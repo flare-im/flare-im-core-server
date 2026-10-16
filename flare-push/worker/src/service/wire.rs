@@ -122,12 +122,6 @@ pub async fn initialize(
             } else {
                 vec![backend]
             };
-            let path = config.mobile_applications_file.as_deref().ok_or_else(|| {
-                FlareError::localized(
-                    ErrorCode::InvalidParameter,
-                    "per-application push credentials file required",
-                )
-            })?;
             let tokens = Arc::new(
                 RedisDeviceTokenRepository::connect(
                     &config.device_token_redis_url,
@@ -135,17 +129,36 @@ pub async fn initialize(
                 )
                 .await?,
             );
-            let executor = super::mobile_credentials::build(
-                std::path::Path::new(path),
-                &providers,
-                tokens,
-                usage.recorder(),
-                config.getui_default_ttl_ms,
-                config.getui_request_timeout_ms,
-            )?;
+            let executor: Arc<dyn crate::domain::offline_delivery::OfflinePushExecutor> = match (
+                &config.mobile_applications_file,
+                &config.mobile_snapshot_file,
+            ) {
+                (Some(path), None) => Arc::new(super::mobile_credentials::build(
+                    std::path::Path::new(path),
+                    &providers,
+                    tokens,
+                    usage.recorder(),
+                    config.getui_default_ttl_ms,
+                    config.getui_request_timeout_ms,
+                )?),
+                (None, Some(path)) => Arc::new(super::mobile_credentials::LeasedApplications::new(
+                    path.into(),
+                    providers,
+                    tokens,
+                    usage.recorder(),
+                    config.getui_default_ttl_ms,
+                    config.getui_request_timeout_ms,
+                )),
+                _ => {
+                    return Err(FlareError::localized(
+                        ErrorCode::InvalidParameter,
+                        "exactly one private mobile credential source required",
+                    ));
+                }
+            };
             OfflinePushConsumerFactory::create_handler_with_delivery(
                 dlq,
-                Arc::new(executor),
+                executor,
                 config.offline_parking_capacity,
                 metrics,
             )

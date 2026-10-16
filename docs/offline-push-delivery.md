@@ -43,18 +43,38 @@ Each `fcm` record is the service account object; its OAuth destination is fixed 
 `https://restapi.getui.com/v2/<app_id>`; an old custom `...BASE_URL` cannot redirect secrets.
 Credentials are validated at startup and never printed. Refresh is single-flight per application/vendor executor.
 
-This is a **private per-application operational configuration**, not a tenant self-service
+Static mode is a **private per-application operational configuration**, not a tenant self-service
 credential UI, encrypted Platform credential database or hot-rotation service. Different
 applications may now share a delivery Cell without sharing a project/topic. Operators validate
 bundle/project/environment mappings before supplying a new file and restarting the future runtime;
-this task does not replace any existing runtime secret. Platform self-service and SDK/OS token
-lifecycle integration remain explicit work; no phone/vendor delivery is implied.
+this path does not replace any existing runtime secret. No phone/vendor delivery is implied.
+
+For a live configuration authority, choose `PUSH_WORKER_MOBILE_SNAPSHOT_FILE` instead of
+the static file. It uses the same closed document plus `valid_until_ms` (at most 30 seconds
+in the future) and optional per-application `disabled_providers`. Core rechecks within one
+second of a delivery, preserves executors/OAuth caches for unchanged credentials, and
+rejects missing/invalid/expired snapshots without stale/static/cross-app fallback. Refresh
+has a two-second file-read budget and try-lock admission. Explicitly disabled providers
+intentionally do not send; a registered provider absent from configuration remains an error.
+The file remains private and read-only to Core; any trusted producer can implement this
+contract. There is **no dependency on Platform, staff roles, organizations or its SQL/API**.
+
+Core's default service Hook profiles likewise remain empty/business-neutral. Product
+deployments must supply their own policy profile explicitly. Capability auto-routing no
+longer guesses policy ownership from endpoint substrings: an optional
+`MESSAGE_INGEST_CAPABILITY_DELEGATED_PRE_SEND` JSON array names exact, enabled direct
+hooks to remove only when `MESSAGE_INGEST_CAPABILITY_HOOKS_AUTO` is enabled. Invalid,
+unknown, duplicate and disabled names reject startup; an absent declaration removes
+nothing. This declaration is an operator's execution plan, **not proof** the replacement
+policy exists. End-to-end product acceptance must verify the policy is installed and
+actually denies unauthorized sends. Static route validation still runs before delegation.
 
 The conditional lifecycle is now implemented in Rust and generated bindings; see
 `../../flare-im-core-sdk/docs/native-push-lifecycle.md`. Token/permission callbacks and
 resume/network recovery have a thin Flutter bridge. No Firebase/APNs plugin or device is
 automatically initialized, and OS channels/background display/badges still need host/device
-integration. Tenant self-service credentials and final runtime installation remain separate work.
+integration. Platform's encrypted self-service source and leased publisher are implemented
+separately in Social; their actual installation and mounted full-stack validation remain R6 work.
 
 ## Binding authority and unknown outcomes
 

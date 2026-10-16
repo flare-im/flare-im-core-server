@@ -1,5 +1,7 @@
 //! Explicit private per-application credential mount. No default project/topic,
-//! environment credential fallback, remote secret fetch or live-file reload.
+//! environment credential fallback or remote secret fetch. A separate leased
+//! file adapter supports generic authorities without Core business dependencies.
+mod leased;
 use crate::{
     application::{
         application_delivery::{ApplicationChannels, ApplicationDelivery},
@@ -16,23 +18,28 @@ use crate::{
     interface::messaging::offline_consumer::UsageCountedExecutor,
 };
 use flare_server_core::{ErrorCode, FlareError};
+pub use leased::LeasedApplications;
 use std::{collections::HashMap, fs::File, io::Read, path::Path, sync::Arc};
 const MAX_BYTES: u64 = 4 * 1024 * 1024;
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Document {
     schema: String,
+    #[serde(default)]
+    valid_until_ms: Option<i64>,
     applications: Vec<Application>,
 }
-#[derive(serde::Deserialize)]
+#[derive(serde::Deserialize, serde::Serialize)]
 #[serde(deny_unknown_fields)]
 struct Application {
     app_id: String,
+    #[serde(default)]
+    disabled_providers: Vec<String>,
     fcm: Option<FcmServiceAccount>,
     apns: Option<ApnsCredentials>,
     getui: Option<GetuiCredentials>,
 }
-#[derive(serde::Deserialize)]
+#[derive(serde::Deserialize, serde::Serialize)]
 #[serde(deny_unknown_fields)]
 struct GetuiCredentials {
     app_id: String,
@@ -72,10 +79,7 @@ fn read(path: &Path) -> Result<Document, FlareError> {
         return Err(rejected());
     }
     let doc: Document = serde_json::from_slice(&bytes).map_err(|_| rejected())?;
-    if doc.schema != "flare.mobile-push-applications/v1"
-        || doc.applications.is_empty()
-        || doc.applications.len() > 1024
-    {
+    if doc.schema != "flare.mobile-push-applications/v1" || doc.applications.len() > 1024 {
         return Err(rejected());
     }
     Ok(doc)
@@ -115,6 +119,19 @@ fn assemble(
         }
         let mut providers = Vec::<Arc<dyn OfflinePushExecutor>>::new();
         let mut names = Vec::new();
+        let mut disabled = Vec::new();
+        for p in app.disabled_providers {
+            let name = match p.as_str() {
+                "apns" => "apns",
+                "fcm" => "fcm",
+                "getui" => "getui",
+                _ => return Err(rejected()),
+            };
+            if disabled.contains(&name) {
+                return Err(rejected());
+            }
+            disabled.push(name);
+        }
         if let Some(account) = app.fcm {
             names.push("fcm");
             if !allowed.contains(&OfflineDeliveryBackend::Fcm) {
@@ -168,13 +185,16 @@ fn assemble(
                 usage.clone(),
             ));
         }
-        if providers.is_empty() {
+        if (providers.is_empty() && disabled.is_empty())
+            || names.iter().any(|p| disabled.contains(p))
+        {
             return Err(rejected());
         }
         apps.insert(
             app.app_id,
             ApplicationChannels {
                 providers: names,
+                disabled,
                 executor: Arc::new(MobileFanout(providers)),
             },
         );

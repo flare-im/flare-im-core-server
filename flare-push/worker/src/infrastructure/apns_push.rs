@@ -37,7 +37,7 @@ const SANDBOX_HOST: &str = "https://api.sandbox.push.apple.com";
 const TOKEN_TTL: Duration = Duration::from_secs(50 * 60);
 
 /// APNs 提供者凭据。
-#[derive(Clone, serde::Deserialize)]
+#[derive(Clone, serde::Deserialize, serde::Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ApnsCredentials {
     /// Apple Developer Team ID（10 位）。

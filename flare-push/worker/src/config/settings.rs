@@ -89,6 +89,8 @@ pub struct PushWorkerConfig {
     pub device_token_key_prefix: String,
     /// Private per-application credentials mount, consumed only by push-worker.
     pub mobile_applications_file: Option<String>,
+    /// Neutral leased configuration authority; no Platform API dependency.
+    pub mobile_snapshot_file: Option<String>,
     /// 个推离线消息默认 TTL。
     pub getui_default_ttl_ms: u64,
     /// 个推 HTTP 请求超时。
@@ -237,6 +239,13 @@ impl PushWorkerConfig {
             .unwrap_or_else(|| "flare:im:push:device_tokens".to_string());
         reject_global_vendor_credentials()?;
         let mobile_applications_file = non_empty_env("PUSH_WORKER_MOBILE_APPLICATIONS_FILE");
+        let mobile_snapshot_file = non_empty_env("PUSH_WORKER_MOBILE_SNAPSHOT_FILE");
+        if mobile_applications_file.is_some() && mobile_snapshot_file.is_some() {
+            return Err(flare_server_core::FlareError::localized(
+                flare_server_core::ErrorCode::InvalidParameter,
+                "choose exactly one mobile credential source",
+            ));
+        }
         let getui_default_ttl_ms = env::var("PUSH_WORKER_GETUI_DEFAULT_TTL_MS")
             .ok()
             .and_then(|value| value.parse::<u64>().ok())
@@ -295,6 +304,7 @@ impl PushWorkerConfig {
             device_token_redis_url,
             device_token_key_prefix,
             mobile_applications_file,
+            mobile_snapshot_file,
             getui_default_ttl_ms,
             getui_request_timeout_ms,
             event_ping_debounce_window_ms,

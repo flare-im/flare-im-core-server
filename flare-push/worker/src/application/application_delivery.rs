@@ -11,6 +11,7 @@ pub struct ApplicationDelivery {
 }
 pub struct ApplicationChannels {
     pub providers: Vec<&'static str>,
+    pub disabled: Vec<&'static str>,
     pub executor: Arc<dyn OfflinePushExecutor>,
 }
 #[async_trait::async_trait]
@@ -40,9 +41,10 @@ impl OfflinePushExecutor for ApplicationDelivery {
         // Deliver configured channels, but never ACK a missing registered channel
         // as if every device had been handled. Existing per-registration receipts
         // protect already accepted devices if the operator later replays the DLQ.
-        let missing = registered
-            .iter()
-            .any(|token| !channels.providers.contains(&token.provider.as_str()));
+        let missing = registered.iter().any(|token| {
+            !channels.providers.contains(&token.provider.as_str())
+                && !channels.disabled.contains(&token.provider.as_str())
+        });
         channels.executor.deliver(ctx, envelope).await?;
         if missing {
             return Err(FlareError::localized(
@@ -77,6 +79,7 @@ mod tests {
                     "app-a".into(),
                     ApplicationChannels {
                         providers: vec!["fcm"],
+                        disabled: vec![],
                         executor: Arc::new(Backend(a.clone())),
                     },
                 ),
@@ -84,6 +87,7 @@ mod tests {
                     "app-b".into(),
                     ApplicationChannels {
                         providers: vec!["apns"],
+                        disabled: vec![],
                         executor: Arc::new(Backend(b.clone())),
                     },
                 ),
@@ -129,6 +133,7 @@ mod tests {
                 "t1".into(),
                 ApplicationChannels {
                     providers: vec!["apns"],
+                    disabled: vec![],
                     executor: Arc::new(Backend(calls.clone())),
                 },
             )]),

@@ -37,7 +37,7 @@ const OAUTH_TOKEN_URI: &str = "https://oauth2.googleapis.com/token";
 const TOKEN_REFRESH_SKEW: Duration = Duration::from_secs(300);
 
 /// FCM 服务账号凭据（取自 Google Cloud 下发的 service-account JSON）。
-#[derive(Clone, Deserialize)]
+#[derive(Clone, Deserialize, Serialize)]
 pub struct FcmServiceAccount {
     pub project_id: String,
     pub client_email: String,
