@@ -15,6 +15,7 @@ pub use tenant::{
 
 pub type ConversationId = String;
 pub type UserId = String;
+pub mod push_binding;
 pub type MessageId = String;
 pub type ClientMessageId = String;
 pub type Seq = u64;
@@ -30,7 +31,7 @@ pub struct DevicePushToken {
     pub platform: String,
     pub provider: String,
     pub token: String,
-    /// Server-owned registration identity. A late vendor response cannot delete a new registration.
+    /// Conditional binding identity; only a matching generation can be invalidated.
     pub registration_id: String,
     pub registered_at_ms: i64,
 }
@@ -58,10 +59,9 @@ impl DevicePushToken {
 
 pub fn device_push_token_registry_key(prefix: &str, tenant_id: &str, user_id: &str) -> String {
     format!(
-        "{}:{}:{}",
+        "{}:tokens:{}",
         prefix.trim_end_matches(':'),
-        tenant_id.trim(),
-        user_id.trim()
+        push_binding::binding_hash(&[tenant_id, user_id])
     )
 }
 

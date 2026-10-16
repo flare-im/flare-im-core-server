@@ -43,9 +43,10 @@ impl TokenValidator for Validator {
     ) -> Result<AuthenticatedPrincipal, AuthError> {
         let (tenant, device, scopes): (Option<&str>, Option<&str>, Vec<String>) =
             match request.token.as_str() {
-                "alice-a" => (Some("tenant-a"), None, vec![]),
-                "alice-b" => (Some("tenant-b"), None, vec![]),
-                "alice-default" => (Some("default"), None, vec![]),
+                "alice-a" => (Some("tenant-a"), Some("d1"), vec![]),
+                "alice-b" => (Some("tenant-b"), Some("d1"), vec![]),
+                "alice-default" => (Some("default"), Some("d1"), vec![]),
+                "no-device" => (Some("tenant-a"), None, vec![]),
                 "bound-d1" => (Some("tenant-a"), Some("d1"), vec![]),
                 "unbound" => (None, None, vec![]),
                 "blank-tenant" => (Some(""), None, vec![]),
@@ -168,26 +169,21 @@ impl PushService for FakePushProxy {
         });
         Ok(tonic::Response::new(RegisterDevicePushTokenResponse {
             success: true,
+            binding_id: req.binding_id,
         }))
     }
 
-    async fn unregister_device_push_token(
+    async fn inspect_device_push_binding(
         &self,
-        request: tonic::Request<UnregisterDevicePushTokenRequest>,
-    ) -> Result<tonic::Response<UnregisterDevicePushTokenResponse>, tonic::Status> {
+        request: tonic::Request<InspectDevicePushBindingRequest>,
+    ) -> Result<tonic::Response<InspectDevicePushBindingResponse>, tonic::Status> {
         let claims = self.admit(&request)?;
         let req = request.into_inner();
         if req.user_id != claims.actor_id {
             return Err(tonic::Status::permission_denied("user_id mismatch"));
         }
-        self.store.lock().unwrap().remove(&(
-            claims.tenant_id.clone(),
-            req.user_id.clone(),
-            req.provider,
-            req.device_id.clone(),
-        ));
         self.calls.lock().unwrap().push(Call {
-            rpc: "unregister",
+            rpc: "inspect",
             claims,
             user_id: req.user_id,
             device_id: req.device_id,
@@ -195,7 +191,36 @@ impl PushService for FakePushProxy {
             provider: req.provider,
             token: String::new(),
         });
-        Ok(tonic::Response::new(UnregisterDevicePushTokenResponse {
+        Ok(tonic::Response::new(InspectDevicePushBindingResponse {
+            version: "a".repeat(64),
+            current_binding_id: "a".repeat(64),
+            state: "active".into(),
+        }))
+    }
+
+    async fn revoke_device_push_binding(
+        &self,
+        request: tonic::Request<RevokeDevicePushBindingRequest>,
+    ) -> Result<tonic::Response<RevokeDevicePushBindingResponse>, tonic::Status> {
+        let ctx = flare_server_core::require_ctx_from_request(&request)?;
+        let claims = ctx
+            .get_data::<VerifiedContext>()
+            .and_then(|v| v.claims())
+            .unwrap()
+            .clone();
+        assert_eq!(claims.actor_type, SignedActorType::Service);
+        assert_eq!(claims.credential_id.as_deref(), Some("api-gateway"));
+        assert_eq!(request.get_ref().revocation_token.len(), 64);
+        self.calls.lock().unwrap().push(Call {
+            rpc: "revoke",
+            claims,
+            user_id: String::new(),
+            device_id: String::new(),
+            platform: String::new(),
+            provider: 0,
+            token: String::new(),
+        });
+        Ok(tonic::Response::new(RevokeDevicePushBindingResponse {
             success: true,
         }))
     }
@@ -303,7 +328,13 @@ fn with_bearer(
     }
 }
 
-fn put_request(token: Option<&str>, device_id: &str, body: Value) -> Request<Body> {
+fn put_request(token: Option<&str>, device_id: &str, mut body: Value) -> Request<Body> {
+    if let Some(row) = body.as_object_mut() {
+        row.entry("bindingId").or_insert(json!("a".repeat(64)));
+        row.entry("expectedVersion").or_insert(json!(""));
+        row.entry("expiresAtMs")
+            .or_insert(json!(chrono::Utc::now().timestamp_millis() + 60_000));
+    }
     with_bearer(
         Request::builder()
             .method("PUT")
@@ -315,10 +346,10 @@ fn put_request(token: Option<&str>, device_id: &str, body: Value) -> Request<Bod
     .unwrap()
 }
 
-fn delete_request(token: Option<&str>, device_id: &str, query: &str) -> Request<Body> {
+fn inspect_request(token: Option<&str>, device_id: &str, query: &str) -> Request<Body> {
     with_bearer(
         Request::builder()
-            .method("DELETE")
+            .method("GET")
             .uri(format!("/api/v1/devices/{device_id}/push-token?{query}")),
         token,
     )
@@ -376,7 +407,7 @@ async fn fcm_and_apns_use_the_same_signed_user_registration_entry() {
 }
 
 #[tokio::test]
-async fn register_and_unregister_reach_push_proxy_with_token_identity_only() {
+async fn register_and_inspect_reach_push_proxy_with_token_identity_only() {
     let fake = FakePushProxy::default();
     let router = signed_router(fake.clone()).await;
 
@@ -391,7 +422,10 @@ async fn register_and_unregister_reach_push_proxy_with_token_identity_only() {
     }
     let (status, body) = send(&router, request).await;
     assert_eq!(status, StatusCode::OK, "{body}");
-    assert_eq!(body, json!({"code": 0, "data": {"success": true}}));
+    assert_eq!(
+        body,
+        json!({"code": 0, "data": {"success": true,"bindingId":"a".repeat(64)}})
+    );
 
     let calls = fake.calls();
     assert_eq!(calls.len(), 1);
@@ -410,18 +444,22 @@ async fn register_and_unregister_reach_push_proxy_with_token_identity_only() {
 
     let (status, body) = send(
         &router,
-        delete_request(Some("alice-a"), "d1", "provider=getui"),
+        inspect_request(Some("alice-a"), "d1", "provider=getui"),
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{body}");
-    assert_eq!(body, json!({"code": 0, "data": {"success": true}}));
+    assert_eq!(body["data"]["state"], "active");
     let calls = fake.calls();
     assert_eq!(calls.len(), 2);
-    assert_eq!(calls[1].rpc, "unregister");
+    assert_eq!(calls[1].rpc, "inspect");
     assert_eq!(calls[1].claims.tenant_id, "tenant-a");
     assert_eq!(calls[1].user_id, "alice");
     assert_eq!(calls[1].device_id, "d1");
-    assert!(fake.store.lock().unwrap().is_empty());
+    assert_eq!(
+        fake.store.lock().unwrap().len(),
+        1,
+        "inspection is read-only"
+    );
 }
 
 #[tokio::test]
@@ -431,7 +469,7 @@ async fn missing_or_malformed_bearer_is_401_envelope_before_push_proxy() {
 
     let missing = send(&router, put_request(None, "d1", registration())).await;
     assert_denied(&missing, StatusCode::UNAUTHORIZED, "UNAUTHORIZED");
-    let missing = send(&router, delete_request(None, "d1", "provider=getui")).await;
+    let missing = send(&router, inspect_request(None, "d1", "provider=getui")).await;
     assert_denied(&missing, StatusCode::UNAUTHORIZED, "UNAUTHORIZED");
 
     let mut basic = put_request(None, "d1", registration());
@@ -471,7 +509,7 @@ async fn caller_cannot_name_another_tenant_or_user() {
         "provider=getui&tenantId=tenant-b",
         "provider=getui&userId=bob",
     ] {
-        let result = send(&router, delete_request(Some("alice-a"), "d1", query)).await;
+        let result = send(&router, inspect_request(Some("alice-a"), "d1", query)).await;
         assert_denied(&result, StatusCode::BAD_REQUEST, "INVALID_QUERY");
     }
 
@@ -491,7 +529,7 @@ async fn caller_cannot_name_another_tenant_or_user() {
     assert_eq!(status, StatusCode::OK);
     let (status, _) = send(
         &router,
-        delete_request(Some("alice-b"), "d1", "provider=getui"),
+        inspect_request(Some("alice-b"), "d1", "provider=getui"),
     )
     .await;
     assert_eq!(status, StatusCode::OK);
@@ -521,7 +559,7 @@ async fn default_tenant_alias_is_signed_as_the_canonical_tenant() {
     assert_eq!(status, StatusCode::OK, "{body}");
     let (status, body) = send(
         &router,
-        delete_request(Some("alice-default"), "d1", "provider=getui"),
+        inspect_request(Some("alice-default"), "d1", "provider=getui"),
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{body}");
@@ -531,7 +569,11 @@ async fn default_tenant_alias_is_signed_as_the_canonical_tenant() {
         assert_eq!(call.claims.tenant_id, "0", "{}", call.rpc);
         assert_eq!(call.user_id, "alice");
     }
-    assert!(fake.store.lock().unwrap().is_empty());
+    assert_eq!(
+        fake.store.lock().unwrap().len(),
+        1,
+        "inspection is read-only"
+    );
 }
 
 #[tokio::test]
@@ -545,7 +587,7 @@ async fn push_proxy_tenant_denial_is_a_403_envelope() {
     assert_denied(&result, StatusCode::FORBIDDEN, "PERMISSION_DENIED");
     let result = send(
         &router,
-        delete_request(Some("alice-b"), "d1", "provider=getui"),
+        inspect_request(Some("alice-b"), "d1", "provider=getui"),
     )
     .await;
     assert_denied(&result, StatusCode::FORBIDDEN, "PERMISSION_DENIED");
@@ -567,9 +609,15 @@ async fn admin_unsigned_foreign_device_and_invalid_input_never_reach_push_proxy(
     // 绑定 d1 的令牌不能改 d2 的推送令牌。
     let foreign = send(&router, put_request(Some("bound-d1"), "d2", registration())).await;
     assert_denied(&foreign, StatusCode::FORBIDDEN, "DEVICE_MISMATCH");
+    let unbound = send(
+        &router,
+        put_request(Some("no-device"), "d1", registration()),
+    )
+    .await;
+    assert_denied(&unbound, StatusCode::FORBIDDEN, "DEVICE_MISMATCH");
     let foreign = send(
         &router,
-        delete_request(Some("bound-d1"), "d2", "provider=getui"),
+        inspect_request(Some("bound-d1"), "d2", "provider=getui"),
     )
     .await;
     assert_denied(&foreign, StatusCode::FORBIDDEN, "DEVICE_MISMATCH");
@@ -588,7 +636,7 @@ async fn admin_unsigned_foreign_device_and_invalid_input_never_reach_push_proxy(
         StatusCode::BAD_REQUEST,
         "PUSH_PROVIDER_INVALID",
     );
-    let missing_provider = send(&router, delete_request(Some("alice-a"), "d1", "")).await;
+    let missing_provider = send(&router, inspect_request(Some("alice-a"), "d1", "")).await;
     assert_denied(&missing_provider, StatusCode::BAD_REQUEST, "INVALID_QUERY");
     let bad_token = send(
         &router,
@@ -681,8 +729,50 @@ async fn openapi_documents_the_push_token_routes() {
     let spec = serde_json::to_value(ApiDoc::openapi()).unwrap();
     let path = &spec["paths"]["/api/v1/devices/{device_id}/push-token"];
     assert!(path["put"].is_object(), "{path}");
-    assert!(path["delete"].is_object(), "{path}");
+    assert!(path["get"].is_object(), "{path}");
+    assert!(path.get("delete").is_none());
+    assert!(spec["paths"]["/api/v1/push/bindings/revoke"]["post"].is_object());
     let schemas = &spec["components"]["schemas"];
     assert!(schemas["RegisterPushTokenHttpRequest"].is_object());
     assert!(schemas["PushTokenHttpResponse"].is_object());
+}
+
+#[tokio::test]
+async fn revoke_only_capability_survives_logout_but_cannot_read_or_register() {
+    let fake = FakePushProxy::default();
+    let router = signed_router(fake.clone()).await;
+    let request = |body: Value| {
+        Request::builder()
+            .method("POST")
+            .uri("/api/v1/push/bindings/revoke")
+            .header("content-type", "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap()
+    };
+    let result = send(&router, request(json!({"revocationToken":"b".repeat(64)}))).await;
+    assert_eq!(result.0, StatusCode::OK);
+    assert_eq!(fake.calls()[0].rpc, "revoke");
+    for body in [
+        json!({"revocationToken":"short"}),
+        json!({"revocationToken":"b".repeat(64),"userId":"other"}),
+        json!({"revocationToken":"b".repeat(1024)}),
+    ] {
+        assert_eq!(
+            send(&router, request(body)).await.0,
+            StatusCode::BAD_REQUEST
+        );
+    }
+    assert_eq!(fake.calls().len(), 1);
+    assert_eq!(
+        send(&router, put_request(None, "d1", registration()))
+            .await
+            .0,
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        send(&router, inspect_request(None, "d1", "provider=fcm"))
+            .await
+            .0,
+        StatusCode::UNAUTHORIZED
+    );
 }

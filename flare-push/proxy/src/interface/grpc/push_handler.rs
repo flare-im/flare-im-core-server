@@ -5,10 +5,11 @@ use std::sync::Arc;
 
 use flare_grpc_proto::push::push_service_server::PushService;
 use flare_grpc_proto::push::{
-    DevicePushProvider, PushCustomRequest, PushCustomResponse, PushMessageRequest,
-    PushMessageResponse, PushNotificationRequest, PushNotificationResponse, QueryPushStatusRequest,
+    DevicePushProvider, InspectDevicePushBindingRequest, InspectDevicePushBindingResponse,
+    PushCustomRequest, PushCustomResponse, PushMessageRequest, PushMessageResponse,
+    PushNotificationRequest, PushNotificationResponse, QueryPushStatusRequest,
     QueryPushStatusResponse, RegisterDevicePushTokenRequest, RegisterDevicePushTokenResponse,
-    UnregisterDevicePushTokenRequest, UnregisterDevicePushTokenResponse,
+    RevokeDevicePushBindingRequest, RevokeDevicePushBindingResponse,
 };
 use flare_im_contracts::Ctx;
 use flare_im_contracts::DevicePushToken;
@@ -204,33 +205,66 @@ impl PushService for PushServiceHandler {
             platform: req.platform.trim().to_string(),
             provider,
             token: req.token.trim().to_string(),
-            registration_id: uuid::Uuid::new_v4().to_string(),
-            registered_at_ms: chrono::Utc::now().timestamp_millis(),
+            registration_id: req.binding_id.clone(),
+            registered_at_ms: 0, // Redis records its own time; replay digest remains immutable.
         };
         self.device_tokens
-            .register(&token)
+            .register(&token, &req.expected_version, req.expires_at_ms)
             .await
-            .map_err(|_| Status::unavailable("device registry unavailable"))?;
+            .map_err(binding_error)?;
         Ok(Response::new(RegisterDevicePushTokenResponse {
             success: true,
+            binding_id: req.binding_id,
         }))
     }
 
-    async fn unregister_device_push_token(
+    async fn inspect_device_push_binding(
         &self,
-        request: Request<UnregisterDevicePushTokenRequest>,
-    ) -> Result<Response<UnregisterDevicePushTokenResponse>, Status> {
+        request: Request<InspectDevicePushBindingRequest>,
+    ) -> Result<Response<InspectDevicePushBindingResponse>, Status> {
         let ctx = require_verified_actor(&request, SignedActorType::User)?;
         let req = request.into_inner();
         validate_registration_owner(&ctx, &req.user_id)?;
         let provider = provider_string(req.provider)?;
         require_non_empty(&req.device_id, "device_id")?;
         let tenant_id = require_tenant_id(&ctx)?;
-        self.device_tokens
-            .unregister(&tenant_id, &req.user_id, &provider, req.device_id.trim())
+        let row = self
+            .device_tokens
+            .inspect(
+                &tenant_id,
+                &req.user_id,
+                &provider,
+                req.device_id.trim(),
+                &req.binding_id,
+            )
             .await
-            .map_err(|_| Status::unavailable("device registry unavailable"))?;
-        Ok(Response::new(UnregisterDevicePushTokenResponse {
+            .map_err(binding_error)?;
+        Ok(Response::new(InspectDevicePushBindingResponse {
+            version: row.version,
+            current_binding_id: row.current_binding_id,
+            state: row.state,
+        }))
+    }
+
+    async fn revoke_device_push_binding(
+        &self,
+        request: Request<RevokeDevicePushBindingRequest>,
+    ) -> Result<Response<RevokeDevicePushBindingResponse>, Status> {
+        let ctx = require_verified_actor(&request, SignedActorType::Service)?;
+        let claims = ctx
+            .get_data::<VerifiedContext>()
+            .and_then(|marker| marker.claims())
+            .ok_or_else(|| Status::permission_denied("gateway revoke capability required"))?;
+        if claims.credential_id.as_deref() != Some("api-gateway") {
+            return Err(Status::permission_denied(
+                "gateway revoke capability required",
+            ));
+        }
+        self.device_tokens
+            .revoke(&request.into_inner().revocation_token)
+            .await
+            .map_err(binding_error)?;
+        Ok(Response::new(RevokeDevicePushBindingResponse {
             success: true,
         }))
     }
@@ -252,6 +286,18 @@ impl PushService for PushServiceHandler {
             task_id: req.task_id,
             status,
         }))
+    }
+}
+
+fn binding_error(error: crate::infrastructure::BindingError) -> Status {
+    use crate::infrastructure::BindingError;
+    match error {
+        BindingError::Conflict | BindingError::Revoked => {
+            Status::failed_precondition("push binding version conflict or revoked")
+        }
+        BindingError::Invalid => Status::invalid_argument("push binding command rejected"),
+        BindingError::Limit => Status::resource_exhausted("device registration limit"),
+        BindingError::Unavailable => Status::unavailable("device registry unavailable"),
     }
 }
 

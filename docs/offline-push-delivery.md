@@ -7,11 +7,14 @@ does not mean a phone received or displayed a notification, and offline push is 
 ## Normal entry and explicit configuration
 
 The authenticated end-user route is `PUT /api/v1/devices/{device_id}/push-token`, with
-`platform`, `provider` (`fcm`, `apns`, `getui`) and `token`. DELETE uses the same provider.
+`platform`, `provider` (`fcm`, `apns`, `getui`), `token`, `bindingId`,
+`expectedVersion` and `expiresAtMs` (camelCase). GET on that route takes provider and optional
+bindingId for read-back. Unconditional DELETE has been removed.
 The gateway and Push Proxy keep the verified User/app identity; body fields cannot choose
 another user/app. The internal proto has the same three typed providers. Registration accepts
 at most 128 device/provider entries per user; size/control-character and APNs hex checks run
-before Redis. Registrations receive a server UUID generation and millisecond timestamp.
+before Redis. A device-bound JWT is mandatory at the public route. Registration uses a
+client-generated binding fence and Redis's millisecond timestamp.
 
 `PUSH_WORKER_OFFLINE_DELIVERY_BACKEND` defaults to `disabled` (DLQ/explicit parking,
 not silent phone delivery). Choose `fcm`, `apns` or `getui` for one provider, or `mobile` plus
@@ -47,15 +50,36 @@ bundle/project/environment mappings before supplying a new file and restarting t
 this task does not replace any existing runtime secret. Platform self-service and SDK/OS token
 lifecycle integration remain explicit work; no phone/vendor delivery is implied.
 
-The current Rust SDK has manual registration methods, but native bindings do not expose a
-complete lifecycle yet. Logout/account switching also needs server-side conditional binding
-generations and revocation tombstones: a timed-out PUT can otherwise finish after a DELETE,
-and an unconditional old DELETE can erase a new registration. Merely adding a Flutter
-logout callback, or changing the existing HTTP client's mutable auth context, is not a safe
-closure. Preserve app/user/device/session identity for every in-flight operation, retain
-unknown outcomes for reconciliation, expose the normal SDK contract through code generation,
-then test token refresh, permission revocation and logout/switch races before real OS testing.
-This is unfinished source functionality, not only a missing vendor credential/device.
+The conditional lifecycle is now implemented in Rust and generated bindings; see
+`../../flare-im-core-sdk/docs/native-push-lifecycle.md`. Token/permission callbacks and
+resume/network recovery have a thin Flutter bridge. No Firebase/APNs plugin or device is
+automatically initialized, and OS channels/background display/badges still need host/device
+integration. Tenant self-service credentials and final runtime installation remain separate work.
+
+## Binding authority and unknown outcomes
+
+The singleton Redis/Dragonfly authority owns one slot per app/provider/device, across users.
+A CAS replacement removes the old user's token index and installs the new one in one script.
+The index keys are length-delimited hashes; app/user/device delimiters cannot alias entries.
+This authority is **not Redis Cluster compatible** and must not be rolled back underneath live
+clients. Loss/restore of binding fences is a security-relevant runtime reset, not a safe retry.
+
+Before PUT, the SDK saves a random 256-bit hex revocation capability; bindingId is its SHA256.
+`POST /api/v1/push/bindings/revoke` accepts only that capability, requires no expired login,
+and cannot register/read a token or choose an app/user. Gateway uses its signed Service identity
+for this exact operation. An unknown capability creates a tombstone, so cancellation can win
+before a delayed PUT. Anonymous unbound tombstones are capped at 4,096 per authority with
+bounded expiry pruning; capacity exhaustion returns unavailable without pretending revocation
+succeeded. Existing known bindings can still be revoked. Tombstones and retired slots last 24 hours; commands have at most ten
+minutes of validity. Active fences do not expire. Repeating an immutable command is idempotent;
+changing its content or stale expectedVersion conflicts. Read-back never returns an OS token
+or another account's identity. Public ingress rate limiting still applies to revocation.
+
+Workers recheck the actual current slot after credential acquisition and before sending to
+FCM/APNs (before Getui's client call). Vendor invalidation clears only the observed binding
+and leaves its revocation fence. This is not an atomic transaction with an external vendor:
+a request already in flight can still arrive. Offline logout retains pending cleanup and
+does not claim server revocation until a later successful reconcile.
 
 ## Delivery and failure semantics
 

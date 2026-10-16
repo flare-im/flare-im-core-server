@@ -13,6 +13,8 @@ pub trait OfflinePushExecutor: Send + Sync {
 
 #[async_trait]
 pub trait DeviceTokenRepository: Send + Sync {
+    /// Recheck the authority before vendor IO, not just a cached list.
+    async fn is_current(&self, token: &DevicePushToken) -> Result<bool, FlareError>;
     async fn list_user_tokens(
         &self,
         ctx: &Ctx,

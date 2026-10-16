@@ -240,6 +240,9 @@ impl crate::domain::offline_delivery::OfflinePushExecutor for ApnsOfflinePushExe
                 ));
             }
             let jwt = self.provider_token().await?;
+            if !self.tokens.is_current(&token).await? {
+                continue;
+            }
             let mut request = self
                 .http
                 .post(format!("{}/3/device/{}", self.creds.host(), token.token))

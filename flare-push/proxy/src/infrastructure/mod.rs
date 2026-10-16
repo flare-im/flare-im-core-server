@@ -4,6 +4,6 @@ mod device_token_registry;
 mod mq_publisher;
 mod state_store;
 
-pub use device_token_registry::RedisDeviceTokenRegistry;
+pub use device_token_registry::{BindingError, RedisDeviceTokenRegistry};
 pub use mq_publisher::PushProxyMqPublisher;
 pub use state_store::RedisStateStore;

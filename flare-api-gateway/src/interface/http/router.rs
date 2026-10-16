@@ -56,7 +56,8 @@ use flare_server_core::http::HttpApiError;
         presence_handler::kick_device,
         presence_handler::logout_presence,
         push_token_handler::register_push_token,
-        push_token_handler::unregister_push_token,
+        push_token_handler::inspect_push_token,
+        push_token_handler::revoke_push_token,
         auth_handler::issue_token,
         auth_handler::refresh_token,
         auth_handler::revoke_user,
@@ -126,6 +127,8 @@ use flare_server_core::http::HttpApiError;
             super::presence_handler::LogoutPresenceHttpResponse,
             super::push_token_handler::RegisterPushTokenHttpRequest,
             super::push_token_handler::PushTokenHttpResponse,
+            super::push_token_handler::PushBindingView,
+            super::push_token_handler::RevokePushTokenRequest,
             super::auth_handler::IssueTokenHttpRequest,
         auth_handler::RevokeUserHttpRequest,
             super::auth_handler::IssuedTokenHttp,
@@ -333,7 +336,7 @@ pub fn create_public_router(clients: Arc<GrpcClients>) -> Router {
         .route(
             "/{device_id}/push-token",
             put(push_token_handler::register_push_token)
-                .delete(push_token_handler::unregister_push_token),
+                .get(push_token_handler::inspect_push_token),
         )
         .route_layer(middleware::from_fn(gateway_auth_middleware));
 
@@ -346,6 +349,11 @@ pub fn create_public_router(clients: Arc<GrpcClients>) -> Router {
         .route("/revoke", post(auth_handler::revoke_user));
 
     let api_router = Router::new()
+        .route(
+            "/api/v1/push/bindings/revoke",
+            post(push_token_handler::revoke_push_token)
+                .layer(axum::extract::DefaultBodyLimit::max(512)),
+        )
         .nest("/api/v1/auth", auth_router)
         .nest("/api/v1/medias", media_router)
         .nest("/api/v1/messages", message_router)

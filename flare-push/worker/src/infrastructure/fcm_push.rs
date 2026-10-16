@@ -297,6 +297,9 @@ impl crate::domain::offline_delivery::OfflinePushExecutor for FcmOfflinePushExec
                 continue;
             }
             let access_token = self.access_token().await?;
+            if !self.tokens.is_current(&token).await? {
+                continue;
+            }
             let response = self
                 .http
                 .post(&self.endpoint)
@@ -384,6 +387,29 @@ mod tests {
             })),
             endpoint,
         }
+    }
+
+    #[tokio::test]
+    async fn retired_binding_is_rechecked_before_vendor_send() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let repo = Arc::new(Tokens::default());
+        let row = token("device-a");
+        repo.removed
+            .lock()
+            .unwrap()
+            .push(row.registration_id.clone());
+        *repo.rows.lock().unwrap() = vec![row];
+        test_executor(endpoint, repo.clone())
+            .deliver(&Ctx::default(), &envelope(1))
+            .await
+            .unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), listener.accept())
+                .await
+                .is_err()
+        );
+        assert!(repo.accepted.lock().unwrap().is_empty());
     }
 
     #[tokio::test]

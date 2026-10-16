@@ -17,6 +17,9 @@ local raw = redis.call('HGET', KEYS[1], ARGV[1])
 if not raw then return 0 end
 local ok, row = pcall(cjson.decode, raw)
 if ok and row.registration_id == ARGV[2] and row.token == ARGV[3] then
+  local slotraw=redis.call('GET',KEYS[2])
+  if slotraw then local slot=cjson.decode(slotraw); if slot.binding_id==ARGV[2] then slot.registry=nil;redis.call('SET',KEYS[2],cjson.encode(slot),'EX',86400) end end
+  redis.call('SET',KEYS[3],'{"revoked":true}','EX',86400)
   return redis.call('HDEL', KEYS[1], ARGV[1])
 end
 return 0
@@ -87,6 +90,11 @@ impl RedisDeviceTokenRepository {
 
 #[async_trait::async_trait]
 impl DeviceTokenRepository for RedisDeviceTokenRepository {
+    async fn is_current(&self, token: &DevicePushToken) -> Result<bool, FlareError> {
+        let mut conn = self.conn.clone();
+        tokio::time::timeout(IO_BUDGET,redis::Script::new("local raw=redis.call('GET',KEYS[1]);if not raw then return 0 end local row=cjson.decode(raw);return row.registry and row.binding_id==ARGV[1] and row.user_id==ARGV[2] and 1 or 0")
+            .key(flare_im_contracts::domain::push_binding::push_binding_slot(&self.key_prefix,&token.tenant_id,&token.provider,&token.device_id)).arg(&token.registration_id).arg(&token.user_id).invoke_async::<bool>(&mut conn)).await.map_err(|_|unavailable())?.map_err(|_|unavailable())
+    }
     async fn list_user_tokens(
         &self,
         _ctx: &Ctx,
@@ -123,6 +131,18 @@ impl DeviceTokenRepository for RedisDeviceTokenRepository {
             IO_BUDGET,
             redis::Script::new(REMOVE_OBSERVED)
                 .key(key)
+                .key(flare_im_contracts::domain::push_binding::push_binding_slot(
+                    &self.key_prefix,
+                    &token.tenant_id,
+                    &token.provider,
+                    &token.device_id,
+                ))
+                .key(
+                    flare_im_contracts::domain::push_binding::push_binding_command(
+                        &self.key_prefix,
+                        &token.registration_id,
+                    ),
+                )
                 .arg(field)
                 .arg(&token.registration_id)
                 .arg(&token.token)
@@ -254,6 +274,17 @@ mod tests {
             &observed.user_id,
         );
         let field = device_push_token_registry_field(&observed.provider, &observed.device_id);
+        let slot = flare_im_contracts::domain::push_binding::push_binding_slot(
+            &repo.key_prefix,
+            &newer.tenant_id,
+            &newer.provider,
+            &newer.device_id,
+        );
+        let _: () = redis::cmd("SET").arg(&slot)
+            .arg(serde_json::json!({"binding_id":newer.registration_id,"user_id":newer.user_id,"registry":key}).to_string())
+            .query_async(&mut conn).await.unwrap();
+        assert!(!repo.is_current(&observed).await.unwrap());
+        assert!(repo.is_current(&newer).await.unwrap());
         let _: () = redis::cmd("HSET")
             .arg(&key)
             .arg(&field)
@@ -294,6 +325,10 @@ mod tests {
         assert!((1..=RECEIPT_TTL_SECS as i64).contains(&ttl));
         assert!(!repo.receipt_key(&newer, &task).contains("device-a"));
         repo.remove_device_token(&ctx, &newer).await.unwrap();
+        assert!(
+            !repo.is_current(&newer).await.unwrap(),
+            "vendor invalidation retires the exact authority generation"
+        );
         assert!(
             repo.list_user_tokens(&ctx, "t1", "u1")
                 .await

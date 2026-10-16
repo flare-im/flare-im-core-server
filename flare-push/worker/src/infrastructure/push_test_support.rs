@@ -35,6 +35,9 @@ pub(crate) struct Tokens {
 }
 #[async_trait::async_trait]
 impl DeviceTokenRepository for Tokens {
+    async fn is_current(&self, t: &DevicePushToken) -> Result<bool, FlareError> {
+        Ok(!self.removed.lock().unwrap().contains(&t.registration_id))
+    }
     async fn list_user_tokens(
         &self,
         _: &Ctx,

@@ -347,6 +347,9 @@ impl OfflinePushExecutor for GetuiOfflinePushExecutor {
             if self.tokens.was_accepted(&token, envelope).await? {
                 continue;
             }
+            if !self.tokens.is_current(&token).await? {
+                continue;
+            }
             let request = build_getui_push_request(envelope, &token, self.default_ttl_ms);
             match self.client.push_single_cid(&request).await {
                 Ok(GetuiPushOutcome::Delivered) => {
@@ -654,6 +657,9 @@ mod tests {
 
     #[async_trait::async_trait]
     impl DeviceTokenRepository for FakeTokenRepository {
+        async fn is_current(&self, _: &DevicePushToken) -> Result<bool, FlareError> {
+            Ok(true)
+        }
         async fn was_accepted(
             &self,
             _: &DevicePushToken,

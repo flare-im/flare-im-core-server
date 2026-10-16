@@ -1,7 +1,7 @@
-//! 设备推送令牌：`PUT` / `DELETE /api/v1/devices/{device_id}/push-token`。
+//! Conditional push binding and an independently authenticated revoke-only capability.
 //!
 //! 用户与租户只取自已验证的 IM 令牌主体；网关按该身份现签一枚 User 内部上下文，
-//! 调用 Push Proxy 的 `RegisterDevicePushToken` / `UnregisterDevicePushToken`。
+//! User binding/inspection and Service capability revocation are separate boundaries.
 //! 请求体、查询串和请求头都不能指定 `user_id` / `tenant_id`：体与查询串拒收未知字段，
 //! 身份头在鉴权中间件里已被令牌主体覆盖，Push Proxy 侧的签名层也会丢弃它们。
 
@@ -17,7 +17,8 @@ use axum::{
 };
 use flare_grpc_proto::push::push_service_client::PushServiceClient;
 use flare_grpc_proto::push::{
-    DevicePushProvider, RegisterDevicePushTokenRequest, UnregisterDevicePushTokenRequest,
+    DevicePushProvider, InspectDevicePushBindingRequest, RegisterDevicePushTokenRequest,
+    RevokeDevicePushBindingRequest,
 };
 use flare_im_service_kit::discovery::{
     StaticChannelPolicy, invalidate_static_channel_on_transport_failure, resolve_grpc_channel,
@@ -145,7 +146,7 @@ impl PushTokenClient {
 }
 
 /// 注册/更新当前用户某台设备的推送令牌。
-#[derive(Debug, Deserialize, utoipa::ToSchema)]
+#[derive(Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RegisterPushTokenHttpRequest {
     /// 设备平台，例如 `ios`、`android`、`harmony`
@@ -154,20 +155,40 @@ pub struct RegisterPushTokenHttpRequest {
     pub provider: String,
     /// 推送通道为该设备下发的令牌
     pub token: String,
+    pub binding_id: String,
+    pub expected_version: String,
+    pub expires_at_ms: i64,
 }
 
 /// 注销推送令牌的查询参数。
 #[derive(Debug, Deserialize, utoipa::IntoParams)]
 #[serde(deny_unknown_fields)]
 #[into_params(parameter_in = Query)]
-pub struct UnregisterPushTokenQuery {
+pub struct InspectPushTokenQuery {
     /// 推送通道：`getui`、`fcm` 或 `apns`。
     pub provider: String,
+    #[serde(default, rename = "bindingId")]
+    pub binding_id: String,
 }
 
 #[derive(Debug, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct PushTokenHttpResponse {
     pub success: bool,
+    pub binding_id: String,
+}
+
+#[derive(Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RevokePushTokenRequest {
+    pub revocation_token: String,
+}
+#[derive(Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct PushBindingView {
+    pub version: String,
+    pub current_binding_id: String,
+    pub state: String,
 }
 
 /// 已验证的调用方：用户、规范化租户与现签的内部上下文令牌。
@@ -217,12 +238,12 @@ fn push_token_caller(
         ));
     }
     // 绑定了设备的令牌只能管理本设备的推送令牌。
-    if let Some(bound) = principal
+    if principal
         .device_id
         .as_deref()
         .map(str::trim)
         .filter(|bound| !bound.is_empty())
-        && bound != device_id
+        != Some(device_id)
     {
         return Err(forbidden(
             "DEVICE_MISMATCH",
@@ -317,14 +338,20 @@ fn push_proxy_error(status: tonic::Status) -> GatewayError {
             false,
         ),
         Code::DeadlineExceeded => (ErrorCode::HttpGatewayTimeout, "UPSTREAM_TIMEOUT", false),
+        Code::FailedPrecondition | Code::AlreadyExists => {
+            (ErrorCode::HttpConflict, "PUSH_BINDING_CONFLICT", false)
+        }
         _ => (ErrorCode::HttpBadGateway, "GRPC_ERROR", false),
     };
     warn!(
         grpc_code = ?status.code(),
-        grpc_message = %status.message(),
         "push proxy rejected a device push token request"
     );
-    let details = if expose { status.message() } else { "" };
+    let details = if expose {
+        "push registration rejected"
+    } else {
+        ""
+    };
     GatewayError(
         ErrorBuilder::new(code, reason)
             .details(details)
@@ -359,7 +386,8 @@ pub async fn register_push_token(
     let device_id = device_id(&raw_device_id)?;
     let caller = push_token_caller(&headers, &principal, &signer, &device_id)?;
     let Json(body) = body.map_err(|rejection| {
-        GatewayError::bad_request("INVALID_REQUEST_BODY", rejection.body_text())
+        let _ = rejection;
+        GatewayError::bad_request("INVALID_REQUEST_BODY", "push binding body rejected")
     })?;
     let request = RegisterDevicePushTokenRequest {
         user_id: caller.user_id.clone(),
@@ -367,6 +395,9 @@ pub async fn register_push_token(
         platform: platform(&body.platform)?,
         provider: provider(&body.provider)? as i32,
         token: push_token(&body.token)?,
+        binding_id: body.binding_id,
+        expected_version: body.expected_version,
+        expires_at_ms: body.expires_at_ms,
     };
     debug!(
         trace_id = %caller.ctx.trace_id(),
@@ -383,20 +414,21 @@ pub async fn register_push_token(
         .into_inner();
     Ok(Json(ApiResponse::success(PushTokenHttpResponse {
         success: response.success,
+        binding_id: response.binding_id,
     })))
 }
 
-/// 注销当前用户某台设备在指定通道的推送令牌
+/// Read back the exact binding after an unknown write; never returns an OS token.
 #[utoipa::path(
-    delete,
+    get,
     path = "/api/v1/devices/{device_id}/push-token",
     tag = "Device",
     params(
         ("device_id" = String, Path, description = "设备 ID；设备绑定的令牌只能是本设备"),
-        UnregisterPushTokenQuery,
+        InspectPushTokenQuery,
     ),
     responses(
-        (status = 200, description = "成功", body = ApiResponse<PushTokenHttpResponse>),
+        (status = 200, description = "成功", body = ApiResponse<PushBindingView>),
         (status = 400, description = "参数错误或包含未知参数"),
         (status = 401, description = "缺少或无效的 IM 令牌"),
         (status = 403, description = "令牌未绑定租户、是管理员令牌或绑定了其他设备"),
@@ -404,38 +436,97 @@ pub async fn register_push_token(
     )
 )]
 #[instrument(skip_all)]
-pub async fn unregister_push_token(
+pub async fn inspect_push_token(
     headers: HeaderMap,
     Extension(client): Extension<PushTokenClient>,
     Extension(principal): Extension<AuthenticatedPrincipal>,
     Extension(signer): Extension<MessageContextSigner>,
     Path(raw_device_id): Path<String>,
-    query: std::result::Result<Query<UnregisterPushTokenQuery>, QueryRejection>,
-) -> Result<Json<ApiResponse<PushTokenHttpResponse>>> {
+    query: std::result::Result<Query<InspectPushTokenQuery>, QueryRejection>,
+) -> Result<Json<ApiResponse<PushBindingView>>> {
     let device_id = device_id(&raw_device_id)?;
     let caller = push_token_caller(&headers, &principal, &signer, &device_id)?;
     let Query(query) = query
-        .map_err(|rejection| GatewayError::bad_request("INVALID_QUERY", rejection.body_text()))?;
-    let request = UnregisterDevicePushTokenRequest {
+        .map_err(|_| GatewayError::bad_request("INVALID_QUERY", "push binding query rejected"))?;
+    let request = InspectDevicePushBindingRequest {
         user_id: caller.user_id.clone(),
         device_id,
         provider: provider(&query.provider)? as i32,
+        binding_id: query.binding_id,
     };
     debug!(
         trace_id = %caller.ctx.trace_id(),
         device_id = %request.device_id,
-        "UnregisterDevicePushToken"
+        "InspectDevicePushBinding"
     );
     let grpc_request = caller.request(request)?;
     let mut push_proxy = client.client().await?;
     let response = client
-        .call(|| push_proxy.unregister_device_push_token(grpc_request))
+        .call(|| push_proxy.inspect_device_push_binding(grpc_request))
         .await
         .map_err(push_proxy_error)?
         .into_inner();
-    Ok(Json(ApiResponse::success(PushTokenHttpResponse {
-        success: response.success,
+    Ok(Json(ApiResponse::success(PushBindingView {
+        version: response.version,
+        current_binding_id: response.current_binding_id,
+        state: response.state,
     })))
+}
+
+/// No bearer required: possession of the random revoke-only secret can ONLY
+/// retire that exact binding. It cannot inspect/register/send or grant authority.
+#[utoipa::path(post,path="/api/v1/push/bindings/revoke",tag="Device",request_body=RevokePushTokenRequest,responses((status=200,body=ApiResponse<serde_json::Value>)))]
+#[instrument(skip_all)]
+pub async fn revoke_push_token(
+    Extension(client): Extension<PushTokenClient>,
+    Extension(signer): Extension<MessageContextSigner>,
+    body: std::result::Result<Json<RevokePushTokenRequest>, JsonRejection>,
+) -> Result<Json<ApiResponse<serde_json::Value>>> {
+    let Json(body) = body.map_err(|_| {
+        GatewayError::bad_request("INVALID_REQUEST_BODY", "push revocation body rejected")
+    })?;
+    if !flare_im_contracts::domain::push_binding::binding_id_valid(&body.revocation_token) {
+        return Err(GatewayError::bad_request(
+            "INVALID_CAPABILITY",
+            "push revocation capability rejected",
+        ));
+    }
+    let signer = signer.0.as_ref().ok_or_else(|| {
+        GatewayError::internal(
+            "PUSH_SIGNER_UNAVAILABLE",
+            "internal identity signer not configured",
+        )
+    })?;
+    let signed = signer
+        .sign(
+            &SignedContextIdentity::new(
+                SignedActorType::Service,
+                "push-binding-revoker",
+                "0",
+                uuid::Uuid::new_v4().to_string(),
+            )
+            .with_credential_id("api-gateway"),
+        )
+        .map_err(|_| {
+            GatewayError::internal("PUSH_SIGNING_FAILED", "internal identity signing failed")
+        })?;
+    let caller = PushTokenCaller {
+        ctx: Ctx::default(),
+        user_id: String::new(),
+        signed_context: signed,
+    };
+    let req = caller.request(RevokeDevicePushBindingRequest {
+        revocation_token: body.revocation_token,
+    })?;
+    let mut proxy = client.client().await?;
+    let response = client
+        .call(|| proxy.revoke_device_push_binding(req))
+        .await
+        .map_err(push_proxy_error)?
+        .into_inner();
+    Ok(Json(ApiResponse::success(
+        serde_json::json!({"success":response.success}),
+    )))
 }
 
 #[cfg(test)]
@@ -587,9 +678,9 @@ mod tests {
             is_static_channel_cached(&url),
             "push proxy must use the service-kit static channel"
         );
-        let request = tonic::Request::new(UnregisterDevicePushTokenRequest::default());
+        let request = tonic::Request::new(InspectDevicePushBindingRequest::default());
         let status = client
-            .call(|| push_proxy.unregister_device_push_token(request))
+            .call(|| push_proxy.inspect_device_push_binding(request))
             .await
             .expect_err("nothing listens on a closed port");
         assert!(
