@@ -101,6 +101,17 @@ impl ApplicationBootstrap {
             }
         };
 
+        let observed_verifier = staff_verifier.clone();
+        let ops = flare_server_core::flare_core_infra::ops::RuntimeProbe::from_env(
+            "core-admin",
+            move || {
+                use flare_server_core::flare_core_infra::ops::LoadedKeys;
+                Some(std::collections::BTreeMap::from([(
+                    "context".into(),
+                    LoadedKeys::context(observed_verifier.key_set()),
+                )]))
+            },
+        )?;
         let app = create_admin_router(clients, capability)
             .layer(flare_im_service_kit::metrics::HttpMetricsLayer::new(
                 ADMIN_GATEWAY,
@@ -112,7 +123,8 @@ impl ApplicationBootstrap {
                 ServiceBuilder::new()
                     .layer(TraceLayer::new_for_http())
                     .layer(CorsLayer::permissive()),
-            );
+            )
+            .merge(flare_server_core::http::ops::router(ops));
 
         let runtime = flare_im_service_kit::health::attach_runtime_health_checks(
             ServiceRuntime::new(ADMIN_GATEWAY)
