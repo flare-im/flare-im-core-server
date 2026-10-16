@@ -22,10 +22,7 @@ use flare_server_core::mq::consumer::dispatcher::Dispatcher;
 
 use crate::application::GatewayPushExecutor;
 use crate::config::{OfflineDeliveryBackend, PushWorkerConfig};
-use crate::infrastructure::apns_push::{ApnsCredentials, ApnsOfflinePushExecutor};
 use crate::infrastructure::device_tokens::RedisDeviceTokenRepository;
-use crate::infrastructure::fcm_push::{FcmOfflinePushExecutor, FcmServiceAccount};
-use crate::infrastructure::getui_push::{GetuiClient, GetuiConfig, GetuiOfflinePushExecutor};
 use crate::infrastructure::mq::dlq_publisher::DlqPublisher;
 use crate::infrastructure::offline_outbox::RedisOfflineOutbox;
 use crate::infrastructure::rpc::OnlineServiceClient;
@@ -33,89 +30,6 @@ use crate::interface::messaging::offline_consumer::{
     OfflinePushConsumerFactory, UsageCountedExecutor,
 };
 use crate::interface::messaging::online_consumer::OnlinePushConsumerFactory;
-
-async fn vendor_executor(
-    config: &PushWorkerConfig,
-    backend: OfflineDeliveryBackend,
-) -> Result<(
-    &'static str,
-    Arc<dyn crate::domain::offline_delivery::OfflinePushExecutor>,
-)> {
-    let tokens = Arc::new(
-        RedisDeviceTokenRepository::connect(
-            &config.device_token_redis_url,
-            config.device_token_key_prefix.clone(),
-        )
-        .await?,
-    );
-    match backend {
-        OfflineDeliveryBackend::Fcm => {
-            let raw = required_config(
-                config.fcm_service_account_json.clone(),
-                "PUSH_WORKER_FCM_SERVICE_ACCOUNT_JSON",
-            )?;
-            let account: FcmServiceAccount = serde_json::from_str(&raw).map_err(|_| {
-                FlareError::localized(
-                    ErrorCode::InvalidParameter,
-                    "FCM service account JSON rejected",
-                )
-            })?;
-            Ok((
-                "fcm",
-                Arc::new(FcmOfflinePushExecutor::new(
-                    account,
-                    crate::infrastructure::vendor_http::client()?,
-                    tokens,
-                )?),
-            ))
-        }
-        OfflineDeliveryBackend::Apns => {
-            let credentials = ApnsCredentials {
-                team_id: required_config(config.apns_team_id.clone(), "PUSH_WORKER_APNS_TEAM_ID")?,
-                key_id: required_config(config.apns_key_id.clone(), "PUSH_WORKER_APNS_KEY_ID")?,
-                private_key_pem: required_config(
-                    config.apns_private_key.clone(),
-                    "PUSH_WORKER_APNS_PRIVATE_KEY",
-                )?,
-                topic: required_config(config.apns_topic.clone(), "PUSH_WORKER_APNS_TOPIC")?,
-                sandbox: config.apns_sandbox,
-            };
-            Ok((
-                "apns",
-                Arc::new(ApnsOfflinePushExecutor::new(
-                    credentials,
-                    crate::infrastructure::vendor_http::client()?,
-                    tokens,
-                )?),
-            ))
-        }
-        OfflineDeliveryBackend::Getui => {
-            let settings = GetuiConfig::new(
-                required_config(config.getui_app_id.clone(), "PUSH_WORKER_GETUI_APP_ID")?,
-                required_config(config.getui_app_key.clone(), "PUSH_WORKER_GETUI_APP_KEY")?,
-                required_config(
-                    config.getui_master_secret.clone(),
-                    "PUSH_WORKER_GETUI_MASTER_SECRET",
-                )?,
-                config.getui_base_url.clone(),
-                config.getui_default_ttl_ms,
-                config.getui_request_timeout_ms,
-            )?;
-            Ok((
-                "getui",
-                Arc::new(GetuiOfflinePushExecutor::new(
-                    tokens,
-                    Arc::new(GetuiClient::new(settings)?),
-                    config.getui_default_ttl_ms,
-                )),
-            ))
-        }
-        _ => Err(FlareError::localized(
-            ErrorCode::InvalidParameter,
-            "explicit vendor backend required",
-        )),
-    }
-}
 
 pub struct ApplicationContext {
     pub config: Arc<PushWorkerConfig>,
@@ -208,14 +122,30 @@ pub async fn initialize(
             } else {
                 vec![backend]
             };
-            let mut executors = Vec::new();
-            for provider in providers {
-                let (name, executor) = vendor_executor(&config, provider).await?;
-                executors.push(UsageCountedExecutor::wrap(executor, name, usage.recorder()));
-            }
+            let path = config.mobile_applications_file.as_deref().ok_or_else(|| {
+                FlareError::localized(
+                    ErrorCode::InvalidParameter,
+                    "per-application push credentials file required",
+                )
+            })?;
+            let tokens = Arc::new(
+                RedisDeviceTokenRepository::connect(
+                    &config.device_token_redis_url,
+                    config.device_token_key_prefix.clone(),
+                )
+                .await?,
+            );
+            let executor = super::mobile_credentials::build(
+                std::path::Path::new(path),
+                &providers,
+                tokens,
+                usage.recorder(),
+                config.getui_default_ttl_ms,
+                config.getui_request_timeout_ms,
+            )?;
             OfflinePushConsumerFactory::create_handler_with_delivery(
                 dlq,
-                Arc::new(crate::application::mobile_fanout::MobileFanout(executors)),
+                Arc::new(executor),
                 config.offline_parking_capacity,
                 metrics,
             )
@@ -292,15 +222,6 @@ pub(crate) fn push_consumer_config(batch_size: usize, batch_timeout_ms: u64) -> 
         .with_ordered(true)
         .with_max_retries(PUSH_DELIVERY_MAX_RETRIES)
         .with_retry_backoff(push_delivery_retry_backoff())
-}
-
-fn required_config(value: Option<String>, name: &'static str) -> Result<String> {
-    value.ok_or_else(|| {
-        FlareError::localized(
-            ErrorCode::InvalidParameter,
-            format!("missing required config {name}"),
-        )
-    })
 }
 
 #[cfg(test)]

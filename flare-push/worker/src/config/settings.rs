@@ -87,23 +87,8 @@ pub struct PushWorkerConfig {
     pub device_token_redis_url: String,
     /// 设备厂商 token registry Redis key 前缀。
     pub device_token_key_prefix: String,
-    /// 个推 App ID。
-    /// FCM 服务账号 JSON（整份内容）。**用环境变量或密钥管理注入，勿写进配置文件**。
-    pub fcm_service_account_json: Option<String>,
-    /// APNs：Team ID / Key ID / p8 私钥 / bundle id / 是否沙箱。
-    /// **p8 私钥走环境变量或密钥管理注入，勿写进配置文件。**
-    pub apns_team_id: Option<String>,
-    pub apns_key_id: Option<String>,
-    pub apns_private_key: Option<String>,
-    pub apns_topic: Option<String>,
-    pub apns_sandbox: bool,
-    pub getui_app_id: Option<String>,
-    /// 个推 App Key。
-    pub getui_app_key: Option<String>,
-    /// 个推 Master Secret。
-    pub getui_master_secret: Option<String>,
-    /// 个推 RestAPI V2 BaseUrl；未配置时按 app_id 生成。
-    pub getui_base_url: Option<String>,
+    /// Private per-application credentials mount, consumed only by push-worker.
+    pub mobile_applications_file: Option<String>,
     /// 个推离线消息默认 TTL。
     pub getui_default_ttl_ms: u64,
     /// 个推 HTTP 请求超时。
@@ -250,18 +235,8 @@ impl PushWorkerConfig {
             .ok()
             .filter(|value| !value.trim().is_empty())
             .unwrap_or_else(|| "flare:im:push:device_tokens".to_string());
-        let fcm_service_account_json = non_empty_env("PUSH_WORKER_FCM_SERVICE_ACCOUNT_JSON");
-        let apns_team_id = non_empty_env("PUSH_WORKER_APNS_TEAM_ID");
-        let apns_key_id = non_empty_env("PUSH_WORKER_APNS_KEY_ID");
-        let apns_private_key = non_empty_env("PUSH_WORKER_APNS_PRIVATE_KEY");
-        let apns_topic = non_empty_env("PUSH_WORKER_APNS_TOPIC");
-        let apns_sandbox = non_empty_env("PUSH_WORKER_APNS_SANDBOX")
-            .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
-            .unwrap_or(false);
-        let getui_app_id = non_empty_env("PUSH_WORKER_GETUI_APP_ID");
-        let getui_app_key = non_empty_env("PUSH_WORKER_GETUI_APP_KEY");
-        let getui_master_secret = non_empty_env("PUSH_WORKER_GETUI_MASTER_SECRET");
-        let getui_base_url = non_empty_env("PUSH_WORKER_GETUI_BASE_URL");
+        reject_global_vendor_credentials()?;
+        let mobile_applications_file = non_empty_env("PUSH_WORKER_MOBILE_APPLICATIONS_FILE");
         let getui_default_ttl_ms = env::var("PUSH_WORKER_GETUI_DEFAULT_TTL_MS")
             .ok()
             .and_then(|value| value.parse::<u64>().ok())
@@ -319,16 +294,7 @@ impl PushWorkerConfig {
             offline_outbox_maxlen,
             device_token_redis_url,
             device_token_key_prefix,
-            fcm_service_account_json,
-            apns_team_id,
-            apns_key_id,
-            apns_private_key,
-            apns_topic,
-            apns_sandbox,
-            getui_app_id,
-            getui_app_key,
-            getui_master_secret,
-            getui_base_url,
+            mobile_applications_file,
             getui_default_ttl_ms,
             getui_request_timeout_ms,
             event_ping_debounce_window_ms,
@@ -368,6 +334,28 @@ fn mobile_providers(
         providers.push(provider);
     }
     Ok(providers)
+}
+
+fn reject_global_vendor_credentials() -> Result<()> {
+    for name in [
+        "PUSH_WORKER_FCM_SERVICE_ACCOUNT_JSON",
+        "PUSH_WORKER_APNS_TEAM_ID",
+        "PUSH_WORKER_APNS_KEY_ID",
+        "PUSH_WORKER_APNS_PRIVATE_KEY",
+        "PUSH_WORKER_APNS_TOPIC",
+        "PUSH_WORKER_APNS_SANDBOX",
+        "PUSH_WORKER_GETUI_APP_ID",
+        "PUSH_WORKER_GETUI_APP_KEY",
+        "PUSH_WORKER_GETUI_MASTER_SECRET",
+        "PUSH_WORKER_GETUI_BASE_URL",
+    ] {
+        if env::var_os(name).is_some() {
+            return Err(FlareError::system(
+                "global mobile credentials unsupported; configure per-application private file",
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn non_empty_env(name: &str) -> Option<String> {

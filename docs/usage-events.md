@@ -78,8 +78,11 @@ dropped and counted, never queued without limit.
 
 ## Consumer requirements
 
-Not yet implemented for Core windows: the current Platform consumer handles Social snapshots
-only. The following is the pending integration contract, not a claim that window rows already exist.
+The Platform worker now routes Core windows beside Social snapshots into Commerce-owned
+immutable event fences, window readings and unique daily user hashes. Its authorized application
+usage/workspace includes `core.series` in the same read snapshot; fixed decimals are strings.
+Source DDL is `flare-social/platform/crates/platform-commerce/resources/core-usage.sql`,
+not an executed change to the old development stack. See Social `docs/platform-metering-and-id-leases.md`.
 
 The platform metering consumer (Cell Agent or `platform-commerce` usage) must:
 
@@ -89,10 +92,15 @@ The platform metering consumer (Cell Agent or `platform-commerce` usage) must:
    `(instance, meter, dims, app, window_start_ms)`, writing the value (not adding to it), so a
    redelivered event changes nothing.
 3. Upsert active users keyed by `(app, day, user_hash)`.
-4. Aggregate across instances per window by summing. For `connections.peak` the sum is an
-   upper bound of the Cell's concurrent sessions in that window (each instance reports its own
-   peak, and the peaks need not coincide); a period's peak is the maximum over its windows.
-   Stored bytes are `added − removed`.
+4. Sum counters across instances. Daily `connections.peak_upper_bound` sums each instance's
+   daily maximum, never sums one instance's peaks across time. It is deliberately conservative
+   even when window sizes differ; not exact simultaneous sessions. Stored-byte `added − removed`
+   is a period delta, not current object inventory.
+
+The consumer rejects subject/app mismatches and producer/meter/dimension combinations outside
+the fixed catalog. Same-key conflicting content retains the original and emits a fixed diagnostic.
+Only committed transactions ACK; database failure redelivers. Publisher ACLs, final runtime
+consumption, retention/compaction at scale and the initial release remain separate work.
 
 ## Metrics
 

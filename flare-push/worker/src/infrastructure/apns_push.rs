@@ -37,7 +37,8 @@ const SANDBOX_HOST: &str = "https://api.sandbox.push.apple.com";
 const TOKEN_TTL: Duration = Duration::from_secs(50 * 60);
 
 /// APNs 提供者凭据。
-#[derive(Clone)]
+#[derive(Clone, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ApnsCredentials {
     /// Apple Developer Team ID（10 位）。
     pub team_id: String,
@@ -48,6 +49,7 @@ pub struct ApnsCredentials {
     /// 目标 App 的 bundle id，作为 `apns-topic`。
     pub topic: String,
     /// true 走沙箱环境（开发构建的设备 token 只能用沙箱）。
+    #[serde(default)]
     pub sandbox: bool,
 }
 

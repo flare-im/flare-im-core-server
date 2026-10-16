@@ -1321,54 +1321,9 @@ pub const REGISTERED_ENV_VARS: &[EnvVarSpec] = &[
         EnvPurpose::Mq,
     ),
     env(
-        "PUSH_WORKER_APNS_TEAM_ID",
+        "PUSH_WORKER_MOBILE_APPLICATIONS_FILE",
         EnvOwner::PushWorker,
         EnvPurpose::Auth,
-    ),
-    env(
-        "PUSH_WORKER_APNS_KEY_ID",
-        EnvOwner::PushWorker,
-        EnvPurpose::Auth,
-    ),
-    env(
-        "PUSH_WORKER_APNS_PRIVATE_KEY",
-        EnvOwner::PushWorker,
-        EnvPurpose::Auth,
-    ),
-    env(
-        "PUSH_WORKER_APNS_TOPIC",
-        EnvOwner::PushWorker,
-        EnvPurpose::Auth,
-    ),
-    env(
-        "PUSH_WORKER_APNS_SANDBOX",
-        EnvOwner::PushWorker,
-        EnvPurpose::RuntimeTuning,
-    ),
-    env(
-        "PUSH_WORKER_FCM_SERVICE_ACCOUNT_JSON",
-        EnvOwner::PushWorker,
-        EnvPurpose::Auth,
-    ),
-    env(
-        "PUSH_WORKER_GETUI_APP_ID",
-        EnvOwner::PushWorker,
-        EnvPurpose::Auth,
-    ),
-    env(
-        "PUSH_WORKER_GETUI_APP_KEY",
-        EnvOwner::PushWorker,
-        EnvPurpose::Auth,
-    ),
-    env(
-        "PUSH_WORKER_GETUI_MASTER_SECRET",
-        EnvOwner::PushWorker,
-        EnvPurpose::Auth,
-    ),
-    env(
-        "PUSH_WORKER_GETUI_BASE_URL",
-        EnvOwner::PushWorker,
-        EnvPurpose::ServiceEndpoint,
     ),
     env(
         "PUSH_WORKER_OFFLINE_PROVIDERS",

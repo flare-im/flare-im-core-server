@@ -19,18 +19,43 @@ an explicit unique `PUSH_WORKER_OFFLINE_PROVIDERS=fcm,apns` list. The latter run
 three provider futures concurrently, so an unavailable vendor cannot starve another.
 `outbox` remains an explicitly selected development backend and is forbidden in production.
 
-FCM uses `PUSH_WORKER_FCM_SERVICE_ACCOUNT_JSON`; its OAuth destination is fixed to
-`https://oauth2.googleapis.com/token`. APNs uses `PUSH_WORKER_APNS_TEAM_ID`, `...KEY_ID`,
-`...PRIVATE_KEY`, `...TOPIC`, and optional `...SANDBOX`. Getui uses `PUSH_WORKER_GETUI_APP_ID`,
-`...APP_KEY`, `...MASTER_SECRET`. Its credential destination is fixed to the official
-`https://restapi.getui.com/v2/<app_id>`; an old custom `...BASE_URL` cannot redirect secrets.
-Credentials are validated at startup and never printed. Refresh is single-flight per executor.
+Mobile backends require `PUSH_WORKER_MOBILE_APPLICATIONS_FILE`, a private regular single-link
+0600 JSON mount (at most 4 MiB/1,024 applications), owned operationally by push-worker.
+Schema `flare.mobile-push-applications/v1` contains an `applications` array; each entry has
+an exact `app_id` plus optional `fcm`, `apns`, and `getui` credentials. Unknown fields, duplicate
+applications, empty providers and providers outside the explicit backend allowlist reject startup.
+There is no default application/project/topic or global environment credential fallback; old
+global vendor credential variables explicitly reject. Normal attested app context must match
+the task before an executor is selected. An unconfigured application with a registered mobile
+device goes to the existing terminal failure/DLQ path instead of borrowing another application's
+credentials; a web-only user with no OS registration needs no vendor and completes without a send.
+For a configured application, an existing registration on an unconfigured provider is also an
+explicit terminal configuration failure, not a silent all-devices success. Configured channels
+still run first; existing acceptance receipts apply if the operator later replays the DLQ.
 
-These are **Cell-configured provider credentials**, not a tenant self-service multi-bundle
-credential store. Apps requiring different Firebase projects/Apple topics still require
-separate correctly configured delivery Cells; per-application credential routing and SDK/OS
-device-token lifecycle integration remain explicit product work. Do not claim every mobile
-application can share one APNs topic or that native SDK registration is already implemented.
+Each `fcm` record is the service account object; its OAuth destination is fixed to
+`https://oauth2.googleapis.com/token`. Each `apns` record has `team_id`, `key_id`,
+`private_key_pem`, `topic` and optional `sandbox`; `getui` has vendor `app_id`, `app_key`,
+`master_secret`. Its credential destination is fixed to the official
+`https://restapi.getui.com/v2/<app_id>`; an old custom `...BASE_URL` cannot redirect secrets.
+Credentials are validated at startup and never printed. Refresh is single-flight per application/vendor executor.
+
+This is a **private per-application operational configuration**, not a tenant self-service
+credential UI, encrypted Platform credential database or hot-rotation service. Different
+applications may now share a delivery Cell without sharing a project/topic. Operators validate
+bundle/project/environment mappings before supplying a new file and restarting the future runtime;
+this task does not replace any existing runtime secret. Platform self-service and SDK/OS token
+lifecycle integration remain explicit work; no phone/vendor delivery is implied.
+
+The current Rust SDK has manual registration methods, but native bindings do not expose a
+complete lifecycle yet. Logout/account switching also needs server-side conditional binding
+generations and revocation tombstones: a timed-out PUT can otherwise finish after a DELETE,
+and an unconditional old DELETE can erase a new registration. Merely adding a Flutter
+logout callback, or changing the existing HTTP client's mutable auth context, is not a safe
+closure. Preserve app/user/device/session identity for every in-flight operation, retain
+unknown outcomes for reconciliation, expose the normal SDK contract through code generation,
+then test token refresh, permission revocation and logout/switch races before real OS testing.
+This is unfinished source functionality, not only a missing vendor credential/device.
 
 ## Delivery and failure semantics
 
@@ -81,6 +106,11 @@ and a separately opted-in **private Redis Unix-socket process** for generation C
 The HTTP peer is controlled test infrastructure, not Firebase/Apple or a real device. The Redis
 test creates no shared database, stops its exact child and removes only its own random directory.
 
+The per-application file/factory/routing suite is part of the final worker result: 58 passed,
+2 explicitly ignored; strict worker/service-kit all-targets Clippy passed. This includes the
+no-default app boundary, private file/size/schema checks and missing registered provider case.
+Earlier 57/2 and the preceding worker results overlap; they are not additional coverage.
+
 Core's independent R7 lane (`8e120ee`, `922ffaa`, `caaec1c`, `c8d8673`, `9629a8d`) was
 adopted rather than rewritten: tracing, explicit Hook-file
 startup failure, sampled execution evidence/per-tenant Hook circuits, unused implementation
@@ -88,7 +118,9 @@ removal, and six usage producers. Existing durable audit lifecycle tasks were re
 and Writer. Hook evidence is bounded lossy diagnostic telemetry, not transactional audit;
 `0015_20261016_hook_execution_evidence.sql` is source DDL, not an executed upgrade. The old
 lane's migration snapshots/compatibility tests were intentionally not adopted. Usage-window
-consumption/aggregation and Snowflake leases are still incomplete.
+consumption/aggregation and the actual Social/IAM ID lease entry points were subsequently
+implemented in the owning Social/Platform modules; see `docs/usage-events.md`. They are not
+already installed in the old runtime and do not complete the native mobile lifecycle.
 
 An earlier candidate's six related Core libraries passed 354 tests (3 ignored separately);
 the push registry's explicit Redis method passed independently. API push-token tests passed
