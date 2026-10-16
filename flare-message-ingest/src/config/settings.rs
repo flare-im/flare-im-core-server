@@ -87,6 +87,9 @@ pub struct MessageIngestConfig {
     /// `HookPlugin.Call`（PreSend/PostSend）gRPC Hook。关闭时仅使用配置文件中的 Hook。
     /// 环境变量：`MESSAGE_INGEST_CAPABILITY_HOOKS_AUTO=1|true`。
     pub capability_hooks_auto: bool,
+    /// Explicit JSON array of direct PreSend hook names delegated to Capability.
+    /// No endpoint/product-name inference. Validated before infrastructure starts.
+    pub capability_delegated_pre_send: Option<String>,
     /// `flare-capability` HookPlugin gRPC 地址，例如 `http://flare-capability:50051`。
     /// 环境变量：`MESSAGE_INGEST_CAPABILITY_GRPC_URI`（未设且开启 auto 时使用本机默认端口，见 wire 常量）。
     pub capability_grpc_uri: Option<String>,
@@ -664,6 +667,13 @@ impl MessageIngestConfig {
             server_id,
             svid,
             capability_hooks_auto,
+            capability_delegated_pre_send: match env::var(
+                "MESSAGE_INGEST_CAPABILITY_DELEGATED_PRE_SEND",
+            ) {
+                Ok(value) => Some(value),
+                Err(env::VarError::NotPresent) => None,
+                Err(_) => Some(String::new()), // invalid Unicode must fail the same closed parser
+            },
             capability_grpc_uri,
             extension_post_send_fail_open,
             extension_pre_send_timeout_ms,

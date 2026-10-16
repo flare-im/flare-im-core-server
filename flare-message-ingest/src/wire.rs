@@ -380,6 +380,64 @@ fn inject_flare_capability_hook_plugin_targets(cfg: &mut HookConfig, endpoint: S
     });
 }
 
+/// The deployment owns the execution plan. Never infer plugin ownership from
+/// a product's endpoint substring, hook name prefix or metadata convention.
+fn apply_capability_delegation(
+    cfg: &mut HookConfig,
+    enabled: bool,
+    raw: Option<&str>,
+) -> Result<usize> {
+    let reject = || {
+        flare_server_core::error::FlareError::system("invalid explicit capability hook delegation")
+    };
+    if enabled
+        && (cfg
+            .pre_send
+            .iter()
+            .any(|h| h.name == "flare_capability_hook_plugin_pre_send")
+            || cfg
+                .post_send
+                .iter()
+                .any(|h| h.name == "flare_capability_hook_plugin_post_send"))
+    {
+        return Err(reject());
+    }
+    let Some(raw) = raw else {
+        return Ok(0);
+    };
+    if raw.len() > 8192 {
+        return Err(reject());
+    }
+    let names: Vec<String> = serde_json::from_str(raw).map_err(|_| reject())?;
+    if names.len() > 64 || (!enabled && !names.is_empty()) {
+        return Err(reject());
+    }
+    let mut unique = std::collections::HashSet::new();
+    for name in &names {
+        if name.is_empty()
+            || name.len() > 128
+            || name.chars().any(char::is_control)
+            || !unique.insert(name.as_str())
+            || cfg
+                .pre_send
+                .iter()
+                .filter(|hook| hook.name == *name)
+                .count()
+                != 1
+            || cfg
+                .pre_send
+                .iter()
+                .any(|hook| hook.name == *name && !hook.enabled)
+        {
+            return Err(reject());
+        }
+    }
+    let before = cfg.pre_send.len();
+    cfg.pre_send
+        .retain(|hook| !unique.contains(hook.name.as_str()));
+    Ok(before - cfg.pre_send.len())
+}
+
 fn validate_static_hook_routes(hook_cfg: &HookConfig, static_registry_mode: bool) -> Result<()> {
     if !static_registry_mode {
         return Ok(());
@@ -425,26 +483,23 @@ async fn build_hook_dispatcher(
         flare_server_core::error::FlareError::system(format!("load hook config: {e}"))
     })?;
 
-    // Validate the declared policy before capability auto-dedup can remove a
-    // discovery:// Social hook and conceal a broken static deployment profile.
+    // Validate the original routes before explicit delegation can conceal a
+    // broken static deployment profile.
     validate_static_hook_routes(&hook_cfg, static_registry_mode)?;
+
+    let removed = apply_capability_delegation(
+        &mut hook_cfg,
+        ingest_cfg.capability_hooks_auto,
+        ingest_cfg.capability_delegated_pre_send.as_deref(),
+    )?;
 
     if ingest_cfg.capability_hooks_auto {
         let ep = ingest_cfg.resolve_capability_grpc_uri();
         inject_flare_capability_hook_plugin_targets(&mut hook_cfg, ep);
-        let before = hook_cfg.pre_send.len();
-        hook_cfg.pre_send.retain(|hook| {
-            !matches!(
-                &hook.transport,
-                HookTransportConfig::Grpc { endpoint, .. }
-                    if endpoint.contains("flare-social-hook")
-            )
-        });
-        let removed = before.saturating_sub(hook_cfg.pre_send.len());
         if removed > 0 {
             tracing::info!(
                 removed,
-                "deduped ingest pre_send hooks already executed via flare-capability"
+                "delegated explicitly selected pre_send hooks to capability"
             );
         }
     }
@@ -487,6 +542,98 @@ async fn build_hook_dispatcher(
 #[cfg(test)]
 mod hook_startup_tests {
     use super::*;
+
+    #[test]
+    fn shipped_defaults_select_the_empty_core_profile_not_a_business_profile_link() {
+        for (raw, name) in [
+            (
+                include_str!("../../config/services/message-ingest.toml"),
+                "message_ingest",
+            ),
+            (
+                include_str!("../../config/services/message-orchestrator.toml"),
+                "message_orchestrator",
+            ),
+            (
+                include_str!("../../config/services/push-server.toml"),
+                "push_server",
+            ),
+            (
+                include_str!("../../config/services/push-worker.toml"),
+                "push_worker",
+            ),
+        ] {
+            let value: toml::Value = toml::from_str(raw).unwrap();
+            assert_eq!(
+                value["services"][name]["hook_config"].as_str(),
+                Some("config/hooks.core.toml")
+            );
+        }
+        let cfg: HookConfig = toml::from_str(include_str!("../../config/hooks.core.toml")).unwrap();
+        assert!(
+            cfg.pre_send.is_empty()
+                && cfg.post_send.is_empty()
+                && cfg.delivery.is_empty()
+                && cfg.recall.is_empty()
+        );
+    }
+
+    #[test]
+    fn delegation_is_explicit_product_neutral_and_failure_is_non_mutating() {
+        let mut cfg = HookConfig::default();
+        for (name, endpoint) in [
+            ("customer-policy", "http://business-a:9000"),
+            ("audit-policy", "http://business-b:9000"),
+        ] {
+            cfg.pre_send.push(HookDefinition {
+                name: name.into(),
+                transport: HookTransportConfig::Grpc {
+                    endpoint: endpoint.into(),
+                    metadata: HashMap::new(),
+                },
+                ..Default::default()
+            });
+        }
+        assert_eq!(
+            apply_capability_delegation(&mut cfg, true, None).unwrap(),
+            0
+        );
+        for raw in [
+            "not-json",
+            r#"["missing"]"#,
+            r#"["customer-policy","customer-policy"]"#,
+            r#"["customer-policy","missing"]"#,
+        ] {
+            assert!(apply_capability_delegation(&mut cfg, true, Some(raw)).is_err());
+            assert_eq!(cfg.pre_send.len(), 2);
+        }
+        assert!(
+            apply_capability_delegation(&mut cfg, false, Some(r#"["customer-policy"]"#)).is_err()
+        );
+        assert_eq!(
+            apply_capability_delegation(&mut cfg, true, Some(r#"["customer-policy"]"#)).unwrap(),
+            1
+        );
+        assert_eq!(cfg.pre_send[0].name, "audit-policy");
+        inject_flare_capability_hook_plugin_targets(&mut cfg, "http://capability:9010".into());
+        assert_eq!(cfg.pre_send.len(), 2);
+        assert_eq!(cfg.post_send.len(), 1);
+    }
+
+    #[test]
+    fn a_product_endpoint_name_never_implicitly_disables_a_direct_gate() {
+        let mut cfg = HookConfig::default();
+        cfg.pre_send.push(HookDefinition {
+            name: "required-gate".into(),
+            transport: HookTransportConfig::Grpc {
+                endpoint: "http://customer.example/flare-social-hook".into(),
+                metadata: HashMap::new(),
+            },
+            ..Default::default()
+        });
+        apply_capability_delegation(&mut cfg, true, None).unwrap();
+        assert_eq!(cfg.pre_send.len(), 1);
+    }
 
     #[test]
     fn static_mode_rejects_discovery_hooks_but_accepts_explicit_uri() {
