@@ -18,6 +18,7 @@ flare-proto = { workspace = true }
 flare-grpc-proto = { workspace = true }
 flare-im-contracts = { workspace = true }
 flare-im-service-kit = { workspace = true }
+flare-im-usage = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }

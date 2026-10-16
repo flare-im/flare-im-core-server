@@ -203,6 +203,8 @@ impl MediaService {
         };
 
         self.save_and_cache(ctx, &metadata).await?;
+        self.usage
+            .media_stored(require_tenant(ctx)?, usage_bytes(file_size));
 
         if let (Some(scope), Some(_)) = (
             self.extract_reference_scope(&scope_context),

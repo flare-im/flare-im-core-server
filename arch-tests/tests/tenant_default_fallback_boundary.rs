@@ -89,7 +89,6 @@ const FIXED_BY_W12_T: &[&str] = &[
     "crates/flare-im-message-pipeline/src/extension/orchestrator.rs",
     "crates/flare-im-message-pipeline/src/extension/routing.rs",
     "flare-conversation/src/domain/service/conversation_domain_service.rs",
-    "flare-conversation/src/infrastructure/persistence/thread_repository.rs",
     "flare-media/src/interface/grpc/media_handler.rs",
     "flare-orchestrator/src/application/commands/message_action_commands.rs",
     "flare-signaling/gateway/src/domain/service/push_domain_service.rs",

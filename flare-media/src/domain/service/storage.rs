@@ -287,6 +287,8 @@ impl MediaService {
             .map_err(|e| map_infra_error(e, ErrorCode::DatabaseError, "persist metadata"))?;
 
         tracing::trace!(file_id = context.file_id, "文件元数据已保存");
+        self.usage
+            .media_stored(tenant_id, usage_bytes(metadata.file_size));
 
         if let (Some(scope), Some(_)) = (scope, self.reference_store.as_ref()) {
             tracing::trace!(file_id = context.file_id, "为新文件创建引用");
@@ -337,6 +339,11 @@ impl MediaService {
         if let Some(repo) = &self.object_repo {
             let target = storage_path.as_deref().unwrap_or(file_id);
             let _ = repo.delete_object(target).await;
+        }
+        // 对象删除失败也照样删元数据（见下），文件从此不再计入存量，用量与之一致。
+        if let Ok(tenant) = require_tenant(ctx) {
+            self.usage
+                .media_removed(tenant, usage_bytes(metadata.file_size));
         }
 
         if let Some(local) = &self.local_store {
@@ -404,7 +411,12 @@ impl MediaService {
             )
         })?;
 
-        local.read(target).await
+        let bytes = local.read(target).await?;
+        if let Ok(tenant) = require_tenant(ctx) {
+            self.usage
+                .media_egress(tenant, u64::try_from(bytes.len()).unwrap_or(u64::MAX));
+        }
+        Ok(bytes)
     }
 
     #[instrument(skip(self, ctx), fields(
@@ -420,7 +432,7 @@ impl MediaService {
     ) -> Result<PresignedUrl> {
         ctx.ensure_not_cancelled().map_err(map_context_error)?;
 
-        require_tenant(ctx)?;
+        let tenant = require_tenant(ctx)?;
         let metadata = self.get_metadata(ctx, file_id).await?;
         let expires_in = if expires_in > 0 {
             expires_in
@@ -545,6 +557,13 @@ impl MediaService {
         } else {
             String::new()
         };
+        // 对象存储里的文件按签名计出口（对象大小）：字节由对象存储或 CDN 直接下发，签一次可能
+        // 下多次或不下，这是 Media 能给出的估计。本地文件的字节经 `download_local_file` 读出，
+        // 在那里按实际字节计，这里再计就重复了。
+        if stored_in_object_store {
+            self.usage
+                .media_egress(tenant, usage_bytes(metadata.file_size));
+        }
 
         Ok(PresignedUrl {
             url,

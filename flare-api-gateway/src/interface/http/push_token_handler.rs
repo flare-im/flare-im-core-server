@@ -150,7 +150,7 @@ impl PushTokenClient {
 pub struct RegisterPushTokenHttpRequest {
     /// 设备平台，例如 `ios`、`android`、`harmony`
     pub platform: String,
-    /// 推送通道，当前只支持 `getui`
+    /// 推送通道：`getui`、`fcm` 或 `apns`。
     pub provider: String,
     /// 推送通道为该设备下发的令牌
     pub token: String,
@@ -161,7 +161,7 @@ pub struct RegisterPushTokenHttpRequest {
 #[serde(deny_unknown_fields)]
 #[into_params(parameter_in = Query)]
 pub struct UnregisterPushTokenQuery {
-    /// 推送通道，当前只支持 `getui`
+    /// 推送通道：`getui`、`fcm` 或 `apns`。
     pub provider: String,
 }
 
@@ -293,9 +293,11 @@ fn push_token(raw: &str) -> Result<String> {
 fn provider(raw: &str) -> Result<DevicePushProvider> {
     match raw.trim().to_ascii_lowercase().as_str() {
         "getui" => Ok(DevicePushProvider::Getui),
+        "fcm" => Ok(DevicePushProvider::Fcm),
+        "apns" => Ok(DevicePushProvider::Apns),
         _ => Err(GatewayError::bad_request(
             "PUSH_PROVIDER_INVALID",
-            "provider must be one of: getui",
+            "provider must be one of: getui, fcm, apns",
         )),
     }
 }
@@ -443,7 +445,9 @@ mod tests {
     #[test]
     fn provider_accepts_only_known_channels() {
         assert_eq!(provider(" GeTui ").unwrap(), DevicePushProvider::Getui);
-        for raw in ["", "apns", "fcm", "unspecified", "1"] {
+        assert_eq!(provider(" FCM ").unwrap(), DevicePushProvider::Fcm);
+        assert_eq!(provider("apns").unwrap(), DevicePushProvider::Apns);
+        for raw in ["", "firebase", "apple", "unspecified", "1"] {
             assert!(provider(raw).is_err(), "{raw}");
         }
     }

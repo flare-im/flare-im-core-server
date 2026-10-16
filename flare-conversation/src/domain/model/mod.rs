@@ -457,35 +457,6 @@ pub struct ConversationSort {
     pub ascending: bool,
 }
 
-/// 话题（Thread）模型
-#[derive(Clone, Debug)]
-pub struct Thread {
-    pub id: String,
-    pub conversation_id: String,
-    pub root_message_id: String,
-    pub title: Option<String>,
-    pub creator_id: String,
-    pub reply_count: i32,
-    pub last_reply_at: Option<DateTime<Utc>>,
-    pub last_reply_id: Option<String>,
-    pub last_reply_user_id: Option<String>,
-    pub participant_count: i32,
-    pub is_pinned: bool,
-    pub is_locked: bool,
-    pub is_archived: bool,
-    pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
-    pub extra: HashMap<String, String>,
-}
-
-/// 话题排序方式
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ThreadSortOrder {
-    UpdatedDesc,    // 按更新时间降序（默认）
-    UpdatedAsc,     // 按更新时间升序
-    ReplyCountDesc, // 按回复数降序
-}
-
 /// 按时间边界清除会话历史的结果。
 ///
 /// 会话本身、成员和边界之后的消息都保留，只报告删掉了什么。

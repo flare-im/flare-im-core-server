@@ -92,3 +92,34 @@ pub trait PluginEndpointRepository: Send + Sync {
         cutoff: chrono::DateTime<chrono::Utc>,
     ) -> flare_server_core::error::Result<Vec<crate::domain::model::PluginEndpointKey>>;
 }
+
+/// Hook 执行证据的持久化端口（`hook_executions`）。写入方是后台的批量写入任务，读取方是
+/// `hook_config.get_statistics` / `query_executions`；读写都按租户与 Hook 限定。
+#[async_trait::async_trait]
+pub trait HookExecutionRepository: Send + Sync {
+    /// 一次写入一批记录，返回写入的行数。
+    async fn insert_batch(
+        &self,
+        records: &[crate::domain::model::HookExecutionRecord],
+    ) -> flare_server_core::error::Result<u64>;
+
+    /// 删除执行时间早于 `cutoff` 的至多 `limit` 行（最旧的先删），返回删除的行数。
+    async fn delete_executed_before(
+        &self,
+        cutoff: std::time::SystemTime,
+        limit: u32,
+    ) -> flare_server_core::error::Result<u64>;
+
+    /// 一个租户的一条 Hook 在一段时间里的统计（按 `sample_weight` 加权）。
+    async fn statistics(
+        &self,
+        scope: &crate::domain::model::HookExecutionScope,
+        range: &crate::domain::model::HookExecutionTimeRange,
+    ) -> flare_server_core::error::Result<crate::domain::model::HookExecutionStatistics>;
+
+    /// 按条件查执行记录，从新到旧，至多 `filter.limit` 条。
+    async fn query(
+        &self,
+        filter: &crate::domain::model::HookExecutionFilter,
+    ) -> flare_server_core::error::Result<Vec<crate::domain::model::StoredHookExecution>>;
+}

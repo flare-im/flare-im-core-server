@@ -18,6 +18,7 @@ use std::time::{Duration, Instant};
 use flare_im_contracts::Ctx;
 use flare_im_service_kit::metrics::MessageOrchestratorMetrics;
 use flare_im_service_kit::tenant_runtime::{TenantAccessPolicy, TenantLookup, TenantRuntimeCache};
+use flare_im_usage::UsageRecorder;
 use flare_proto::common::{
     ContentVisibility, MessageRetentionPolicy, RetentionMode, RetentionTrigger, SendAckDurability,
 };
@@ -63,6 +64,8 @@ pub struct MessageIngestHandler {
     tenant_policy: TenantAccessPolicy,
     /// WAL 后 MQ publish 阶段超时。持久消息超时后返回 WalAccepted，交给 WAL replay 恢复。
     send_publish_timeout: Option<Duration>,
+    /// 用量计数点（`messages.accepted`）：broker 确认接受后按租户与消息类别计一次。
+    usage: UsageRecorder,
 }
 
 impl MessageIngestHandler {
@@ -83,6 +86,7 @@ impl MessageIngestHandler {
             tenant_runtime: TenantRuntimeCache::disabled(),
             tenant_policy: TenantAccessPolicy::Lenient,
             send_publish_timeout: None,
+            usage: UsageRecorder::disabled(),
         }
     }
 
@@ -107,6 +111,11 @@ impl MessageIngestHandler {
 
     pub fn with_send_rate_limiter(mut self, limiter: Arc<SendRateLimiter>) -> Self {
         self.send_rate_limiter = Some(limiter);
+        self
+    }
+
+    pub fn with_usage(mut self, usage: UsageRecorder) -> Self {
+        self.usage = usage;
         self
     }
 
@@ -614,6 +623,10 @@ impl MessageIngestHandler {
         if let Some(reservation) = reservation {
             reservation.mark_accepted(&outcome);
         }
+        // 只在 broker 确认后计：发布失败回 WalAccepted 的消息由 WAL 重放补发，计在 writer 的
+        // `messages.persisted` 里，这里不重复计。
+        self.usage
+            .message_accepted(&tenant_id, usage_category(&profile));
 
         // 10. broker 已确认接受后，主队列成为恢复来源，可以清理发送侧 WAL。
         // 清理失败只会增加一次未来重放/去重成本，不能让已被 broker 接受的发送变成失败。
@@ -907,6 +920,19 @@ fn send_ack_durability(
         // 即"提交点"已 durable（storage-writer 必定消费落库）。直接同步回 Persisted 作为发送方
         // 权威持久化确认——发送方无需再等"自己的消息穿过整条 fanout 回流"(根治 116s 尾延迟)。
         SendAckDurability::Persisted
+    }
+}
+
+/// `messages.accepted` 的类别维度（封闭取值）。
+fn usage_category(profile: &crate::domain::MessageProfile) -> &'static str {
+    if profile.is_temporary() {
+        "temporary"
+    } else if profile.is_notification() {
+        "notification"
+    } else if profile.is_operation() {
+        "operation"
+    } else {
+        "normal"
     }
 }
 

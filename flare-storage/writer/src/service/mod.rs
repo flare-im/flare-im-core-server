@@ -61,6 +61,10 @@ impl ApplicationBootstrap {
                 },
             );
         }
+        let usage = context.usage;
+        runtime = runtime.add_spawn_with_shutdown("storage-writer-usage", move |shutdown_rx| {
+            usage.run(shutdown_rx)
+        });
 
         if context.config.metrics.enabled {
             let metrics_config = context.config.metrics.clone();

@@ -10,6 +10,10 @@ pub struct ApplicationBootstrap;
 impl ApplicationBootstrap {
     pub async fn run() -> Result<()> {
         let app_config = flare_im_service_kit::load_app_config_from_env();
+        // 与其余 Core 服务同一个日志与 trace 入口：`[logging]`、`RUST_LOG`、`FLARE_LOG_FORMAT`
+        // 与 `OTEL_EXPORTER_OTLP_ENDPOINT` 含义一致；守卫持有到服务退出，释放时导出最后一批 span。
+        let _tracing =
+            flare_im_service_kit::tracing::init_tracing_from_config(Some(app_config.logging()))?;
         let service_config = app_config.sync_orchestrator_service();
         let runtime_plan = flare_im_service_kit::build_service_runtime_plan(
             app_config,

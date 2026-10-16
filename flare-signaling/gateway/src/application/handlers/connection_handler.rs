@@ -9,6 +9,7 @@ use std::sync::Arc;
 use crate::domain::ports::IConnectionPort;
 use flare_im_contracts::Ctx;
 use flare_im_contracts::abstractions::state::{ConnectionState, ConnectionStateNotifier};
+use flare_im_usage::UsageRecorder;
 use flare_server_core::error::Result;
 use std::collections::HashMap;
 use tokio::sync::RwLock;
@@ -45,6 +46,9 @@ pub struct ConnectionHandler {
     conversation_subscriptions: Arc<crate::domain::service::ConversationSubscriptionRegistry>,
     /// Conversation 读服务客户端池：登录时拉取用户会话列表用于 eager 订阅。
     conversation_read: Arc<crate::infrastructure::ports::ConversationReadGrpcPool>,
+    /// 用量计数点：`online_sessions` 写入与取出成对计连接（`connections.peak`、
+    /// `connection.minutes`），写入时计当日活跃用户（`users.active_daily`）。
+    usage: UsageRecorder,
 }
 
 impl ConnectionHandler {
@@ -65,7 +69,13 @@ impl ConnectionHandler {
             connecting: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             conversation_subscriptions,
             conversation_read,
+            usage: UsageRecorder::disabled(),
         }
+    }
+
+    pub fn with_usage(mut self, usage: UsageRecorder) -> Self {
+        self.usage = usage;
+        self
     }
 
     /// 会话列表 sync 时重跑 eager 订阅：客户端建群/被拉群后刷新会话列表，即可订阅到新会话
@@ -270,7 +280,7 @@ impl ConnectionHandler {
             let connecting = self.connecting.lock().await;
             let closed_while_registering = connecting.get(connection_id).copied().unwrap_or(false);
             if still_connected && !closed_while_registering {
-                self.online_sessions.write().await.insert(
+                let replaced = self.online_sessions.write().await.insert(
                     connection_id.to_string(),
                     OnlineSession {
                         user_id: user_id.clone(),
@@ -279,6 +289,13 @@ impl ConnectionHandler {
                         authenticated_ctx: authenticated_ctx.clone(),
                     },
                 );
+                // 并发的第二次登记会覆盖同一连接的会话：被覆盖的那条不会再被断开处理取出，
+                // 在这里与它登记时的 `connection_opened` 配对，连接数不会只增不减。
+                if let Some(replaced) = replaced {
+                    self.usage.connection_closed(&replaced.tenant_id);
+                }
+                self.usage.connection_opened(&connection_info.tenant_id);
+                self.usage.user_active(&connection_info.tenant_id, &user_id);
                 true
             } else {
                 false
@@ -395,6 +412,8 @@ impl ConnectionHandler {
         let tenant_id = session.tenant_id;
         let conversation_id = session.conversation_id;
         let authenticated_ctx = session.authenticated_ctx;
+        // 与登记时的 `connection_opened` 成对：会话只会从 `online_sessions` 取出一次。
+        self.usage.connection_closed(&tenant_id);
 
         // 底层连接可能已先被移除，断开清理必须以 Online 会话缓存为准。
         let user_connections = self
@@ -785,7 +804,8 @@ mod disconnect_tests {
     #[tokio::test]
     async fn a_disconnect_during_registration_unregisters_the_late_login() {
         let port = Arc::new(GatedLoginPort::new());
-        let handler = Arc::new(handler(port.clone()));
+        let usage = UsageRecorder::unpublished("signaling-gateway-test");
+        let handler = Arc::new(handler(port.clone()).with_usage(usage.clone()));
         let connect = connect_until_login_waits(&handler, &port).await;
 
         handler
@@ -804,6 +824,8 @@ mod disconnect_tests {
         handler.handle_disconnect("conn-1").await.expect("second");
         assert_eq!(port.logouts.load(Ordering::SeqCst), 1);
         assert_eq!(port.logins.load(Ordering::SeqCst), 1);
+        // 没写进 `online_sessions` 的登记不算连接，也不算活跃用户。
+        assert!(usage.live().is_empty());
     }
 
     /// 断开处理在注册占位之前就跑完了（什么都没清），底层随后把连接移出连接表：登记完成时
@@ -826,7 +848,8 @@ mod disconnect_tests {
     #[tokio::test]
     async fn a_connection_still_open_after_registration_keeps_its_session() {
         let port = Arc::new(GatedLoginPort::new());
-        let handler = Arc::new(handler(port.clone()));
+        let usage = UsageRecorder::unpublished("signaling-gateway-test");
+        let handler = Arc::new(handler(port.clone()).with_usage(usage.clone()));
         let connect = connect_until_login_waits(&handler, &port).await;
         port.release_login.notify_one();
 
@@ -834,6 +857,12 @@ mod disconnect_tests {
             connect.await.expect("connect task").expect("registered"),
             "presence-1"
         );
+        let live: Vec<_> = usage
+            .live()
+            .into_iter()
+            .map(|reading| (reading.app, reading.meter, reading.value))
+            .collect();
+        assert_eq!(live, [("tenant-a".to_string(), "connections.peak", 1)]);
         assert!(handler.online_sessions.read().await.contains_key("conn-1"));
         assert!(handler.connecting.lock().await.is_empty());
         assert_eq!(port.logouts.load(Ordering::SeqCst), 0);
@@ -844,5 +873,60 @@ mod disconnect_tests {
             .expect("disconnect");
         assert_eq!(port.logouts.load(Ordering::SeqCst), 1);
         assert!(!handler.online_sessions.read().await.contains_key("conn-1"));
+
+        // 断开把连接数减回去：再登记一次，窗口峰值仍是 1 而不是 2。
+        let reconnect = connect_until_login_waits(&handler, &port).await;
+        port.release_login.notify_one();
+        reconnect.await.expect("connect task").expect("registered");
+        let live: Vec<_> = usage
+            .live()
+            .into_iter()
+            .map(|reading| (reading.app, reading.meter, reading.value))
+            .collect();
+        assert_eq!(live, [("tenant-a".to_string(), "connections.peak", 1)]);
+    }
+
+    /// 同一连接的会话被并发登记覆盖时，被覆盖的那条按断开计，连接数不累积。
+    #[tokio::test]
+    async fn a_replaced_session_does_not_leave_a_connection_counted() {
+        let port = Arc::new(GatedLoginPort::new());
+        let usage = UsageRecorder::unpublished("signaling-gateway-test");
+        let handler = Arc::new(handler(port.clone()).with_usage(usage.clone()));
+        let first = connect_until_login_waits(&handler, &port).await;
+        port.release_login.notify_one();
+        first.await.expect("connect task").expect("registered");
+
+        // 单飞判空之后、拿到占位之前对方已登记完成的竞态，结果是第二次登记直接覆盖会话。
+        handler.online_sessions.write().await.remove("conn-1");
+        let second = connect_until_login_waits(&handler, &port).await;
+        handler.online_sessions.write().await.insert(
+            "conn-1".to_string(),
+            OnlineSession {
+                user_id: "u1".to_string(),
+                tenant_id: "tenant-a".to_string(),
+                conversation_id: "presence-1".to_string(),
+                authenticated_ctx: Arc::new(
+                    flare_server_core::Context::with_request_id("req")
+                        .with_tenant_id("tenant-a")
+                        .with_user_id("u1"),
+                ),
+            },
+        );
+        port.release_login.notify_one();
+        second.await.expect("connect task").expect("registered");
+
+        handler
+            .handle_disconnect("conn-1")
+            .await
+            .expect("disconnect");
+        let third = connect_until_login_waits(&handler, &port).await;
+        port.release_login.notify_one();
+        third.await.expect("connect task").expect("registered");
+        let live: Vec<_> = usage
+            .live()
+            .into_iter()
+            .map(|reading| (reading.app, reading.meter, reading.value))
+            .collect();
+        assert_eq!(live, [("tenant-a".to_string(), "connections.peak", 1)]);
     }
 }

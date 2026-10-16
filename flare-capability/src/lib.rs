@@ -38,7 +38,8 @@ pub use composition::{
 };
 pub use domain::hook_integration::{HookTransportSurface, classify_transport};
 pub use domain::model::{
-    ExecutionMode, HookConfig, HookExecutionPlan, HookExecutionResult, HookStatistics,
+    ExecutionMode, HookConfig, HookExecutionOutcome, HookExecutionPlan, HookExecutionRecord,
+    HookExecutionStatistics,
 };
 pub use infrastructure::capability::{CapabilityExtensionRegistry, PluginRouteBook};
 pub use infrastructure::config::{ConfigLoader, ConfigWatcher};

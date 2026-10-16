@@ -59,9 +59,11 @@ pub(crate) async fn prepare_config_sources(
     let mut loaders: Vec<Arc<ConfigLoaderItem>> = Vec::new();
 
     if let Some(ref path) = config.config_file {
-        loaders.push(Arc::new(ConfigLoaderItem::File(FileConfigLoader::new(
-            path.clone(),
-        ))));
+        let file = FileConfigLoader::new(path.clone());
+        // 本进程自己的 Hook 文件先于配置中心与数据库读：文件存在却读不了、解析或校验不过时直接
+        // 拒绝启动，报错不被随后的数据库不可达之类的错误盖住。文件不存在仍按没有文件 Hook 处理。
+        file.load_at_startup().await?;
+        loaders.push(Arc::new(ConfigLoaderItem::File(file)));
     }
 
     if let Some(ref endpoint) = config.config_center_endpoint {
@@ -168,4 +170,52 @@ pub(crate) async fn prepare_config_sources(
         invalidation,
         listener,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::infrastructure::config::loader::test_support::{
+        SECRET, TempDir, broken_profiles, webhook_profile,
+    };
+
+    /// 装配配置源（Capability 启动）时本进程自己的 Hook 文件坏了就报错、不往下装配：先于数据库，
+    /// 库连不上也不会盖住文件的错误。文件不存在或正常时照常装配。
+    #[tokio::test]
+    async fn a_broken_hook_file_refuses_to_start_before_the_database_is_touched() {
+        let dir = TempDir::new();
+        for (content, expected) in broken_profiles() {
+            let path = dir.write("hooks.toml", &content);
+            let config = CapabilityServiceConfig {
+                config_file: Some(path.clone()),
+                // 端口 1 上没有 PostgreSQL：要是先连库，报的会是连库失败。
+                database_url: Some("postgres://r75b@127.0.0.1:1/none".into()),
+                postgres_acquire_timeout_seconds: 1,
+                ..Default::default()
+            };
+            let error = prepare_config_sources(&config)
+                .await
+                .err()
+                .expect("a broken hook file must stop startup");
+            let shown = error.to_string();
+            assert!(shown.contains(&path.display().to_string()), "{shown}");
+            assert!(shown.contains(expected), "{shown}");
+            assert!(!format!("{error:?}").contains(SECRET), "{error:?}");
+        }
+
+        for (name, hooks) in [("absent.toml", 0), ("hooks.toml", 1)] {
+            if hooks > 0 {
+                dir.write(name, webhook_profile("audit"));
+            }
+            let config = CapabilityServiceConfig {
+                config_file: Some(dir.path(name)),
+                ..Default::default()
+            };
+            let ready = prepare_config_sources(&config)
+                .await
+                .unwrap_or_else(|error| panic!("{name}: {error}"));
+            assert_eq!(ready.watcher.snapshot().await.global().hook_count(), hooks);
+            assert!(ready.hook_config_repository.is_none());
+        }
+    }
 }

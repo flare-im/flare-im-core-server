@@ -63,7 +63,7 @@ flowchart LR
 
 - 客户端生命周期简单，断线重连、设备绑定、心跳、限流和 backpressure 只维护一套。
 - 消息、ACK、sync、call signaling 可在同一连接中按 frame 类型隔离，避免两个 WebSocket 入口竞争认证、路由和在线状态。
-- 下行推送只需通过 online/route 找到一个 connection owner。
+- 下行推送只需通过 online 找到一个 connection owner。
 
 保留例外：
 

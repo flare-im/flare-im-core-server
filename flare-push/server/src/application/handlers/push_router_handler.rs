@@ -19,6 +19,31 @@ use crate::domain::repository::{NotifyPolicyRepository, NotifyPreference};
 use crate::infrastructure::mq::publisher::PushServerMqPublisher;
 use crate::infrastructure::online::online_status_service::OnlineStatusService;
 
+fn payload_has_mobile_alert(kind: i32, payload: &[u8]) -> bool {
+    use flare_im_contracts::domain::push_policy::{
+        event_has_mobile_alert, message_has_mobile_alert,
+    };
+    match PushTaskPayloadKind::try_from(kind) {
+        Ok(PushTaskPayloadKind::Message) => access_gateway::PushMessageRequest::decode(payload)
+            .ok()
+            .is_some_and(|request| request.messages.iter().any(message_has_mobile_alert)),
+        Ok(PushTaskPayloadKind::Event) => access_gateway::PushEventRequest::decode(payload)
+            .ok()
+            .is_some_and(|request| request.events.iter().any(event_has_mobile_alert)),
+        Ok(PushTaskPayloadKind::Notification | PushTaskPayloadKind::Custom) => true,
+        _ => false,
+    }
+}
+
+#[cfg(test)]
+fn mobile_message_payload_fixture() -> Vec<u8> {
+    access_gateway::PushMessageRequest {
+        messages: vec![flare_proto::common::Message::default()],
+        ..Default::default()
+    }
+    .encode_to_vec()
+}
+
 #[async_trait]
 pub trait ConversationOnlineIndexReader: Send + Sync {
     async fn online_user_ids(
@@ -755,6 +780,8 @@ impl PushRouterHandler {
         prefetched_preferences: Option<&HashMap<String, NotifyPreference>>,
     ) -> Result<()> {
         // 先算出哪些人会走离线推送，再一次性查免打扰——在线用户不查，
+        let online_only =
+            online_only || !payload_has_mobile_alert(template.payload_kind, template.push_payload);
         // 他们的事件走长连接，提不提示由客户端决定。
         let offline_candidates: Vec<String> = if online_only {
             Vec::new()
@@ -781,6 +808,14 @@ impl PushRouterHandler {
         for user_id in user_ids {
             let is_online = online_statuses.get(user_id).copied().unwrap_or(false);
             let preference = preferences.get(user_id).copied().unwrap_or_default();
+            // Sync is independent of optional OS alerts. The online index can lag: do not let
+            // mute/event-only policy suppress delivery to an actually connected recipient.
+            if is_online || deliver_online_to_all {
+                online_user_ids.push(user_id.clone());
+            }
+            if is_online || online_only {
+                continue;
+            }
             if !is_online && preference.muted {
                 tracing::debug!(
                     user_id = %user_id,
@@ -797,25 +832,6 @@ impl PushRouterHandler {
                 );
                 continue;
             }
-            if online_only && !is_online {
-                tracing::trace!(
-                    user_id = %user_id,
-                    conversation_id = %template.conversation_id,
-                    "Skipping offline user for pure conversation ping"
-                );
-                continue;
-            }
-
-            if is_online {
-                online_user_ids.push(user_id.clone());
-                continue;
-            }
-            if deliver_online_to_all {
-                // 在线索引可能滞后：照发一份在线任务，真没连上就自然丢弃；
-                // 离线推送任务在下面照建，两者互不替代。
-                online_user_ids.push(user_id.clone());
-            }
-
             // 离线任务是**每个用户一条**，载荷必须收敛成"只含本人"。
             //
             // 原本直接复制 template.push_payload，而该 payload 里带着全量收件人
@@ -1151,6 +1167,9 @@ impl PushRouterHandler {
         conversation_id: &str,
         template: OfflineFanoutTemplate<'_>,
     ) {
+        if !payload_has_mobile_alert(PushTaskPayloadKind::Event as i32, template.push_payload) {
+            return;
+        }
         let tenant_id = match self.request_tenant_id(ctx) {
             Ok(tenant_id) => tenant_id.to_string(),
             Err(error) => {
@@ -1872,7 +1891,7 @@ mod tests {
                     tenant_id: "tenant-a",
                     priority: 5,
                     expire_at: None,
-                    push_payload: &[],
+                    push_payload: &mobile_message_payload_fixture(),
                     headers: &headers,
                     payload_kind: PushTaskPayloadKind::Message as i32,
                 },
@@ -1923,6 +1942,7 @@ mod tests {
             events: vec![flare_proto::common::Event {
                 conversation_id: "conversation-large".to_string(),
                 conversation_seq: 3,
+                r#type: EventType::EventMessage as i32,
                 payload: Some(flare_proto::common::event::Payload::Message(
                     flare_proto::common::Message {
                         conversation_id: "conversation-large".to_string(),
@@ -1984,6 +2004,10 @@ mod tests {
                     conversation_id: "conversation-large".to_string(),
                     events: vec![flare_proto::common::Event {
                         conversation_id: "conversation-large".to_string(),
+                        r#type: EventType::EventMessage as i32,
+                        payload: Some(flare_proto::common::event::Payload::Message(
+                            flare_proto::common::Message::default(),
+                        )),
                         ..Default::default()
                     }],
                     ..Default::default()
@@ -1994,6 +2018,7 @@ mod tests {
                             &ctx,
                             access_gateway::PushMessageRequest {
                                 user_ids: vec!["same-user".to_string()],
+                                messages: vec![flare_proto::common::Message::default()],
                                 ..Default::default()
                             },
                         )
@@ -2095,6 +2120,7 @@ mod tests {
             events: vec![flare_proto::common::Event {
                 conversation_id: "conversation-group".to_string(),
                 conversation_seq: 9,
+                r#type: EventType::EventMessage as i32,
                 payload: Some(flare_proto::common::event::Payload::Message(Message {
                     conversation_id: "conversation-group".to_string(),
                     server_id: "m-9".to_string(),
@@ -2166,7 +2192,7 @@ mod tests {
                     tenant_id: "tenant-a",
                     priority: 5,
                     expire_at: None,
-                    push_payload: &[],
+                    push_payload: &mobile_message_payload_fixture(),
                     headers: &headers,
                     payload_kind: PushTaskPayloadKind::Message as i32,
                 },
@@ -2250,6 +2276,7 @@ mod tests {
             events: vec![flare_proto::common::Event {
                 conversation_id: "conversation-group".to_string(),
                 conversation_seq: 7,
+                r#type: EventType::EventMessage as i32,
                 payload: Some(flare_proto::common::event::Payload::Message(
                     flare_proto::common::Message {
                         conversation_id: "conversation-group".to_string(),
@@ -2300,6 +2327,63 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn sync_only_notice_ignores_mobile_mute_and_stale_online_index_without_offline_fanout() {
+        use flare_proto::common::{
+            Event, Message, MessageContent, NotificationContent, event::Payload,
+            message_content::Content,
+        };
+        let publisher = Arc::new(MockPushTaskPublisher::default());
+        let calls = Arc::new(AtomicUsize::new(0));
+        let handler = PushRouterHandler::new(
+            Arc::new(MockOnlineStatusReader {
+                statuses: HashMap::from([("recipient".into(), false)]),
+                tenant_id: "tenant-a".into(),
+            }),
+            Arc::new(MockConversationOnlineIndexReader {
+                user_ids: vec![],
+                calls: Arc::new(AtomicUsize::new(0)),
+            }),
+            publisher.clone(),
+        )
+        .with_notify_policy(Arc::new(MockNotifyPolicy {
+            muted: vec!["recipient".into()],
+            mention_only: vec![],
+            participants: None,
+            fail: false,
+            calls: calls.clone(),
+        }));
+        let req = access_gateway::PushEventRequest {
+            user_ids: vec!["recipient".into()],
+            events: vec![Event {
+                r#type: EventType::EventMessage as i32,
+                payload: Some(Payload::Message(Message {
+                    content: Some(MessageContent {
+                        content: Some(Content::Notification(NotificationContent::default())),
+                    }),
+                    ..Default::default()
+                })),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        handler
+            .handle_event(&Arc::new(Context::root().with_tenant_id("tenant-a")), req)
+            .await
+            .unwrap();
+        assert_eq!(
+            publisher.online.lock().unwrap().len(),
+            1,
+            "required client event still attempts the actual connection"
+        );
+        assert!(publisher.offline.lock().unwrap().is_empty());
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            0,
+            "no optional-notification directory lookup"
+        );
+    }
+
+    #[tokio::test]
     async fn unmuted_user_still_gets_offline_push() {
         let (offline_users, _, _) = run_targeted_push(vec![], false).await;
         assert_eq!(offline_users, vec!["user-offline".to_string()]);
@@ -2346,7 +2430,7 @@ mod tests {
                     tenant_id: "tenant-a",
                     priority: 5,
                     expire_at: None,
-                    push_payload: &[],
+                    push_payload: &mobile_message_payload_fixture(),
                     headers: &headers,
                     payload_kind: PushTaskPayloadKind::Message as i32,
                 },

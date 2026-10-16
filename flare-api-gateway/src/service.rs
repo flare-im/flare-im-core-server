@@ -254,6 +254,9 @@ impl ApplicationBootstrap {
             None => None,
         };
 
+        // 用量预聚合（`api.calls`）：记录器以 Extension 交给鉴权中间件，flush 循环挂进运行时。
+        let usage = flare_im_usage::UsageReporter::from_env("flare-api-gateway").await?;
+
         // 限流在指标层之内：被拒的请求也计入 HTTP 指标。
         let app = with_request_rate_limit(create_public_router(clients), &settings.rate_limit)
             .layer(flare_im_service_kit::metrics::HttpMetricsLayer::new(
@@ -268,6 +271,7 @@ impl ApplicationBootstrap {
             .layer(axum::Extension(token_service))
             .layer(axum::Extension(MessageContextSigner(message_signer)))
             .layer(axum::Extension(push_tokens))
+            .layer(axum::Extension(usage.recorder()))
             .layer(
                 ServiceBuilder::new()
                     .layer(TraceLayer::new_for_http())
@@ -299,6 +303,9 @@ impl ApplicationBootstrap {
                     })
                     .await
                     .map_err(|e| e.into())
+                })
+                .add_spawn_with_shutdown("api-gateway-usage", move |shutdown_rx| {
+                    usage.run(shutdown_rx)
                 }),
             API_GATEWAY,
         );

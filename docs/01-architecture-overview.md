@@ -35,7 +35,7 @@ flowchart TB
 
     subgraph "在线与路由"
         Online["flare-signaling/online<br/>presence / device"]
-        Route["flare-signaling/route<br/>routing / fanout target"]
+        Route["flare-signaling/route<br/>upstream frame routing"]
     end
 
     subgraph "编排层"
@@ -91,7 +91,7 @@ flowchart TB
 - ACK / read / sync：在同一条长连接上承载对应 frame，服务端再转发到 route、conversation 或 sync-orchestrator。
 - call / SFU 信令：`flare-call` 拥有通话会话生命周期和业务 FSM，`flare-capability` / 插件负责 RTC/SFU 资源编排，gateway 只做连接侧路由提示；真实音视频媒体流不进入 IM 消息主链。
 - 能力/插件契约：`flare-im-capability-core` 是共享 contract 来源；`flare-capability` 只负责运行时注册、授权、路由和 gRPC 服务实现。
-- 下行推送：push-server 通过 route/online 找到连接所在 gateway，由同一条长连接下发。
+- 下行推送：push worker 向 online 查设备所在 gateway，经 GatewayRouter 直推该 gateway，由同一条长连接下发；不经过 route。
 
 `flare-api-gateway` 不作为客户端长连接入口；它是业务系统、三方系统和低频后台调用 Core typed API 的 HTTP facade。`flare-admin-gateway` 只服务管理面、审计和运维查询。若未来需要 HTTP/2 或 QUIC multiplexed stream，应优先保持同一个客户端接入网关进程，并在 transport 内隔离逻辑 stream，而不是让 core/signaling/admin 三个网关同时暴露客户端 WebSocket。
 

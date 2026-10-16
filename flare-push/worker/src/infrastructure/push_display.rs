@@ -8,6 +8,7 @@
 use flare_grpc_proto::access_gateway::{
     PushEventRequest, PushMessageRequest, PushNotificationRequest,
 };
+use flare_im_contracts::domain::push_policy::{event_has_mobile_alert, message_has_mobile_alert};
 use flare_proto::PushTaskEnvelope;
 use flare_proto::common::event::Payload as EventPayload;
 use flare_proto::common::{ContentVisibility, PushTaskPayloadKind};
@@ -20,6 +21,26 @@ use crate::infrastructure::getui_push::message_has_e2ee_placeholder;
 pub struct PushDisplay {
     pub title: String,
     pub body: String,
+    pub play_sound: bool,
+    pub show_badge: bool,
+}
+
+/// Defense for queued tasks made before routing policy was corrected. No Social event names.
+pub fn mobile_alert_eligible(envelope: &PushTaskEnvelope) -> bool {
+    match PushTaskPayloadKind::try_from(envelope.payload_kind) {
+        Ok(PushTaskPayloadKind::Message) => {
+            PushMessageRequest::decode(envelope.push_payload.as_slice())
+                .ok()
+                .is_some_and(|req| req.messages.iter().any(message_has_mobile_alert))
+        }
+        Ok(PushTaskPayloadKind::Event) => {
+            PushEventRequest::decode(envelope.push_payload.as_slice())
+                .ok()
+                .is_some_and(|req| req.events.iter().any(event_has_mobile_alert))
+        }
+        Ok(PushTaskPayloadKind::Notification | PushTaskPayloadKind::Custom) => true,
+        _ => false,
+    }
 }
 
 pub fn notification_display(envelope: &PushTaskEnvelope) -> PushDisplay {
@@ -30,69 +51,80 @@ pub fn notification_display(envelope: &PushTaskEnvelope) -> PushDisplay {
             PushNotificationRequest::decode(envelope.push_payload.as_slice())
                 .ok()
                 .and_then(|request| request.notification)
-                .map(|notification| PushDisplay {
-                    title: non_empty_or(notification.title, "Flare IM"),
-                    body: non_empty_or(notification.body, "你收到一条通知"),
+                .map(|notice| PushDisplay {
+                    title: non_empty_or(notice.title, "Flare IM"),
+                    body: non_empty_or(notice.body, "你收到一条通知"),
+                    play_sound: true,
+                    show_badge: false,
                 })
                 .unwrap_or_else(default_notification_display)
         }
         PushTaskPayloadKind::Message => {
             PushMessageRequest::decode(envelope.push_payload.as_slice())
                 .ok()
-                .and_then(|request| request.messages.into_iter().next())
-                .map(|message| {
-                    if message_requires_generic_push_display(&message) {
-                        return default_message_display();
-                    }
-                    message
-                        .offline_push_info
-                        .map(|offline| PushDisplay {
-                            title: non_empty_or(offline.title, "Flare IM"),
-                            body: non_empty_or(offline.body, "你收到一条新消息"),
-                        })
-                        .unwrap_or_else(default_message_display)
-                })
+                .and_then(|request| request.messages.into_iter().find(message_has_mobile_alert))
+                .map(message_display)
                 .unwrap_or_else(default_message_display)
         }
-        // 内联事件（群消息默认走这条）里带着整条消息，能渲染出和单聊一样的真实文案。
-        // 落到通用文案只该发生在拿不到消息时——每条群消息都显示「你收到一条新消息」
-        // 不是隐私保护，是信息缺失。真正需要遮蔽的情况由下面同一个判定负责。
         PushTaskPayloadKind::Event => PushEventRequest::decode(envelope.push_payload.as_slice())
             .ok()
             .and_then(|request| {
                 request
                     .events
                     .into_iter()
+                    .filter(event_has_mobile_alert)
                     .find_map(|event| match event.payload {
                         Some(EventPayload::Message(message)) => Some(message),
                         _ => None,
                     })
             })
-            .map(|message| {
-                if message_requires_generic_push_display(&message) {
-                    return default_message_display();
-                }
-                message
-                    .offline_push_info
-                    .map(|offline| PushDisplay {
-                        title: non_empty_or(offline.title, "Flare IM"),
-                        body: non_empty_or(offline.body, "你收到一条新消息"),
-                    })
-                    .unwrap_or_else(default_message_display)
-            })
+            .map(message_display)
             .unwrap_or_else(default_message_display),
         PushTaskPayloadKind::Custom => PushDisplay {
-            title: "Flare IM".to_string(),
-            body: "你收到一条业务通知".to_string(),
+            title: "Flare IM".into(),
+            body: "你收到一条业务通知".into(),
+            play_sound: true,
+            show_badge: false,
         },
         _ => default_message_display(),
     }
+}
+
+fn message_display(message: flare_proto::common::Message) -> PushDisplay {
+    use flare_proto::common::message_content::Content;
+    let mut display = if let Some(info) = message.offline_push_info.as_ref() {
+        PushDisplay {
+            title: non_empty_or(info.title.clone(), "Flare IM"),
+            body: non_empty_or(info.body.clone(), "你收到一条新消息"),
+            play_sound: !info.sound.trim().is_empty(),
+            show_badge: info.badge,
+        }
+    } else if let Some(Content::Notification(notice)) =
+        message.content.as_ref().and_then(|c| c.content.as_ref())
+    {
+        PushDisplay {
+            title: non_empty_or(notice.title.clone(), "Flare IM"),
+            body: non_empty_or(notice.body.clone(), "你收到一条通知"),
+            play_sound: notice.play_sound,
+            show_badge: notice.show_badge,
+        }
+    } else {
+        default_message_display()
+    };
+    if message_requires_generic_push_display(&message) {
+        let hidden = default_message_display();
+        display.title = hidden.title;
+        display.body = hidden.body;
+    }
+    display
 }
 
 fn default_message_display() -> PushDisplay {
     PushDisplay {
         title: "Flare IM".to_string(),
         body: "你收到一条新消息".to_string(),
+        play_sound: true,
+        show_badge: false,
     }
 }
 
@@ -100,6 +132,8 @@ fn default_notification_display() -> PushDisplay {
     PushDisplay {
         title: "Flare IM".to_string(),
         body: "你收到一条通知".to_string(),
+        play_sound: true,
+        show_badge: false,
     }
 }
 
@@ -134,6 +168,7 @@ mod tests {
     fn event_task(message: Message) -> PushTaskEnvelope {
         let req = PushEventRequest {
             events: vec![Event {
+                r#type: flare_proto::common::EventType::EventMessage as i32,
                 payload: Some(EventPayload::Message(message)),
                 ..Default::default()
             }],
@@ -167,8 +202,27 @@ mod tests {
             PushDisplay {
                 title: "项目群".into(),
                 body: "小明: 今天几点开会".into(),
+                play_sound: false,
+                show_badge: false,
             }
         );
+    }
+
+    #[test]
+    fn fact_only_notification_does_not_alert_or_mutate_its_client_carrier() {
+        use flare_proto::common::{MessageContent, NotificationContent, message_content::Content};
+        let mut task = event_task(Message {
+            content: Some(MessageContent {
+                content: Some(Content::Notification(NotificationContent::default())),
+            }),
+            ..Default::default()
+        });
+        let original = task.push_payload.clone();
+        assert!(!mobile_alert_eligible(&task));
+        assert_eq!(task.push_payload, original);
+        task.push_payload =
+            event_task(message_with_push_info("Visible", "Optional notification")).push_payload;
+        assert!(mobile_alert_eligible(&task));
     }
 
     /// 内容不可见（撤回/清除）时必须退回通用文案：推送是内容最容易漏出去的地方。
@@ -180,7 +234,13 @@ mod tests {
             ..Default::default()
         });
         let display = notification_display(&event_task(message));
-        assert_eq!(display, default_message_display());
+        assert_eq!(
+            display,
+            PushDisplay {
+                play_sound: false,
+                ..default_message_display()
+            }
+        );
         assert!(!display.body.contains("不该出现"));
     }
 

@@ -397,6 +397,15 @@ pub const REGISTERED_ENV_VARS: &[EnvVarSpec] = &[
         EnvOwner::AdminGateway,
         EnvPurpose::Mq,
     ),
+    // 用量预聚合事件（flare.usage.window.v1，flare-im-usage）的 NATS 地址：摄入、存储写入、
+    // 接入网关、推送 worker、媒体与 API 网关各自上报；未设则不上报用量并告警一次。
+    env("FLARE_USAGE_NATS_URL", EnvOwner::Shared, EnvPurpose::Mq),
+    // 用量窗口秒数（10..=3600，默认 60）。
+    env(
+        "FLARE_USAGE_WINDOW_SECS",
+        EnvOwner::Shared,
+        EnvPurpose::RuntimeTuning,
+    ),
     env(
         "FLARE_REQUIRE_SIGNED_READ_CTX",
         EnvOwner::Shared,
@@ -1310,6 +1319,61 @@ pub const REGISTERED_ENV_VARS: &[EnvVarSpec] = &[
         "PUSH_WORKER_CONSUMER_GROUP",
         EnvOwner::PushWorker,
         EnvPurpose::Mq,
+    ),
+    env(
+        "PUSH_WORKER_APNS_TEAM_ID",
+        EnvOwner::PushWorker,
+        EnvPurpose::Auth,
+    ),
+    env(
+        "PUSH_WORKER_APNS_KEY_ID",
+        EnvOwner::PushWorker,
+        EnvPurpose::Auth,
+    ),
+    env(
+        "PUSH_WORKER_APNS_PRIVATE_KEY",
+        EnvOwner::PushWorker,
+        EnvPurpose::Auth,
+    ),
+    env(
+        "PUSH_WORKER_APNS_TOPIC",
+        EnvOwner::PushWorker,
+        EnvPurpose::Auth,
+    ),
+    env(
+        "PUSH_WORKER_APNS_SANDBOX",
+        EnvOwner::PushWorker,
+        EnvPurpose::RuntimeTuning,
+    ),
+    env(
+        "PUSH_WORKER_FCM_SERVICE_ACCOUNT_JSON",
+        EnvOwner::PushWorker,
+        EnvPurpose::Auth,
+    ),
+    env(
+        "PUSH_WORKER_GETUI_APP_ID",
+        EnvOwner::PushWorker,
+        EnvPurpose::Auth,
+    ),
+    env(
+        "PUSH_WORKER_GETUI_APP_KEY",
+        EnvOwner::PushWorker,
+        EnvPurpose::Auth,
+    ),
+    env(
+        "PUSH_WORKER_GETUI_MASTER_SECRET",
+        EnvOwner::PushWorker,
+        EnvPurpose::Auth,
+    ),
+    env(
+        "PUSH_WORKER_GETUI_BASE_URL",
+        EnvOwner::PushWorker,
+        EnvPurpose::ServiceEndpoint,
+    ),
+    env(
+        "PUSH_WORKER_OFFLINE_PROVIDERS",
+        EnvOwner::PushWorker,
+        EnvPurpose::RuntimeTuning,
     ),
     env(
         "PUSH_WORKER_DEVICE_TOKEN_KEY_PREFIX",

@@ -195,6 +195,7 @@ impl PushService for PushServiceHandler {
         require_non_empty(&req.device_id, "device_id")?;
         require_non_empty(&req.platform, "platform")?;
         require_non_empty(&req.token, "token")?;
+        validate_device_registration(&provider, &req.device_id, &req.platform, &req.token)?;
         let tenant_id = require_tenant_id(&ctx)?;
         let token = DevicePushToken {
             tenant_id,
@@ -203,11 +204,13 @@ impl PushService for PushServiceHandler {
             platform: req.platform.trim().to_string(),
             provider,
             token: req.token.trim().to_string(),
+            registration_id: uuid::Uuid::new_v4().to_string(),
+            registered_at_ms: chrono::Utc::now().timestamp_millis(),
         };
         self.device_tokens
             .register(&token)
             .await
-            .map_err(|error| Status::internal(error.to_string()))?;
+            .map_err(|_| Status::unavailable("device registry unavailable"))?;
         Ok(Response::new(RegisterDevicePushTokenResponse {
             success: true,
         }))
@@ -226,7 +229,7 @@ impl PushService for PushServiceHandler {
         self.device_tokens
             .unregister(&tenant_id, &req.user_id, &provider, req.device_id.trim())
             .await
-            .map_err(|error| Status::internal(error.to_string()))?;
+            .map_err(|_| Status::unavailable("device registry unavailable"))?;
         Ok(Response::new(UnregisterDevicePushTokenResponse {
             success: true,
         }))
@@ -431,11 +434,58 @@ mod delivery_gate_tests {
     }
 }
 
+fn validate_device_registration(
+    provider: &str,
+    device: &str,
+    platform: &str,
+    token: &str,
+) -> Result<(), Status> {
+    if device.len() > 128
+        || platform.len() > 32
+        || token.len() > 4096
+        || [device, platform, token].iter().any(|s| {
+            s.trim().is_empty()
+                || s.bytes()
+                    .any(|b| b.is_ascii_control() || b.is_ascii_whitespace())
+        })
+        || (provider == "apns"
+            && (token.len() > 512 || !token.bytes().all(|b| b.is_ascii_hexdigit())))
+    {
+        return Err(Status::invalid_argument("device push registration invalid"));
+    }
+    Ok(())
+}
+
 fn provider_string(provider: i32) -> Result<String, Status> {
     match DevicePushProvider::try_from(provider) {
         Ok(DevicePushProvider::Getui) => Ok("getui".to_string()),
+        Ok(DevicePushProvider::Fcm) => Ok("fcm".to_string()),
+        Ok(DevicePushProvider::Apns) => Ok("apns".to_string()),
         Ok(DevicePushProvider::Unspecified) | Err(_) => Err(Status::invalid_argument(
             "valid device push provider is required",
         )),
+    }
+}
+
+#[cfg(test)]
+mod provider_contract_tests {
+    use super::*;
+    #[test]
+    fn all_vendor_registrations_are_typed_and_bounded() {
+        for (provider, name) in [
+            (DevicePushProvider::Getui, "getui"),
+            (DevicePushProvider::Fcm, "fcm"),
+            (DevicePushProvider::Apns, "apns"),
+        ] {
+            assert_eq!(provider_string(provider as i32).unwrap(), name);
+        }
+        assert!(provider_string(0).is_err());
+        assert!(provider_string(99).is_err());
+        assert!(validate_device_registration("apns", "ios", "ios", "a1b2").is_ok());
+        assert!(validate_device_registration("apns", "ios", "ios", "a1/path").is_err());
+        assert!(
+            validate_device_registration("fcm", "android", "android", &"a".repeat(4097)).is_err()
+        );
+        assert!(validate_device_registration("fcm", "android", "android", "a\nb").is_err());
     }
 }

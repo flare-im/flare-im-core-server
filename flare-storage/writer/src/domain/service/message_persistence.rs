@@ -9,6 +9,7 @@ use flare_im_contracts::utils::{
     current_millis, extract_timeline_from_extra, normalize_optional_tenant_id, normalize_tenant_id,
 };
 use flare_im_service_kit::metrics::StorageWriterMetrics;
+use flare_im_usage::UsageRecorder;
 use flare_proto::common::RetentionMode;
 use flare_server_core::error::{ErrorCode, Result, map_infra_error};
 use flare_server_core::flare_err;
@@ -46,6 +47,8 @@ where
     ack_publisher: Option<Arc<P>>,
     write_ledger_repo: Option<Arc<dyn MessageWriteLedgerRepository>>,
     metrics: Option<Arc<StorageWriterMetrics>>,
+    /// 用量计数点（`messages.persisted`）：新消息提交后按租户计；去重命中的不计。
+    usage: UsageRecorder,
 }
 
 #[derive(Debug, Clone)]
@@ -91,6 +94,7 @@ where
             ack_publisher,
             write_ledger_repo: None,
             metrics: None,
+            usage: UsageRecorder::disabled(),
         }
     }
 
@@ -99,6 +103,11 @@ where
         write_ledger_repo: Option<Arc<dyn MessageWriteLedgerRepository>>,
     ) -> Self {
         self.write_ledger_repo = write_ledger_repo;
+        self
+    }
+
+    pub fn with_usage(mut self, usage: UsageRecorder) -> Self {
+        self.usage = usage;
         self
     }
 
@@ -571,6 +580,7 @@ where
             &message_id,
             MessageWriteStage::StoragePersisted,
         );
+        self.usage.messages_persisted(&tenant_id, 1);
 
         let result = PersistenceResult {
             message_id,
@@ -650,6 +660,9 @@ where
             }
             return Err(err);
         }
+        // 整批已落库：先把每条都记为已持久化并计入用量，再逐条 ACK。ACK 中途失败会提前
+        // 返回，而后面几条的幂等占位已经生效，重投时走去重分支不会再计，所以计数不能放在
+        // ACK 循环里。
         for (msg, _, tenant_id) in &new_messages {
             self.record_write_stage_best_effort(
                 ctx,
@@ -657,6 +670,9 @@ where
                 &msg.message_id,
                 MessageWriteStage::StoragePersisted,
             );
+            self.usage.messages_persisted(tenant_id, 1);
+        }
+        for (msg, _, tenant_id) in &new_messages {
             let result = PersistenceResult {
                 message_id: msg.message_id.clone(),
                 conversation_id: msg.conversation_id.clone(),
@@ -902,6 +918,29 @@ mod tests {
         }
     }
 
+    /// 按 message_id 逐条占位：同一条第二次进来就是去重命中。
+    struct PerMessageIdempotencyRepository {
+        reserved: Arc<Mutex<std::collections::HashSet<String>>>,
+    }
+
+    impl MessageIdempotencyRepository for PerMessageIdempotencyRepository {
+        async fn is_new(&self, _ctx: &Ctx, message_id: &str) -> AnyhowResult<bool> {
+            Ok(self
+                .reserved
+                .lock()
+                .expect("reserved idempotency lock")
+                .insert(message_id.to_string()))
+        }
+
+        async fn release(&self, _ctx: &Ctx, message_id: &str) -> AnyhowResult<()> {
+            self.reserved
+                .lock()
+                .expect("reserved idempotency lock")
+                .remove(message_id);
+            Ok(())
+        }
+    }
+
     struct ReservingIdempotencyRepository {
         reserved: Arc<AtomicBool>,
     }
@@ -1023,6 +1062,24 @@ mod tests {
                 self.duplicate_acks.fetch_add(1, Ordering::SeqCst);
             }
             Ok(())
+        }
+    }
+
+    /// 第 `fail_at` 次（从 0 起）发布失败，其余成功。
+    struct FailNthAckPublisher {
+        attempts: Arc<AtomicUsize>,
+        fail_at: usize,
+    }
+
+    impl AckPublisher for FailNthAckPublisher {
+        async fn publish(&self, _ctx: &Ctx, _event: AckEvent<'_>) -> AnyhowResult<()> {
+            if self.attempts.fetch_add(1, Ordering::SeqCst) == self.fail_at {
+                Err(flare_server_core::error::FlareError::system(
+                    "ack publisher unavailable".to_string(),
+                ))
+            } else {
+                Ok(())
+            }
         }
     }
 
@@ -1493,13 +1550,27 @@ mod tests {
             })),
             None,
             Some(Arc::new(NoopRepository)),
-        );
+        )
+        .with_usage(flare_im_usage::UsageRecorder::unpublished(
+            "storage-writer-test",
+        ));
+        let usage = service.usage.clone();
+        let persisted = || {
+            usage
+                .live()
+                .into_iter()
+                .filter(|reading| reading.meter == "messages.persisted")
+                .map(|reading| (reading.app, reading.value))
+                .collect::<Vec<_>>()
+        };
         let ctx = test_ctx();
 
         service
             .ensure_consistency(&ctx, prepared_message("message-a", 1))
             .await
             .expect_err("first attempt should fail at durable event stream append");
+        // Usage counts committed messages only.
+        assert!(persisted().is_empty());
 
         let retry = service
             .ensure_consistency(&ctx, prepared_message("message-a", 1))
@@ -1520,6 +1591,82 @@ mod tests {
             2,
             "retry must re-enter durable event stream path"
         );
+        assert_eq!(persisted(), [("tenant-a".to_string(), 1)]);
+    }
+
+    /// 批量路径：整批落库后第二条 ACK 失败，第三条已经占位，重投时走去重分支。用量仍按
+    /// 落库条数计，重投不再重复计。
+    #[tokio::test]
+    async fn ensure_batch_consistency_counts_every_persisted_message_when_an_ack_fails() {
+        let reserved = Arc::new(Mutex::new(std::collections::HashSet::new()));
+        let ack_attempts = Arc::new(AtomicUsize::new(0));
+        let batch_calls = Arc::new(AtomicUsize::new(0));
+        let event_count = Arc::new(AtomicUsize::new(0));
+        let service: MessagePersistenceDomainService<
+            PerMessageIdempotencyRepository,
+            NoopRepository,
+            NoopRepository,
+            BatchCountingEventStreamRepository,
+            NoopRepository,
+            FailNthAckPublisher,
+        > = MessagePersistenceDomainService::new(
+            Some(Arc::new(PerMessageIdempotencyRepository {
+                reserved: reserved.clone(),
+            })),
+            None,
+            Some(Arc::new(NoopRepository)),
+            Some(Arc::new(BatchCountingEventStreamRepository {
+                batch_calls: batch_calls.clone(),
+                event_count: event_count.clone(),
+                single_writes: Arc::new(AtomicUsize::new(0)),
+            })),
+            None,
+            Some(Arc::new(FailNthAckPublisher {
+                attempts: ack_attempts.clone(),
+                fail_at: 1,
+            })),
+        )
+        .with_usage(flare_im_usage::UsageRecorder::unpublished(
+            "storage-writer-test",
+        ));
+        let usage = service.usage.clone();
+        let persisted = || {
+            usage
+                .live()
+                .into_iter()
+                .filter(|reading| reading.meter == "messages.persisted")
+                .map(|reading| (reading.app, reading.value))
+                .collect::<Vec<_>>()
+        };
+        let batch = || {
+            vec![
+                prepared_message("message-a", 1),
+                prepared_message("message-b", 2),
+                prepared_message("message-c", 3),
+            ]
+        };
+        let ctx = test_ctx();
+
+        service
+            .ensure_batch_consistency(&ctx, batch())
+            .await
+            .expect_err("the second ACK fails");
+        assert_eq!(batch_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(event_count.load(Ordering::SeqCst), 3);
+        assert_eq!(ack_attempts.load(Ordering::SeqCst), 2);
+        assert_eq!(persisted(), [("tenant-a".to_string(), 3)]);
+
+        let redelivered = service
+            .ensure_batch_consistency(&ctx, batch())
+            .await
+            .expect("redelivery acknowledges the stored messages");
+        assert!(redelivered.iter().all(|result| result.deduplicated));
+        assert_eq!(
+            batch_calls.load(Ordering::SeqCst),
+            1,
+            "nothing is rewritten"
+        );
+        assert_eq!(persisted(), [("tenant-a".to_string(), 3)]);
     }
 
     #[tokio::test]
@@ -1625,7 +1772,10 @@ mod tests {
             Some(Arc::new(CountingAckPublisher {
                 duplicate_acks: duplicate_acks.clone(),
             })),
-        );
+        )
+        .with_usage(flare_im_usage::UsageRecorder::unpublished(
+            "storage-writer-test",
+        ));
 
         let result = service
             .ensure_consistency(&test_ctx(), prepared_message("message-a", 1))
@@ -1633,6 +1783,8 @@ mod tests {
             .expect("duplicate message should still produce a result");
 
         assert!(result.deduplicated);
+        // A redelivered duplicate was counted when it was first persisted.
+        assert!(service.usage.live().is_empty());
         assert_eq!(
             duplicate_acks.load(Ordering::SeqCst),
             1,

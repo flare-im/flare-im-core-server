@@ -242,9 +242,13 @@ load_platform_public_key() {
     # Admin Gateway is started on its own switch; it needs no platform key.
     CORE_ADMIN_GATEWAY_ENABLED="${FLARE_ADMIN_GATEWAY_ENABLED:-}"
     CORE_AUDIT_NATS_URL="${FLARE_AUDIT_NATS_URL:-}"
+    # Usage events (flare.usage.window.v1) go only to the six counting services.
+    CORE_USAGE_NATS_URL="${FLARE_USAGE_NATS_URL:-}"
+    CORE_USAGE_WINDOW_SECS="${FLARE_USAGE_WINDOW_SECS:-}"
     unset FLARE_PLATFORM_PUBLIC_KEY FLARE_PLATFORM_SIGNING_KEY FLARE_ADMIN_GATEWAY_TOKEN_SECRET
-    unset FLARE_ADMIN_GATEWAY_ENABLED FLARE_AUDIT_NATS_URL
+    unset FLARE_ADMIN_GATEWAY_ENABLED FLARE_AUDIT_NATS_URL FLARE_USAGE_NATS_URL FLARE_USAGE_WINDOW_SECS
     export -n CORE_PLATFORM_PUBLIC_KEY CORE_ADMIN_GATEWAY_ENABLED CORE_AUDIT_NATS_URL
+    export -n CORE_USAGE_NATS_URL CORE_USAGE_WINDOW_SECS
 }
 
 FLARE_BUILD_PROFILE="${FLARE_BUILD_PROFILE:-debug}"
@@ -819,6 +823,11 @@ for service in "${CORE_SERVICES[@]}"; do
             env_args+=("FLARE_ADMIN_GATEWAY_BIND_ADDRESS=${FLARE_ADMIN_GATEWAY_BIND_ADDRESS:-127.0.0.1:50051}")
             [ -n "$CORE_AUDIT_NATS_URL" ] && env_args+=("FLARE_AUDIT_NATS_URL=$CORE_AUDIT_NATS_URL") ;;
     esac
+    case "$service" in
+        message-ingest|storage-writer|push-worker|media|api-gateway)
+            [ -n "$CORE_USAGE_NATS_URL" ] && env_args+=("FLARE_USAGE_NATS_URL=$CORE_USAGE_NATS_URL")
+            [ -n "$CORE_USAGE_WINDOW_SECS" ] && env_args+=("FLARE_USAGE_WINDOW_SECS=$CORE_USAGE_WINDOW_SECS") ;;
+    esac
 
     # 启动服务（使用编译好的二进制，避免并发编译问题）
     start_detached_process "flare-$service-$FLARE_BUILD_PROFILE" "$LOGS_DIR/flare-$service.log" "$CARGO_TARGET_BIN_DIR/$BIN_NAME" "${env_args[@]}"
@@ -983,6 +992,8 @@ if [ "$GATEWAY_MODE" == "single" ]; then
         "FLARE_INTERNAL_CTX_PRIVATE_KEY=$CORE_INTERNAL_PRIVATE_KEY"
         "FLARE_INTERNAL_CTX_PUBLIC_KEY=$CORE_INTERNAL_PUBLIC_KEY"
     )
+    [ -n "$CORE_USAGE_NATS_URL" ] && gateway_env_args+=("FLARE_USAGE_NATS_URL=$CORE_USAGE_NATS_URL")
+    [ -n "$CORE_USAGE_WINDOW_SECS" ] && gateway_env_args+=("FLARE_USAGE_WINDOW_SECS=$CORE_USAGE_WINDOW_SECS")
     start_detached_process "flare-access-gateway-$FLARE_BUILD_PROFILE" "$LOGS_DIR/flare-access-gateway.log" "$CARGO_TARGET_BIN_DIR/flare-signaling-gateway" "${gateway_env_args[@]}"
     gateway_pid="$DETACHED_PID"
     echo $gateway_pid > "$pid_file"
@@ -1064,6 +1075,8 @@ else
             "FLARE_INTERNAL_CTX_PRIVATE_KEY=$CORE_INTERNAL_PRIVATE_KEY"
             "FLARE_INTERNAL_CTX_PUBLIC_KEY=$CORE_INTERNAL_PUBLIC_KEY"
         )
+        [ -n "$CORE_USAGE_NATS_URL" ] && gateway_env_args+=("FLARE_USAGE_NATS_URL=$CORE_USAGE_NATS_URL")
+        [ -n "$CORE_USAGE_WINDOW_SECS" ] && gateway_env_args+=("FLARE_USAGE_WINDOW_SECS=$CORE_USAGE_WINDOW_SECS")
         start_detached_process "flare-access-gateway-$gateway_key-$FLARE_BUILD_PROFILE" "$LOGS_DIR/flare-access-gateway-$gateway_key.log" "$CARGO_TARGET_BIN_DIR/flare-signaling-gateway" "${gateway_env_args[@]}"
         gateway_pid="$DETACHED_PID"
         echo $gateway_pid > "$pid_file"

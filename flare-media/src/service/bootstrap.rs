@@ -105,6 +105,11 @@ impl ApplicationBootstrap {
             },
         );
 
+        // 用量 flush 循环：停机时补发当前窗口。
+        let usage = context.usage;
+        let runtime = runtime
+            .add_spawn_with_shutdown("media-usage", move |shutdown_rx| usage.run(shutdown_rx));
+
         // 运行服务（带服务注册）
         runtime
             .run_with_registration(|addr| {

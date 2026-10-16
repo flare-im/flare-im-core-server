@@ -20,6 +20,7 @@ pub enum OfflineDeliveryBackend {
     Getui,
     Fcm,
     Apns,
+    Mobile,
     Disabled,
 }
 
@@ -30,6 +31,7 @@ impl OfflineDeliveryBackend {
             "getui" => Self::Getui,
             "fcm" | "firebase" => Self::Fcm,
             "apns" | "apple" => Self::Apns,
+            "mobile" => Self::Mobile,
             "disabled" | "off" | "none" => Self::Disabled,
             _ => {
                 return Err(FlareError::system(
@@ -49,7 +51,7 @@ impl OfflineDeliveryBackend {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct PushWorkerConfig {
     pub mq_backend: String,
     pub jetstream_url: String,
@@ -74,6 +76,7 @@ pub struct PushWorkerConfig {
     pub offline_parking_capacity: usize,
     /// 离线推送后端：outbox/getui/fcm/apns/disabled。
     pub offline_delivery_backend: OfflineDeliveryBackend,
+    pub offline_mobile_providers: Vec<OfflineDeliveryBackend>,
     /// 离线推送 outbox Redis 地址；None 表示禁用（PUSH_WORKER_OFFLINE_REDIS_URL=off）
     pub offline_outbox_redis_url: Option<String>,
     /// 离线推送 outbox Stream key
@@ -219,8 +222,12 @@ impl PushWorkerConfig {
             .ok()
             .map(|value| OfflineDeliveryBackend::parse(&value))
             .transpose()?
-            .unwrap_or(OfflineDeliveryBackend::Outbox)
+            .unwrap_or(OfflineDeliveryBackend::Disabled)
             .validate_environment(&env::var("FLARE_ENV").unwrap_or_default())?;
+        let offline_mobile_providers = mobile_providers(
+            offline_delivery_backend,
+            non_empty_env("PUSH_WORKER_OFFLINE_PROVIDERS").as_deref(),
+        )?;
         let offline_outbox_redis_url = resolve_offline_outbox_redis_url(
             env::var("PUSH_WORKER_OFFLINE_REDIS_URL").ok(),
             app.redis_profile("push").map(|profile| profile.url.clone()),
@@ -306,6 +313,7 @@ impl PushWorkerConfig {
             access_gateway_static_endpoint,
             offline_parking_capacity,
             offline_delivery_backend,
+            offline_mobile_providers,
             offline_outbox_redis_url,
             offline_outbox_stream,
             offline_outbox_maxlen,
@@ -327,6 +335,39 @@ impl PushWorkerConfig {
             metrics,
         })
     }
+}
+
+fn mobile_providers(
+    backend: OfflineDeliveryBackend,
+    raw: Option<&str>,
+) -> Result<Vec<OfflineDeliveryBackend>> {
+    if backend != OfflineDeliveryBackend::Mobile {
+        if raw.is_some() {
+            return Err(FlareError::system(
+                "OFFLINE_PROVIDERS requires mobile backend",
+            ));
+        }
+        return Ok(Vec::new());
+    }
+    let raw = raw
+        .ok_or_else(|| FlareError::system("mobile backend requires explicit OFFLINE_PROVIDERS"))?;
+    let mut providers = Vec::new();
+    for name in raw.split(',') {
+        let provider = OfflineDeliveryBackend::parse(name)?;
+        if !matches!(
+            provider,
+            OfflineDeliveryBackend::Fcm
+                | OfflineDeliveryBackend::Apns
+                | OfflineDeliveryBackend::Getui
+        ) || providers.contains(&provider)
+        {
+            return Err(FlareError::system(
+                "OFFLINE_PROVIDERS must be unique fcm/apns/getui entries",
+            ));
+        }
+        providers.push(provider);
+    }
+    Ok(providers)
 }
 
 fn non_empty_env(name: &str) -> Option<String> {
@@ -424,10 +465,25 @@ impl KafkaConsumerConfig for PushWorkerConfig {
 
 #[cfg(test)]
 mod tests {
-    use super::{OfflineDeliveryBackend, resolve_offline_outbox_redis_url};
+    use super::{OfflineDeliveryBackend, mobile_providers, resolve_offline_outbox_redis_url};
 
     #[test]
     fn offline_delivery_backend_is_explicit() {
+        assert_eq!(
+            mobile_providers(OfflineDeliveryBackend::Mobile, Some("fcm,apns")).unwrap(),
+            vec![OfflineDeliveryBackend::Fcm, OfflineDeliveryBackend::Apns]
+        );
+        for raw in [
+            None,
+            Some(""),
+            Some("fcm,fcm"),
+            Some("outbox"),
+            Some("mobile"),
+            Some("getui,"),
+        ] {
+            assert!(mobile_providers(OfflineDeliveryBackend::Mobile, raw).is_err());
+        }
+        assert!(mobile_providers(OfflineDeliveryBackend::Fcm, Some("apns")).is_err());
         assert_eq!(
             OfflineDeliveryBackend::parse("getui").unwrap(),
             OfflineDeliveryBackend::Getui

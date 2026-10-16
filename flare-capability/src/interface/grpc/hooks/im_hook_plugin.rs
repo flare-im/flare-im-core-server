@@ -25,6 +25,7 @@ use crate::application::handler::HookCommandHandler;
 use crate::composition::hook_registry::CoreHookRegistry;
 use crate::domain::capability::GuardDecision;
 use crate::domain::model::{HookExecutionPlan, LoggableName, is_hook_unavailable};
+use crate::domain::service::HookExecutionGuard;
 use crate::infrastructure::adapters::HookAdapterFactory;
 use crate::infrastructure::adapters::conversion::{
     message_draft_to_proto, proto_to_message_draft, timestamp_to_system_time,
@@ -149,6 +150,8 @@ pub struct ImHookPluginServer {
     adapter_factory: Arc<HookAdapterFactory>,
     capability_registry: CapabilityExtensionRegistry,
     verifier: Option<SignedContextVerifier>,
+    /// 挂到每个执行计划上的 (租户, Hook) 熔断与执行记录；没有时照旧直接调用。
+    execution_guard: Option<Arc<HookExecutionGuard>>,
 }
 
 impl ImHookPluginServer {
@@ -166,7 +169,14 @@ impl ImHookPluginServer {
             adapter_factory,
             capability_registry,
             verifier,
+            execution_guard: None,
         }
+    }
+
+    /// 每个 Hook 调用先过 (租户, Hook) 熔断，结果交给执行证据（见 [`HookExecutionGuard`]）。
+    pub fn with_execution_guard(mut self, guard: Arc<HookExecutionGuard>) -> Self {
+        self.execution_guard = Some(guard);
+        self
     }
 
     /// 将 protobuf HookMessageRecord 转换为 MessageRecord
@@ -238,7 +248,13 @@ impl ImHookPluginServer {
         config: crate::domain::model::HookConfigItem,
         hook_type: &str,
     ) -> FlareResult<HookExecutionPlan> {
-        materialize_hook_execution_plan(self.adapter_factory.as_ref(), config, hook_type).await
+        let plan =
+            materialize_hook_execution_plan(self.adapter_factory.as_ref(), config, hook_type)
+                .await?;
+        Ok(match self.execution_guard.as_ref() {
+            Some(guard) => plan.with_execution_guard(Arc::clone(guard)),
+            None => plan,
+        })
     }
 
     // proto 响应不再携带 `status` 字段；失败通过 gRPC `Status` 或业务字段表达。
@@ -1506,6 +1522,85 @@ mod tests {
                 }
                 PreSendDecision::Continue => panic!("an unreachable required hook must not allow"),
             }
+        }
+
+        /// 挂了执行守卫：必需的下游 Hook 连续不可达两次后熔断打开，第三次 Capability 不再拨号，
+        /// Message Ingest 得到的仍是可重试的 `SERVICE_UNAVAILABLE`（不是策略拒绝）；三次调用都按
+        /// 签名租户记下执行记录（两次调用失败、一次熔断短路），租户与消息号来自 Ingest 的调用。
+        #[tokio::test]
+        async fn an_open_circuit_is_unavailable_to_ingest_and_every_call_is_recorded() {
+            use crate::domain::model::HookExecutionOutcome;
+            use crate::domain::service::hook_execution::test_support::RecordingObserver;
+            use crate::domain::service::{HookCircuitPolicy, HookExecutionGuard};
+
+            let observer = Arc::new(RecordingObserver::recording_everything());
+            let guard = Arc::new(HookExecutionGuard::new(
+                HookCircuitPolicy {
+                    enabled: true,
+                    failure_threshold: 2,
+                    failure_window: std::time::Duration::from_secs(30),
+                    open_for: std::time::Duration::from_secs(600),
+                },
+                observer.clone(),
+            ));
+            let watcher = Arc::new(ConfigWatcher::with_config(HookConfig {
+                pre_send: vec![required_pre_send_hook(&closed_port_endpoint().await)],
+                ..Default::default()
+            }));
+            let server = ImHookPluginServer::new(
+                Arc::new(HookCommandHandler::new(Arc::new(HookOrchestrationService))),
+                Arc::new(CoreHookRegistry::new(watcher)),
+                Arc::new(HookAdapterFactory::new()),
+                CapabilityExtensionRegistry::new(),
+                Some(keys().verifier),
+            )
+            .with_execution_guard(Arc::clone(&guard));
+            let capability = serve_hook_plugin(server).await;
+
+            for _ in 0..3 {
+                match ingest_pre_send(&capability).await {
+                    PreSendDecision::Reject { error } => {
+                        assert!(!is_pre_send_rejection(&error), "{error}");
+                        assert_eq!(error.code(), Some(ErrorCode::ServiceUnavailable), "{error}");
+                    }
+                    PreSendDecision::Continue => {
+                        panic!("an unavailable required hook must not allow")
+                    }
+                }
+            }
+            let records = observer.records();
+            let outcomes: Vec<_> = records.iter().map(|r| r.outcome.clone()).collect();
+            assert_eq!(outcomes.len(), 3, "{outcomes:?}");
+            assert!(matches!(outcomes[0], HookExecutionOutcome::Failed { .. }));
+            assert!(matches!(outcomes[1], HookExecutionOutcome::Failed { .. }));
+            assert_eq!(outcomes[2], HookExecutionOutcome::CircuitOpen);
+            for record in &records {
+                assert_eq!(record.tenant_id, "0");
+                assert_eq!(record.hook_id(), "pre_send:required-pre-send");
+                assert_eq!(record.message_id.as_deref(), Some("m-hook-unavailable"));
+            }
+
+            // Capability 自己回的状态：熔断短路与不可达同为 UNAVAILABLE（可重试）。
+            let decision = guarded_circuit_open_decision(&guard).await;
+            let status = pre_send_response(decision, HookMessageDraft::default()).unwrap_err();
+            assert_eq!(status.code(), tonic::Code::Unavailable, "{status:?}");
+        }
+
+        /// 用同一个守卫再走一次计划：熔断仍打开，直接得到短路的决定。
+        async fn guarded_circuit_open_decision(
+            guard: &Arc<crate::domain::service::HookExecutionGuard>,
+        ) -> PreSendDecision {
+            let plan = HookExecutionPlan::from_hook_config(
+                required_pre_send_hook("http://127.0.0.1:9"),
+                "pre_send",
+            )
+            .with_execution_guard(Arc::clone(guard));
+            let ctx: flare_server_core::context::Ctx = Arc::new(
+                flare_server_core::Context::with_request_id("req-open").with_tenant_id("0"),
+            );
+            plan.execute(&ctx, &mut flare_im_hooks::MessageDraft::new(b"x".to_vec()))
+                .await
+                .unwrap()
         }
 
         /// 对照：下游 Hook 明确拒绝时，Message Ingest 仍得到带标记的策略拒绝（422）。

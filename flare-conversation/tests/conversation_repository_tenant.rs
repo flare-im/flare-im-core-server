@@ -12,17 +12,15 @@ use std::sync::Arc;
 use chrono::Utc;
 use flare_conversation::config::ConversationConfig;
 use flare_conversation::domain::model::{
-    ConflictResolutionPolicy, Conversation, ConversationFilter, ConversationLifecycleState,
-    ConversationParticipant, ConversationPolicy, ConversationSort, ConversationType,
-    ConversationVisibility, HistoryPurgeBoundary, UpdateConversationUserSettingsPatch,
+    ConflictResolutionPolicy, Conversation, ConversationDomainConfig, ConversationFilter,
+    ConversationLifecycleState, ConversationParticipant, ConversationPolicy, ConversationSort,
+    ConversationType, ConversationVisibility, HistoryPurgeBoundary,
+    UpdateConversationUserSettingsPatch,
 };
-use flare_conversation::domain::model::{ConversationDomainConfig, ThreadSortOrder};
-use flare_conversation::domain::repository::{ConversationRepository, ThreadRepository};
+use flare_conversation::domain::repository::ConversationRepository;
 use flare_conversation::domain::service::DefaultConversationDomainService;
+use flare_conversation::infrastructure::persistence::PostgresConversationRepository;
 use flare_conversation::infrastructure::persistence::redis_presence::RedisPresenceRepository;
-use flare_conversation::infrastructure::persistence::{
-    PostgresConversationRepository, PostgresThreadRepository,
-};
 use flare_server_core::context::Context;
 use flare_server_core::error::{ErrorCode, FlareError};
 use sqlx::postgres::PgPoolOptions;
@@ -299,56 +297,4 @@ async fn domain_service_requires_a_context_tenant_to_create_a_conversation() {
             );
         }
     }
-}
-
-/// 话题仓储同样只认上下文租户（W12-T）：缺租户即 `InvalidParameter`，在发出 SQL 之前返回；
-/// 以前借 `normalize_tenant_id` 把空租户变成 "0"，去读写租户 0 的话题。
-#[tokio::test]
-async fn every_thread_repository_method_requires_a_context_tenant() {
-    let repo = PostgresThreadRepository::new(Arc::new(lazy_pool()));
-    let thread = "root-1";
-    for ctx in tenantless_contexts() {
-        assert_tenant_required(
-            "create_thread",
-            repo.create_thread(&ctx, CID, thread, Some("t"), "alice")
-                .await,
-        );
-        assert_tenant_required(
-            "list_threads",
-            repo.list_threads(&ctx, CID, 10, 0, false, ThreadSortOrder::UpdatedDesc)
-                .await,
-        );
-        assert_tenant_required("get_thread", repo.get_thread(&ctx, thread).await);
-        assert_tenant_required(
-            "update_thread",
-            repo.update_thread(&ctx, thread, Some("t"), None, None, None)
-                .await,
-        );
-        assert_tenant_required("delete_thread", repo.delete_thread(&ctx, thread).await);
-        assert_tenant_required(
-            "increment_reply_count",
-            repo.increment_reply_count(&ctx, thread, "reply-1", "bob")
-                .await,
-        );
-        assert_tenant_required(
-            "add_participant",
-            repo.add_participant(&ctx, thread, "bob").await,
-        );
-        assert_tenant_required(
-            "get_participants",
-            repo.get_participants(&ctx, thread).await,
-        );
-    }
-
-    // 对照：显式的租户 "0" 越过租户检查去查库，得到的是连接错误。
-    let ctx = Context::with_request_id("req").with_tenant_id("0");
-    let error = repo
-        .get_thread(&ctx, thread)
-        .await
-        .expect_err("no database behind the lazy pool");
-    assert!(
-        !error.reason().contains("tenant required"),
-        "{}",
-        error.reason()
-    );
 }

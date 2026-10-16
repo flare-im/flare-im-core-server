@@ -34,7 +34,8 @@ impl RedisDeviceTokenRegistry {
         let field = device_push_token_registry_field(&token.provider, &token.device_id);
         let value = serde_json::to_string(token)?;
         let mut conn = self.conn().await?;
-        let _: () = conn.hset(key, field, value).await?;
+        let _: i64 = redis::Script::new("if redis.call('HEXISTS', KEYS[1], ARGV[1]) == 0 and redis.call('HLEN', KEYS[1]) >= 128 then return redis.error_reply('device limit') end return redis.call('HSET', KEYS[1], ARGV[1], ARGV[2])")
+            .key(key).arg(field).arg(value).invoke_async(&mut conn).await?;
         Ok(())
     }
 

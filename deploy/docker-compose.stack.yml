@@ -72,6 +72,10 @@ x-flare-service: &flare-service
     FLARE_KAFKA_BROKERS: kafka:9092
     FLARE_S3_ENDPOINT: http://rustfs:9000
     FLARE_CONSUL_ENDPOINT: http://consul:8500
+    # 用量预聚合事件（flare.usage.window.v1）的 NATS 地址；留空则不上报用量。只有六个计量点
+    # 服务读它（摄入、存储写入、推送 worker、媒体、API 网关、接入网关）。
+    FLARE_USAGE_NATS_URL: ${FLARE_USAGE_NATS_URL:-}
+    FLARE_USAGE_WINDOW_SECS: ${FLARE_USAGE_WINDOW_SECS:-}
   depends_on:
     consul: {condition: service_started}
     postgres: {condition: service_started}

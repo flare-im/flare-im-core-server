@@ -55,6 +55,15 @@ fn protected_api_groups_are_wrapped_by_gateway_auth() {
     );
 }
 
+/// `api.calls` 由鉴权中间件按请求里的记录器计数，记录器靠启动层的 Extension 注入：少了这一层，
+/// 计数会悄悄停掉而请求照常成功。flush 循环也必须挂进运行时。
+#[test]
+fn usage_recorder_is_wired_into_the_public_app() {
+    assert!(SERVICE_RS.contains("UsageReporter::from_env(\"flare-api-gateway\")"));
+    assert!(SERVICE_RS.contains(".layer(axum::Extension(usage.recorder()))"));
+    assert!(SERVICE_RS.contains("usage.run(shutdown_rx)"));
+}
+
 /// 签发/刷新接口在拿到 token 之前调用，不能套 bearer 中间件；生命周期实现必须在 server-core。
 #[test]
 fn auth_token_routes_are_public_and_delegate_lifecycle_to_server_core() {

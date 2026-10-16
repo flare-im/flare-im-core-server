@@ -1,29 +1,40 @@
-//! Hook **Query** 编排：读模型经基础设施 [`crate::infrastructure::monitoring::MetricsCollector`] 提供（后续可下沉为领域读端口）。
+//! Hook **Query** 编排：执行统计与执行记录经领域读端口 [`HookExecutionRepository`] 读
+//! `hook_executions`（按租户与 Hook 限定，计数按采样权重加权）。
 
 use std::sync::Arc;
 
-use crate::domain::model::HookStatistics;
-use crate::infrastructure::monitoring::MetricsCollector;
+use flare_server_core::error::Result;
+
+use crate::domain::model::{
+    HookExecutionFilter, HookExecutionScope, HookExecutionStatistics, HookExecutionTimeRange,
+    StoredHookExecution,
+};
+use crate::domain::repository::HookExecutionRepository;
 
 /// Hook 查询处理器（应用层编排读路径）。
 pub struct HookQueryHandler {
-    metrics_collector: Arc<MetricsCollector>,
+    repository: Arc<dyn HookExecutionRepository>,
 }
 
 impl HookQueryHandler {
-    pub fn new(metrics_collector: Arc<MetricsCollector>) -> Self {
-        Self { metrics_collector }
+    pub fn new(repository: Arc<dyn HookExecutionRepository>) -> Self {
+        Self { repository }
     }
 
-    /// 处理获取 Hook 统计信息查询
-    pub async fn handle_get_statistics(&self, hook_name: &str) -> Option<HookStatistics> {
-        self.metrics_collector.get_statistics(hook_name).await
-    }
-
-    /// 处理获取所有 Hook 统计信息查询
-    pub async fn handle_get_all_statistics(
+    /// 一个租户的一条 Hook 在一段时间里的执行统计。
+    pub async fn statistics(
         &self,
-    ) -> std::collections::HashMap<String, HookStatistics> {
-        self.metrics_collector.get_all_statistics().await
+        scope: &HookExecutionScope,
+        range: &HookExecutionTimeRange,
+    ) -> Result<HookExecutionStatistics> {
+        self.repository.statistics(scope, range).await
+    }
+
+    /// 一个租户的一条 Hook 的执行记录，从新到旧。
+    pub async fn executions(
+        &self,
+        filter: &HookExecutionFilter,
+    ) -> Result<Vec<StoredHookExecution>> {
+        self.repository.query(filter).await
     }
 }

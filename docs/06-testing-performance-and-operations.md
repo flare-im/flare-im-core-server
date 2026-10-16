@@ -109,7 +109,7 @@ python3 scripts/test_smoke_message_flow.py
 
 | 变量 | 需要的环境 | 用例 |
 |------|------------|------|
-| `FLARE_TENANT_TEST_DATABASE_URL` | 已用 `deploy/init.sql` 初始化的库（含 TimescaleDB） | `flare-capability` 的 `tenant_projection_pg`（2 条）、`capability_admin_pg`；`flare-conversation` 的 `thread_repository_pg` |
+| `FLARE_TENANT_TEST_DATABASE_URL` | 已用 `deploy/init.sql` 初始化的库（含 TimescaleDB） | `flare-capability` 的 `tenant_projection_pg`（2 条）、`capability_admin_pg` |
 | `FLARE_CONVERSATION_TEST_DATABASE_URL` | 任意可建 schema 的一次性 PostgreSQL | `flare-conversation` 的 `conversation_admin_pg`、`conversation_history_purge_pg`（2 条） |
 | `FLARE_CONVERSATION_TEST_REDIS_URL` | 一次性 Redis | `conversation_history_purge_pg` 的读侧缓存失效用例 |
 | `FLARE_MEDIA_TEST_DATABASE_URL` | 一次性 PostgreSQL | `flare-media` lib 的 5 条 |

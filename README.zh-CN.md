@@ -162,7 +162,7 @@ flowchart LR
 | `flare-api-gateway` | 面向业务系统和第三方的 HTTP API，做协议适配、认证上下文、错误映射，不写 IM 状态。 |
 | `flare-admin-gateway` | 面向管理面和审计查询的 Admin API。 |
 | `flare-signaling/gateway` | 客户端长连接接入、上行 frame 转发、下行推送、连接质量。 |
-| `flare-signaling/route` | 设备路由、跨网关路由、推送策略。 |
+| `flare-signaling/route` | 上行帧路由：消息转 ingest、事件转 orchestrator，ACK 与数据帧分线转发，含会话流控；下行推送不经过它。 |
 | `flare-signaling/online` | 在线状态、设备连接、presence 查询。 |
 | `flare-message-ingest` | 上行消息发送入口，负责发送校验、Pre/PostSend Hook、seq、WAL、会话确保与写入主消息流。 |
 | `flare-orchestrator` | 主消息流 fanout、消息操作事件执行、RTC/capability 事件 enrich。 |

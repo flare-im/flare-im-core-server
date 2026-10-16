@@ -11,7 +11,7 @@ use flare_server_core::flare_err;
 use prost::Message as _;
 use redis::aio::ConnectionManager;
 
-use crate::interface::messaging::offline_consumer::OfflinePushExecutor;
+use crate::domain::offline_delivery::OfflinePushExecutor;
 
 pub struct RedisOfflineOutbox {
     conn: ConnectionManager,

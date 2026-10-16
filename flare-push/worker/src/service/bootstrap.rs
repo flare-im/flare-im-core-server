@@ -38,6 +38,11 @@ impl ApplicationBootstrap {
     ) -> Result<()> {
         info!("Starting Push Worker (push-online/push-offline) via ServiceRuntime...");
 
+        let usage = context.usage;
+        runtime = runtime.add_spawn_with_shutdown("push-worker-usage", move |shutdown_rx| {
+            usage.run(shutdown_rx)
+        });
+
         if context.config.metrics.enabled {
             let metrics_config = context.config.metrics.clone();
             runtime = runtime.add_spawn_with_shutdown(

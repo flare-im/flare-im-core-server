@@ -4,10 +4,11 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::infrastructure::push_display::notification_display;
+use crate::infrastructure::vendor_http;
 use flare_im_contracts::{Ctx, DevicePushToken};
 use flare_proto::PushTaskEnvelope;
 use flare_proto::common::message_content::Content as MessageContentVariant;
-use flare_server_core::error::{ErrorCode, FlareError, map_infra_error};
+use flare_server_core::error::{ErrorCode, FlareError};
 use reqwest::StatusCode;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -15,14 +16,14 @@ use sha2::{Digest, Sha256};
 use tokio::sync::Mutex;
 
 use crate::domain::DeviceTokenRepository;
-use crate::interface::messaging::offline_consumer::OfflinePushExecutor;
+use crate::domain::offline_delivery::OfflinePushExecutor;
 
 const GETUI_PROVIDER: &str = "getui";
 const TOKEN_REFRESH_SKEW_MS: i64 = 60_000;
 const GETUI_TOKEN_EXPIRED_CODE: i64 = 10001;
 const E2EE_PLACEHOLDER_REASON: &str = "e2e_ciphertext";
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct GetuiConfig {
     pub app_id: String,
     pub app_key: String,
@@ -54,6 +55,17 @@ impl GetuiConfig {
             .map(|value| value.trim().trim_end_matches('/').to_string())
             .filter(|value| !value.is_empty())
             .unwrap_or_else(|| format!("https://restapi.getui.com/v2/{app_id}"));
+        if !app_id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+            || app_id.len() > 128
+            || base_url != format!("https://restapi.getui.com/v2/{app_id}")
+        {
+            return Err(FlareError::localized(
+                ErrorCode::InvalidParameter,
+                "getui credential destination rejected",
+            ));
+        }
         Ok(Self {
             app_id,
             app_key,
@@ -101,6 +113,8 @@ pub struct GetuiPushRequest {
     pub body: String,
     pub payload: Value,
     pub ttl_ms: u64,
+    pub play_sound: bool,
+    pub show_badge: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -126,15 +140,15 @@ pub struct GetuiClient {
 impl GetuiClient {
     pub fn new(config: GetuiConfig) -> Result<Self, FlareError> {
         let http = reqwest::Client::builder()
-            .timeout(Duration::from_millis(config.request_timeout_ms.max(1_000)))
+            .connect_timeout(Duration::from_secs(3))
+            .timeout(Duration::from_millis(
+                config.request_timeout_ms.clamp(1_000, 10_000),
+            ))
+            .redirect(reqwest::redirect::Policy::none())
+            .retry(reqwest::retry::never())
+            .no_proxy()
             .build()
-            .map_err(|error| {
-                map_infra_error(
-                    error,
-                    ErrorCode::ServiceUnavailable,
-                    "build getui http client",
-                )
-            })?;
+            .map_err(|_| vendor_http::failure("build getui HTTP client failed"))?;
         Ok(Self {
             http,
             config,
@@ -144,17 +158,13 @@ impl GetuiClient {
 
     async fn bearer_token(&self) -> Result<String, FlareError> {
         let now = now_ms();
-        {
-            let guard = self.access_token.lock().await;
-            if let Some(token) = guard.as_ref()
-                && token.expire_time_ms > now + TOKEN_REFRESH_SKEW_MS
-            {
-                return Ok(token.token.clone());
-            }
-        }
-
-        let token = self.authenticate(now).await?;
         let mut guard = self.access_token.lock().await;
+        if let Some(token) = guard.as_ref()
+            && token.expire_time_ms > now + TOKEN_REFRESH_SKEW_MS
+        {
+            return Ok(token.token.clone());
+        }
+        let token = self.authenticate(now).await?;
         *guard = Some(token.clone());
         Ok(token.token)
     }
@@ -175,14 +185,9 @@ impl GetuiClient {
             .map_err(retryable_getui_error)?;
 
         let status = response.status();
-        if !status.is_success() {
-            return Err(http_status_error(status, "getui auth"));
-        }
-
-        let payload = response
-            .json::<GetuiResponse<GetuiAuthData>>()
-            .await
-            .map_err(retryable_getui_error)?;
+        let payload: GetuiResponse<GetuiAuthData> =
+            serde_json::from_str(&vendor_http::body(response).await?)
+                .map_err(|_| vendor_http::failure("getui auth response invalid"))?;
         if payload.code != 0 {
             return Err(getui_business_error(
                 payload.code,
@@ -190,13 +195,23 @@ impl GetuiClient {
                 "getui auth",
             ));
         }
+        if !status.is_success() {
+            return Err(http_status_error(status, "getui auth"));
+        }
         let Some(data) = payload.data else {
             return Err(FlareError::localized(
                 ErrorCode::ServiceUnavailable,
                 "getui auth response missing token data",
             ));
         };
-        if data.token.trim().is_empty() {
+        if data.token.trim().is_empty()
+            || data.token.len() > 8192
+            || data
+                .token
+                .bytes()
+                .any(|b| b.is_ascii_whitespace() || b.is_ascii_control())
+            || data.expire_time <= timestamp_ms + TOKEN_REFRESH_SKEW_MS
+        {
             return Err(FlareError::localized(
                 ErrorCode::ServiceUnavailable,
                 "getui auth response token is empty",
@@ -218,7 +233,9 @@ impl GetuiClient {
             Err(error) if error.code() == Some(ErrorCode::AuthenticationRequired) => {
                 {
                     let mut guard = self.access_token.lock().await;
-                    *guard = None;
+                    if guard.as_ref().is_some_and(|cached| cached.token == token) {
+                        *guard = None;
+                    }
                 }
                 let refreshed = self.bearer_token().await?;
                 self.push_single_cid_with_token(&refreshed, request).await
@@ -243,26 +260,30 @@ impl GetuiClient {
             .map_err(retryable_getui_error)?;
 
         let status = response.status();
-        let response_text = response.text().await.map_err(retryable_getui_error)?;
+        let response_text = vendor_http::body(response).await?;
         if let Ok(payload) = serde_json::from_str::<GetuiResponse<Value>>(&response_text) {
-            if payload.code == 0 {
+            if payload.code == 0 && status == StatusCode::OK {
                 return Ok(GetuiPushOutcome::Delivered);
             }
-            if is_invalid_target_business_error(payload.code, &payload.msg) {
+            if status == StatusCode::BAD_REQUEST
+                && is_invalid_target_business_error(payload.code, &payload.msg)
+            {
                 return Ok(GetuiPushOutcome::InvalidTarget);
             }
-            return Err(getui_business_error(
-                payload.code,
-                &payload.msg,
-                "getui push single cid",
-            ));
+            if payload.code != 0 && !status.is_server_error() {
+                return Err(getui_business_error(
+                    payload.code,
+                    &payload.msg,
+                    "getui push single cid",
+                ));
+            }
         }
         if !status.is_success() {
             return Err(http_status_error(status, "getui push single cid"));
         }
         Err(FlareError::localized(
             ErrorCode::ServiceUnavailable,
-            format!("getui push single cid response is not valid json: {response_text}"),
+            "getui push single cid response invalid",
         ))
     }
 }
@@ -300,6 +321,9 @@ impl GetuiOfflinePushExecutor {
 #[async_trait::async_trait]
 impl OfflinePushExecutor for GetuiOfflinePushExecutor {
     async fn deliver(&self, ctx: &Ctx, envelope: &PushTaskEnvelope) -> Result<(), FlareError> {
+        if !crate::infrastructure::push_display::mobile_alert_eligible(envelope) {
+            return Ok(());
+        }
         let tokens = self
             .tokens
             .list_user_tokens(ctx, &envelope.tenant_id, &envelope.user_id)
@@ -318,17 +342,17 @@ impl OfflinePushExecutor for GetuiOfflinePushExecutor {
             return Ok(());
         }
 
-        let mut attempts = 0usize;
-        let mut successes = 0usize;
-        let mut invalid_targets = 0usize;
         let mut terminal_error = None::<FlareError>;
         for token in usable_tokens {
-            attempts += 1;
+            if self.tokens.was_accepted(&token, envelope).await? {
+                continue;
+            }
             let request = build_getui_push_request(envelope, &token, self.default_ttl_ms);
             match self.client.push_single_cid(&request).await {
-                Ok(GetuiPushOutcome::Delivered) => successes += 1,
+                Ok(GetuiPushOutcome::Delivered) => {
+                    self.tokens.record_accepted(&token, envelope).await?
+                }
                 Ok(GetuiPushOutcome::InvalidTarget) => {
-                    invalid_targets += 1;
                     tracing::warn!(
                         tenant_id = %envelope.tenant_id,
                         user_id = %envelope.user_id,
@@ -352,13 +376,7 @@ impl OfflinePushExecutor for GetuiOfflinePushExecutor {
             }
         }
 
-        if successes > 0 || invalid_targets > 0 || attempts == 0 {
-            Ok(())
-        } else {
-            Err(terminal_error.unwrap_or_else(|| {
-                FlareError::localized(ErrorCode::MessageDeliveryFailed, "getui delivery failed")
-            }))
-        }
+        terminal_error.map_or(Ok(()), Err)
     }
 }
 
@@ -384,20 +402,29 @@ pub fn build_getui_push_request(
         "messageId": envelope.message_id,
         "payloadKind": envelope.payload_kind,
         "deviceId": token.device_id,
+        "playSound":notification.play_sound,
+        "showBadge":notification.show_badge,
     });
     GetuiPushRequest {
         cid: token.token.clone(),
         request_id: getui_request_id(envelope, token),
         title: notification.title,
         body: notification.body,
+        play_sound: notification.play_sound,
+        show_badge: notification.show_badge,
         payload,
-        ttl_ms: default_ttl_ms,
+        ttl_ms: envelope
+            .expire_at
+            .filter(|value| *value > 0)
+            .map(|expires| expires.saturating_sub(now_ms()).max(0) as u64)
+            .map(|remaining| remaining.min(default_ttl_ms))
+            .unwrap_or(default_ttl_ms),
     }
 }
 
 pub fn build_getui_single_cid_body(request: &GetuiPushRequest) -> Value {
     let payload = request.payload.to_string();
-    json!({
+    let mut body = json!({
         "request_id": request.request_id,
         "settings": {
             "ttl": request.ttl_ms,
@@ -436,7 +463,18 @@ pub fn build_getui_single_cid_body(request: &GetuiPushRequest) -> Value {
                 },
             },
         },
-    })
+    });
+    if !request.play_sound
+        && let Some(aps) = body["push_channel"]["ios"]["aps"].as_object_mut()
+    {
+        aps.remove("sound");
+    }
+    if !request.show_badge
+        && let Some(ios) = body["push_channel"]["ios"].as_object_mut()
+    {
+        ios.remove("auto_badge");
+    }
+    body
 }
 
 pub(crate) fn message_has_e2ee_placeholder(message: &flare_proto::common::Message) -> bool {
@@ -459,6 +497,8 @@ fn getui_request_id(envelope: &PushTaskEnvelope, token: &DevicePushToken) -> Str
     hasher.update(envelope.message_id.as_bytes());
     hasher.update([0]);
     hasher.update(token.device_id.as_bytes());
+    hasher.update([0]);
+    hasher.update(token.registration_id.as_bytes());
     let digest = hex::encode(hasher.finalize());
     format!("f{}", &digest[..31])
 }
@@ -470,8 +510,8 @@ fn now_ms() -> i64 {
         .unwrap_or_default()
 }
 
-fn retryable_getui_error(error: reqwest::Error) -> FlareError {
-    map_infra_error(error, ErrorCode::ServiceUnavailable, "getui request failed")
+fn retryable_getui_error(_: reqwest::Error) -> FlareError {
+    vendor_http::failure("getui transport failed; acceptance unknown")
 }
 
 fn http_status_error(status: StatusCode, operation: &'static str) -> FlareError {
@@ -485,16 +525,18 @@ fn http_status_error(status: StatusCode, operation: &'static str) -> FlareError 
     FlareError::localized(code, format!("{operation} http status {status}"))
 }
 
-fn getui_business_error(code: i64, msg: &str, operation: &'static str) -> FlareError {
+fn getui_business_error(code: i64, _msg: &str, operation: &'static str) -> FlareError {
     let error_code = if code == GETUI_TOKEN_EXPIRED_CODE {
         ErrorCode::AuthenticationRequired
+    } else if matches!(
+        code,
+        2 | 5000 | 10003 | 10005 | 30012 | 30013 | 30014 | 30015 | 30018 | 30019 | 30021 | 30022
+    ) {
+        ErrorCode::ServiceUnavailable
     } else {
         ErrorCode::MessageDeliveryFailed
     };
-    FlareError::localized(
-        error_code,
-        format!("{operation} failed: code={code} msg={msg}"),
-    )
+    FlareError::localized(error_code, format!("{operation} rejected: code={code}"))
 }
 
 fn is_invalid_target_business_error(code: i64, msg: &str) -> bool {
@@ -502,10 +544,7 @@ fn is_invalid_target_business_error(code: i64, msg: &str) -> bool {
         return false;
     }
     let lower = msg.to_ascii_lowercase();
-    lower.contains("target user is invalid")
-        || lower.contains("appid not match cid")
-        || lower.contains("cid无效")
-        || lower.contains("cid不是当前应用")
+    matches!(lower.trim(), "target user is invalid" | "cid无效")
 }
 
 fn deserialize_i64<'de, D>(deserializer: D) -> Result<i64, D::Error>
@@ -554,6 +593,48 @@ mod tests {
     use prost::Message as _;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
+    #[tokio::test]
+    async fn structured_provider_rate_limit_is_retryable_and_non_200_is_not_acceptance() {
+        use crate::infrastructure::push_test_support::http_peer;
+        let (endpoint, peer) = http_peer(vec![
+            (401, r#"{"code":10005,"msg":"PRIVATE rate body"}"#.into()),
+            (500, r#"{"code":0,"msg":"PRIVATE fake success"}"#.into()),
+        ])
+        .await;
+        let config = GetuiConfig {
+            app_id: "app".into(),
+            app_key: "key".into(),
+            master_secret: "secret".into(),
+            base_url: endpoint,
+            default_ttl_ms: 1000,
+            request_timeout_ms: 1000,
+        };
+        let client = GetuiClient {
+            http: vendor_http::client().unwrap(),
+            config,
+            access_token: Mutex::new(Some(GetuiAccessToken {
+                token: "controlled".into(),
+                expire_time_ms: i64::MAX,
+            })),
+        };
+        let request = GetuiPushRequest {
+            cid: "cid".into(),
+            request_id: "id".into(),
+            title: "test".into(),
+            body: "test".into(),
+            payload: json!({}),
+            ttl_ms: 1000,
+            play_sound: false,
+            show_badge: false,
+        };
+        for _ in 0..2 {
+            let error = client.push_single_cid(&request).await.unwrap_err();
+            assert!(error.is_retryable());
+            assert!(!error.to_string().contains("PRIVATE"));
+        }
+        peer.await.unwrap();
+    }
+
     fn token() -> DevicePushToken {
         DevicePushToken {
             tenant_id: "tenant-a".to_string(),
@@ -562,6 +643,8 @@ mod tests {
             platform: "ios".to_string(),
             provider: "getui".to_string(),
             token: "cid-1".to_string(),
+            registration_id: "r1".to_string(),
+            registered_at_ms: 1,
         }
     }
 
@@ -571,6 +654,20 @@ mod tests {
 
     #[async_trait::async_trait]
     impl DeviceTokenRepository for FakeTokenRepository {
+        async fn was_accepted(
+            &self,
+            _: &DevicePushToken,
+            _: &PushTaskEnvelope,
+        ) -> Result<bool, FlareError> {
+            Ok(false)
+        }
+        async fn record_accepted(
+            &self,
+            _: &DevicePushToken,
+            _: &PushTaskEnvelope,
+        ) -> Result<(), FlareError> {
+            Ok(())
+        }
         async fn list_user_tokens(
             &self,
             _ctx: &Ctx,
@@ -639,6 +736,8 @@ mod tests {
             body: "你收到一条新消息".to_string(),
             payload: json!({"conversationId":"conv-1"}),
             ttl_ms: 7_200_000,
+            play_sound: true,
+            show_badge: true,
         };
 
         let body = build_getui_single_cid_body(&request);
@@ -657,7 +756,7 @@ mod tests {
             20_001,
             "target user is invalid"
         ));
-        assert!(is_invalid_target_business_error(
+        assert!(!is_invalid_target_business_error(
             20_001,
             "appid not match cid"
         ));
@@ -682,7 +781,7 @@ mod tests {
             conversation_id: "conv-1".to_string(),
             priority: 5,
             expire_at: None,
-            push_payload: Vec::new(),
+            push_payload: crate::infrastructure::push_test_support::alert_payload(),
             headers: Default::default(),
             payload_kind: PushTaskPayloadKind::Message as i32,
         };
@@ -833,6 +932,8 @@ mod tests {
             body: "Getui sandbox push verification".to_string(),
             payload: json!({"kind":"getui_sandbox_verification"}),
             ttl_ms: 7_200_000,
+            play_sound: true,
+            show_badge: true,
         };
 
         let outcome = client.push_single_cid(&request).await.expect("push");

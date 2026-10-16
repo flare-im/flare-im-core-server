@@ -12,12 +12,14 @@
 //! `LISTEN/NOTIFY` 互相通知写入（见 [`HookConfigInvalidation`]）。
 
 pub mod capability_runtime;
+pub mod hook_execution;
 pub mod invalidation;
 pub mod loader;
 pub mod snapshot;
 pub mod watcher;
 
 pub use capability_runtime::CapabilityRuntimeConfig;
+pub use hook_execution::{HookExecutionConfig, HookExecutionSettings};
 pub use invalidation::{HOOK_CONFIG_CHANNEL, HookConfigInvalidation, HookConfigListener};
 pub use loader::{
     ConfigCenterLoader, ConfigLoader, ConfigLoaderItem, ConfigMerger, ConfigValidator,

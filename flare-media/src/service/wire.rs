@@ -33,6 +33,8 @@ pub struct ApplicationContext {
     pub handler: MediaGrpcHandler,
     /// 供后台任务（过期上传会话回收）使用的领域服务。
     pub media_service: Arc<MediaService>,
+    /// 用量预聚合（对象字节存量变化与出口）；启动层把它的 flush 循环挂进运行时。
+    pub usage: flare_im_usage::UsageReporter,
 }
 
 /// 构建应用上下文
@@ -51,7 +53,8 @@ pub async fn initialize(
     let media_config = MediaConfig::from_app_config(app_config);
 
     // 2. 构建媒体服务
-    let (media_service, audit_pool) = build_media_service(&media_config)
+    let usage = flare_im_usage::UsageReporter::from_env("flare-media").await?;
+    let (media_service, audit_pool) = build_media_service(&media_config, usage.recorder())
         .await
         .context("Failed to build media service")?;
 
@@ -82,12 +85,14 @@ pub async fn initialize(
         audit_delivery,
         handler,
         media_service,
+        usage,
     })
 }
 
 /// 构建媒体服务
 async fn build_media_service(
     config: &MediaConfig,
+    usage: flare_im_usage::UsageRecorder,
 ) -> Result<(Arc<MediaService>, Option<Arc<sqlx::PgPool>>)> {
     let object_repo: Option<ObjectRepositoryRef> =
         build_object_store(config.object_store.as_ref()).await?;
@@ -175,15 +180,18 @@ async fn build_media_service(
     );
 
     Ok((
-        Arc::new(MediaService::new(
-            object_repo,
-            metadata_store,
-            reference_store,
-            metadata_cache,
-            upload_conversation_store,
-            local_store,
-            domain_config,
-        )),
+        Arc::new(
+            MediaService::new(
+                object_repo,
+                metadata_store,
+                reference_store,
+                metadata_cache,
+                upload_conversation_store,
+                local_store,
+                domain_config,
+            )
+            .with_usage(usage),
+        ),
         audit_pool,
     ))
 }

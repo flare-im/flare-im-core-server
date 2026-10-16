@@ -50,6 +50,8 @@ pub struct ApplicationContext {
     /// 指标端点配置。带进上下文是为了让 startup 能真正起 serve_prometheus_metrics
     /// —— 网关此前只注册指标、从不暴露。
     pub metrics_config: flare_im_service_kit::metrics::MetricsEndpointConfig,
+    /// 用量预聚合（连接峰值、连接分钟、当日活跃用户）；startup 把 flush 循环挂进运行时。
+    pub usage: flare_im_usage::UsageReporter,
 }
 
 /// 构建应用上下文
@@ -156,14 +158,18 @@ pub async fn initialize(
             .with_signer(message_signer.clone()),
     );
 
-    let connection_handler_app = Arc::new(ConnectionHandler::new(
-        session_domain_service.clone(),
-        metrics.clone(),
-        Arc::new(flare_im_contracts::abstractions::state::NoopConnectionStateNotifier),
-        connection_port.clone(),
-        conversation_subscriptions.clone(),
-        conversation_read_pool.clone(),
-    ));
+    let usage = flare_im_usage::UsageReporter::from_env("flare-signaling-gateway").await?;
+    let connection_handler_app = Arc::new(
+        ConnectionHandler::new(
+            session_domain_service.clone(),
+            metrics.clone(),
+            Arc::new(flare_im_contracts::abstractions::state::NoopConnectionStateNotifier),
+            connection_port.clone(),
+            conversation_subscriptions.clone(),
+            conversation_read_pool.clone(),
+        )
+        .with_usage(usage.recorder()),
+    );
 
     // 7. Push 端口
     let push_handle_slot: Arc<Mutex<Option<Arc<dyn flare_core::server::handle::ServerHandle>>>> =
@@ -320,6 +326,7 @@ pub async fn initialize(
     info!("Application context initialized successfully");
     Ok(ApplicationContext {
         metrics_config: access_config.metrics.clone(),
+        usage,
         long_connection_server,
         grpc_services: GrpcServices {
             access_gateway_handler: access_gateway_grpc_handler,

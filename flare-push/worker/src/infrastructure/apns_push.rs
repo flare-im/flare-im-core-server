@@ -1,8 +1,7 @@
 //! APNs（Apple Push Notification service）离线推送通道。
 //!
-//! 为什么不能只靠 FCM 转发：VoIP 来电、Live Activity、Critical Alert 这些
-//! 推送类型只有原生 APNs 支持，FCM 转发覆盖不到。做 IM 少了 VoIP 推送，
-//! 就意味着 iOS 端收不到来电。
+//! 本适配器只发送 regular alert；VoIP、Live Activity、Critical Alert 需要独立的
+//! typed 负载、entitlement 与设备生命周期，不因接入 APNs 就视为已经实现。
 //!
 //! ## 认证：provider token（JWT）
 //!
@@ -27,6 +26,7 @@ use tokio::sync::RwLock;
 
 use crate::domain::offline_delivery::DeviceTokenRepository;
 use crate::infrastructure::push_display::notification_display;
+use crate::infrastructure::vendor_http;
 
 /// 注册表中标识 APNs 通道的 provider 名。
 pub const APNS_PROVIDER: &str = "apns";
@@ -37,7 +37,7 @@ const SANDBOX_HOST: &str = "https://api.sandbox.push.apple.com";
 const TOKEN_TTL: Duration = Duration::from_secs(50 * 60);
 
 /// APNs 提供者凭据。
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct ApnsCredentials {
     /// Apple Developer Team ID（10 位）。
     pub team_id: String,
@@ -86,13 +86,33 @@ impl ApnsOfflinePushExecutor {
         creds: ApnsCredentials,
         http: reqwest::Client,
         tokens: Arc<dyn DeviceTokenRepository>,
-    ) -> Self {
-        Self {
+    ) -> Result<Self, FlareError> {
+        if [&creds.team_id, &creds.key_id].iter().any(|s| {
+            s.len() != 10
+                || !s
+                    .bytes()
+                    .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit())
+        }) || creds.topic.is_empty()
+            || creds.topic.len() > 255
+            || !creds
+                .topic
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-'))
+        {
+            return Err(FlareError::localized(
+                ErrorCode::InvalidParameter,
+                "APNs configuration rejected",
+            ));
+        }
+        jsonwebtoken::EncodingKey::from_ec_pem(creds.private_key_pem.as_bytes()).map_err(|_| {
+            FlareError::localized(ErrorCode::InvalidParameter, "APNs EC private key rejected")
+        })?;
+        Ok(Self {
             creds,
             http,
             tokens,
             cached: RwLock::new(None),
-        }
+        })
     }
 
     fn now_secs() -> u64 {
@@ -107,7 +127,8 @@ impl ApnsOfflinePushExecutor {
     /// 复用不是单纯的性能优化 —— Apple 对过于频繁的 token 更新会直接拒绝。
     async fn provider_token(&self) -> Result<String, FlareError> {
         let now = Self::now_secs();
-        if let Some(cached) = self.cached.read().await.as_ref()
+        let mut cached_slot = self.cached.write().await;
+        if let Some(cached) = cached_slot.as_ref()
             && cached.refresh_after > now
         {
             return Ok(cached.value.clone());
@@ -121,17 +142,14 @@ impl ApnsOfflinePushExecutor {
         header.kid = Some(self.creds.key_id.clone());
 
         let key = jsonwebtoken::EncodingKey::from_ec_pem(self.creds.private_key_pem.as_bytes())
-            .map_err(|e| {
-                FlareError::localized(
-                    ErrorCode::InvalidParameter,
-                    format!("APNs p8 私钥无法解析（需 PEM 格式 EC 私钥）: {e}"),
-                )
+            .map_err(|_| {
+                FlareError::localized(ErrorCode::InvalidParameter, "APNs EC private key rejected")
             })?;
-        let jwt = jsonwebtoken::encode(&header, &claims, &key).map_err(|e| {
-            FlareError::localized(ErrorCode::InternalError, format!("APNs JWT 签名失败: {e}"))
+        let jwt = jsonwebtoken::encode(&header, &claims, &key).map_err(|_| {
+            FlareError::localized(ErrorCode::InternalError, "APNs JWT signing failed")
         })?;
 
-        *self.cached.write().await = Some(CachedToken {
+        *cached_slot = Some(CachedToken {
             value: jwt.clone(),
             refresh_after: now + TOKEN_TTL.as_secs(),
         });
@@ -145,10 +163,9 @@ impl ApnsOfflinePushExecutor {
 /// 排查起来比彻底失败更费劲。
 pub fn build_apns_payload(envelope: &PushTaskEnvelope) -> Value {
     let display = notification_display(envelope);
-    json!({
+    let mut payload = json!({
         "aps": {
             "alert": { "title": display.title, "body": display.body },
-            "sound": "default",
             // mutable-content 让 Notification Service Extension 有机会
             // 在展示前替换内容（如拉取头像、解密 E2EE 正文）。
             "mutable-content": 1,
@@ -157,7 +174,12 @@ pub fn build_apns_payload(envelope: &PushTaskEnvelope) -> Value {
         "message_id": envelope.message_id,
         "conversation_id": envelope.conversation_id,
         "tenant_id": envelope.tenant_id,
-    })
+        "show_badge":display.show_badge,
+    });
+    if display.play_sound {
+        payload["aps"]["sound"] = json!("default");
+    }
+    payload
 }
 
 /// APNs 的这次失败是否意味着「该 device token 永久失效」。
@@ -165,15 +187,7 @@ pub fn build_apns_payload(envelope: &PushTaskEnvelope) -> Value {
 /// 判定必须保守：把限流或 Apple 侧故障当成失效会误删正常设备的 token，
 /// 用户从此收不到任何推送，且无法自愈（除非重装 App 重新注册）。
 pub fn is_dead_device_token(status: reqwest::StatusCode, reason: &str) -> bool {
-    // 410 Gone 是 Apple 明确的「此 token 不再有效」信号。
-    if status == reqwest::StatusCode::GONE {
-        return true;
-    }
-    // 400 里只有这两个 reason 指向 token 本身，其余多是我们请求组装错误。
-    if status == reqwest::StatusCode::BAD_REQUEST {
-        return reason.contains("BadDeviceToken") || reason.contains("DeviceTokenNotForTopic");
-    }
-    false
+    status == reqwest::StatusCode::GONE && reason == "Unregistered"
 }
 
 /// 从 APNs 错误响应体里取出 `reason` 字段。
@@ -181,93 +195,102 @@ pub fn parse_apns_reason(body: &str) -> String {
     serde_json::from_str::<Value>(body)
         .ok()
         .and_then(|v| v.get("reason").and_then(Value::as_str).map(str::to_string))
-        .unwrap_or_else(|| body.chars().take(120).collect())
+        .filter(|s| s.len() <= 64 && s.bytes().all(|b| b.is_ascii_alphabetic()))
+        .unwrap_or_else(|| "Unknown".to_string())
+}
+
+fn invalidation_applies(status: reqwest::StatusCode, body: &str, registered_at_ms: i64) -> bool {
+    if !is_dead_device_token(status, &parse_apns_reason(body)) {
+        return false;
+    }
+    serde_json::from_str::<Value>(body)
+        .ok()
+        .and_then(|v| v.get("timestamp").and_then(Value::as_i64))
+        .is_some_and(|timestamp| timestamp > 0 && registered_at_ms <= timestamp)
+}
+
+fn expiration_seconds(expire_at_ms: i64) -> i64 {
+    expire_at_ms.max(0) / 1000
 }
 
 #[async_trait::async_trait]
-impl crate::interface::messaging::offline_consumer::OfflinePushExecutor
-    for ApnsOfflinePushExecutor
-{
+impl crate::domain::offline_delivery::OfflinePushExecutor for ApnsOfflinePushExecutor {
     async fn deliver(&self, ctx: &Ctx, envelope: &PushTaskEnvelope) -> Result<(), FlareError> {
+        if !crate::infrastructure::push_display::mobile_alert_eligible(envelope) {
+            return Ok(());
+        }
         let tokens = self
             .tokens
             .list_user_tokens(ctx, &envelope.tenant_id, &envelope.user_id)
             .await?;
-        let usable: Vec<_> = tokens
+        let mut failure = None;
+        for token in tokens
             .into_iter()
             .filter(|t| t.usable_for_provider(APNS_PROVIDER))
-            .collect();
-        if usable.is_empty() {
-            tracing::debug!(
-                tenant_id = %envelope.tenant_id,
-                user_id = %envelope.user_id,
-                message_id = %envelope.message_id,
-                "离线推送：该用户无 APNs 设备 token"
-            );
-            return Ok(());
-        }
-
-        let jwt = self.provider_token().await?;
-        let payload = build_apns_payload(envelope);
-        let host = self.creds.host();
-        let priority = if envelope.priority > 0 { "10" } else { "5" };
-
-        let mut delivered = 0usize;
-        let mut terminal_error: Option<FlareError> = None;
-
-        for token in usable {
-            let url = format!("{host}/3/device/{}", token.token);
-            let mut req = self
+        {
+            if self.tokens.was_accepted(&token, envelope).await? {
+                continue;
+            }
+            if token.token.len() > 512 || !token.token.bytes().all(|b| b.is_ascii_hexdigit()) {
+                return Err(FlareError::localized(
+                    ErrorCode::MessageDeliveryFailed,
+                    "APNs device token shape rejected",
+                ));
+            }
+            let jwt = self.provider_token().await?;
+            let mut request = self
                 .http
-                .post(&url)
+                .post(format!("{}/3/device/{}", self.creds.host(), token.token))
                 .bearer_auth(&jwt)
                 .header("apns-topic", &self.creds.topic)
                 .header("apns-push-type", "alert")
-                .header("apns-priority", priority);
-            if let Some(expire_at) = envelope.expire_at {
-                // APNs 的 apns-expiration 是绝对 unix 秒；0 表示只投递一次不重试。
-                req = req.header("apns-expiration", expire_at.to_string());
+                .header(
+                    "apns-priority",
+                    if envelope.priority > 0 { "10" } else { "5" },
+                );
+            if let Some(expiration) = envelope.expire_at.filter(|value| *value > 0) {
+                request = request.header(
+                    "apns-expiration",
+                    expiration_seconds(expiration).to_string(),
+                );
             }
-
-            match req.json(&payload).send().await {
-                Ok(r) if r.status().is_success() => delivered += 1,
-                Ok(r) => {
-                    let status = r.status();
-                    let body = r.text().await.unwrap_or_default();
-                    let reason = parse_apns_reason(&body);
-                    if is_dead_device_token(status, &reason) {
-                        tracing::info!(
-                            tenant_id = %envelope.tenant_id,
-                            user_id = %envelope.user_id,
-                            device_id = %token.device_id,
-                            reason = %reason,
-                            "APNs 目标已失效，从注册表移除该设备 token"
-                        );
-                        let _ = self.tokens.remove_device_token(ctx, &token).await;
-                    } else {
-                        terminal_error = Some(FlareError::localized(
-                            ErrorCode::InternalError,
-                            format!("APNs 投递失败（{status}）: {reason}"),
-                        ));
+            let result = match request.json(&build_apns_payload(envelope)).send().await {
+                Ok(response) if response.status() == reqwest::StatusCode::OK => {
+                    self.tokens.record_accepted(&token, envelope).await
+                }
+                Ok(response) => {
+                    let status = response.status();
+                    match vendor_http::body(response).await {
+                        Ok(body) if invalidation_applies(status, &body, token.registered_at_ms) => {
+                            self.tokens.remove_device_token(ctx, &token).await
+                        }
+                        Ok(_) => {
+                            let code = if status.is_server_error()
+                                || status == reqwest::StatusCode::TOO_MANY_REQUESTS
+                                || status == reqwest::StatusCode::GONE
+                            {
+                                ErrorCode::ServiceUnavailable
+                            } else {
+                                ErrorCode::MessageDeliveryFailed
+                            };
+                            Err(FlareError::localized(code, "APNs delivery rejected"))
+                        }
+                        Err(error) => Err(error),
                     }
                 }
-                Err(e) => {
-                    terminal_error = Some(FlareError::localized(
-                        ErrorCode::InternalError,
-                        format!("APNs 请求失败: {e}"),
-                    ));
-                }
+                Err(_) => Err(vendor_http::failure(
+                    "APNs transport failed; acceptance unknown",
+                )),
+            };
+            if let Err(error) = result
+                && failure
+                    .as_ref()
+                    .is_none_or(|previous: &FlareError| !previous.is_retryable())
+            {
+                failure = Some(error);
             }
         }
-
-        // 与 FCM 通道一致：一台成功即整体成功，避免重试给其余设备造成重复通知。
-        if delivered > 0 {
-            return Ok(());
-        }
-        match terminal_error {
-            Some(err) => Err(err),
-            None => Ok(()), // 全部目标已失效并清理，无需重试
-        }
+        failure.map_or(Ok(()), Err)
     }
 }
 
@@ -306,11 +329,11 @@ mod tests {
         use reqwest::StatusCode;
         // Apple 明确的失效信号
         assert!(is_dead_device_token(StatusCode::GONE, "Unregistered"));
-        assert!(is_dead_device_token(
+        assert!(!is_dead_device_token(
             StatusCode::BAD_REQUEST,
             "BadDeviceToken"
         ));
-        assert!(is_dead_device_token(
+        assert!(!is_dead_device_token(
             StatusCode::BAD_REQUEST,
             "DeviceTokenNotForTopic"
         ));
@@ -345,8 +368,24 @@ mod tests {
             parse_apns_reason(r#"{"reason":"BadDeviceToken"}"#),
             "BadDeviceToken"
         );
-        // 非 JSON 时退回原文截断，保证日志里仍有可诊断信息
-        assert_eq!(parse_apns_reason("gateway timeout"), "gateway timeout");
+        assert_eq!(parse_apns_reason("PRIVATE vendor body"), "Unknown");
+        assert!(!is_dead_device_token(reqwest::StatusCode::GONE, "anything"));
+        assert!(!invalidation_applies(
+            reqwest::StatusCode::GONE,
+            r#"{"reason":"Unregistered","timestamp":1000}"#,
+            1001
+        ));
+        assert!(invalidation_applies(
+            reqwest::StatusCode::GONE,
+            r#"{"reason":"Unregistered","timestamp":1000}"#,
+            1000
+        ));
+        assert!(!invalidation_applies(
+            reqwest::StatusCode::GONE,
+            r#"{"reason":"Unregistered"}"#,
+            1
+        ));
+        assert_eq!(expiration_seconds(1_800_000_000_123), 1_800_000_000);
     }
 
     #[test]

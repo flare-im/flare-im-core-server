@@ -12,7 +12,9 @@ use flare_im_hooks::hooks::adapters::is_reserved_webhook_header;
 use flare_server_core::error::{AnyhowContext, Result};
 use tracing::{debug, error, info, warn};
 
-use crate::domain::model::{HookConfig, HookTransportConfig, LoggableName, validate_hook_name};
+use crate::domain::model::{
+    HOOK_TYPES, HookConfig, HookTransportConfig, LoggableName, validate_hook_name,
+};
 use crate::infrastructure::persistence::postgres_config::PostgresHookConfigRepository;
 use flare_server_core::KvStore;
 
@@ -59,6 +61,21 @@ impl ConfigLoaderItem {
         match self {
             ConfigLoaderItem::Database(loader) => loader.buckets_by_tenant(),
             ConfigLoaderItem::File(_) | ConfigLoaderItem::ConfigCenter(_) => false,
+        }
+    }
+
+    /// 启动时本源加载失败，Capability 就不启动：只有本进程自己的 Hook 文件（见
+    /// [`FileConfigLoader`]）。数据库与配置中心启动时加载失败照旧只记告警、等下一次刷新。
+    pub fn required_at_startup(&self) -> bool {
+        matches!(self, ConfigLoaderItem::File(_))
+    }
+
+    /// 日志里的配置源类别。
+    pub fn source_name(&self) -> &'static str {
+        match self {
+            ConfigLoaderItem::File(_) => "file",
+            ConfigLoaderItem::Database(_) => "database",
+            ConfigLoaderItem::ConfigCenter(_) => "config_center",
         }
     }
 }
@@ -136,6 +153,12 @@ impl ConfigValidator {
         Ok(())
     }
 
+    /// 同 [`Self::validate`]，只是不对命名规则告警：配置文件加载器用它先查一遍，文件的 Hook
+    /// 随后合成快照时还要经 [`Self::validate`]，告警每次加载只打一次。
+    fn check(config: &HookConfig) -> Result<()> {
+        config.all_hooks().try_for_each(Self::check_hook)
+    }
+
     /// 校验单条 Hook 配置（名称、优先级、超时、分组、错误策略与 Webhook 的签名密钥和自定义头），
     /// 规则同 [`Self::validate`]。
     ///
@@ -147,6 +170,24 @@ impl ConfigValidator {
     /// - `error_policy` 不认识（解析不区分大小写、忽略下划线，见 `HookErrorPolicy::parse`）：
     ///   以前按 fail_fast 处理。
     pub fn validate_hook(hook: &crate::domain::model::HookConfigItem) -> Result<()> {
+        Self::check_hook(hook)?;
+
+        // 创建与改名时才强制的名称规则（`validate_hook_name`：不超过 128 个字符、不含控制字符）。
+        // 规则之前已经存下或写在配置文件里的名称照常加载，已有部署不受影响；这里只告警，名称在
+        // 日志与错误信息里一律经 `LoggableName` 转义。
+        if let Err(rule) = validate_hook_name(&hook.name) {
+            warn!(
+                hook = %LoggableName(&hook.name),
+                rule,
+                "hook name breaks the naming rule for new hooks; it is still loaded, rename it"
+            );
+        }
+
+        Ok(())
+    }
+
+    /// [`Self::validate_hook`] 里报错的那些检查（不含命名规则告警）。
+    fn check_hook(hook: &crate::domain::model::HookConfigItem) -> Result<()> {
         if let HookTransportConfig::Webhook {
             secret: Some(secret),
             ..
@@ -189,17 +230,6 @@ impl ConfigValidator {
             return Err(config_error("Hook name cannot be empty"));
         }
 
-        // 创建与改名时才强制的名称规则（`validate_hook_name`：不超过 128 个字符、不含控制字符）。
-        // 规则之前已经存下或写在配置文件里的名称照常加载，已有部署不受影响；这里只告警，名称在
-        // 日志与错误信息里一律经 `LoggableName` 转义。
-        if let Err(rule) = validate_hook_name(&hook.name) {
-            warn!(
-                hook = %LoggableName(&hook.name),
-                rule,
-                "hook name breaks the naming rule for new hooks; it is still loaded, rename it"
-            );
-        }
-
         if hook.priority < 0 || hook.priority > 1000 {
             return Err(config_error("Hook priority must be between 0 and 1000"));
         }
@@ -218,7 +248,17 @@ impl ConfigValidator {
     }
 }
 
-/// 配置文件加载器
+/// 配置文件加载器：本进程自己的 Hook 文件（`CONFIG_FILE`，默认 `config/hooks.toml`，最低优先级）。
+///
+/// - 文件不存在：该文件可选，没有文件 Hook（行为同以前）。
+/// - 文件存在却读不了（无权限、是目录、不是 UTF-8、符号链接指向不存在的文件）、不是合法的 Hook
+///   配置（TOML 语法或字段类型错误、顶层写了不认识的 Hook 类型）或校验不过（见
+///   [`ConfigValidator::validate_hook`]）：报配置错误。启动时 Capability 因此拒绝启动；运行中的
+///   重载沿用该文件上一次加载成功的配置并记错误日志（见 [`super::ConfigWatcher`]）。以前读不了、
+///   解析不了时只记一条告警，按没有文件 Hook 启动，平台写在文件里的审核、合规 Hook 静默失效。
+///
+/// 错误只带文件路径、出错的行列、Hook 名与头名，不带文件内容：TOML 解析器的报错会原样引用出错的
+/// 那一行，字段类型错误还会带上取值，可能正是 Webhook 密钥或鉴权头。
 #[derive(Debug)]
 pub struct FileConfigLoader {
     path: PathBuf,
@@ -228,30 +268,108 @@ impl FileConfigLoader {
     pub fn new<P: Into<PathBuf>>(path: P) -> Self {
         Self { path: path.into() }
     }
+
+    /// 读取并校验文件；文件不存在时返回 `Ok(None)`（规则见类型说明）。
+    pub async fn read(&self) -> Result<Option<HookConfig>> {
+        let content = match tokio::fs::read_to_string(&self.path).await {
+            Ok(content) => content,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                // 链接本身在、指向的文件不在：多半是配置档没装好（启动脚本用符号链接选配置档），
+                // 不当成「没有文件」。
+                if tokio::fs::symlink_metadata(&self.path).await.is_ok() {
+                    return Err(self.error("is a symbolic link to a missing file"));
+                }
+                return Ok(None);
+            }
+            Err(error) => return Err(self.error(format!("cannot be read: {error}"))),
+        };
+        let config = parse_hook_file(&content).map_err(|reason| self.error(reason))?;
+        ConfigValidator::check(&config)
+            .map_err(|error| self.error(format!("is invalid: {}", reason_with_details(&error))))?;
+        Ok(Some(config))
+    }
+
+    /// 启动时先于配置中心与数据库读一次（见 `prepare_config_sources`），文件有问题时返回错误、
+    /// Capability 拒绝启动，报错不被随后的数据库不可达之类的错误盖住；读到的 Hook 条数（或文件
+    /// 不存在）记一条 INFO。
+    pub async fn load_at_startup(&self) -> Result<()> {
+        match self.read().await? {
+            Some(config) => info!(
+                path = %self.path.display(),
+                hooks_count = config.hook_count(),
+                "Loaded hook config file"
+            ),
+            None => info!(
+                path = %self.path.display(),
+                "Hook config file not found; no hooks from file"
+            ),
+        }
+        Ok(())
+    }
+
+    fn error(&self, reason: impl std::fmt::Display) -> flare_server_core::error::FlareError {
+        config_error(format!("Hook config file {} {reason}", self.path.display()))
+    }
 }
 
 impl ConfigLoader for FileConfigLoader {
     async fn load(&self) -> Result<HookConfig> {
-        if !self.path.exists() {
+        let Some(config) = self.read().await? else {
             debug!(path = %self.path.display(), "Hook config file not found, using default config");
             return Ok(HookConfig::default());
-        }
-
-        let content = tokio::fs::read_to_string(&self.path)
-            .await
-            .with_context(|| format!("Failed to read hook config file: {}", self.path.display()))?;
-
-        let config: HookConfig = toml::from_str(&content).with_context(|| {
-            format!("Failed to parse hook config file: {}", self.path.display())
-        })?;
+        };
 
         debug!(
             path = %self.path.display(),
-            hooks_count = config.pre_send.len() + config.post_send.len() + config.delivery.len() + config.recall.len(),
+            hooks_count = config.hook_count(),
             "Loaded hook config from file"
         );
 
         Ok(config)
+    }
+}
+
+/// 把文件内容解析成 Hook 配置；失败时返回不带文件内容的原因（见 [`FileConfigLoader`]）。
+fn parse_hook_file(content: &str) -> std::result::Result<HookConfig, String> {
+    let invalid = |error: toml::de::Error| match error.span() {
+        Some(span) => {
+            let (line, column) = line_and_column(content, span.start);
+            format!("is not a valid hook configuration (line {line}, column {column})")
+        }
+        None => "is not a valid hook configuration".to_string(),
+    };
+    // 先按表解析拿到顶层键：顶层只能是 15 类 Hook。写错的类型名（`[[pre_sned]]`）以前被静默
+    // 忽略，那一节的 Hook 就不加载。
+    let table: toml::Table = toml::from_str(content).map_err(invalid)?;
+    if let Some(unknown) = table.keys().find(|key| !HOOK_TYPES.contains(&key.as_str())) {
+        return Err(format!(
+            "has an unknown hook type `{}` (hook types: {})",
+            LoggableName(unknown),
+            HOOK_TYPES.join(", ")
+        ));
+    }
+    toml::from_str(content).map_err(invalid)
+}
+
+/// `offset`（字节）所在的行与列，都从 1 起算；列按字符计。
+fn line_and_column(content: &str, offset: usize) -> (usize, usize) {
+    let before = content.get(..offset).unwrap_or(content);
+    let line_start = before.rfind('\n').map_or(0, |index| index + 1);
+    (
+        before.matches('\n').count() + 1,
+        before[line_start..].chars().count() + 1,
+    )
+}
+
+/// 配置错误的原因加细节（Hook 名、头名，不带取值）：`FlareError` 的 Display 不含细节。
+fn reason_with_details(error: &flare_server_core::error::FlareError) -> String {
+    match error {
+        flare_server_core::error::FlareError::Localized {
+            reason,
+            details: Some(details),
+            ..
+        } => format!("{reason} ({details})"),
+        other => other.reason().to_string(),
     }
 }
 
@@ -652,8 +770,86 @@ fn config_error(reason: impl Into<String>) -> flare_server_core::error::FlareErr
     .build_error()
 }
 
+/// 测试用的 Hook 文件：临时目录与样例内容（`watcher`、`config_sources` 的用例也用）。
+#[cfg(test)]
+pub(crate) mod test_support {
+    use std::path::PathBuf;
+
+    /// 样例里的密钥与鉴权头取值：任何报错与日志里都不能出现。
+    pub(crate) const SECRET: &str = "r75b-secret-not-for-errors";
+
+    /// 一条 post_send Webhook Hook，第 10 行是 `secret`、第 12 行是鉴权头。
+    pub(crate) fn webhook_profile(name: &str) -> String {
+        format!(
+            "[[post_send]]\nname = \"{name}\"\nenabled = true\npriority = 0\ntimeout_ms = 500\n\
+             [post_send.selector]\n[post_send.transport]\ntype = \"webhook\"\n\
+             endpoint = \"https://audit.example.com/hook\"\nsecret = \"{SECRET}\"\n\
+             [post_send.transport.headers]\nAuthorization = \"Bearer {SECRET}\"\n"
+        )
+    }
+
+    /// 坏掉的文件：(内容, 报错里应有的说明)。前两份 TOML 解析器自己的报错会带出密钥。
+    pub(crate) fn broken_profiles() -> Vec<(String, &'static str)> {
+        vec![
+            // 第 10 行的字符串没有收尾。
+            (
+                webhook_profile("audit").replace(
+                    &format!("secret = \"{SECRET}\""),
+                    &format!("secret = \"{SECRET}"),
+                ),
+                "not a valid hook configuration (line 10,",
+            ),
+            // 第 3 行字段类型不对。
+            (
+                webhook_profile("audit")
+                    .replace("enabled = true", &format!("enabled = \"{SECRET}\"")),
+                "not a valid hook configuration (line 3,",
+            ),
+            // 顶层 Hook 类型写错。
+            (
+                webhook_profile("audit").replace("post_send", "post_sned"),
+                "unknown hook type `post_sned`",
+            ),
+            // 能解析，校验不过。
+            (
+                webhook_profile("audit").replace("priority = 0", "priority = 5000"),
+                "is invalid: Hook priority must be between 0 and 1000",
+            ),
+        ]
+    }
+
+    /// 临时目录，用完删除。
+    pub(crate) struct TempDir(PathBuf);
+
+    impl TempDir {
+        pub(crate) fn new() -> Self {
+            let path = std::env::temp_dir().join(format!("flare-r75b-{}", uuid::Uuid::new_v4()));
+            std::fs::create_dir(&path).unwrap();
+            Self(path)
+        }
+
+        /// 目录下名为 `name` 的路径（不创建）。
+        pub(crate) fn path(&self, name: &str) -> PathBuf {
+            self.0.join(name)
+        }
+
+        pub(crate) fn write(&self, name: &str, content: impl AsRef<[u8]>) -> PathBuf {
+            let path = self.path(name);
+            std::fs::write(&path, content).unwrap();
+            path
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use super::test_support::{SECRET, TempDir, broken_profiles, webhook_profile};
     use super::*;
     use crate::domain::model::HookConfigItem;
     use crate::infrastructure::config::HookConfigSnapshot;
@@ -911,10 +1107,14 @@ Authorization = "Bearer w13h-header-value-not-for-errors"
         }
     }
 
-    fn shipped_profile(name: &str) -> HookConfig {
-        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+    fn shipped_profile_path(name: &str) -> PathBuf {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../config")
-            .join(name);
+            .join(name)
+    }
+
+    fn shipped_profile(name: &str) -> HookConfig {
+        let path = shipped_profile_path(name);
         let content = std::fs::read_to_string(&path)
             .unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
         toml::from_str(&content).unwrap_or_else(|error| {
@@ -923,9 +1123,10 @@ Authorization = "Bearer w13h-header-value-not-for-errors"
     }
 
     /// 仓库里的 Hook 配置样例也能被 Capability 的加载器解析与校验（Ingest 的加载器另有
-    /// `flare-im-hooks` 的 `config_fail_closed` 用例）。
-    #[test]
-    fn shipped_hook_profiles_load_in_the_capability_engine() {
+    /// `flare-im-hooks` 的 `config_fail_closed` 用例），作为 Capability 自己的 Hook 文件
+    /// （`CONFIG_FILE`）也能加载：顶层没有不认识的 Hook 类型。
+    #[tokio::test]
+    async fn shipped_hook_profiles_load_in_the_capability_engine() {
         for name in [
             "hooks.core.toml",
             "hooks.social.toml",
@@ -937,6 +1138,12 @@ Authorization = "Bearer w13h-header-value-not-for-errors"
             let config = shipped_profile(name);
             ConfigValidator::validate(&config)
                 .unwrap_or_else(|error| panic!("{name} fails validation: {error}"));
+            let from_file = FileConfigLoader::new(shipped_profile_path(name))
+                .read()
+                .await
+                .unwrap_or_else(|error| panic!("{name} fails as a Capability hook file: {error}"))
+                .unwrap_or_else(|| panic!("{name} is missing"));
+            assert_eq!(from_file.hook_count(), config.hook_count(), "{name}");
         }
     }
 
@@ -991,5 +1198,126 @@ Authorization = "Bearer w13h-header-value-not-for-errors"
                 );
             }
         }
+    }
+
+    fn printed(error: &flare_server_core::error::FlareError) -> String {
+        format!("{error} {error:?}")
+    }
+
+    /// 文件不存在（文件可选）：没有文件 Hook，行为同以前。
+    #[tokio::test]
+    async fn a_missing_hook_file_means_no_file_hooks() {
+        let dir = TempDir::new();
+        let loader = FileConfigLoader::new(dir.path("hooks.toml"));
+        assert!(loader.read().await.unwrap().is_none());
+        loader.load_at_startup().await.unwrap();
+        let loaded = ConfigLoaderItem::File(loader).load().await.unwrap();
+        assert!(loaded.global.is_empty());
+        assert!(loaded.tenants.is_empty());
+    }
+
+    /// 解析不了（语法、字段类型、顶层 Hook 类型写错）或校验不过的文件报配置错误，说明带文件路径与
+    /// 出错的行列；不带文件内容（TOML 解析器自己的报错会带出那一行的密钥）。修复前加载器只记告警，
+    /// 按没有文件 Hook 启动。
+    #[tokio::test]
+    async fn a_broken_hook_file_is_an_error_naming_the_file_but_not_its_content() {
+        let dir = TempDir::new();
+        let valid = dir.write("hooks.toml", webhook_profile("audit"));
+        let config = FileConfigLoader::new(&valid).read().await.unwrap().unwrap();
+        assert_eq!(config.post_send.len(), 1);
+
+        for (index, (content, expected)) in broken_profiles().into_iter().enumerate() {
+            if index < 2 {
+                let raw = toml::from_str::<HookConfig>(&content)
+                    .unwrap_err()
+                    .to_string();
+                assert!(
+                    raw.contains(SECRET),
+                    "parser error is expected to echo the source: {raw}"
+                );
+            }
+            let path = dir.write("hooks.toml", &content);
+            for error in [
+                FileConfigLoader::new(&path).read().await.unwrap_err(),
+                FileConfigLoader::new(&path)
+                    .load_at_startup()
+                    .await
+                    .unwrap_err(),
+                ConfigLoaderItem::File(FileConfigLoader::new(&path))
+                    .load()
+                    .await
+                    .unwrap_err(),
+            ] {
+                let printed = printed(&error);
+                assert_eq!(
+                    error.code(),
+                    Some(flare_server_core::error::ErrorCode::ConfigurationError)
+                );
+                // 路径与原因在 Display 里（启动失败与日志打印的都是它）。
+                let shown = error.to_string();
+                assert!(shown.contains(&path.display().to_string()), "{shown}");
+                assert!(shown.contains(expected), "{shown}");
+                assert!(!printed.contains(SECRET), "{printed}");
+            }
+        }
+    }
+
+    /// 校验错误带 Hook 名（细节以前只在 Debug 里，启动失败的报错看不到）。
+    #[tokio::test]
+    async fn an_invalid_hook_in_the_file_is_named_in_the_error() {
+        let dir = TempDir::new();
+        let path = dir.write(
+            "hooks.toml",
+            webhook_profile("audit-empty-secret")
+                .replace(&format!("secret = \"{SECRET}\""), "secret = \"\""),
+        );
+        let error = FileConfigLoader::new(&path).read().await.unwrap_err();
+        let shown = error.to_string();
+        assert!(shown.contains("signing secret is empty"), "{shown}");
+        assert!(shown.contains("hook=audit-empty-secret"), "{shown}");
+        assert!(!printed(&error).contains(SECRET), "{error:?}");
+    }
+
+    /// 文件在却读不了：是目录、不是 UTF-8、符号链接指向不存在的文件、没有读权限。
+    #[tokio::test]
+    async fn an_unreadable_hook_file_is_an_error() {
+        let dir = TempDir::new();
+        let directory = dir.path("hooks.d");
+        std::fs::create_dir(&directory).unwrap();
+        let not_utf8 = dir.write("latin1.toml", [b'#', b' ', 0xff, 0xfe, b'\n']);
+        let mut cases = vec![(directory, "cannot be read"), (not_utf8, "cannot be read")];
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let dangling = dir.path("hooks.toml");
+            std::os::unix::fs::symlink("hooks.social.toml", &dangling).unwrap();
+            cases.push((dangling, "symbolic link to a missing file"));
+
+            let locked = dir.write("locked.toml", webhook_profile("audit"));
+            std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+            // 以 root 跑时权限位挡不住读，这一项不适用。
+            if std::fs::read(&locked).is_err() {
+                cases.push((locked, "cannot be read"));
+            }
+        }
+
+        for (path, expected) in cases {
+            let error = FileConfigLoader::new(&path).read().await.unwrap_err();
+            let shown = error.to_string();
+            assert!(shown.contains(&path.display().to_string()), "{shown}");
+            assert!(shown.contains(expected), "{shown}");
+            assert!(!printed(&error).contains(SECRET), "{error:?}");
+        }
+    }
+
+    #[test]
+    fn error_positions_are_one_based_lines_and_character_columns() {
+        let content = "a = 1\nname = \"审核\"x\n";
+        assert_eq!(line_and_column(content, 0), (1, 1));
+        assert_eq!(line_and_column(content, 6), (2, 1));
+        let offset = content.find('x').unwrap();
+        assert_eq!(line_and_column(content, offset), (2, 12));
+        assert_eq!(line_and_column(content, content.len() + 5), (3, 1));
     }
 }

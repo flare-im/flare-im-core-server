@@ -8,7 +8,7 @@ Flare IM **能力服务**：**Hook 引擎**（配置与 gRPC 调度）+ **能力
 
 - **配置管理**：支持配置文件、动态API（数据库）、配置中心三种配置方式
 - **执行调度**：按优先级执行Hook，支持并发执行和超时控制
-- **监控统计**：收集Hook执行指标，提供监控和告警能力
+- **执行证据与熔断**：把 Hook 执行记录写进 `hook_executions`（失败全量、成功采样）并提供统计，按 (租户, Hook) 熔断，见[执行证据与熔断](#执行证据与熔断)
 - **扩展机制**：支持 gRPC、WebHook、Local Plugin（Hook 传输侧）三种扩展方式；Hook 的 gRPC 面（`HookExtension` / `HookService`）与 `CapabilityService` 同文件 **`capability_service.proto`**、同包 **`flare.capability.v1`**，Rust 侧统一 `flare_grpc_proto::capability`
 - **能力扩展**：通过 `CapabilityExtensionRegistry` 聚合 Guard / Resolver / `RtcCapability`；RTC 后端通过 `capability_runtime.plugin_discovery_endpoints`（`capability_id = rtc.media.control`）或环境变量 `FLARE_MEDIA_CONTROL_GRPC_ENDPOINT` 装配。能力目录、授权与命令分发经 **`flare.capability.v1.CapabilityService` gRPC** 与本进程 Hook 端口同服暴露；外部 HTTP 由接入网关转发至该 gRPC（无旧版 plugin 宿主与 outbox）
 
@@ -191,11 +191,17 @@ let config = CapabilityServiceConfig {
 **存储位置**：本地TOML文件
 
 **特点**：
-- 适合开发环境
-- 适合静态配置
-- 不支持动态更新（需要重启服务）
+- 适合开发环境，以及对所有租户生效的平台级 Hook
+- 每次刷新都重新读取（见「配置刷新」）
 
-**配置文件路径**：`config/hooks.toml`
+**配置文件路径**：`CONFIG_FILE`，默认 `config/hooks.toml`（相对工作目录）
+
+**加载规则**：
+- 文件可选。没有文件时 Capability 不带文件 Hook 运行，启动日志在 INFO 级说明；有文件时记录路径与 Hook 条数。
+- 文件存在却用不了，Capability 拒绝启动：读不了（无权限、是目录、不是 UTF-8、符号链接指向不存在的文件），不是 Hook 配置（TOML 语法或字段类型错误，或顶层写了 15 类 Hook 以外的表，例如 `[[pre_sned]]`），或其中的 Hook 校验不过（优先级、超时、分组、错误策略、Webhook 空密钥、保留的 Webhook 头）。文件先于配置中心与数据库检查，数据库不可达盖不住这个错误。
+- 报错带文件路径、解析错误的行列、校验错误的 Hook 名与头名，不带文件内容：TOML 解析器自己的报错会引用出错的那一行（字段类型错误还会带上取值），可能正是 Webhook 密钥或鉴权头。
+- 运行中文件改坏了不会让服务退出：文件里的 Hook 停在上一次加载成功的版本，每次刷新按 ERROR 记下错误，其余配置源照常刷新。文件改好后下一次刷新生效；删掉文件则下一次刷新后没有文件 Hook。
+- Hook 条目里不认识的键 Capability 忽略（可能读同一份文件的 Message Ingest 会拒绝）。
 
 **配置示例**：
 ```toml
@@ -262,7 +268,8 @@ ORDER BY hook_type, priority ASC
 
 - **刷新间隔**：默认60秒（可通过`refresh_interval_secs`配置）
 - **自动刷新**：定时从所有配置源重新加载配置
-- **配置验证**：刷新时会验证配置格式，无效配置会被忽略
+- **失败**：某个配置源加载失败时沿用它上一次加载的结果，并记录失败（配置文件为 ERROR，数据库与配置中心为 WARN）；合成的全局配置校验不过时当前 Hook 不变。刷新不会让运行中的服务退出。
+- **启动**：三个配置源里只有配置文件必须加载成功（见「配置文件配置」）。启动时从数据库或配置中心加载 Hook 行失败只记日志，下一次刷新重试；连上数据库本身仍是必需的。
 
 ## 使用示例
 
@@ -348,7 +355,7 @@ flare-capability/
 ├── infrastructure/      # 基础设施层
 │   ├── adapters/        # Hook适配器（gRPC、WebHook、Local）
 │   ├── config/          # 配置加载器（文件、数据库、配置中心）
-│   ├── monitoring/      # 监控统计
+│   ├── hook_execution/  # 执行证据：缓冲、批量写库、保留期、指标
 │   └── persistence/     # 配置持久化（PostgreSQL）
 ├── interface/           # 接口层
 │   └── grpc/            # gRPC服务接口
@@ -421,13 +428,63 @@ flare-capability/
    target = "plugin-name"
    ```
 
-## 监控和统计
+## 执行证据与熔断
 
-目前**不记录**单个 Hook 的执行结果：进程内的 `MetricsCollector`、`ExecutionRecorder` 没有任何写入
-方，`deploy/init.sql` 里的 `hook_executions` 表为预留、从不写入。因此 `hook_config.get_statistics`
-的计数为 0，`hook_config.query_executions` 返回空列表。要落库执行记录，发送链路上每条消息的每个
-Hook 都多一次写库，须先定采样与保留期；记录器还须按租户（不只按 Hook 名）区分。本服务导出通用的
-gRPC 服务端指标（`GrpcMetricsLayer`），Hook 失败见日志。
+`HookPlugin` 为 `pre_send`、`post_send`、`delivery`、`recall` 调用的每个 Hook 都先过一个
+(租户, Hook) 熔断器，并在 `hook_executions`（源 DDL `0015_20261016_hook_execution_evidence.sql`）留下执行记录。
+
+- **熔断**：按签名里的租户、Hook 类型与名称分开，每个 Capability 实例各自维护。同一 Hook 连续
+  `failure_threshold` 次调用失败或超时（都在这一串第一次失败后的 `failure_window_secs` 内）即打开
+  `open_secs`，期间不调用该 Hook。必需的 Hook（critical 组或 `require_success`）此时与 Hook 不可用
+  相同：PreSend、Recall 回可重试的 `UNAVAILABLE`（Message Ingest 回 503），PostSend、Delivery 以
+  `UNAVAILABLE` 失败；可选的 Hook 跳过。窗口到期后放一次探测：成功关闭，失败再打开一个窗口，探测
+  未结束时其余调用仍短路。Hook 给出结论（放行或拒绝）都算健康。打开、探测失败（第 1、2、4、8…
+  次）与关闭记日志，租户与 Hook 名转义；单次短路只记 DEBUG。
+- **记录**：租户、Hook 类型与名称（`hook_id` 为 `hook_type:name`）、Hook 版本、消息号、请求号与
+  追踪号、Hook 是否给出结论（`success`）、耗时、错误码、固定说明、时间与 `sample_weight`。从不记
+  消息正文或下游错误原文：调用失败只记错误码与 "hook call failed"，拒绝记 `HOOK_REJECTED` 与
+  Hook 的拒绝原因码，超时记 `HOOK_TIMEOUT`，熔断短路记 `HOOK_CIRCUIT_OPEN`。拒绝、失败、超时全量
+  记录；放行与熔断短路按 1/N 采样，N 为 `1 / success_sample_ratio` 四舍五入（0.01 即每 100 次留
+  1 次，0.3 即每 3 次留 1 次），留下的一行 `sample_weight` 为 N。
+- **写入**：消息链路上只把记录放进内存里的有界缓冲（一次加锁，从不等待）。后台任务在攒够
+  `batch_size` 条时立即写一批，另每 `flush_interval_ms` 写一次；停机时在 5 秒内写完余下的（每批的
+  写入截到这 5 秒为止），然后关闭缓冲：没写完的、被截断的那一批以及之后仍在收尾的请求交来的记录都
+  按 `shutdown` 计为丢弃。缓冲满时先丢采样的：新来的采样记录直接丢，新来的全量记录挤掉最旧的采样
+  记录；缓冲里全是全量记录时丢新来的。写库失败或超过 10 秒的一批丢弃，不重试。每次丢弃都计数。
+- **保留期**：每 `retention_sweep_secs` 删除早于 `retention_days` 的行，最旧的先删，每条语句至多
+  `retention_delete_batch` 行。
+- **读取**：`hook_config.get_statistics` 与 `hook_config.query_executions`（`Administer`）只读调用方
+  租户这一条 Hook 的行。计数按权重估计；平均与 p99 耗时按权重计算、不含熔断短路；
+  `circuit_break_count` 是熔断短路次数，`error_count_by_code` 按错误码统计失败（拒绝算成功，不在
+  其中）。统计不给时间范围时取最近 24 小时；执行记录从新到旧，至多 `limit` 条（上限 1000），带
+  `has_more`。
+- 没有库时只熔断，不记录。
+
+| 设置（环境变量，其次配置键） | 缺省 | 取值范围 |
+| --- | --- | --- |
+| `FLARE_CAPABILITY_HOOK_EXECUTIONS_ENABLED` / `hook_executions.enabled` | true | true 或 false |
+| `FLARE_CAPABILITY_HOOK_EXECUTIONS_BUFFER_CAPACITY` / `hook_executions.buffer_capacity` | 10000 | 100 到 1,000,000 条 |
+| `FLARE_CAPABILITY_HOOK_EXECUTIONS_BATCH_SIZE` / `hook_executions.batch_size` | 500 | 1 到 5000，不超过缓冲上限 |
+| `FLARE_CAPABILITY_HOOK_EXECUTIONS_FLUSH_INTERVAL_MS` / `hook_executions.flush_interval_ms` | 1000 | 50 到 60000 毫秒 |
+| `FLARE_CAPABILITY_HOOK_EXECUTIONS_SUCCESS_SAMPLE_RATIO` / `hook_executions.success_sample_ratio` | 0.01 | 0（不留）到 1（全留） |
+| `FLARE_CAPABILITY_HOOK_EXECUTIONS_RETENTION_DAYS` / `hook_executions.retention_days` | 7 | 1 到 90 天 |
+| `FLARE_CAPABILITY_HOOK_EXECUTIONS_RETENTION_SWEEP_SECS` / `hook_executions.retention_sweep_secs` | 600 | 10 到 86400 秒 |
+| `FLARE_CAPABILITY_HOOK_EXECUTIONS_RETENTION_DELETE_BATCH` / `hook_executions.retention_delete_batch` | 5000 | 100 到 100000 行 |
+| `FLARE_CAPABILITY_HOOK_CIRCUIT_ENABLED` / `hook_circuit.enabled` | true | true 或 false |
+| `FLARE_CAPABILITY_HOOK_CIRCUIT_FAILURE_THRESHOLD` / `hook_circuit.failure_threshold` | 5 | 1 到 1000 |
+| `FLARE_CAPABILITY_HOOK_CIRCUIT_FAILURE_WINDOW_SECS` / `hook_circuit.failure_window_secs` | 30 | 1 到 3600 秒 |
+| `FLARE_CAPABILITY_HOOK_CIRCUIT_OPEN_SECS` / `hook_circuit.open_secs` | 20 | 1 到 3600 秒 |
+
+配置键从运行时配置文件（`config/services/capability.toml`）读；超出范围的值被忽略，使用缺省值。
+
+指标（Hook 名不做标签）：`capability_hook_execution_records_queued_total`、
+`capability_hook_execution_records_written_total`、
+`capability_hook_execution_records_dropped_total{reason=buffer_full|write_failed|shutdown, class=sampled|always}`、
+`capability_hook_execution_records_buffered`、`capability_hook_execution_flushes_total{result}`、
+`capability_hook_execution_records_expired_total`、
+`capability_hook_circuit_transitions_total{tenant_id, transition=opened|reopened|closed}`、
+`capability_hook_circuit_short_circuits_total{tenant_id}` 与 `capability_hook_circuits_open`，另有通用的
+gRPC 服务端指标（`GrpcMetricsLayer`）。
 
 ## 参考文档
 

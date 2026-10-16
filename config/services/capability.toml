@@ -26,6 +26,27 @@ service_name = "flare-strom-sfu"
 # 本地静态 SFU（无 Consul）时可改用：
 # FLARE_MEDIA_CONTROL_GRPC_ENDPOINT=http://127.0.0.1:50060
 
+# Hook 执行证据（hook_executions，迁移 0012）：拒绝、失败、超时全量，成功与熔断短路按比例采样
+# （0.01 即每 100 次留 1 次，一行代表 100 次）；缓冲满时先丢采样的，丢弃计入指标；按保留期分批删除。
+# 环境变量 FLARE_CAPABILITY_HOOK_EXECUTIONS_* 优先，范围见 flare-capability/README。
+[hook_executions]
+enabled = true
+buffer_capacity = 10000
+batch_size = 500
+flush_interval_ms = 1000
+success_sample_ratio = 0.01
+retention_days = 7
+retention_sweep_secs = 600
+retention_delete_batch = 5000
+
+# 每个 (租户, Hook) 一个熔断器：窗口内连续失败或超时达到阈值即打开，打开期间必需的 Hook 按不可用处理
+# （PreSend 回可重试的 503），可选的跳过；到期放一次探测。环境变量 FLARE_CAPABILITY_HOOK_CIRCUIT_* 优先。
+[hook_circuit]
+enabled = true
+failure_threshold = 5
+failure_window_secs = 30
+open_secs = 20
+
 # Prometheus 出口（共享运行时挂载；端口表见 deploy/prometheus.yml）。
 [services.capability.metrics]
 address = "0.0.0.0"

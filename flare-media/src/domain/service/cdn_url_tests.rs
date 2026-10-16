@@ -47,6 +47,10 @@ struct Fixture {
 
 impl Fixture {
     fn new(cdn_base_url: Option<&str>) -> Self {
+        Self::counting(cdn_base_url, flare_im_usage::UsageRecorder::disabled())
+    }
+
+    fn counting(cdn_base_url: Option<&str>, usage: flare_im_usage::UsageRecorder) -> Self {
         let metadata = Arc::new(Metadata::default());
         let temporary = std::env::temp_dir().join(format!("flare-media-cdn-{}", Uuid::new_v4()));
         let service = MediaService::new(
@@ -64,7 +68,8 @@ impl Fixture {
                 3600,
                 8 * 1024 * 1024,
             ),
-        );
+        )
+        .with_usage(usage);
         Self {
             service,
             metadata,
@@ -133,6 +138,32 @@ async fn blank_cdn_base_never_yields_a_relative_cdn_url() {
         assert_eq!(presigned.cdn_url, "", "cdn_url for base {blank:?}");
         assert_signed(&presigned.url, &key);
     }
+}
+
+/// 用量：对象存储里的文件按下载签名计 `media.bytes_egress`（对象大小），字节不经 Media。
+#[tokio::test]
+async fn signing_an_object_store_download_counts_its_egress() {
+    let usage = flare_im_usage::UsageRecorder::unpublished("media-test");
+    let f = Fixture::counting(None, usage.clone());
+    f.upload(&owner(), "signed-egress").await;
+    f.service
+        .create_presigned_url(&owner(), "signed-egress", 60)
+        .await
+        .unwrap();
+
+    let readings: Vec<_> = usage
+        .live()
+        .into_iter()
+        .map(|reading| (reading.meter, reading.dims, reading.value))
+        .collect();
+    let size = b"cdn url bytes".len() as u64;
+    assert_eq!(
+        readings,
+        [
+            ("media.bytes_stored", vec![("op", "added")], size),
+            ("media.bytes_egress", vec![], size),
+        ]
+    );
 }
 
 /// 修复前落库的历史行：cdn_url 是裸 key。读取时丢弃它，回退到签名 URL。

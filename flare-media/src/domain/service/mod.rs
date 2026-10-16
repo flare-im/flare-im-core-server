@@ -22,6 +22,7 @@ use crate::domain::repository::{
     LocalStoreRef, MetadataCacheRef, MetadataStoreRef, ObjectRepositoryRef, ReferenceStoreRef,
     UploadSessionStoreRef,
 };
+use flare_im_usage::UsageRecorder;
 use flare_server_core::error::{ErrorCode, Result, map_context_error, map_infra_error};
 pub use reclaim::{
     UPLOAD_SESSION_RECLAIM_BATCH, UPLOAD_SESSION_RECLAIM_GRACE_SECONDS,
@@ -31,6 +32,11 @@ pub(crate) use tenant::{require_owner, require_tenant, validate_tenant};
 
 const DIRECT_SINGLE_PUT_THRESHOLD_BYTES: i64 = 8 * 1024 * 1024;
 const DIRECT_MULTIPART_MIN_PART_SIZE_BYTES: i64 = 8 * 1024 * 1024;
+
+/// 元数据里的文件大小（i64）换成用量字节数；负值按 0 计。
+fn usage_bytes(file_size: i64) -> u64 {
+    u64::try_from(file_size).unwrap_or(0)
+}
 
 type UploadContextData<'a> = (
     String,
@@ -51,6 +57,9 @@ pub struct MediaService {
     config: MediaDomainConfig,
     /// 直传完成的领取租期；合并与登记期间按它的五分之一续租。
     direct_completion_lease: Duration,
+    /// 用量计数点：新对象登记（`media.bytes_stored` added）、对象删除（removed）、对象存储文件
+    /// 的下载签名或本地文件读出（`media.bytes_egress`）。去重复用已有对象不计。
+    usage: UsageRecorder,
 }
 
 impl MediaService {
@@ -80,7 +89,13 @@ impl MediaService {
             local_store,
             config,
             direct_completion_lease: Duration::seconds(direct::DIRECT_COMPLETION_LEASE_SECONDS),
+            usage: UsageRecorder::disabled(),
         }
+    }
+
+    pub fn with_usage(mut self, usage: UsageRecorder) -> Self {
+        self.usage = usage;
+        self
     }
 
     /// 测试用：缩短直传完成的领取租期，在毫秒级观察续租。

@@ -2,7 +2,7 @@
 //!
 //! ## 核心职责
 //! 1. 消费 TOPIC_PUSH_OFFLINE 中的 PushTaskEnvelope 消息
-//! 2. 经 `OfflinePushExecutor`（默认 Redis Stream outbox）持久化/投递；
+//! 2. 经显式配置的 `OfflinePushExecutor` 投递（默认关闭，不冒充设备送达）；
 //!    未配置 executor 时回退 DLQ/parking
 //!
 //! ## 设计原则
@@ -15,12 +15,14 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use flare_im_contracts::Ctx;
 use flare_im_service_kit::metrics::PushWorkerMetrics;
+use flare_im_usage::{PushOutcome, UsageRecorder};
 use flare_proto::PushTaskEnvelope;
 use flare_server_core::FlareError;
 use flare_server_core::mq::consumer::{ConsumerError, Message, MessageHandler, MessageResult};
 use prost::Message as _;
 use tracing::instrument;
 
+use crate::domain::offline_delivery::OfflinePushExecutor;
 use crate::infrastructure::mq::dlq_publisher::DlqPublisher;
 
 #[cfg(test)]
@@ -79,9 +81,50 @@ impl OfflineParkingLot {
     }
 }
 
+/// 用量计数点（`push.attempts`）：包住离线推送后端，每次投递按租户、通道与结果计一次。
+/// 结果的划分与 [`OfflinePushHandler`] 一致：可重试的失败会重投，其余失败进死信。
+pub struct UsageCountedExecutor {
+    inner: Arc<dyn OfflinePushExecutor>,
+    provider: &'static str,
+    usage: UsageRecorder,
+}
+
+impl UsageCountedExecutor {
+    pub fn wrap(
+        inner: Arc<dyn OfflinePushExecutor>,
+        provider: &'static str,
+        usage: UsageRecorder,
+    ) -> Arc<dyn OfflinePushExecutor> {
+        Arc::new(Self {
+            inner,
+            provider,
+            usage,
+        })
+    }
+}
+
 #[async_trait::async_trait]
-pub trait OfflinePushExecutor: Send + Sync {
-    async fn deliver(&self, ctx: &Ctx, envelope: &PushTaskEnvelope) -> Result<(), FlareError>;
+impl OfflinePushExecutor for UsageCountedExecutor {
+    async fn deliver(&self, ctx: &Ctx, envelope: &PushTaskEnvelope) -> Result<(), FlareError> {
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            self.inner.deliver(ctx, envelope),
+        )
+        .await
+        .unwrap_or_else(|_| {
+            Err(crate::infrastructure::vendor_http::failure(
+                "offline delivery deadline; acceptance unknown",
+            ))
+        });
+        let outcome = match &result {
+            Ok(()) => PushOutcome::Completed,
+            Err(error) if error.is_retryable() => PushOutcome::Retryable,
+            Err(_) => PushOutcome::Failed,
+        };
+        self.usage
+            .push_attempt(&envelope.tenant_id, self.provider, outcome);
+        result
+    }
 }
 
 /// 离线推送消费者处理器
@@ -147,7 +190,7 @@ impl OfflinePushHandler {
             .duration_since(UNIX_EPOCH)
             .map(|duration| duration.as_millis() as i64)
             .unwrap_or_default();
-        now_ms > expire_at
+        now_ms >= expire_at
     }
 }
 
@@ -223,7 +266,17 @@ impl MessageHandler for OfflinePushHandler {
             return Ok(MessageResult::Ack);
         };
 
-        match delivery.deliver(ctx, &envelope).await {
+        let outcome = tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            delivery.deliver(ctx, &envelope),
+        )
+        .await
+        .unwrap_or_else(|_| {
+            Err(crate::infrastructure::vendor_http::failure(
+                "offline delivery deadline; acceptance unknown",
+            ))
+        });
+        match outcome {
             Ok(()) => Ok(MessageResult::Ack),
             Err(error) if error.is_retryable() => {
                 tracing::warn!(
@@ -354,6 +407,79 @@ mod tests {
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             Ok(())
         }
+    }
+
+    struct FailingExecutor(flare_server_core::error::ErrorCode);
+
+    #[async_trait::async_trait]
+    impl OfflinePushExecutor for FailingExecutor {
+        async fn deliver(
+            &self,
+            _ctx: &Ctx,
+            _envelope: &PushTaskEnvelope,
+        ) -> Result<(), FlareError> {
+            Err(
+                flare_server_core::error::ErrorBuilder::new(self.0, "provider failed")
+                    .build_error(),
+            )
+        }
+    }
+
+    /// 每次投递按租户、通道与结果计一次 `push.attempts`；结果与 handler 的重投/死信划分一致。
+    #[tokio::test]
+    async fn every_delivery_attempt_is_counted_by_provider_and_result() {
+        use flare_server_core::error::ErrorCode;
+        let usage = UsageRecorder::unpublished("push-worker-test");
+        let delivered = UsageCountedExecutor::wrap(
+            Arc::new(RecordingExecutor {
+                delivered: std::sync::atomic::AtomicUsize::new(0),
+            }),
+            "apns",
+            usage.clone(),
+        );
+        let retryable = UsageCountedExecutor::wrap(
+            Arc::new(FailingExecutor(ErrorCode::ServiceUnavailable)),
+            "apns",
+            usage.clone(),
+        );
+        let failed = UsageCountedExecutor::wrap(
+            Arc::new(FailingExecutor(ErrorCode::InvalidParameter)),
+            "fcm",
+            usage.clone(),
+        );
+        let message = task_message();
+        let envelope = OfflinePushHandler::decode_task_envelope(&message).unwrap();
+        let ctx = &message.context.ctx;
+        delivered.deliver(ctx, &envelope).await.unwrap();
+        delivered.deliver(ctx, &envelope).await.unwrap();
+        assert!(
+            retryable
+                .deliver(ctx, &envelope)
+                .await
+                .unwrap_err()
+                .is_retryable()
+        );
+        assert!(failed.deliver(ctx, &envelope).await.is_err());
+
+        let attempts: Vec<_> = usage
+            .live()
+            .into_iter()
+            .map(|reading| {
+                assert_eq!(
+                    (reading.app.as_str(), reading.meter),
+                    ("tenant-a", "push.attempts")
+                );
+                (reading.dims[0].1, reading.dims[1].1, reading.value)
+            })
+            .collect();
+        assert_eq!(
+            attempts,
+            [
+                ("apns", "completed", 2),
+                ("apns", "retryable", 1),
+                ("fcm", "failed", 1)
+            ]
+        );
     }
 
     #[tokio::test]

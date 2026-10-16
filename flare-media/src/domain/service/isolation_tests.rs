@@ -215,6 +215,7 @@ struct Fixture {
     files: Arc<Files>,
     sessions: Arc<Sessions>,
     temporary: PathBuf,
+    usage: UsageRecorder,
 }
 
 impl Fixture {
@@ -223,6 +224,7 @@ impl Fixture {
         let files = Arc::new(Files::default());
         let sessions = Arc::new(Sessions::default());
         let temporary = std::env::temp_dir().join(format!("flare-media-sec05-{}", Uuid::new_v4()));
+        let usage = UsageRecorder::unpublished("media-test");
         let service = MediaService::new(
             None,
             Some(metadata.clone()),
@@ -231,13 +233,15 @@ impl Fixture {
             Some(sessions.clone()),
             Some(files.clone()),
             MediaDomainConfig::new(3600, None, 60, temporary.clone(), 3600, 8 * 1024 * 1024),
-        );
+        )
+        .with_usage(usage.clone());
         Self {
             service,
             metadata,
             files,
             sessions,
             temporary,
+            usage,
         }
     }
 }
@@ -335,6 +339,58 @@ async fn upload_download_and_presign_enforce_tenant_and_authenticated_owner() {
     assert!(f.service.get_metadata(&other, "file").await.is_ok());
     assert!(f.service.delete_media_file(&other, "file").await.is_err());
     assert!(f.service.get_metadata(&b, "file").await.is_err());
+}
+
+/// 用量：新对象登记计 `media.bytes_stored`（added），本地读出计 `media.bytes_egress`，删除计
+/// removed；本地文件的下载签名不计出口（字节随后经本地读出计），跨租户被拒的读不计。
+#[tokio::test]
+async fn usage_follows_the_stored_served_signed_and_removed_bytes_of_the_tenant() {
+    let f = Fixture::new();
+    let a = ctx("tenant-a", "owner");
+    let data = b"0123456789";
+    let input = UploadContext {
+        tenant_id: "tenant-a",
+        file_id: "file",
+        file_name: "file.txt",
+        mime_type: "text/plain",
+        file_size: data.len() as i64,
+        payload: data,
+        file_category: "file".to_string(),
+        user_id: "owner",
+        trace_id: None,
+        namespace: None,
+        business_tag: None,
+        metadata: HashMap::new(),
+    };
+    f.service.store_media_file(&a, input).await.unwrap();
+    f.service.download_local_file(&a, "file").await.unwrap();
+    f.service
+        .create_presigned_url(&a, "file", 60)
+        .await
+        .unwrap();
+    assert!(
+        f.service
+            .download_local_file(&ctx("tenant-b", "owner"), "file")
+            .await
+            .is_err()
+    );
+    f.service.delete_media_file(&a, "file").await.unwrap();
+
+    let readings: Vec<_> = f
+        .usage
+        .live()
+        .into_iter()
+        .map(|reading| (reading.app, reading.meter, reading.dims, reading.value))
+        .collect();
+    let tenant = || "tenant-a".to_string();
+    assert_eq!(
+        readings,
+        [
+            (tenant(), "media.bytes_stored", vec![("op", "added")], 10),
+            (tenant(), "media.bytes_stored", vec![("op", "removed")], 10),
+            (tenant(), "media.bytes_egress", vec![], 10),
+        ]
+    );
 }
 
 #[tokio::test]

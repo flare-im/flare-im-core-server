@@ -9,21 +9,25 @@ use flare_grpc_proto::capability::{
     SetHookStatusRequest, SetHookStatusResponse, UpdateHookConfigRequest, UpdateHookConfigResponse,
 };
 use flare_server_core::error::Result as FlareResult;
-use flare_server_core::error::{ErrorBuilder, ErrorCode};
+use flare_server_core::error::{ErrorBuilder, ErrorCode, FlareError};
 use flare_server_core::utils::require_ctx_from_request;
 use std::sync::Arc;
 use tonic::{Request, Response, Status};
 
+use crate::application::handler::HookQueryHandler;
 use crate::composition::hook_registry::CoreHookRegistry;
 use crate::domain::model::{
-    HookConfigItem, HookSelectorConfig, HookTransportConfig, LoggableName, administrable_hook_type,
-    validate_hook_name,
+    HookConfigItem, HookExecutionFilter, HookExecutionScope, HookExecutionStatistics,
+    HookExecutionTimeRange, HookSelectorConfig, HookTransportConfig, LoggableName,
+    StoredHookExecution, administrable_hook_type, validate_hook_name,
 };
 use crate::infrastructure::config::{ConfigValidator, HookConfigInvalidation};
 use crate::infrastructure::persistence::postgres_config::PostgresHookConfigRepository;
 use chrono::Utc;
+use flare_proto::common::{Pagination, TimeRange};
 use std::collections::HashMap;
 use std::str::FromStr;
+use std::time::{Duration, SystemTime};
 
 /// 从 gRPC 请求中提取租户 ID。
 ///
@@ -40,8 +44,8 @@ fn extract_tenant_id<T>(request: &Request<T>) -> Option<String> {
 pub struct HookServiceServer {
     repository: Arc<PostgresHookConfigRepository>,
     registry: Arc<CoreHookRegistry>,
-    metrics_collector: Option<Arc<crate::infrastructure::monitoring::MetricsCollector>>,
-    execution_recorder: Option<Arc<crate::infrastructure::monitoring::ExecutionRecorder>>,
+    /// `hook_executions` 的读侧；没有时统计为 0、执行记录为空。
+    executions: Option<Arc<HookQueryHandler>>,
     invalidation: Option<Arc<HookConfigInvalidation>>,
 }
 
@@ -53,8 +57,7 @@ impl HookServiceServer {
         Self {
             repository,
             registry,
-            metrics_collector: None,
-            execution_recorder: None,
+            executions: None,
             invalidation: None,
         }
     }
@@ -65,14 +68,52 @@ impl HookServiceServer {
         self
     }
 
-    pub fn with_monitoring(
-        mut self,
-        metrics_collector: Arc<crate::infrastructure::monitoring::MetricsCollector>,
-        execution_recorder: Arc<crate::infrastructure::monitoring::ExecutionRecorder>,
-    ) -> Self {
-        self.metrics_collector = Some(metrics_collector);
-        self.execution_recorder = Some(execution_recorder);
+    /// 统计与执行记录从 `hook_executions` 读（见 [`HookQueryHandler`]）。
+    pub fn with_executions(mut self, executions: Arc<HookQueryHandler>) -> Self {
+        self.executions = Some(executions);
         self
+    }
+
+    /// 按 hook_id（数字 id 或 `hook_type:name`）找到调用方租户自己的这条 Hook，返回统计与查询的
+    /// 范围。Administer 已核对过配置的租户；这里再核一次，范围只取签名里的租户。
+    async fn execution_scope(
+        &self,
+        tenant_id: Option<&str>,
+        hook_id: &str,
+    ) -> Result<HookExecutionScope, Status> {
+        let tenant_id = tenant_id
+            .filter(|tenant| !tenant.is_empty())
+            .ok_or_else(|| Status::invalid_argument("tenant is required"))?;
+        if hook_id.is_empty() {
+            return Err(Status::invalid_argument("hook_id is required"));
+        }
+        let row = if let Ok(id) = hook_id.parse::<i64>() {
+            self.repository
+                .get_by_id(id)
+                .await
+                .map_err(|e| Status::internal(format!("Failed to get hook config: {}", e)))?
+                .map(|(row, _)| row)
+        } else {
+            let (hook_type, name) = hook_id.split_once(':').ok_or_else(|| {
+                Status::invalid_argument(
+                    "Invalid hook_id format, expected numeric id or 'hook_type:name'",
+                )
+            })?;
+            self.repository
+                .get_by_name(Some(tenant_id), hook_type, name)
+                .await
+                .map_err(|e| Status::internal(format!("Failed to get hook config: {}", e)))?
+                .map(|(row, _)| row)
+        }
+        .ok_or_else(|| Status::not_found("Hook config not found"))?;
+        if row.tenant_id.as_deref() != Some(tenant_id) {
+            return Err(Status::permission_denied("hook belongs to another tenant"));
+        }
+        Ok(HookExecutionScope {
+            tenant_id: tenant_id.to_string(),
+            hook_type: row.hook_type,
+            hook_name: row.name,
+        })
     }
 
     /// 写入后让配置立即生效：租户的行只重载该租户，全局行（`tenant_id IS NULL`）全量重载。
@@ -567,93 +608,23 @@ impl HookServiceServer {
         &self,
         request: Request<GetHookStatisticsRequest>,
     ) -> Result<Response<GetHookStatisticsResponse>, Status> {
-        // 先提取租户ID（在into_inner()之前）
         let tenant_id = extract_tenant_id(&request);
         let req = request.into_inner();
+        let scope = self
+            .execution_scope(tenant_id.as_deref(), &req.hook_id)
+            .await?;
+        let range = time_range(req.time_range.as_ref(), STATISTICS_DEFAULT_SPAN)?;
 
-        if req.hook_id.is_empty() {
-            return Err(Status::invalid_argument("hook_id is required"));
-        }
-
-        // 解析hook_id（格式：hook_type:name 或 id）
-        let hook_id_parsed = req.hook_id.parse::<i64>();
-
-        let hook_id = if let Ok(id) = hook_id_parsed {
-            // 作为数字ID使用
-            id
-        } else {
-            // 作为hook_type:name格式解析，需要先查询获取ID
-            let parts: Vec<&str> = req.hook_id.splitn(2, ':').collect();
-            if parts.len() != 2 {
-                return Err(Status::invalid_argument(
-                    "Invalid hook_id format, expected numeric id or 'hook_type:name'",
-                ));
-            }
-
-            let hook_type = parts[0];
-            let name = parts[1];
-
-            let (row, _) = self
-                .repository
-                .get_by_name(tenant_id.as_deref(), hook_type, name)
+        let statistics = match self.executions.as_ref() {
+            Some(executions) => executions
+                .statistics(&scope, &range)
                 .await
-                .map_err(|e| Status::internal(format!("Failed to get hook config: {}", e)))?
-                .ok_or_else(|| Status::not_found("Hook config not found"))?;
-
-            row.id
-        };
-
-        // 从监控系统查询统计数据
-        let statistics = if let Some(ref metrics_collector) = self.metrics_collector {
-            // 根据hook_id查询统计信息
-            // hook_id可能是数字ID或hook_type:name格式，需要转换为hook名称
-            let hook_name = if hook_id_parsed.is_ok() {
-                // 如果是数字ID，需要先查询获取hook名称
-                if let Ok(Some((row, _))) = self.repository.get_by_id(hook_id).await {
-                    format!("{}:{}", row.hook_type, row.name)
-                } else {
-                    hook_id.to_string()
-                }
-            } else {
-                // 如果是hook_type:name格式，直接使用
-                req.hook_id.clone()
-            };
-
-            // 从MetricsCollector查询统计数据
-            if let Some(stats) = metrics_collector.get_statistics(&hook_name).await {
-                // 将domain model转换为protobuf类型
-                domain_to_protobuf_statistics(hook_id.to_string(), &stats)
-            } else {
-                // 没有统计数据，返回空统计数据
-                HookStatistics {
-                    hook_id: hook_id.to_string(),
-                    total_executions: 0,
-                    success_count: 0,
-                    failure_count: 0,
-                    avg_latency_ms: 0.0,
-                    p99_latency_ms: 0.0,
-                    rate_limit_count: 0,
-                    circuit_break_count: 0,
-                    error_count_by_code: std::collections::HashMap::new(),
-                }
-            }
-        } else {
-            // 没有监控系统，返回空统计数据
-            HookStatistics {
-                hook_id: hook_id.to_string(),
-                total_executions: 0,
-                success_count: 0,
-                failure_count: 0,
-                avg_latency_ms: 0.0,
-                p99_latency_ms: 0.0,
-                rate_limit_count: 0,
-                circuit_break_count: 0,
-                error_count_by_code: std::collections::HashMap::new(),
-            }
+                .map_err(execution_read_error)?,
+            None => HookExecutionStatistics::default(),
         };
 
         Ok(Response::new(GetHookStatisticsResponse {
-            statistics: Some(statistics),
+            statistics: Some(domain_to_protobuf_statistics(req.hook_id, statistics)),
         }))
     }
 
@@ -661,118 +632,100 @@ impl HookServiceServer {
         &self,
         request: Request<QueryHookExecutionsRequest>,
     ) -> Result<Response<QueryHookExecutionsResponse>, Status> {
+        let tenant_id = extract_tenant_id(&request);
         let req = request.into_inner();
+        let scope = self
+            .execution_scope(tenant_id.as_deref(), &req.hook_id)
+            .await?;
+        let range = time_range(req.time_range.as_ref(), EXECUTIONS_DEFAULT_SPAN)?;
+        let limit = req
+            .pagination
+            .as_ref()
+            .map(|p| p.limit)
+            .filter(|limit| *limit > 0)
+            .unwrap_or(DEFAULT_EXECUTION_PAGE)
+            .min(MAX_EXECUTION_PAGE);
 
-        // 从执行记录器查询历史记录
-        let executions = if let Some(ref execution_recorder) = self.execution_recorder {
-            // 解析hook_id（格式：hook_type:name 或 id）
-            let hook_name = if !req.hook_id.is_empty() {
-                let hook_id_parsed = req.hook_id.parse::<i64>();
-                if let Ok(id) = hook_id_parsed {
-                    // 如果是数字ID，需要先查询获取hook名称
-                    if let Ok(Some((row, _))) = self.repository.get_by_id(id).await {
-                        Some(format!("{}:{}", row.hook_type, row.name))
-                    } else {
-                        None
-                    }
-                } else {
-                    // 如果是hook_type:name格式，直接使用
-                    Some(req.hook_id.clone())
-                }
-            } else {
-                None
-            };
-
-            // 确定查询限制
-            let limit = req
-                .pagination
-                .as_ref()
-                .map(|p| p.limit as usize)
-                .unwrap_or(100)
-                .min(1000); // 最多1000条
-
-            // 从ExecutionRecorder查询执行记录
-            let records = execution_recorder.query(hook_name.as_deref(), limit).await;
-
-            // 过滤条件
-            let filtered_records = records
-                .into_iter()
-                .filter(|r| {
-                    // 如果指定了message_id，需要匹配（但domain model中没有message_id，暂时跳过）
-                    // if !req.message_id.is_empty() && r.message_id != req.message_id {
-                    //     return false;
-                    // }
-
-                    // 如果只查询成功的，过滤失败的
-                    if req.success_only && !r.success {
-                        return false;
-                    }
-
-                    // 时间范围过滤
-                    if let Some(ref time_range) = req.time_range {
-                        let executed_at_ms = r
-                            .executed_at
-                            .duration_since(std::time::SystemTime::UNIX_EPOCH)
-                            .map(|d| d.as_millis() as i64)
-                            .unwrap_or_default();
-
-                        // 检查是否在时间范围内
-                        if let Some(start) = time_range.start_time
-                            && executed_at_ms < start
-                        {
-                            return false;
-                        }
-                        if let Some(end) = time_range.end_time
-                            && executed_at_ms > end
-                        {
-                            return false;
-                        }
-                    }
-
-                    true
-                })
-                .collect::<Vec<_>>();
-
-            // 转换为protobuf类型
-            filtered_records
-                .into_iter()
-                .enumerate()
-                .map(|(idx, record)| {
-                    domain_to_protobuf_execution(
-                        format!("exec-{}", idx), // execution_id
-                        req.hook_id.clone(),     // hook_id
-                        String::new(),           // message_id (domain model中没有，暂时为空)
-                        record,
-                    )
-                })
-                .collect()
-        } else {
-            // 没有执行记录器，返回空列表
-            vec![]
+        let (executions, has_more) = match self.executions.as_ref() {
+            Some(executions) => {
+                // 多取一条判断后面还有没有。
+                let mut rows = executions
+                    .executions(&HookExecutionFilter {
+                        scope,
+                        range,
+                        message_id: Some(req.message_id.clone()).filter(|id| !id.is_empty()),
+                        success_only: req.success_only,
+                        limit: limit as u32 + 1,
+                    })
+                    .await
+                    .map_err(execution_read_error)?;
+                let has_more = rows.len() > limit as usize;
+                rows.truncate(limit as usize);
+                (rows, has_more)
+            }
+            None => (Vec::new(), false),
         };
 
         Ok(Response::new(QueryHookExecutionsResponse {
-            executions,
-            pagination: req.pagination,
+            executions: executions
+                .into_iter()
+                .map(|execution| domain_to_protobuf_execution(&req.hook_id, execution))
+                .collect(),
+            pagination: Some(Pagination {
+                limit,
+                has_more,
+                ..Default::default()
+            }),
         }))
     }
 }
 
-/// 将统计数据转换为protobuf类型
+/// 统计没给时间范围时取最近 24 小时（`GetHookStatisticsRequest.time_range` 的约定）。
+const STATISTICS_DEFAULT_SPAN: Duration = Duration::from_secs(86_400);
+/// 执行记录没给时间范围时取保留期上限内的全部（90 天）。
+const EXECUTIONS_DEFAULT_SPAN: Duration = Duration::from_secs(90 * 86_400);
+const DEFAULT_EXECUTION_PAGE: i32 = 100;
+const MAX_EXECUTION_PAGE: i32 = 1_000;
+
+/// 管理接口的时间范围：越界（负数、晚于 9999 年末）或倒置为 INVALID_ARGUMENT。
+fn time_range(
+    range: Option<&TimeRange>,
+    default_span: Duration,
+) -> Result<HookExecutionTimeRange, Status> {
+    HookExecutionTimeRange::from_millis(
+        range.and_then(|r| r.start_time),
+        range.and_then(|r| r.end_time),
+        SystemTime::now(),
+        default_span,
+    )
+    .map_err(Status::invalid_argument)
+}
+
+/// 读执行记录失败：存储层判为无效参数的（时间换算越界）回 INVALID_ARGUMENT，其余为存储不可用。
+/// 错误原文不进应答。
+fn execution_read_error(error: FlareError) -> Status {
+    if error.code() == Some(ErrorCode::InvalidParameter) {
+        Status::invalid_argument("time is out of range")
+    } else {
+        Status::unavailable("hook execution storage is unavailable")
+    }
+}
+
+/// 将统计数据转换为protobuf类型（计数按采样权重估计；Capability 的 Hook 没有限流，限流次数为 0）
 fn domain_to_protobuf_statistics(
     hook_id: String,
-    stats: &crate::domain::model::HookStatistics,
+    stats: HookExecutionStatistics,
 ) -> HookStatistics {
     HookStatistics {
         hook_id,
-        total_executions: stats.total_count as i64,
-        success_count: stats.success_count as i64,
-        failure_count: stats.failure_count as i64,
+        total_executions: stats.total_executions,
+        success_count: stats.success_count,
+        failure_count: stats.failure_count,
         avg_latency_ms: stats.avg_latency_ms,
-        p99_latency_ms: 0.0,    // 暂时不计算P99延迟
-        rate_limit_count: 0,    // 暂时不统计限流次数
-        circuit_break_count: 0, // 暂时不统计熔断次数
-        error_count_by_code: std::collections::HashMap::new(), // 暂时不统计错误码
+        p99_latency_ms: stats.p99_latency_ms,
+        rate_limit_count: 0,
+        circuit_break_count: stats.circuit_open_count,
+        error_count_by_code: stats.error_count_by_code,
     }
 }
 
@@ -1289,50 +1242,82 @@ fn hook_config_item_to_protobuf(
     })
 }
 
-/// 将执行结果转换为protobuf类型
-fn domain_to_protobuf_execution(
-    execution_id: String,
-    hook_id: String,
-    message_id: String,
-    result: crate::domain::model::HookExecutionResult,
-) -> HookExecution {
-    use std::time::SystemTime;
-
-    // 将执行时间转换为Timestamp
-    let executed_at = result
+/// 将执行记录转换为protobuf类型；`hook_id` 回请求里的写法。
+fn domain_to_protobuf_execution(hook_id: &str, execution: StoredHookExecution) -> HookExecution {
+    let executed_at = execution
         .executed_at
         .duration_since(SystemTime::UNIX_EPOCH)
-        .map(|d| prost_types::Timestamp {
-            seconds: d.as_secs() as i64,
-            nanos: d.subsec_nanos() as i32,
-        })
-        .unwrap_or_else(|_| prost_types::Timestamp {
-            seconds: 0,
-            nanos: 0,
-        });
-
-    // 解析错误信息
-    let (_error_code, _error_message) = if let Some(ref err) = result.error_message {
-        // 尝试从错误信息中提取错误码（格式：CODE: message）
-        let parts: Vec<&str> = err.splitn(2, ':').collect();
-        if parts.len() == 2 {
-            (parts[0].trim().to_string(), parts[1].trim().to_string())
-        } else {
-            ("UNKNOWN".to_string(), err.clone())
-        }
-    } else {
-        (String::new(), String::new())
-    };
-
+        .unwrap_or_default();
     HookExecution {
-        execution_id,
-        hook_id,
-        message_id,
-        success: result.success,
-        latency_ms: result.latency_ms as i32,
-        error_code: String::new(), // 暂时不填充错误码
-        error_message: result.error_message.clone().unwrap_or_default(),
-        executed_at: Some(executed_at),
+        execution_id: execution.execution_id,
+        hook_id: hook_id.to_string(),
+        message_id: execution.message_id.unwrap_or_default(),
+        success: execution.success,
+        latency_ms: execution.latency_ms.unwrap_or_default(),
+        error_code: execution.error_code.unwrap_or_default(),
+        error_message: execution.error_message.unwrap_or_default(),
+        executed_at: Some(prost_types::Timestamp {
+            seconds: executed_at.as_secs() as i64,
+            nanos: executed_at.subsec_nanos() as i32,
+        }),
+    }
+}
+
+#[cfg(test)]
+mod execution_query_tests {
+    use super::*;
+
+    fn range(
+        start_time: Option<i64>,
+        end_time: Option<i64>,
+    ) -> Result<HookExecutionTimeRange, Status> {
+        time_range(
+            Some(&TimeRange {
+                start_time,
+                end_time,
+            }),
+            STATISTICS_DEFAULT_SPAN,
+        )
+    }
+
+    /// 管理员给的时间超出 9999 年末（例如 `end_time=9000000000000000`）回 INVALID_ARGUMENT，不会
+    /// 进到存储层的时间换算里 panic。
+    #[test]
+    fn times_beyond_year_9999_are_invalid_arguments() {
+        for (start, end) in [
+            (None, Some(9_000_000_000_000_000)),
+            (None, Some(i64::MAX)),
+            (Some(9_000_000_000_000_000), None),
+            (
+                Some(0),
+                Some(crate::domain::model::MAX_QUERY_TIME_MILLIS + 1),
+            ),
+            (Some(-1), None),
+        ] {
+            let status = range(start, end).unwrap_err();
+            assert_eq!(
+                status.code(),
+                tonic::Code::InvalidArgument,
+                "{start:?} {end:?}"
+            );
+        }
+        assert!(range(Some(0), Some(crate::domain::model::MAX_QUERY_TIME_MILLIS)).is_ok());
+        assert!(time_range(None, STATISTICS_DEFAULT_SPAN).is_ok());
+    }
+
+    /// 存储层的无效参数回 INVALID_ARGUMENT，其余存储错误回 UNAVAILABLE；错误原文都不进应答。
+    #[test]
+    fn storage_errors_map_to_fixed_statuses() {
+        let invalid = execution_read_error(
+            ErrorBuilder::new(ErrorCode::InvalidParameter, "time is out of range").build_error(),
+        );
+        assert_eq!(invalid.code(), tonic::Code::InvalidArgument);
+        let down = execution_read_error(
+            ErrorBuilder::new(ErrorCode::DatabaseError, "connect 10.0.0.9:5432 refused")
+                .build_error(),
+        );
+        assert_eq!(down.code(), tonic::Code::Unavailable);
+        assert!(!down.message().contains("10.0.0.9"));
     }
 }
 

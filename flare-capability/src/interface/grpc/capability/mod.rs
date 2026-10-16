@@ -2,6 +2,8 @@
 
 mod administer;
 #[cfg(test)]
+mod hook_executions_pg_tests;
+#[cfg(test)]
 mod hook_secret_invalidation_pg_tests;
 mod service;
 #[cfg(test)]

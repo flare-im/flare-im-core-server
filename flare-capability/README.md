@@ -8,7 +8,7 @@ Flare IM **capability service**: the **Hook engine** (configuration and gRPC dis
 
 - **Configuration management**: supports three configuration sources — configuration file, dynamic API (database), and configuration center.
 - **Execution dispatch**: executes hooks by priority, with support for concurrent execution and timeout control.
-- **Monitoring and statistics**: collects hook execution metrics and provides monitoring and alerting capabilities.
+- **Execution evidence and circuit breakers**: records hook executions in `hook_executions` (failures in full, successes sampled), serves their statistics, and breaks the circuit per (tenant, hook); see [Execution evidence and circuit breakers](#execution-evidence-and-circuit-breakers).
 - **Extension mechanism**: supports three extension methods — gRPC, WebHook, and Local Plugin (on the hook transport side); the hook's gRPC surface (`HookExtension` / `HookService`) shares the same file **`capability_service.proto`** and the same package **`flare.capability.v1`** with `CapabilityService`, and on the Rust side is unified under `flare_grpc_proto::capability`.
 - **Capability extension**: aggregates Guard / Resolver / `RtcCapability` via `CapabilityExtensionRegistry`; the RTC backend is wired via `capability_runtime.plugin_discovery_endpoints` (`capability_id = rtc.media.control`) or the environment variable `FLARE_MEDIA_CONTROL_GRPC_ENDPOINT`. The capability catalog, authorization, and command dispatch are exposed via **`flare.capability.v1.CapabilityService` gRPC** on the same server as this process's hook port; external HTTP is forwarded to this gRPC by the access gateway (there is no legacy plugin host or outbox).
 
@@ -191,11 +191,17 @@ let config = CapabilityServiceConfig {
 **Storage location**: local TOML file
 
 **Characteristics**:
-- Suitable for development environments
-- Suitable for static configuration
-- Does not support dynamic updates (requires restarting the service)
+- Suitable for development environments and for platform-wide hooks that apply to every tenant
+- Re-read at every refresh (see "Configuration refresh")
 
-**Configuration file path**: `config/hooks.toml`
+**Configuration file path**: `CONFIG_FILE`, default `config/hooks.toml` (relative to the working directory)
+
+**Loading rules**:
+- The file is optional. Without it Capability runs with no file hooks, and the startup log says so at INFO; otherwise it logs the path and the hook count.
+- A file that exists but cannot be used stops Capability at startup: it cannot be read (permissions, a directory, not UTF-8, a symbolic link to a missing file), it is not a hook configuration (a TOML syntax or field type error, or a top-level table that is not one of the 15 hook types, such as `[[pre_sned]]`), or a hook in it fails validation (priority, timeout, group, error policy, empty webhook secret, reserved webhook header). The file is checked before the configuration center and the database, so a database outage cannot hide the error.
+- The error names the file, the line and column of a parse error, and the hook and header names of a validation error. It never repeats the file's content: the TOML parser's own message quotes the offending line (and a field type error its value), which may hold a webhook secret or an authorization header.
+- A file that becomes unusable while Capability runs does not stop the service: the file's hooks stay at the last version that loaded, every refresh logs the error at ERROR, and the other sources keep refreshing. The next refresh after the file is fixed loads it. Deleting the file removes its hooks at the next refresh.
+- Unknown keys inside a hook entry are ignored by Capability (Message Ingest, which may read the same file, rejects them).
 
 **Configuration example**:
 ```toml
@@ -271,7 +277,8 @@ Hook configuration hot-refresh is supported:
 
 - **Refresh interval**: 60 seconds by default (configurable via `refresh_interval_secs`)
 - **Auto-refresh**: periodically reloads configuration from all configuration sources
-- **Configuration validation**: on refresh, the configuration format is validated, and invalid configurations are ignored
+- **Failures**: a source that fails to load keeps its last loaded hooks and the refresh logs the failure (ERROR for the configuration file, WARN for the database and the configuration center); an invalid merged global configuration leaves the current hooks unchanged. A refresh never stops a running service.
+- **Startup**: of the three sources only the configuration file must load (see "Configuration file"). Loading the hook rows from the database or the configuration center may fail at startup; the failure is logged and the next refresh retries. The database connection itself is still required.
 
 ## Usage examples
 
@@ -357,7 +364,7 @@ flare-capability/
 ├── infrastructure/      # Infrastructure layer
 │   ├── adapters/        # Hook adapters (gRPC, WebHook, Local)
 │   ├── config/          # Configuration loaders (file, database, configuration center)
-│   ├── monitoring/      # Monitoring and statistics
+│   ├── hook_execution/  # Execution evidence: buffer, batched writes, retention, metrics
 │   └── persistence/     # Configuration persistence (PostgreSQL)
 ├── interface/           # Interface layer
 │   └── grpc/            # gRPC service interface
@@ -434,16 +441,75 @@ Supports three transport methods:
    target = "plugin-name"
    ```
 
-## Monitoring and statistics
+## Execution evidence and circuit breakers
 
-Per-hook execution results are **not recorded** at present: nothing feeds the in-process
-`MetricsCollector` or `ExecutionRecorder`, and the `hook_executions` table in
-`deploy/init.sql` is reserved and never written. `hook_config.get_statistics` therefore
-returns zero counts and `hook_config.query_executions` an empty list. Persisting execution
-records would add a database write per hook per message on the send path and needs a
-sampling and retention decision first; a recorder must key records by tenant as well as
-by hook name. The service exports the generic gRPC server metrics
-(`GrpcMetricsLayer`); hook failures are visible in its logs.
+Every hook that `HookPlugin` calls for `pre_send`, `post_send`, `delivery` and `recall` goes
+through a circuit breaker per (tenant, hook) and leaves an execution record in
+`hook_executions` (source DDL `0015_20261016_hook_execution_evidence.sql`).
+
+- **Circuit breaker**: keyed by the signed tenant, the hook type and the hook name, and kept per
+  Capability instance. `failure_threshold` consecutive failures or timeouts, each within
+  `failure_window_secs` of the first one, open it for `open_secs`; while it is open the hook is
+  not called. A required hook (critical group, or `require_success`) then behaves like an
+  unavailable hook: PreSend and Recall answer a retryable `UNAVAILABLE` (Message Ingest returns
+  503), PostSend and Delivery fail with `UNAVAILABLE`; an optional hook is skipped. When the
+  window ends one call probes the hook: success closes the breaker, failure opens it for another
+  window, and other calls are short-circuited while the probe is outstanding. An answer, allow or
+  reject, counts as healthy. Openings, failed probes (the 1st, 2nd, 4th, 8th, ...) and closings
+  are logged with the tenant and hook name escaped; single short circuits only at DEBUG.
+- **Records**: tenant, hook type and name (`hook_id` is `hook_type:name`), hook version, message
+  id, request and trace ids, whether the hook answered (`success`), latency, error code, a fixed
+  message, time and `sample_weight`. Never the message body or the downstream error text: a
+  failure stores its error code and "hook call failed", a rejection `HOOK_REJECTED` and the
+  hook's reason code, a timeout `HOOK_TIMEOUT`, a short circuit `HOOK_CIRCUIT_OPEN`. Rejections,
+  failures and timeouts are kept in full. Allowed calls and short circuits are kept 1 in N, N
+  being `1 / success_sample_ratio` rounded (0.01 keeps 1 in 100, 0.3 keeps 1 in 3), and the kept
+  row has `sample_weight` N.
+- **Write path**: the message path only adds the record to a bounded in-memory buffer (one lock,
+  no waiting). A background task writes a batch as soon as `batch_size` records wait and every
+  `flush_interval_ms`; at shutdown it writes what is left within 5 seconds, each batch's write
+  cut off at that limit, and then closes the buffer: the records still left, a batch cut off and
+  records handed in afterwards by requests still finishing are counted as `shutdown` drops. When
+  the buffer is full a sampled record goes first: an incoming one is dropped, and an incoming
+  full-kept record replaces the oldest buffered sampled one; a buffer holding only full-kept
+  records drops the incoming record. A batch whose write fails or takes longer than 10 seconds is
+  dropped, not retried. Every drop is counted.
+- **Retention**: every `retention_sweep_secs` a task deletes rows older than `retention_days`,
+  oldest first, at most `retention_delete_batch` rows per statement.
+- **Reading**: `hook_config.get_statistics` and `hook_config.query_executions` (`Administer`)
+  read only the rows of the caller's tenant for that hook. Counts are weighted estimates; average
+  and p99 latency are weighted and leave short circuits out; `circuit_break_count` counts short
+  circuits and `error_count_by_code` counts failures by code (a rejection is a success, not an
+  error). Statistics cover the last 24 hours unless a range is given; executions come newest
+  first, up to `limit` (at most 1000) with `has_more`.
+- Without a database the breakers still run and nothing is recorded.
+
+| Setting (environment variable, then key) | Default | Allowed |
+| --- | --- | --- |
+| `FLARE_CAPABILITY_HOOK_EXECUTIONS_ENABLED` / `hook_executions.enabled` | true | true or false |
+| `FLARE_CAPABILITY_HOOK_EXECUTIONS_BUFFER_CAPACITY` / `hook_executions.buffer_capacity` | 10000 | 100 to 1,000,000 records |
+| `FLARE_CAPABILITY_HOOK_EXECUTIONS_BATCH_SIZE` / `hook_executions.batch_size` | 500 | 1 to 5000, at most the capacity |
+| `FLARE_CAPABILITY_HOOK_EXECUTIONS_FLUSH_INTERVAL_MS` / `hook_executions.flush_interval_ms` | 1000 | 50 to 60000 ms |
+| `FLARE_CAPABILITY_HOOK_EXECUTIONS_SUCCESS_SAMPLE_RATIO` / `hook_executions.success_sample_ratio` | 0.01 | 0 (keep none) to 1 (keep all) |
+| `FLARE_CAPABILITY_HOOK_EXECUTIONS_RETENTION_DAYS` / `hook_executions.retention_days` | 7 | 1 to 90 days |
+| `FLARE_CAPABILITY_HOOK_EXECUTIONS_RETENTION_SWEEP_SECS` / `hook_executions.retention_sweep_secs` | 600 | 10 to 86400 seconds |
+| `FLARE_CAPABILITY_HOOK_EXECUTIONS_RETENTION_DELETE_BATCH` / `hook_executions.retention_delete_batch` | 5000 | 100 to 100000 rows |
+| `FLARE_CAPABILITY_HOOK_CIRCUIT_ENABLED` / `hook_circuit.enabled` | true | true or false |
+| `FLARE_CAPABILITY_HOOK_CIRCUIT_FAILURE_THRESHOLD` / `hook_circuit.failure_threshold` | 5 | 1 to 1000 |
+| `FLARE_CAPABILITY_HOOK_CIRCUIT_FAILURE_WINDOW_SECS` / `hook_circuit.failure_window_secs` | 30 | 1 to 3600 seconds |
+| `FLARE_CAPABILITY_HOOK_CIRCUIT_OPEN_SECS` / `hook_circuit.open_secs` | 20 | 1 to 3600 seconds |
+
+The keys are read from the runtime configuration file (`config/services/capability.toml`); a
+value out of range is ignored and the default applies.
+
+Metrics (hook names are never labels): `capability_hook_execution_records_queued_total`,
+`capability_hook_execution_records_written_total`,
+`capability_hook_execution_records_dropped_total{reason=buffer_full|write_failed|shutdown, class=sampled|always}`,
+`capability_hook_execution_records_buffered`, `capability_hook_execution_flushes_total{result}`,
+`capability_hook_execution_records_expired_total`,
+`capability_hook_circuit_transitions_total{tenant_id, transition=opened|reopened|closed}`,
+`capability_hook_circuit_short_circuits_total{tenant_id}` and `capability_hook_circuits_open`,
+next to the generic gRPC server metrics (`GrpcMetricsLayer`).
 
 ## Reference documentation
 

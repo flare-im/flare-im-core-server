@@ -42,6 +42,8 @@ pub struct ApplicationContext {
     pub message_send_grpc: MessageSendGrpcHandler,
     pub wal_replay_handler: Arc<WalReplayHandler>,
     pub config: Arc<MessageIngestConfig>,
+    /// 用量预聚合（`messages.accepted`）；启动层把它的 flush 循环挂进运行时。
+    pub usage: flare_im_usage::UsageReporter,
 }
 
 /// 构建应用上下文。
@@ -278,7 +280,8 @@ async fn initialize_with_config(
             std::time::Duration::from_millis(config.send_publish_timeout_ms),
         );
     }
-    let message_ingest_handler = Arc::new(message_ingest_handler);
+    let usage = flare_im_usage::UsageReporter::from_env("flare-message-ingest").await?;
+    let message_ingest_handler = Arc::new(message_ingest_handler.with_usage(usage.recorder()));
 
     let message_verifier = match std::env::var("FLARE_INTERNAL_CTX_PUBLIC_KEY") {
         Ok(material) => Some(
@@ -307,6 +310,7 @@ async fn initialize_with_config(
         message_send_grpc,
         wal_replay_handler,
         config,
+        usage,
     })
 }
 

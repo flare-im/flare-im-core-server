@@ -116,7 +116,7 @@ impl MediaService {
     ))]
     pub async fn cleanup_orphaned_assets(&self, ctx: &Context, limit: u32) -> Result<Vec<String>> {
         ctx.ensure_not_cancelled().map_err(map_context_error)?;
-        require_tenant(ctx)?;
+        let tenant = require_tenant(ctx)?;
         let limit = if limit == 0 { 100 } else { limit.min(1000) };
 
         let Some(store) = &self.metadata_store else {
@@ -164,6 +164,7 @@ impl MediaService {
             };
             let asset = claim.asset();
             let file_id = asset.file_id.clone();
+            let removed_bytes = usage_bytes(asset.file_size);
             let storage_path = asset
                 .storage_path()
                 .map(|s| s.to_string())
@@ -178,6 +179,7 @@ impl MediaService {
                 local.delete(&storage_path).await?;
             }
             claim.commit().await?;
+            self.usage.media_removed(tenant, removed_bytes);
             if let Some(cache) = &self.metadata_cache {
                 cache.invalidate(ctx, &file_id).await?;
             }

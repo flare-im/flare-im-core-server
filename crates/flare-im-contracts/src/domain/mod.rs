@@ -7,6 +7,7 @@ use crate::Ctx;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+pub mod push_policy;
 pub mod tenant;
 pub use tenant::{
     TenantCoreQuota, TenantQuota, TenantRuntimeSnapshot, TenantStatus, is_valid_tenant_id,
@@ -21,7 +22,7 @@ pub type DeviceId = String;
 pub type ConnectionId = String;
 pub type GatewayId = String;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DevicePushToken {
     pub tenant_id: String,
     pub user_id: String,
@@ -29,6 +30,18 @@ pub struct DevicePushToken {
     pub platform: String,
     pub provider: String,
     pub token: String,
+    /// Server-owned registration identity. A late vendor response cannot delete a new registration.
+    pub registration_id: String,
+    pub registered_at_ms: i64,
+}
+
+impl std::fmt::Debug for DevicePushToken {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DevicePushToken")
+            .field("provider", &self.provider)
+            .field("token", &"[REDACTED]")
+            .finish_non_exhaustive()
+    }
 }
 
 impl DevicePushToken {
@@ -38,6 +51,8 @@ impl DevicePushToken {
             && !self.device_id.trim().is_empty()
             && !self.user_id.trim().is_empty()
             && !self.tenant_id.trim().is_empty()
+            && !self.registration_id.is_empty()
+            && self.registered_at_ms > 0
     }
 }
 

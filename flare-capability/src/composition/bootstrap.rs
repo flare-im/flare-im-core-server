@@ -75,6 +75,7 @@ impl ApplicationBootstrap {
         let tenant_projection = context.tenant_projection;
         let capability_admin = context.capability_admin;
         let hook_config_listener = context.hook_config_listener;
+        let hook_execution_background = context.hook_execution_background;
 
         let mut runtime = runtime_plan.service_runtime();
         if let Some((pool, publisher)) = context.audit_delivery {
@@ -100,6 +101,39 @@ impl ApplicationBootstrap {
                     Ok(())
                 },
             );
+        }
+        // Hook 执行证据：后台批量写库（停机时写完缓冲）与保留期清理。
+        if let Some(background) = hook_execution_background {
+            let tasks = background.tasks;
+            let writer_buffer = background.buffer;
+            let writer_repository = std::sync::Arc::clone(&background.repository);
+            runtime = runtime
+                .add_spawn_with_shutdown(
+                    "flare-capability-hook-execution-writer",
+                    move |shutdown_rx| async move {
+                        crate::infrastructure::hook_execution::run_writer(
+                            writer_buffer,
+                            writer_repository,
+                            tasks.flush_interval,
+                            shutdown_rx,
+                        )
+                        .await;
+                        Ok(())
+                    },
+                )
+                .add_spawn_with_shutdown(
+                    "flare-capability-hook-execution-retention",
+                    move |shutdown_rx| async move {
+                        crate::infrastructure::hook_execution::run_retention(
+                            background.repository,
+                            background.metrics,
+                            tasks,
+                            shutdown_rx,
+                        )
+                        .await;
+                        Ok(())
+                    },
+                );
         }
         let runtime = runtime
             .add_spawn_with_shutdown("flare-capability-grpc", move |shutdown_rx| async move {

@@ -47,6 +47,7 @@ impl ApplicationBootstrap {
         let send_grpc = context.message_send_grpc.clone();
         let config = context.config.clone();
         let wal_replay_handler = context.wal_replay_handler.clone();
+        let usage = context.usage;
         let wal_replay_enabled = config.wal_replay_enabled;
         let wal_replay_interval_ms = config.wal_replay_interval_ms.max(100);
         let wal_replay_error_backoff_ms = config.wal_replay_error_backoff_ms.max(100);
@@ -89,6 +90,11 @@ impl ApplicationBootstrap {
                     })
             },
         );
+
+        service_runtime = service_runtime
+            .add_spawn_with_shutdown("message-ingest-usage", move |shutdown_rx| {
+                usage.run(shutdown_rx)
+            });
 
         if context.config.metrics.enabled {
             let metrics_config = context.config.metrics.clone();

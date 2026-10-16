@@ -10,6 +10,14 @@
 - A PreSend Hook with `require_success=true` rejects service unavailability, connection errors and timeouts. An explicit business rejection always rejects, including optional Hooks. `require_success=false` alone permits the existing infrastructure-error/timeout degradation.
 - `hooks.social.toml` and the packaged `hooks.toml` select one mandatory Social PreSend Hook for every tenant's supported single/group conversation type. This configuration is not proof that a deployed Social service is reachable or correctly authenticated.
 
+## Capability hook file
+
+Capability's own hook file (`CONFIG_FILE`, default `config/hooks.toml`, lowest-priority global source) follows the same rule for a file that is present, but stays optional:
+
+- Missing file: no file hooks, logged at INFO at startup (the Core image does not ship one at Capability's default path).
+- Present but unreadable (permissions, a directory, not UTF-8, a symbolic link to a missing file), not a hook configuration (TOML syntax or field type error, or a top-level table that is not one of the 15 hook types) or failing validation: Capability exits at startup, before the configuration center and the database are touched. The error carries the path, the line and column of a parse error and the hook or header name of a validation error, never file content.
+- At runtime the same failures keep the file's last loaded hooks; every refresh logs the error at ERROR and the other sources keep refreshing. The service is never stopped by a refresh.
+
 The generic `hooks.example.toml` no longer mixes Capability service configuration into HookConfig. Capability discovery belongs in `config/services/capability.toml`. Business examples use the actual Rust enum values `FailFast` and `Ignore`.
 
 ## Focused regression gates
@@ -20,6 +28,8 @@ From the Core repository:
 cargo test -p flare-im-hooks --lib --test config_fail_closed
 cargo test -p flare-message-ingest --lib hook_startup_tests
 cargo check -p flare-message-ingest --lib
+cargo test -p flare-capability --lib infrastructure::config
+cargo test -p flare-capability --lib composition::wiring::config_sources
 ```
 
 The tests cover absent/invalid paths, absent overlays, empty directory mounts, unknown fields, redacted parse errors, all shipped profiles, real factory installation/selection for multiple tenants, required versus optional infrastructure failures, and mandatory-policy startup ordering before missing Redis/MQ. They do not claim to exercise a container or persisted blacklist policy.

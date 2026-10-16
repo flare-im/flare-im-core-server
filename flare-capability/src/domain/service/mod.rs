@@ -7,10 +7,19 @@ use futures_util::future::join_all;
 use std::sync::Arc;
 
 use crate::domain::model::{HookExecutionPlan, LoggableName, is_hook_unavailable};
+
+pub mod hook_circuit;
+pub mod hook_execution;
+
 use flare_im_hooks::{
     DeliveryEvent, HookGroup, MessageDraft, MessageRecord, PreSendDecision, RecallEvent,
 };
 use flare_server_core::context::{Context, Ctx};
+pub use hook_circuit::{
+    HookCircuitAdmission, HookCircuitBreakers, HookCircuitKey, HookCircuitPolicy,
+    HookCircuitResult, HookCircuitTransition,
+};
+pub use hook_execution::{HookCall, HookExecutionGuard, HookExecutionObserver, HookIdentity};
 
 /// Hook分组结果
 #[derive(Debug, Default)]

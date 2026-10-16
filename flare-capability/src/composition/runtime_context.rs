@@ -4,6 +4,7 @@
 
 use std::sync::Arc;
 
+use crate::composition::wiring::HookExecutionBackground;
 use crate::domain::capability::CapabilityPolicyBackend;
 use crate::infrastructure::capability::{CapabilityExtensionRegistry, PluginRouteBook};
 use crate::infrastructure::config::{CapabilityRuntimeConfig, HookConfigListener};
@@ -44,4 +45,6 @@ pub struct ApplicationContext {
     pub capability_admin: CapabilityAdminGrpcServer<PostgresTenantProjectionRepository>,
     /// Hook 配置跨实例失效通知的监听任务（有库时）；进程停机时停掉。
     pub hook_config_listener: Option<HookConfigListener>,
+    /// Hook 执行证据的批量写入与保留期清理（有库且开启记录时）；随进程停机结束，停机时写完缓冲。
+    pub(crate) hook_execution_background: Option<HookExecutionBackground>,
 }

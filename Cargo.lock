@@ -1637,6 +1637,7 @@ dependencies = [
  "flare-grpc-proto",
  "flare-im-contracts",
  "flare-im-service-kit",
+ "flare-im-usage",
  "flare-media",
  "flare-proto",
  "flare-server-core",
@@ -1694,6 +1695,7 @@ dependencies = [
  "hex",
  "hmac",
  "once_cell",
+ "prometheus",
  "prost",
  "prost-types",
  "rand 0.8.7",
@@ -2132,6 +2134,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "flare-im-usage"
+version = "1.0.3"
+dependencies = [
+ "async-nats",
+ "async-trait",
+ "chrono",
+ "flare-im-contracts",
+ "flare-im-service-kit",
+ "flare-server-core",
+ "futures",
+ "parking_lot",
+ "prometheus",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tokio",
+ "tracing",
+ "ulid",
+]
+
+[[package]]
 name = "flare-media"
 version = "1.0.3"
 dependencies = [
@@ -2148,6 +2171,7 @@ dependencies = [
  "flare-grpc-proto",
  "flare-im-contracts",
  "flare-im-service-kit",
+ "flare-im-usage",
  "flare-proto",
  "flare-server-core",
  "futures-util",
@@ -2191,6 +2215,7 @@ dependencies = [
  "flare-im-message-pipeline",
  "flare-im-seq",
  "flare-im-service-kit",
+ "flare-im-usage",
  "flare-proto",
  "flare-server-core",
  "flare-storage-reader",
@@ -2329,6 +2354,7 @@ dependencies = [
  "flare-grpc-proto",
  "flare-im-contracts",
  "flare-im-service-kit",
+ "flare-im-usage",
  "flare-proto",
  "flare-server-core",
  "futures",
@@ -2376,6 +2402,7 @@ dependencies = [
  "flare-grpc-proto",
  "flare-im-contracts",
  "flare-im-service-kit",
+ "flare-im-usage",
  "flare-proto",
  "flare-server-core",
  "futures",
@@ -2520,6 +2547,7 @@ dependencies = [
  "flare-grpc-proto",
  "flare-im-contracts",
  "flare-im-service-kit",
+ "flare-im-usage",
  "flare-proto",
  "flare-server-core",
  "flare-storage-reader",

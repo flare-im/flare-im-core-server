@@ -893,9 +893,12 @@ CREATE TABLE hook_executions (
     latency_ms INT,
     error_code TEXT,
     error_message TEXT,
-    executed_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+    executed_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    hook_version TEXT,
+    sample_weight INTEGER NOT NULL DEFAULT 1
+        CONSTRAINT hook_executions_sample_weight_check CHECK (sample_weight >= 1)
 );
-COMMENT ON TABLE hook_executions IS 'Hook 执行记录表（审计/排障）';
+COMMENT ON TABLE hook_executions IS 'Hook 执行记录表（排障；与 migrations/0015 同一结构）：拒绝、失败、超时全量，成功与熔断短路按 1/N 采样，保留期由 Capability 分批清理';
 COMMENT ON COLUMN hook_executions.execution_id IS '执行 ID（主键）';
 COMMENT ON COLUMN hook_executions.hook_id IS '关联 hook_configs.id 或 hook_id 文本';
 COMMENT ON COLUMN hook_executions.hook_name IS 'Hook 名称';
@@ -909,7 +912,11 @@ COMMENT ON COLUMN hook_executions.latency_ms IS '耗时（毫秒）';
 COMMENT ON COLUMN hook_executions.error_code IS '错误码（失败时）';
 COMMENT ON COLUMN hook_executions.error_message IS '错误信息（失败时）';
 COMMENT ON COLUMN hook_executions.executed_at IS '执行时间';
+COMMENT ON COLUMN hook_executions.hook_version IS '执行时 Hook 配置的版本（可选）';
+COMMENT ON COLUMN hook_executions.sample_weight IS '这一行代表的执行次数：全量记录为 1，按 1/N 采样留下的为 N（统计按它加权）';
 CREATE INDEX IF NOT EXISTS idx_hook_executions_tenant_executed ON hook_executions(tenant_id, executed_at DESC);
+CREATE INDEX IF NOT EXISTS idx_hook_executions_tenant_hook_executed ON hook_executions(tenant_id, hook_type, hook_name, executed_at DESC);
+CREATE INDEX IF NOT EXISTS idx_hook_executions_executed_at ON hook_executions(executed_at);
 
 -- 全局总开关（单行）；无行时服务端按「启用」处理
 CREATE TABLE capability_service_settings (

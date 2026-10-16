@@ -350,6 +350,32 @@ fn assert_denied(result: &(StatusCode, Value), status: StatusCode, reason: &str)
 }
 
 #[tokio::test]
+async fn fcm_and_apns_use_the_same_signed_user_registration_entry() {
+    for (name, provider) in [
+        ("fcm", DevicePushProvider::Fcm),
+        ("apns", DevicePushProvider::Apns),
+    ] {
+        let fake = FakePushProxy::default();
+        let router = signed_router(fake.clone()).await;
+        let result = send(
+            &router,
+            put_request(
+                Some("alice-a"),
+                "d1",
+                json!({"platform":"ios","provider":name,"token":"a1b2"}),
+            ),
+        )
+        .await;
+        assert_eq!(result.0, StatusCode::OK);
+        let calls = fake.calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].provider, provider as i32);
+        assert_eq!(calls[0].claims.tenant_id, "tenant-a");
+        assert_eq!(calls[0].claims.actor_id, "alice");
+    }
+}
+
+#[tokio::test]
 async fn register_and_unregister_reach_push_proxy_with_token_identity_only() {
     let fake = FakePushProxy::default();
     let router = signed_router(fake.clone()).await;
@@ -553,7 +579,7 @@ async fn admin_unsigned_foreign_device_and_invalid_input_never_reach_push_proxy(
         put_request(
             Some("alice-a"),
             "d1",
-            json!({"platform": "ios", "provider": "apns", "token": "tok-1"}),
+            json!({"platform": "ios", "provider": "unknown-vendor", "token": "tok-1"}),
         ),
     )
     .await;

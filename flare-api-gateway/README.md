@@ -332,7 +332,7 @@ Authorization: Bearer <token>
 
 ### Device push tokens
 
-The user and tenant come only from the IM token. The gateway signs an internal User context for them and calls Push Proxy `RegisterDevicePushToken` / `UnregisterDevicePushToken`. Request bodies and queries reject unknown fields, so a caller cannot name another user or tenant. A token bound to a device can only manage that device. `provider` currently accepts only `getui`.
+The user and tenant come only from the IM token. The gateway signs an internal User context for them and calls Push Proxy `RegisterDevicePushToken` / `UnregisterDevicePushToken`. Request bodies and queries reject unknown fields, so a caller cannot name another user or tenant. A token bound to a device can only manage that device. `provider` accepts `getui`, `fcm` or `apns`. Registration uses a server generation for late-response-safe invalidation. See [offline delivery semantics](../docs/offline-push-delivery.md); vendor acceptance is not device delivery.
 
 #### Register or update a push token
 ```http

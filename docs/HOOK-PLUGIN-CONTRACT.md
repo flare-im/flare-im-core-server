@@ -146,6 +146,15 @@ configured source, the embedded empty `hooks.core.toml` profile is used. Startup
 the source, profile and hook counts; the dispatcher also logs its installed counts.
 Container deployments use `MESSAGE_INGEST_HOOKS_CONFIG=/etc/flare/config/hooks.toml`.
 
+The Capability service reads its own hook file (`CONFIG_FILE`, default
+`config/hooks.toml`) as its lowest-priority global source. That file is optional: a
+missing file means no file hooks. A file that exists but cannot be read, is not a hook
+configuration (including a top-level table that is not a hook type) or holds a hook that
+fails validation stops Capability at startup, before it connects to its database. The
+error names the file and the line and column (or the hook), never the file's content.
+While Capability runs, such a file keeps its last loaded hooks, each refresh logs the
+error, and the service keeps serving.
+
 That asymmetry is deliberate. A hook sits in the critical path of every message
 and can reject traffic; letting an arbitrary process insert itself there by
 announcing would be a way to take the system down from outside.

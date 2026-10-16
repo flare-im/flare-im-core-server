@@ -29,13 +29,100 @@ use crate::infrastructure::getui_push::{GetuiClient, GetuiConfig, GetuiOfflinePu
 use crate::infrastructure::mq::dlq_publisher::DlqPublisher;
 use crate::infrastructure::offline_outbox::RedisOfflineOutbox;
 use crate::infrastructure::rpc::OnlineServiceClient;
-use crate::interface::messaging::offline_consumer::OfflinePushConsumerFactory;
+use crate::interface::messaging::offline_consumer::{
+    OfflinePushConsumerFactory, UsageCountedExecutor,
+};
 use crate::interface::messaging::online_consumer::OnlinePushConsumerFactory;
+
+async fn vendor_executor(
+    config: &PushWorkerConfig,
+    backend: OfflineDeliveryBackend,
+) -> Result<(
+    &'static str,
+    Arc<dyn crate::domain::offline_delivery::OfflinePushExecutor>,
+)> {
+    let tokens = Arc::new(
+        RedisDeviceTokenRepository::connect(
+            &config.device_token_redis_url,
+            config.device_token_key_prefix.clone(),
+        )
+        .await?,
+    );
+    match backend {
+        OfflineDeliveryBackend::Fcm => {
+            let raw = required_config(
+                config.fcm_service_account_json.clone(),
+                "PUSH_WORKER_FCM_SERVICE_ACCOUNT_JSON",
+            )?;
+            let account: FcmServiceAccount = serde_json::from_str(&raw).map_err(|_| {
+                FlareError::localized(
+                    ErrorCode::InvalidParameter,
+                    "FCM service account JSON rejected",
+                )
+            })?;
+            Ok((
+                "fcm",
+                Arc::new(FcmOfflinePushExecutor::new(
+                    account,
+                    crate::infrastructure::vendor_http::client()?,
+                    tokens,
+                )?),
+            ))
+        }
+        OfflineDeliveryBackend::Apns => {
+            let credentials = ApnsCredentials {
+                team_id: required_config(config.apns_team_id.clone(), "PUSH_WORKER_APNS_TEAM_ID")?,
+                key_id: required_config(config.apns_key_id.clone(), "PUSH_WORKER_APNS_KEY_ID")?,
+                private_key_pem: required_config(
+                    config.apns_private_key.clone(),
+                    "PUSH_WORKER_APNS_PRIVATE_KEY",
+                )?,
+                topic: required_config(config.apns_topic.clone(), "PUSH_WORKER_APNS_TOPIC")?,
+                sandbox: config.apns_sandbox,
+            };
+            Ok((
+                "apns",
+                Arc::new(ApnsOfflinePushExecutor::new(
+                    credentials,
+                    crate::infrastructure::vendor_http::client()?,
+                    tokens,
+                )?),
+            ))
+        }
+        OfflineDeliveryBackend::Getui => {
+            let settings = GetuiConfig::new(
+                required_config(config.getui_app_id.clone(), "PUSH_WORKER_GETUI_APP_ID")?,
+                required_config(config.getui_app_key.clone(), "PUSH_WORKER_GETUI_APP_KEY")?,
+                required_config(
+                    config.getui_master_secret.clone(),
+                    "PUSH_WORKER_GETUI_MASTER_SECRET",
+                )?,
+                config.getui_base_url.clone(),
+                config.getui_default_ttl_ms,
+                config.getui_request_timeout_ms,
+            )?;
+            Ok((
+                "getui",
+                Arc::new(GetuiOfflinePushExecutor::new(
+                    tokens,
+                    Arc::new(GetuiClient::new(settings)?),
+                    config.getui_default_ttl_ms,
+                )),
+            ))
+        }
+        _ => Err(FlareError::localized(
+            ErrorCode::InvalidParameter,
+            "explicit vendor backend required",
+        )),
+    }
+}
 
 pub struct ApplicationContext {
     pub config: Arc<PushWorkerConfig>,
     pub consumer_config: ConsumerConfig,
     pub dispatcher: Arc<dyn Dispatcher>,
+    /// 用量预聚合（`push.attempts`）；启动层把它的 flush 循环挂进运行时。
+    pub usage: flare_im_usage::UsageReporter,
 }
 
 pub async fn initialize(
@@ -84,7 +171,8 @@ pub async fn initialize(
     // 5. 创建 MessageHandler（直接实现，无适配器）
     let online_handler = OnlinePushConsumerFactory::create_handler(gateway_push, dlq.clone());
 
-    // 5.1 离线推送后端：开发期按生产目标显式选择，不做隐式降级。
+    // 5.1 离线推送后端：开发期按生产目标显式选择，不做隐式降级。每个后端经用量计数包一层。
+    let usage = flare_im_usage::UsageReporter::from_env("flare-push-worker").await?;
     let offline_handler = match config.offline_delivery_backend {
         OfflineDeliveryBackend::Outbox => {
             let redis_url = config.offline_outbox_redis_url.as_deref().ok_or_else(|| {
@@ -106,106 +194,28 @@ pub async fn initialize(
             );
             OfflinePushConsumerFactory::create_handler_with_delivery(
                 dlq,
-                Arc::new(outbox),
+                UsageCountedExecutor::wrap(Arc::new(outbox), "outbox", usage.recorder()),
                 config.offline_parking_capacity,
                 metrics,
             )
         }
-        OfflineDeliveryBackend::Apns => {
-            let token_repo = RedisDeviceTokenRepository::connect(
-                &config.device_token_redis_url,
-                config.device_token_key_prefix.clone(),
-            )
-            .await?;
-            let creds = ApnsCredentials {
-                team_id: required_config(config.apns_team_id.clone(), "PUSH_WORKER_APNS_TEAM_ID")?,
-                key_id: required_config(config.apns_key_id.clone(), "PUSH_WORKER_APNS_KEY_ID")?,
-                private_key_pem: required_config(
-                    config.apns_private_key.clone(),
-                    "PUSH_WORKER_APNS_PRIVATE_KEY",
-                )?,
-                topic: required_config(config.apns_topic.clone(), "PUSH_WORKER_APNS_TOPIC")?,
-                sandbox: config.apns_sandbox,
+        backend @ (OfflineDeliveryBackend::Apns
+        | OfflineDeliveryBackend::Fcm
+        | OfflineDeliveryBackend::Getui
+        | OfflineDeliveryBackend::Mobile) => {
+            let providers = if backend == OfflineDeliveryBackend::Mobile {
+                config.offline_mobile_providers.clone()
+            } else {
+                vec![backend]
             };
-            tracing::info!(
-                topic = %creds.topic,
-                sandbox = creds.sandbox,
-                token_key_prefix = %config.device_token_key_prefix,
-                "offline push apns backend enabled"
-            );
+            let mut executors = Vec::new();
+            for provider in providers {
+                let (name, executor) = vendor_executor(&config, provider).await?;
+                executors.push(UsageCountedExecutor::wrap(executor, name, usage.recorder()));
+            }
             OfflinePushConsumerFactory::create_handler_with_delivery(
                 dlq,
-                Arc::new(ApnsOfflinePushExecutor::new(
-                    creds,
-                    reqwest::Client::new(),
-                    Arc::new(token_repo),
-                )),
-                config.offline_parking_capacity,
-                metrics,
-            )
-        }
-        OfflineDeliveryBackend::Fcm => {
-            let token_repo = RedisDeviceTokenRepository::connect(
-                &config.device_token_redis_url,
-                config.device_token_key_prefix.clone(),
-            )
-            .await?;
-            let raw = required_config(
-                config.fcm_service_account_json.clone(),
-                "PUSH_WORKER_FCM_SERVICE_ACCOUNT_JSON",
-            )?;
-            let account: FcmServiceAccount = serde_json::from_str(&raw).map_err(|e| {
-                flare_server_core::error::FlareError::localized(
-                    flare_server_core::error::ErrorCode::InvalidParameter,
-                    format!("PUSH_WORKER_FCM_SERVICE_ACCOUNT_JSON 不是合法的服务账号 JSON: {e}"),
-                )
-            })?;
-            tracing::info!(
-                project_id = %account.project_id,
-                token_key_prefix = %config.device_token_key_prefix,
-                "offline push fcm backend enabled"
-            );
-            OfflinePushConsumerFactory::create_handler_with_delivery(
-                dlq,
-                Arc::new(FcmOfflinePushExecutor::new(
-                    account,
-                    reqwest::Client::new(),
-                    Arc::new(token_repo),
-                )),
-                config.offline_parking_capacity,
-                metrics,
-            )
-        }
-        OfflineDeliveryBackend::Getui => {
-            let token_repo = RedisDeviceTokenRepository::connect(
-                &config.device_token_redis_url,
-                config.device_token_key_prefix.clone(),
-            )
-            .await?;
-            let getui_config = GetuiConfig::new(
-                required_config(config.getui_app_id.clone(), "PUSH_WORKER_GETUI_APP_ID")?,
-                required_config(config.getui_app_key.clone(), "PUSH_WORKER_GETUI_APP_KEY")?,
-                required_config(
-                    config.getui_master_secret.clone(),
-                    "PUSH_WORKER_GETUI_MASTER_SECRET",
-                )?,
-                config.getui_base_url.clone(),
-                config.getui_default_ttl_ms,
-                config.getui_request_timeout_ms,
-            )?;
-            let getui_client = Arc::new(GetuiClient::new(getui_config)?);
-            tracing::info!(
-                token_key_prefix = %config.device_token_key_prefix,
-                ttl_ms = config.getui_default_ttl_ms,
-                "offline push getui backend enabled"
-            );
-            OfflinePushConsumerFactory::create_handler_with_delivery(
-                dlq,
-                Arc::new(GetuiOfflinePushExecutor::new(
-                    Arc::new(token_repo),
-                    getui_client,
-                    config.getui_default_ttl_ms,
-                )),
+                Arc::new(crate::application::mobile_fanout::MobileFanout(executors)),
                 config.offline_parking_capacity,
                 metrics,
             )
@@ -254,6 +264,7 @@ pub async fn initialize(
         config,
         consumer_config: consumer_cfg,
         dispatcher: Arc::new(dispatcher),
+        usage,
     })
 }
 

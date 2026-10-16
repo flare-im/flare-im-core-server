@@ -8,7 +8,8 @@
 #
 # 判据一：某个服务 crate 里出现 `XxxMetrics::new()`，就必须能找到出口——
 # 直接调用 `serve_prometheus_metrics`，或经共享运行时 `attach_metrics_endpoint` /
-# `ImServiceRuntimePlan { metrics: .. }` 挂载。
+# `ImServiceRuntimePlan { metrics: .. }` 挂载，或 `build_service_runtime_plan(..)` 建计划
+# （按 `[services.<name>.metrics]` 填出口）再调 `.service_runtime()`（挂上 /metrics）。
 # 判据二：config/services 下每个服务都声明了指标端口（专属 metrics_port 或
 # [services.<name>.metrics] 段；接入网关用代码默认 19183），端口互不冲突，
 # 且 deploy/prometheus.yml 恰好为每个端口配置了抓取目标——端口表漂移同样会让面板无数。
@@ -58,7 +59,10 @@ for manifest in sorted(root.rglob("Cargo.toml")):
     # 显式传 disabled() 等于没有出口，不能因为字段存在就放行。
     plan_metrics = re.findall(r'ImServiceRuntimePlan\s*\{[^}]*\bmetrics\s*:\s*([^,}]+)', blob)
     via_plan = any("disabled" not in value for value in plan_metrics)
-    if not any(marker in blob for marker in exits) and not via_plan:
+    # build_service_runtime_plan 按配置段填 metrics，service_runtime() 里 attach_metrics_endpoint；
+    # 两者都在才算（只建计划不起运行时一样没有出口）。端口是否声明由判据二核对。
+    via_built_plan = "build_service_runtime_plan(" in blob and ".service_runtime()" in blob
+    if not any(marker in blob for marker in exits) and not via_plan and not via_built_plan:
         bad.append(name)
 
 if bad:

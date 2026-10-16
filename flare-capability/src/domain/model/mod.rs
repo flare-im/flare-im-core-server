@@ -4,7 +4,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::{Duration, SystemTime};
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
@@ -16,10 +16,19 @@ use flare_server_core::context::{Context, Ctx};
 use flare_server_core::error::{ErrorBuilder, ErrorCode, FlareError, Result as FlareResult};
 use tokio::time::timeout;
 
+use crate::domain::service::hook_execution::{HookCall, HookExecutionGuard, HookIdentity};
+
+pub mod hook_execution;
 pub mod hook_name;
 pub mod plugin_endpoint;
 pub mod tenant_projection;
 pub mod tenant_runtime;
+pub use hook_execution::{
+    HOOK_CALL_FAILED_CODE, HOOK_CIRCUIT_OPEN_CODE, HOOK_REJECTED_CODE, HOOK_TIMEOUT_CODE,
+    HookExecutionClass, HookExecutionFilter, HookExecutionOutcome, HookExecutionRecord,
+    HookExecutionScope, HookExecutionStatistics, HookExecutionTimeRange, MAX_QUERY_TIME_MILLIS,
+    MAX_RECORDED_FIELD_CHARS, StoredHookExecution, bounded,
+};
 pub use hook_name::{LoggableName, MAX_HOOK_NAME_CHARS, validate_hook_name};
 pub use plugin_endpoint::{PluginEndpoint, PluginEndpointKey, validate_plugin_endpoint};
 pub use tenant_projection::{
@@ -554,6 +563,10 @@ pub struct HookExecutionPlan {
     transport_config: Option<HookTransportConfig>,
     /// Local Plugin target（用于 Local 适配器）
     local_target: Option<String>,
+    /// Hook 类型名（`pre_send` 等，与 `hook_configs.hook_type` 相同）：熔断与执行记录的键之一。
+    hook_type: String,
+    /// (租户, Hook) 熔断与执行记录；没有时照旧直接调用、不记录。
+    execution_guard: Option<Arc<HookExecutionGuard>>,
 }
 
 impl std::fmt::Debug for HookExecutionPlan {
@@ -566,6 +579,8 @@ impl std::fmt::Debug for HookExecutionPlan {
                 &self.pre_send_handler.as_ref().map(|_| "Some(PreSendHook)"),
             )
             .field("has_adapter", &self.adapter.is_some())
+            .field("hook_type", &self.hook_type)
+            .field("guarded", &self.execution_guard.is_some())
             .finish()
     }
 }
@@ -575,11 +590,13 @@ impl HookExecutionPlan {
     pub fn new_pre_send(metadata: HookMetadata, handler: Arc<dyn PreSendHook>) -> Self {
         Self {
             group: HookGroup::from_priority(metadata.priority),
+            hook_type: kind_hook_type(metadata.kind).to_string(),
             metadata,
             pre_send_handler: Some(handler),
             adapter: None,
             transport_config: None,
             local_target: None,
+            execution_guard: None,
         }
     }
 
@@ -587,12 +604,25 @@ impl HookExecutionPlan {
     pub fn new(metadata: HookMetadata) -> Self {
         Self {
             group: HookGroup::from_priority(metadata.priority),
+            hook_type: kind_hook_type(metadata.kind).to_string(),
             metadata,
             pre_send_handler: None,
             adapter: None,
             transport_config: None,
             local_target: None,
+            execution_guard: None,
         }
+    }
+
+    /// 挂上 (租户, Hook) 熔断与执行记录（见 [`HookExecutionGuard`]）。
+    pub fn with_execution_guard(mut self, guard: Arc<HookExecutionGuard>) -> Self {
+        self.execution_guard = Some(guard);
+        self
+    }
+
+    /// Hook 类型名（`pre_send` 等）。
+    pub fn hook_type(&self) -> &str {
+        &self.hook_type
     }
 
     /// 指定所在组（覆盖按 priority 的自动分组）
@@ -679,6 +709,8 @@ impl HookExecutionPlan {
                 HookTransportConfig::Local { target } => Some(target.clone()),
                 _ => None,
             },
+            hook_type: hook_type.to_string(),
+            execution_guard: None,
         }
     }
 
@@ -713,11 +745,22 @@ impl HookExecutionPlan {
     }
 
     /// 执行PreSend Hook
+    ///
+    /// 挂了执行守卫时先过 (租户, Hook) 熔断：打开时不调用，按 [`Self::circuit_open_decision`]
+    /// 处理；调用后结算熔断并交出执行记录。
     pub async fn execute(
         &self,
         ctx: &Ctx,
         draft: &mut MessageDraft,
     ) -> FlareResult<PreSendDecision> {
+        let call = self.begin_call(ctx);
+        let message_id = call.as_ref().and_then(|_| draft_message_id(draft));
+        if call.as_ref().is_some_and(HookCall::short_circuited) {
+            if let Some(call) = call {
+                call.finish(HookExecutionOutcome::CircuitOpen, message_id.as_deref());
+            }
+            return Ok(self.circuit_open_decision("pre-send"));
+        }
         let fut = async {
             if let Some(ref adapter) = self.adapter {
                 adapter.pre_send(ctx, draft).await
@@ -728,13 +771,73 @@ impl HookExecutionPlan {
             }
         };
 
-        match timeout(self.metadata.timeout, fut).await {
-            Ok(Ok(decision)) => Ok(decision),
+        let (decision, outcome) = match timeout(self.metadata.timeout, fut).await {
+            Ok(Ok(decision)) => {
+                let outcome = decision_outcome(&decision);
+                (decision, outcome)
+            }
             // Hook 没能给出决定（连不上、对端报错、应答解码失败）与超时同样处理：必需的 Hook
             // 拒绝，可选的放行。以前这里原样上抛，不可达的可选 Hook 与 business 组也让每次
             // PreSend 失败。
-            Ok(Err(cause)) => Ok(self.unavailable_decision("pre-send", &cause)),
-            Err(_) => Ok(self.timeout_decision("pre-send")),
+            Ok(Err(cause)) => (
+                self.unavailable_decision("pre-send", &cause),
+                failed_outcome(&cause),
+            ),
+            Err(_) => (
+                self.timeout_decision("pre-send"),
+                HookExecutionOutcome::TimedOut,
+            ),
+        };
+        if let Some(call) = call {
+            call.finish(outcome, message_id.as_deref());
+        }
+        Ok(decision)
+    }
+
+    /// 开始一次受守卫的调用；没有守卫或上下文没有租户时为 `None`。
+    fn begin_call(&self, ctx: &Context) -> Option<HookCall<'_>> {
+        self.execution_guard.as_ref()?.begin(
+            ctx,
+            HookIdentity {
+                hook_type: &self.hook_type,
+                hook_name: self.name(),
+                hook_version: self.metadata.version.as_deref(),
+            },
+        )
+    }
+
+    /// 熔断打开时 PreSend、Recall 的决定：与 Hook 不可用相同，[`Self::must_succeed`] 时拒绝（带
+    /// [`HOOK_UNAVAILABLE_PARAM`] 标记的 `ServiceUnavailable`，调用方得到可重试的 503），否则
+    /// 跳过。每次短路只记 DEBUG：开合已由熔断器记 WARN/INFO，短路次数见指标。
+    fn circuit_open_decision(&self, stage: &'static str) -> PreSendDecision {
+        if self.must_succeed() {
+            tracing::debug!(hook = %LoggableName(self.name()), stage, group = ?self.group, "required hook circuit open, rejecting");
+            PreSendDecision::Reject {
+                error: unavailable_rejection(
+                    ErrorCode::ServiceUnavailable,
+                    format!("{stage} hook circuit open"),
+                    self.name(),
+                ),
+            }
+        } else {
+            tracing::debug!(hook = %LoggableName(self.name()), stage, group = ?self.group, "hook circuit open, skipped");
+            PreSendDecision::Continue
+        }
+    }
+
+    /// 熔断打开时 PostSend、Delivery 的结果：[`Self::must_succeed`] 时与必需的事件类 Hook 超时
+    /// 相同（带标记的 `ServiceUnavailable`，可重试），否则跳过。
+    fn event_circuit_open_outcome(&self, stage: &'static str) -> FlareResult<()> {
+        if self.must_succeed() {
+            tracing::debug!(hook = %LoggableName(self.name()), stage, group = ?self.group, "required hook circuit open, failing");
+            Err(unavailable_rejection(
+                ErrorCode::ServiceUnavailable,
+                format!("{stage} hook circuit open"),
+                self.name(),
+            ))
+        } else {
+            tracing::debug!(hook = %LoggableName(self.name()), stage, "hook circuit open, skipped");
+            Ok(())
         }
     }
 
@@ -801,11 +904,41 @@ impl HookExecutionPlan {
                 Ok(())
             }
         };
+        self.run_event_hook(ctx, "post-send", Some(record.message_id.as_str()), fut)
+            .await
+    }
 
-        match timeout(self.metadata.timeout, fut).await {
-            Ok(inner) => inner,
-            Err(_) => self.event_timeout_outcome("post-send"),
+    /// 事件类 Hook（PostSend、Delivery）的调用：过熔断、加超时、结算并记录。下游调用本身失败（非
+    /// 超时）的错误原样返回，由编排层按 [`Self::must_succeed`] 决定。
+    async fn run_event_hook(
+        &self,
+        ctx: &Context,
+        stage: &'static str,
+        message_id: Option<&str>,
+        fut: impl std::future::Future<Output = FlareResult<()>>,
+    ) -> FlareResult<()> {
+        let call = self.begin_call(ctx);
+        if call.as_ref().is_some_and(HookCall::short_circuited) {
+            if let Some(call) = call {
+                call.finish(HookExecutionOutcome::CircuitOpen, message_id);
+            }
+            return self.event_circuit_open_outcome(stage);
         }
+        let (result, outcome) = match timeout(self.metadata.timeout, fut).await {
+            Ok(Ok(())) => (Ok(()), HookExecutionOutcome::Allowed),
+            Ok(Err(cause)) => {
+                let outcome = failed_outcome(&cause);
+                (Err(cause), outcome)
+            }
+            Err(_) => (
+                self.event_timeout_outcome(stage),
+                HookExecutionOutcome::TimedOut,
+            ),
+        };
+        if let Some(call) = call {
+            call.finish(outcome, message_id);
+        }
+        result
     }
 
     /// 事件类 Hook（PostSend、Delivery）超时：[`Self::must_succeed`] 时回带
@@ -836,11 +969,8 @@ impl HookExecutionPlan {
                 Ok(())
             }
         };
-
-        match timeout(self.metadata.timeout, fut).await {
-            Ok(inner) => inner,
-            Err(_) => self.event_timeout_outcome("delivery"),
-        }
+        self.run_event_hook(ctx, "delivery", Some(event.message_id.as_str()), fut)
+            .await
     }
 
     /// 执行Recall Hook
@@ -849,6 +979,14 @@ impl HookExecutionPlan {
         ctx: &Context,
         event: &RecallEvent,
     ) -> FlareResult<PreSendDecision> {
+        let call = self.begin_call(ctx);
+        let message_id = Some(event.message_id.as_str());
+        if call.as_ref().is_some_and(HookCall::short_circuited) {
+            if let Some(call) = call {
+                call.finish(HookExecutionOutcome::CircuitOpen, message_id);
+            }
+            return Ok(self.circuit_open_decision("recall"));
+        }
         let fut = async {
             if let Some(ref adapter) = self.adapter {
                 adapter.recall(ctx, event).await
@@ -857,11 +995,78 @@ impl HookExecutionPlan {
             }
         };
 
-        match timeout(self.metadata.timeout, fut).await {
-            Ok(Ok(decision)) => Ok(decision),
-            Ok(Err(cause)) => Ok(self.unavailable_decision("recall", &cause)),
-            Err(_) => Ok(self.timeout_decision("recall")),
+        let (decision, outcome) = match timeout(self.metadata.timeout, fut).await {
+            Ok(Ok(decision)) => {
+                let outcome = decision_outcome(&decision);
+                (decision, outcome)
+            }
+            Ok(Err(cause)) => (
+                self.unavailable_decision("recall", &cause),
+                failed_outcome(&cause),
+            ),
+            Err(_) => (
+                self.timeout_decision("recall"),
+                HookExecutionOutcome::TimedOut,
+            ),
+        };
+        if let Some(call) = call {
+            call.finish(outcome, message_id);
         }
+        Ok(decision)
+    }
+}
+
+/// 没有类型名的计划（直接用元数据构造的）按 [`flare_im_hooks::HookKind`] 取类型名。
+fn kind_hook_type(kind: flare_im_hooks::HookKind) -> &'static str {
+    use flare_im_hooks::HookKind;
+    match kind {
+        HookKind::PreSend => "pre_send",
+        HookKind::PostSend => "post_send",
+        HookKind::Delivery => "delivery",
+        HookKind::Recall => "recall",
+        HookKind::PushPreSend => "push_pre_send",
+        HookKind::PushPostSend => "push_post_send",
+        HookKind::PushDelivery => "push_delivery",
+        HookKind::UserLogin => "user_login",
+        HookKind::UserLogout => "user_logout",
+        HookKind::UserOnline => "user_online",
+        HookKind::UserOffline => "user_offline",
+        HookKind::MessageRead => "message_read",
+        HookKind::MessageReaction => "message_reaction",
+        HookKind::ConversationLifecycle => "conversation_lifecycle",
+        HookKind::ConversationMember => "conversation_member",
+        HookKind::Presence => "presence",
+        HookKind::Custom => "custom",
+    }
+}
+
+/// PreSend 草稿的消息号：服务端号，没有时取客户端号。
+fn draft_message_id(draft: &MessageDraft) -> Option<String> {
+    draft
+        .message_id
+        .clone()
+        .or_else(|| draft.client_message_id.clone())
+}
+
+/// Hook 给出的决定对应的执行结果。带不可用标记的拒绝不是 Hook 的决定（本地处理器可能这样
+/// 回），按调用失败记。
+fn decision_outcome(decision: &PreSendDecision) -> HookExecutionOutcome {
+    match decision {
+        PreSendDecision::Continue => HookExecutionOutcome::Allowed,
+        PreSendDecision::Reject { error } if is_hook_unavailable(error) => failed_outcome(error),
+        PreSendDecision::Reject { error } => HookExecutionOutcome::Rejected {
+            reason: error.reason().to_string(),
+        },
+    }
+}
+
+/// 调用失败的执行结果：只记错误码，不记下游错误原文。
+fn failed_outcome(cause: &FlareError) -> HookExecutionOutcome {
+    HookExecutionOutcome::Failed {
+        code: cause
+            .code()
+            .map(|code| code.as_str())
+            .unwrap_or(HOOK_CALL_FAILED_CODE),
     }
 }
 
@@ -874,68 +1079,11 @@ fn unavailable_rejection(code: ErrorCode, reason: String, hook: &str) -> FlareEr
         .build_error()
 }
 
-/// Hook执行结果
-#[derive(Debug, Clone)]
-pub struct HookExecutionResult {
-    pub hook_name: String,
-    pub executed_at: SystemTime,
-    pub success: bool,
-    pub latency_ms: u64,
-    pub error_message: Option<String>,
-}
-
-/// Hook统计信息
-#[derive(Debug, Clone, Default)]
-pub struct HookStatistics {
-    pub total_count: u64,
-    pub success_count: u64,
-    pub failure_count: u64,
-    pub avg_latency_ms: f64,
-    pub max_latency_ms: u64,
-    pub min_latency_ms: u64,
-}
-
-impl HookStatistics {
-    pub fn success_rate(&self) -> f64 {
-        if self.total_count == 0 {
-            return 1.0;
-        }
-        self.success_count as f64 / self.total_count as f64
-    }
-
-    pub fn update(&mut self, result: &HookExecutionResult) {
-        self.total_count += 1;
-        if result.success {
-            self.success_count += 1;
-        } else {
-            self.failure_count += 1;
-        }
-
-        // 更新延迟统计
-        if self.total_count == 1 {
-            self.avg_latency_ms = result.latency_ms as f64;
-            self.max_latency_ms = result.latency_ms;
-            self.min_latency_ms = result.latency_ms;
-        } else {
-            // 计算新的平均值
-            self.avg_latency_ms = (self.avg_latency_ms * (self.total_count - 1) as f64
-                + result.latency_ms as f64)
-                / self.total_count as f64;
-
-            if result.latency_ms > self.max_latency_ms {
-                self.max_latency_ms = result.latency_ms;
-            }
-            if result.latency_ms < self.min_latency_ms {
-                self.min_latency_ms = result.latency_ms;
-            }
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::str::FromStr;
+    use std::time::SystemTime;
 
     /// 传输配置的 `Debug`（日志里 `?config` 的写法）不带签名密钥与头、元数据的值。
     #[test]
@@ -980,38 +1128,6 @@ mod tests {
             LoadBalanceStrategy::LeastConn
         );
         assert!(LoadBalanceStrategy::from_str("invalid").is_err());
-    }
-
-    #[test]
-    fn test_hook_statistics() {
-        let mut stats = HookStatistics::default();
-        assert_eq!(stats.success_rate(), 1.0);
-
-        stats.update(&HookExecutionResult {
-            hook_name: "test".to_string(),
-            executed_at: SystemTime::now(),
-            success: true,
-            latency_ms: 100,
-            error_message: None,
-        });
-        assert_eq!(stats.total_count, 1);
-        assert_eq!(stats.success_count, 1);
-        assert_eq!(stats.failure_count, 0);
-        assert_eq!(stats.avg_latency_ms, 100.0);
-        assert_eq!(stats.success_rate(), 1.0);
-
-        stats.update(&HookExecutionResult {
-            hook_name: "test".to_string(),
-            executed_at: SystemTime::now(),
-            success: false,
-            latency_ms: 200,
-            error_message: Some("error".to_string()),
-        });
-        assert_eq!(stats.total_count, 2);
-        assert_eq!(stats.success_count, 1);
-        assert_eq!(stats.failure_count, 1);
-        assert_eq!(stats.avg_latency_ms, 150.0);
-        assert_eq!(stats.success_rate(), 0.5);
     }
 
     /// 规则之前存下的名称（带换行）照常执行；执行路径上的日志与拒绝原因里名称一律转义，伪造不了
@@ -1385,6 +1501,287 @@ mod tests {
                 reason.contains("unknown hook_type"),
                 "{hook_type}: {reason}"
             );
+        }
+    }
+
+    mod circuit {
+        //! 挂了执行守卫的计划：(租户, Hook) 熔断打开后不再调用 Hook，按错误策略处理（必需的与 Hook
+        //! 不可用相同，回带标记的 `ServiceUnavailable`，调用方得到可重试的 503；可选的跳过）；每次
+        //! 调用都交出执行记录。
+        use super::*;
+        use crate::domain::service::HookCircuitPolicy;
+        use crate::domain::service::hook_execution::test_support::RecordingObserver;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        /// 每类调用都立即失败的下游，记下被调用的次数。
+        #[derive(Default)]
+        struct Unavailable {
+            calls: AtomicUsize,
+        }
+
+        fn down() -> FlareError {
+            ErrorBuilder::new(
+                ErrorCode::ServiceUnavailable,
+                "upstream 10.0.0.7:50110 refused",
+            )
+            .build_error()
+        }
+
+        #[async_trait::async_trait]
+        impl crate::infrastructure::adapters::HookAdapter for Unavailable {
+            async fn pre_send(
+                &self,
+                _ctx: &Context,
+                _draft: &mut MessageDraft,
+            ) -> FlareResult<PreSendDecision> {
+                self.calls.fetch_add(1, Ordering::Relaxed);
+                Err(down())
+            }
+            async fn post_send(
+                &self,
+                _ctx: &Context,
+                _record: &MessageRecord,
+                _draft: &MessageDraft,
+            ) -> FlareResult<()> {
+                self.calls.fetch_add(1, Ordering::Relaxed);
+                Err(down())
+            }
+            async fn delivery(&self, _ctx: &Context, _event: &DeliveryEvent) -> FlareResult<()> {
+                self.calls.fetch_add(1, Ordering::Relaxed);
+                Err(down())
+            }
+            async fn recall(
+                &self,
+                _ctx: &Context,
+                _event: &RecallEvent,
+            ) -> FlareResult<PreSendDecision> {
+                self.calls.fetch_add(1, Ordering::Relaxed);
+                Err(down())
+            }
+        }
+
+        fn guard(observer: Arc<RecordingObserver>) -> Arc<HookExecutionGuard> {
+            Arc::new(HookExecutionGuard::new(
+                HookCircuitPolicy {
+                    enabled: true,
+                    failure_threshold: 2,
+                    failure_window: Duration::from_secs(30),
+                    open_for: Duration::from_secs(600),
+                },
+                observer,
+            ))
+        }
+
+        fn plan(
+            name: &str,
+            hook_type: &str,
+            require_success: bool,
+            adapter: Arc<Unavailable>,
+            guard: &Arc<HookExecutionGuard>,
+        ) -> HookExecutionPlan {
+            let mut item = config_item(150, None);
+            item.name = name.to_string();
+            item.version = Some("v2".to_string());
+            item.require_success = require_success;
+            HookExecutionPlan::from_hook_config(item, hook_type)
+                .with_adapter(adapter)
+                .with_execution_guard(Arc::clone(guard))
+        }
+
+        fn ctx(tenant: &str) -> Ctx {
+            Arc::new(Context::with_request_id("req-circuit").with_tenant_id(tenant))
+        }
+
+        fn draft() -> MessageDraft {
+            let mut draft = MessageDraft::new(b"hello".to_vec());
+            draft.message_id = Some("m-1".into());
+            draft
+        }
+
+        fn unavailable_reason(decision: &PreSendDecision) -> String {
+            match decision {
+                PreSendDecision::Reject { error } => {
+                    assert!(is_hook_unavailable(error), "{error}");
+                    assert_eq!(error.code(), Some(ErrorCode::ServiceUnavailable), "{error}");
+                    assert!(error.is_retryable(), "{error}");
+                    error.reason().to_string()
+                }
+                PreSendDecision::Continue => panic!("a required unavailable hook must reject"),
+            }
+        }
+
+        /// 必需的 PreSend Hook：连续失败两次后熔断打开，第三次不调用 Hook，拒绝与不可用相同
+        /// （可重试的 `ServiceUnavailable`）；记录依次为两次调用失败与一次熔断短路，只带错误码，
+        /// 不带下游原文；别的租户不受影响。
+        #[tokio::test]
+        async fn an_open_circuit_rejects_a_required_pre_send_hook_as_unavailable() {
+            let observer = Arc::new(RecordingObserver::recording_everything());
+            let guard = guard(Arc::clone(&observer));
+            let adapter = Arc::new(Unavailable::default());
+            let hook = plan("dlp", "pre_send", true, Arc::clone(&adapter), &guard);
+
+            for _ in 0..2 {
+                let decision = hook.execute(&ctx("t1"), &mut draft()).await.unwrap();
+                assert_eq!(unavailable_reason(&decision), "pre-send hook unavailable");
+            }
+            let decision = hook.execute(&ctx("t1"), &mut draft()).await.unwrap();
+            assert_eq!(unavailable_reason(&decision), "pre-send hook circuit open");
+            assert_eq!(
+                adapter.calls.load(Ordering::Relaxed),
+                2,
+                "not called while open"
+            );
+
+            let records = observer.records();
+            let outcomes: Vec<_> = records.iter().map(|r| r.outcome.clone()).collect();
+            assert_eq!(
+                outcomes,
+                vec![
+                    HookExecutionOutcome::Failed {
+                        code: "SERVICE_UNAVAILABLE"
+                    },
+                    HookExecutionOutcome::Failed {
+                        code: "SERVICE_UNAVAILABLE"
+                    },
+                    HookExecutionOutcome::CircuitOpen,
+                ]
+            );
+            for record in &records {
+                assert_eq!(record.tenant_id, "t1");
+                assert_eq!(record.hook_type, "pre_send");
+                assert_eq!(record.hook_name, "dlp");
+                assert_eq!(record.hook_version.as_deref(), Some("v2"));
+                assert_eq!(record.message_id.as_deref(), Some("m-1"));
+                assert_eq!(record.request_id.as_deref(), Some("req-circuit"));
+                let message = record.outcome.error_message().unwrap_or_default();
+                assert!(!message.contains("10.0.0.7"), "{message}");
+            }
+
+            let decision = hook.execute(&ctx("t2"), &mut draft()).await.unwrap();
+            assert_eq!(unavailable_reason(&decision), "pre-send hook unavailable");
+            assert_eq!(
+                adapter.calls.load(Ordering::Relaxed),
+                3,
+                "t2 still calls the hook"
+            );
+        }
+
+        /// 可选的 Hook 熔断打开后照常放行（跳过，不调用）；Recall 同 PreSend。
+        #[tokio::test]
+        async fn an_open_circuit_skips_optional_hooks() {
+            let observer = Arc::new(RecordingObserver::default());
+            let guard = guard(Arc::clone(&observer));
+            let adapter = Arc::new(Unavailable::default());
+            let pre_send = plan("tagger", "pre_send", false, Arc::clone(&adapter), &guard);
+            for _ in 0..3 {
+                let decision = pre_send.execute(&ctx("t1"), &mut draft()).await.unwrap();
+                assert!(matches!(decision, PreSendDecision::Continue));
+            }
+            assert_eq!(adapter.calls.load(Ordering::Relaxed), 2);
+
+            let recall = plan("recall-audit", "recall", true, Arc::clone(&adapter), &guard);
+            let event = RecallEvent {
+                message_id: "m-9".into(),
+                conversation_id: None,
+                operator_id: "u1".into(),
+                recalled_at: SystemTime::now(),
+                metadata: HashMap::new(),
+            };
+            for _ in 0..2 {
+                recall.execute_recall(&ctx("t1"), &event).await.unwrap();
+            }
+            let decision = recall.execute_recall(&ctx("t1"), &event).await.unwrap();
+            assert_eq!(unavailable_reason(&decision), "recall hook circuit open");
+            assert_eq!(adapter.calls.load(Ordering::Relaxed), 4);
+            // 失败全量；采样类（熔断短路）在采样器不要时不记。
+            assert_eq!(observer.records().len(), 4);
+        }
+
+        /// 事件类 Hook：必需的熔断打开后回带标记的 `ServiceUnavailable`（可重试），可选的放行；
+        /// 打开前的下游失败原样返回（编排层决定）。
+        #[tokio::test]
+        async fn an_open_circuit_fails_required_event_hooks_retryably() {
+            let observer = Arc::new(RecordingObserver::recording_everything());
+            let guard = guard(Arc::clone(&observer));
+            let adapter = Arc::new(Unavailable::default());
+            let required = plan("archive", "post_send", true, Arc::clone(&adapter), &guard);
+            let optional = plan("notify", "delivery", false, Arc::clone(&adapter), &guard);
+            let record = MessageRecord {
+                message_id: "m-2".into(),
+                client_message_id: None,
+                conversation_id: "c1".into(),
+                sender_id: "u1".into(),
+                conversation_type: None,
+                message_type: None,
+                persisted_at: SystemTime::now(),
+                metadata: HashMap::new(),
+            };
+            let delivery = DeliveryEvent {
+                message_id: "m-3".into(),
+                user_id: "u2".into(),
+                channel: "ws".into(),
+                delivered_at: SystemTime::now(),
+                metadata: HashMap::new(),
+            };
+            for _ in 0..2 {
+                let error = required
+                    .execute_post_send(&ctx("t1"), &record, &draft())
+                    .await
+                    .unwrap_err();
+                assert!(
+                    !is_hook_unavailable(&error),
+                    "the downstream error itself: {error}"
+                );
+                assert!(
+                    optional
+                        .execute_delivery(&ctx("t1"), &delivery)
+                        .await
+                        .is_err()
+                );
+            }
+            let error = required
+                .execute_post_send(&ctx("t1"), &record, &draft())
+                .await
+                .unwrap_err();
+            assert!(is_hook_unavailable(&error), "{error}");
+            assert_eq!(error.code(), Some(ErrorCode::ServiceUnavailable));
+            assert!(error.is_retryable());
+            assert!(
+                optional
+                    .execute_delivery(&ctx("t1"), &delivery)
+                    .await
+                    .is_ok()
+            );
+            assert_eq!(adapter.calls.load(Ordering::Relaxed), 4);
+            let messages: Vec<_> = observer
+                .records()
+                .iter()
+                .map(|r| {
+                    (
+                        r.hook_type.clone(),
+                        r.message_id.clone().unwrap_or_default(),
+                    )
+                })
+                .collect();
+            assert!(messages.contains(&("post_send".into(), "m-2".into())));
+            assert!(messages.contains(&("delivery".into(), "m-3".into())));
+        }
+
+        /// 没挂守卫的计划照旧：不熔断、不记录。
+        #[tokio::test]
+        async fn plans_without_a_guard_keep_calling() {
+            let adapter = Arc::new(Unavailable::default());
+            let mut item = config_item(150, None);
+            item.require_success = true;
+            let hook =
+                HookExecutionPlan::from_hook_config(item, "pre_send")
+                    .with_adapter(Arc::clone(&adapter)
+                        as Arc<dyn crate::infrastructure::adapters::HookAdapter>);
+            for _ in 0..5 {
+                let decision = hook.execute(&ctx("t1"), &mut draft()).await.unwrap();
+                assert_eq!(unavailable_reason(&decision), "pre-send hook unavailable");
+            }
+            assert_eq!(adapter.calls.load(Ordering::Relaxed), 5);
         }
     }
 }

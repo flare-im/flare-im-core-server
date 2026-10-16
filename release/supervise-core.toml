@@ -102,7 +102,9 @@ FLARE_REQUIRE_SIGNED_READ_CTX = "true"
 [[services]]
 name = "message-ingest"
 command = "/usr/local/bin/flare-message-ingest"
-inherit_env_prefixes = ["MESSAGE_INGEST_", "INGEST_"]
+# FLARE_USAGE_*: the six usage producers (ingest, storage writer, push worker, media, API
+# gateway, signaling gateway) publish flare.usage.window.v1 when FLARE_USAGE_NATS_URL is set.
+inherit_env_prefixes = ["MESSAGE_INGEST_", "INGEST_", "FLARE_USAGE_"]
 # The seq floor self-heal reads Storage Reader as ingest's own Service identity for
 # the message tenant; forwarding the inbound token fails whenever its tenant differs.
 # Without the private key ingest keeps forwarding (and warns once at startup).
@@ -129,7 +131,7 @@ tcp_health = "127.0.0.1:50181"
 [[services]]
 name = "storage-writer"
 command = "/usr/local/bin/flare-storage-writer"
-inherit_env_prefixes = ["STORAGE_"]
+inherit_env_prefixes = ["STORAGE_", "FLARE_USAGE_"]
 inherit_env = ["POSTGRES_URL", "MEDIA_SERVICE_ENDPOINT"]
 
 [[services]]
@@ -193,7 +195,7 @@ tcp_health = "127.0.0.1:50091"
 name = "push-worker"
 command = "/usr/local/bin/flare-push-worker"
 enabled_if_env = "PUSH_WORKER_DELIVERY_READY"
-inherit_env_prefixes = ["PUSH_WORKER_", "FLARE_GETUI_"]
+inherit_env_prefixes = ["PUSH_WORKER_", "FLARE_USAGE_"]
 inherit_env = [
   "ACCESS_GATEWAY_GRPC_ENDPOINT", "FLARE_INTERNAL_CTX_PUBLIC_KEY", "FLARE_INTERNAL_CTX_PUBLIC_KEYS",
   "FLARE_INTERNAL_CTX_PRIVATE_KEY",
@@ -203,7 +205,7 @@ required_env = ["FLARE_INTERNAL_CTX_PUBLIC_KEY", "FLARE_INTERNAL_CTX_PRIVATE_KEY
 [[services]]
 name = "media"
 command = "/usr/local/bin/flare-media"
-inherit_env_prefixes = ["MEDIA_", "DIRECT_", "EXTERNAL_", "FLARE_S3_"]
+inherit_env_prefixes = ["MEDIA_", "DIRECT_", "EXTERNAL_", "FLARE_S3_", "FLARE_USAGE_"]
 # Media gRPC admits only Cell-signed internal context (verify-only public key set; Admin
 # Gateway signs its media calls as kid=admin-gateway).
 inherit_env = ["FLARE_OBJECT_STORE_PROFILE", "FLARE_INTERNAL_CTX_PUBLIC_KEY", "FLARE_INTERNAL_CTX_PUBLIC_KEYS"]
@@ -216,7 +218,7 @@ tcp_health = "127.0.0.1:60081"
 [[services]]
 name = "api-gateway"
 command = "/usr/local/bin/flare-api-gateway"
-inherit_env_prefixes = ["FLARE_API_GATEWAY_", "GRPC_"]
+inherit_env_prefixes = ["FLARE_API_GATEWAY_", "GRPC_", "FLARE_USAGE_"]
 inherit_env = [
   "FLARE_INTERNAL_CTX_PRIVATE_KEY", "FLARE_MEDIA_CONTROL_GRPC_ENDPOINT",
   "FLARE_API_KEY_PEPPER", "FLARE_PLATFORM_API_ENABLED", "FLARE_PLATFORM_TRUSTED_PROXY_CIDRS",
@@ -244,7 +246,7 @@ FLARE_API_GATEWAY_GRPC_STORAGE_READER_SERVICE_URL = "http://127.0.0.1:60083"
 [[services]]
 name = "signaling-gateway"
 command = "/usr/local/bin/flare-signaling-gateway"
-inherit_env_prefixes = ["ACCESS_GATEWAY_", "GATEWAY_"]
+inherit_env_prefixes = ["ACCESS_GATEWAY_", "GATEWAY_", "FLARE_USAGE_"]
 # FLARE_QUIC_TLS_*: the installation certificate for QUIC behind Edge's UDP
 # passthrough (optional; without it the listener generates a localhost one).
 inherit_env = [

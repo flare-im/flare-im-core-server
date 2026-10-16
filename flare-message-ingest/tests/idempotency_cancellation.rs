@@ -6,6 +6,9 @@
 //! - 取消发生在 WAL 之前（序列号分配挂起）：占位回滚，重发正常处理；
 //! - 取消发生在 WAL 之后（发布挂起）：占位按已确定的结果提交，重发拿回同一个 server_id 与 seq，
 //!   不再发布第二次。
+//!
+//! 用量 `messages.accepted` 随 broker 确认计一次：重放与发布挂起（回 WalAccepted、靠 WAL 重放）
+//! 都不再计。
 
 use std::collections::HashMap;
 use std::future::Future;
@@ -19,6 +22,7 @@ use flare_im_hooks::hooks::{HookDispatcher, HookRegistry};
 use flare_im_message_pipeline::MqPushRepository;
 use flare_im_seq::SequenceAllocator;
 use flare_im_service_kit::metrics::MessageOrchestratorMetrics;
+use flare_im_usage::UsageRecorder;
 use flare_message_ingest::application::MessageIngestHandler;
 use flare_message_ingest::application::commands::SendMessageCommand;
 use flare_message_ingest::application::extension::{
@@ -263,6 +267,19 @@ struct Harness {
     store: Arc<MemoryIdempotency>,
     producer: Arc<GatedProducer>,
     exec_hangs: Arc<AtomicBool>,
+    usage: UsageRecorder,
+}
+
+impl Harness {
+    /// `messages.accepted` counted for tenant-a so far, as (category, value).
+    fn accepted(&self) -> Vec<(&'static str, u64)> {
+        self.usage
+            .live()
+            .into_iter()
+            .filter(|reading| reading.app == "tenant-a" && reading.meter == "messages.accepted")
+            .map(|reading| (reading.dims[0].1, reading.value))
+            .collect()
+    }
 }
 
 async fn harness() -> Harness {
@@ -293,6 +310,7 @@ async fn harness() -> Harness {
         ExtensionRouting::new(Vec::new(), Vec::new()),
     ));
     let store = Arc::new(MemoryIdempotency::default());
+    let usage = UsageRecorder::unpublished("message-ingest-test");
     let handler = MessageIngestHandler::new(
         message_ingest_service,
         extension_orchestrator,
@@ -303,12 +321,14 @@ async fn harness() -> Harness {
         )),
         Arc::new(MessageOrchestratorMetrics::new()),
     )
-    .with_idempotency(store.clone());
+    .with_idempotency(store.clone())
+    .with_usage(usage.clone());
     Harness {
         handler,
         store,
         producer,
         exec_hangs,
+        usage,
     }
 }
 
@@ -371,6 +391,18 @@ async fn a_send_cancelled_before_the_wal_releases_its_reservation() {
     let outcome = retry.expect("retry is processed, not rejected as in progress");
     assert!(!outcome.message_id.is_empty());
     assert_eq!(harness.producer.sends.load(Ordering::SeqCst), 1);
+    assert_eq!(harness.accepted(), [("normal", 1)]);
+
+    // 同一 client_msg_id 再发是重放：不再发布，也不再计用量。
+    let replay = tokio::time::timeout(
+        Duration::from_secs(5),
+        harness.handler.handle_send_message(&ctx, command()),
+    )
+    .await
+    .expect("replay finishes")
+    .expect("replay answers the first outcome");
+    assert_eq!(replay.message_id, outcome.message_id);
+    assert_eq!(harness.accepted(), [("normal", 1)]);
 }
 
 #[tokio::test]
@@ -413,4 +445,6 @@ async fn a_send_cancelled_after_the_wal_commits_its_outcome() {
     assert_eq!(outcome.conversation_seq, 1);
     assert_eq!(outcome.durability, SendAckDurability::WalAccepted);
     assert_eq!(harness.producer.sends.load(Ordering::SeqCst), 1);
+    // broker 从未确认：不计 accepted（WAL 重放落库后由 writer 计 persisted）。
+    assert!(harness.accepted().is_empty());
 }

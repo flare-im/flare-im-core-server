@@ -5,6 +5,8 @@
 mod capability_extension;
 mod config_sources;
 mod hook_runtime;
+
+pub(crate) use hook_runtime::HookExecutionBackground;
 mod internal_ctx;
 mod plugin_routes;
 
@@ -17,6 +19,7 @@ use crate::interface::grpc::{CapabilityAdminGrpcServer, TenantProjectionGrpcServ
 
 use crate::composition::process_config::CapabilityServiceConfig;
 use crate::composition::runtime_context::ApplicationContext;
+use crate::infrastructure::config::HookExecutionSettings;
 use crate::interface::grpc::hooks::ImHookPluginServer;
 
 pub use capability_extension::init_capability_extension_stack;
@@ -24,7 +27,12 @@ pub use capability_extension::init_capability_extension_stack;
 /// 构建完整 [`ApplicationContext`]（配置 → Hook → Capability）。
 pub(crate) async fn initialize(config: CapabilityServiceConfig) -> Result<ApplicationContext> {
     let mut sources = config_sources::prepare_config_sources(&config).await?;
-    let hook = hook_runtime::build_hook_runtime(&sources);
+    let runtime_config_file = config
+        .runtime_config_file
+        .clone()
+        .or_else(|| config.config_file.clone());
+    let execution_settings = HookExecutionSettings::from_sources(runtime_config_file.as_deref());
+    let hook = hook_runtime::build_hook_runtime(&sources, &execution_settings);
     let hook_config_listener = sources.listener.take();
 
     let db_pool = sources
@@ -35,10 +43,7 @@ pub(crate) async fn initialize(config: CapabilityServiceConfig) -> Result<Applic
     let plugin_routes = Arc::new(plugin_routes::plugin_route_book(db_pool.as_ref()));
     let (capability_registry, capability_policy, capability_grpc) =
         init_capability_extension_stack(
-            config
-                .runtime_config_file
-                .clone()
-                .or_else(|| config.config_file.clone()),
+            runtime_config_file,
             db_pool.clone(),
             hook.hook_governance.clone(),
             Arc::clone(&plugin_routes),
@@ -82,7 +87,8 @@ pub(crate) async fn initialize(config: CapabilityServiceConfig) -> Result<Applic
         hook.adapter_factory,
         capability_registry.clone(),
         hook_plugin_verifier,
-    );
+    )
+    .with_execution_guard(hook.execution_guard);
 
     let audit_delivery = if let Some(pool) = db_pool {
         let publisher =
@@ -112,5 +118,6 @@ pub(crate) async fn initialize(config: CapabilityServiceConfig) -> Result<Applic
         tenant_projection,
         capability_admin,
         hook_config_listener,
+        hook_execution_background: hook.execution_background,
     })
 }

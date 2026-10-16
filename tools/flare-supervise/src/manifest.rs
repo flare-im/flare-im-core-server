@@ -835,6 +835,27 @@ required_env_unless = [
                 .filter(|service| service.name != "admin-gateway")
                 .any(|service| manifest.env_allowed(service, "FLARE_AUDIT_NATS_URL"))
         );
+        // Exactly the six usage counting points receive the usage stream settings.
+        for name in ["FLARE_USAGE_NATS_URL", "FLARE_USAGE_WINDOW_SECS"] {
+            let producers: Vec<_> = manifest
+                .services
+                .iter()
+                .filter(|service| manifest.env_allowed(service, name))
+                .map(|service| service.name.as_str())
+                .collect();
+            assert_eq!(
+                producers,
+                [
+                    "message-ingest",
+                    "storage-writer",
+                    "push-worker",
+                    "media",
+                    "api-gateway",
+                    "signaling-gateway"
+                ],
+                "{name}"
+            );
+        }
     }
 
     #[test]

@@ -115,6 +115,8 @@ pub struct ApplicationContext {
     pub dispatcher: Arc<dyn Dispatcher>,
     pub retry_forwarder_dispatcher: Option<Arc<dyn Dispatcher>>,
     pub failure_publishers: ConsumerFailurePublishers,
+    /// 用量预聚合（`messages.persisted`）；启动层把它的 flush 循环挂进运行时。
+    pub usage: flare_im_usage::UsageReporter,
 }
 
 pub async fn initialize(
@@ -168,6 +170,8 @@ pub async fn initialize(
             })?,
     );
 
+    let usage = flare_im_usage::UsageReporter::from_env("flare-storage-writer").await?;
+
     // 使用具体类型创建 domain_service
     let write_ledger_repo: Arc<dyn MessageWriteLedgerRepository> = archive_repo.clone();
     let domain_service: Arc<MessagePersistenceService> = Arc::new(
@@ -180,7 +184,8 @@ pub async fn initialize(
             Some(ack_publisher),
         )
         .with_write_ledger_repo(Some(write_ledger_repo))
-        .with_metrics(Some(metrics.clone())),
+        .with_metrics(Some(metrics.clone()))
+        .with_usage(usage.recorder()),
     );
 
     let event_service: Arc<EventApplicationServiceType> = Arc::new(EventApplicationService::new(
@@ -241,6 +246,7 @@ pub async fn initialize(
         dispatcher: Arc::new(dispatcher),
         retry_forwarder_dispatcher,
         failure_publishers,
+        usage,
     })
 }
 

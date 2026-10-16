@@ -120,7 +120,10 @@ its Hook configuration path. Admin Gateway joins `all` only when
 `FLARE_ADMIN_GATEWAY_ENABLED` is set; it verifies the Staff context the Social
 gateway admin partition signs with the Cell key set (Staff pinned to
 `kid=gateway`), needs the private key to re-sign that staff for Media, and may
-receive `FLARE_AUDIT_NATS_URL` for management effect events. Only Online and
+receive `FLARE_AUDIT_NATS_URL` for management effect events. The six usage
+producers (Message Ingest, Storage Writer, Push Worker, Media and the API and
+signaling gateways) receive `FLARE_USAGE_*` for the usage window events described
+in `docs/usage-events.md`. Only Online and
 Capability inherit `FLARE_PLATFORM_PUBLIC_KEY`, which verifies the platform's
 scheduler and projection worker assertions; no Core service verifies an employee
 with it, and the platform signing keys are forbidden in the supervisor environment.

@@ -36,6 +36,7 @@ pub async fn start_services(
     // 解析 gRPC 地址
     // 必须在 context 被 move 进各任务闭包之前取出来
     let metrics_config = context.metrics_config.clone();
+    let usage = context.usage;
 
     let grpc_addr: SocketAddr = format!("{}:{}", address, port_config.grpc_port)
         .parse()
@@ -106,6 +107,8 @@ pub async fn start_services(
             }
         }
     })
+    // 用量 flush 循环：停机时补发当前窗口
+    .add_spawn_with_shutdown("usage-flush", move |shutdown_rx| usage.run(shutdown_rx))
     // 长连接服务器任务
     .add_spawn_with_shutdown("long-conn-server", move |shutdown_rx| {
         let server = context.long_connection_server.clone();
