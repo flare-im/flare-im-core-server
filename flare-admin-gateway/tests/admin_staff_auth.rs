@@ -151,7 +151,7 @@ async fn permission_and_scope_mismatches_are_403_with_typed_reasons() {
             "/api/v1/admin/plugins/register",
             Some(&org),
             WRITE_HEADERS,
-            Some(r#"{"plugin_id":"p","capability_id":"c","grpc_authority":"http://p:9"}"#),
+            Some(r#"{"plugin_id":"p","capability_id":"c","grpc_authority":"http://p:9","plugin_version":"1.0.0","api_version":"1.0","manifest_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","declared_operations":["c"]}"#),
         ),
     )
     .await;

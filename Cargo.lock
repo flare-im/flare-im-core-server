@@ -1613,6 +1613,7 @@ dependencies = [
  "flare-core-runtime",
  "flare-grpc-proto",
  "flare-im-service-kit",
+ "flare-plugin-protocol",
  "flare-proto",
  "flare-server-core",
  "prost",

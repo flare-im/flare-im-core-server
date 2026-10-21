@@ -680,7 +680,6 @@ async fn plugins_shape_and_filter() {
             "manifest_sha256",
             "declared_operations",
             "unverified",
-            "seat_model",
             "labels",
         ])
     );

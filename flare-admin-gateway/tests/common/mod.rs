@@ -718,7 +718,6 @@ impl CapabilityService for Fakes {
                 manifest_sha256: "ab".repeat(32),
                 declared_operations: vec!["rtc.call".to_string()],
                 unverified: false,
-                seat_model: "per_user".to_string(),
                 ..Default::default()
             })
             .collect();
@@ -1186,7 +1185,7 @@ pub fn capability_routes() -> Vec<(&'static str, &'static str, Option<&'static s
             "POST",
             "/api/v1/admin/plugins/register",
             Some(
-                r#"{"plugin_id":"plugin-c","capability_id":"rtc.call","grpc_authority":"http://sfu:9","declared_operations":["rtc.call"]}"#,
+                r#"{"plugin_id":"plugin-c","capability_id":"rtc.call","grpc_authority":"http://sfu:9","declared_operations":["rtc.call"],"plugin_version":"1.0.0","api_version":"1.0","manifest_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}"#,
             ),
         ),
         (

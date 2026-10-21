@@ -246,7 +246,7 @@ async fn sensitive_reads_and_writes_are_audited_other_reads_are_not() {
             "POST",
             "/api/v1/admin/plugins/register",
             Some(
-                r#"{"plugin_id":"plugin-c","capability_id":"rtc.call","grpc_authority":"http://sfu:9"}"#,
+                r#"{"plugin_id":"plugin-c","capability_id":"rtc.call","grpc_authority":"http://sfu:9","plugin_version":"1.0.0","api_version":"1.0","manifest_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","declared_operations":["rtc.call"]}"#,
             ),
             "plugins.register",
             "plugin-c",

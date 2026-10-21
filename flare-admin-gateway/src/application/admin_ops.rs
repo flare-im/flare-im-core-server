@@ -261,17 +261,10 @@ pub struct AdminPluginRegisterHttpRequest {
     pub grpc_authority: String,
     #[serde(default)]
     pub labels: HashMap<String, String>,
-    #[serde(default)]
     pub plugin_version: String,
-    #[serde(default)]
     pub api_version: String,
-    #[serde(default)]
     pub manifest_sha256: String,
-    #[serde(default)]
     pub declared_operations: Vec<String>,
-    /// `tenant` / `per_user`；留空沿用 Capability 的旧语义。
-    #[serde(default)]
-    pub seat_model: String,
 }
 
 #[derive(Debug, Clone, Serialize, ToSchema)]
@@ -303,9 +296,8 @@ pub struct AdminPluginHttp {
     pub api_version: String,
     pub manifest_sha256: String,
     pub declared_operations: Vec<String>,
-    /// 未携带 `declared_operations` 的插件：能用，但声明边界无法强制。
+    /// 未验证实例仅用于诊断展示，不能接收业务调用。
     pub unverified: bool,
-    pub seat_model: String,
     pub labels: HashMap<String, String>,
 }
 
@@ -371,6 +363,17 @@ pub fn register_plugin_request(
     let plugin_id = identifier(&request.plugin_id, "plugin_id")?;
     let capability_id = identifier(&request.capability_id, "capability_id")?;
     let grpc_authority = required(&request.grpc_authority, "grpc_authority")?;
+    flare_plugin_protocol::registration::validate_declaration(
+        &request.plugin_version,
+        &request.api_version,
+        &request.manifest_sha256,
+        &request.declared_operations,
+        &capability_id,
+    )
+    .map_err(|message| AdminArgError {
+        code: "ADMIN_PLUGIN_FIELD_INVALID",
+        message: message.to_owned(),
+    })?;
     if !request
         .declared_operations
         .iter()
@@ -389,7 +392,6 @@ pub fn register_plugin_request(
         api_version: request.api_version,
         manifest_sha256: request.manifest_sha256,
         declared_operations: request.declared_operations,
-        seat_model: request.seat_model,
     })
 }
 
@@ -645,7 +647,6 @@ fn plugin_http(instance: RegisteredPluginInstance) -> AdminPluginHttp {
         manifest_sha256: instance.manifest_sha256,
         declared_operations: instance.declared_operations,
         unverified: instance.unverified,
-        seat_model: instance.seat_model,
         labels: instance.labels,
     }
 }
@@ -778,6 +779,9 @@ mod tests {
                 capability_id: "rtc.call".into(),
                 grpc_authority: "http://sfu:9".into(),
                 declared_operations: vec!["rtc.call".into()],
+                plugin_version: "1.0.0".into(),
+                api_version: "1.0".into(),
+                manifest_sha256: "a".repeat(64),
                 ..Default::default()
             },
         )
@@ -813,6 +817,9 @@ mod tests {
                 capability_id: capability_id.into(),
                 grpc_authority: "http://sfu:9".into(),
                 declared_operations: operations.iter().map(|op| op.to_string()).collect(),
+                plugin_version: "1.0.0".into(),
+                api_version: "1.0".into(),
+                manifest_sha256: "a".repeat(64),
                 ..Default::default()
             }
         };

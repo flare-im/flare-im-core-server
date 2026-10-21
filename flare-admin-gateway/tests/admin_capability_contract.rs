@@ -75,7 +75,7 @@ async fn plugin_registration_is_platform_staff_only() {
     for (path, body) in [
         (
             "/api/v1/admin/plugins/register",
-            r#"{"plugin_id":"plugin-c","capability_id":"rtc.call","grpc_authority":"http://sfu:9"}"#,
+            r#"{"plugin_id":"plugin-c","capability_id":"rtc.call","grpc_authority":"http://sfu:9","plugin_version":"1.0.0","api_version":"1.0","manifest_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","declared_operations":["rtc.call"]}"#,
         ),
         (
             "/api/v1/admin/plugins/deregister",
@@ -233,7 +233,7 @@ async fn plugin_register_and_deregister_shapes_and_requests() {
             "/api/v1/admin/plugins/register",
             &h.gateway,
             Some(
-                r#"{"plugin_id":"plugin-c","capability_id":"rtc.call","grpc_authority":"http://sfu:9","declared_operations":["rtc.call"],"seat_model":"tenant"}"#,
+                r#"{"plugin_id":"plugin-c","capability_id":"rtc.call","grpc_authority":"http://sfu:9","plugin_version":"1.0.0","api_version":"1.0","manifest_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","declared_operations":["rtc.call"]}"#,
             ),
         ),
     )
@@ -264,7 +264,7 @@ async fn plugin_register_and_deregister_shapes_and_requests() {
             "POST",
             "/api/v1/admin/plugins/register",
             &h.gateway,
-            Some(r#"{"plugin_id":"plugin-c","capability_id":"","grpc_authority":"http://sfu:9"}"#),
+            Some(r#"{"plugin_id":"plugin-c","capability_id":"","grpc_authority":"http://sfu:9","plugin_version":"1.0.0","api_version":"1.0","manifest_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","declared_operations":[""]}"#),
         ),
     )
     .await;
@@ -274,10 +274,10 @@ async fn plugin_register_and_deregister_shapes_and_requests() {
 
     // 标识不合规（换行、空白、斜杠、声明里的非标识）：400，不调用下游，也不回显取值。
     for request in [
-        r#"{"plugin_id":"plugin-c\nWARN forged","capability_id":"rtc.call","grpc_authority":"http://sfu:9"}"#,
-        r#"{"plugin_id":"plugin c","capability_id":"rtc.call","grpc_authority":"http://sfu:9"}"#,
-        r#"{"plugin_id":"plugin-c","capability_id":"rtc/call","grpc_authority":"http://sfu:9"}"#,
-        r#"{"plugin_id":"plugin-c","capability_id":"rtc.call","grpc_authority":"http://sfu:9","declared_operations":["rtc.call","rtc.call\r\nWARN forged"]}"#,
+        r#"{"plugin_id":"plugin-c\nWARN forged","capability_id":"rtc.call","grpc_authority":"http://sfu:9","plugin_version":"1.0.0","api_version":"1.0","manifest_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","declared_operations":["rtc.call"]}"#,
+        r#"{"plugin_id":"plugin c","capability_id":"rtc.call","grpc_authority":"http://sfu:9","plugin_version":"1.0.0","api_version":"1.0","manifest_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","declared_operations":["rtc.call"]}"#,
+        r#"{"plugin_id":"plugin-c","capability_id":"rtc/call","grpc_authority":"http://sfu:9","plugin_version":"1.0.0","api_version":"1.0","manifest_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","declared_operations":["rtc/call"]}"#,
+        r#"{"plugin_id":"plugin-c","capability_id":"rtc.call","grpc_authority":"http://sfu:9","declared_operations":["rtc.call","rtc.call\r\nWARN forged"],"plugin_version":"1.0.0","api_version":"1.0","manifest_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}"#,
     ] {
         let (status, body) = send(
             &h.router,
@@ -302,7 +302,7 @@ async fn plugin_register_and_deregister_shapes_and_requests() {
             "POST",
             "/api/v1/admin/plugins/register",
             &h.gateway,
-            Some(r#"{"plugin_id":"denied","capability_id":"rtc.call","grpc_authority":"http://sfu:9"}"#),
+            Some(r#"{"plugin_id":"denied","capability_id":"rtc.call","grpc_authority":"http://sfu:9","plugin_version":"1.0.0","api_version":"1.0","manifest_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","declared_operations":["rtc.call"]}"#),
         ),
     )
     .await;

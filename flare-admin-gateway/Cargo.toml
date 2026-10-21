@@ -20,6 +20,7 @@ flare-core-base = { workspace = true }
 flare-grpc-proto = { workspace = true }
 flare-proto = { workspace = true }
 flare-server-core = { workspace = true }
+flare-plugin-protocol = { version = "0.1.0", path = "../../flare-proto/flare-plugin-protocol" }
 
 anyhow = { workspace = true }
 axum = { workspace = true }
