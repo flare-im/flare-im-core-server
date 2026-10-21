@@ -258,7 +258,12 @@ impl ApplicationBootstrap {
         let usage = flare_im_usage::UsageReporter::from_env("flare-api-gateway").await?;
 
         // 限流在指标层之内：被拒的请求也计入 HTTP 指标。
+        let capability_user_client =
+            crate::interface::http::capability_handler::CapabilityUserClient::from_env().map_err(
+                |_| flare_server_core::error::FlareError::system("invalid API capability endpoint"),
+            )?;
         let app = with_request_rate_limit(create_public_router(clients), &settings.rate_limit)
+            .layer(axum::Extension(capability_user_client))
             .layer(flare_im_service_kit::metrics::HttpMetricsLayer::new(
                 API_GATEWAY,
             ))

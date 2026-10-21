@@ -50,8 +50,8 @@ fn protected_api_groups_are_wrapped_by_gateway_auth() {
         .match_indices(".route_layer(middleware::from_fn(gateway_auth_middleware));")
         .count();
     assert_eq!(
-        auth_layers, 5,
-        "media/message/conversation/presence/device API groups must all be protected"
+        auth_layers, 6,
+        "media/message/conversation/presence/device/capability API groups must all be protected"
     );
 }
 

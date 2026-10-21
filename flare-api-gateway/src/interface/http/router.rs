@@ -43,6 +43,7 @@ use flare_server_core::http::HttpApiError;
         media_handler::references::list_references,
         media_handler::processing::process_image,
         media_handler::processing::process_video,
+        super::capability_handler::dispatch,
         message_handler::send_message,
         message_handler::execute_custom_event,
         message_handler::recall_message,
@@ -100,6 +101,8 @@ use flare_server_core::http::HttpApiError;
             crate::application::dto::MediaReferenceHttpResponse,
             crate::application::dto::ListReferencesHttpResponse,
             crate::application::dto::ListObjectsHttpResponse,
+            super::capability_handler::DispatchRequest,
+            super::capability_handler::DispatchResponse,
             crate::application::dto::SendMessageHttpRequest,
             crate::application::dto::SendMessageHttpResponse,
             crate::application::dto::ExecuteCustomEventHttpRequest,
@@ -340,6 +343,11 @@ pub fn create_public_router(clients: Arc<GrpcClients>) -> Router {
         )
         .route_layer(middleware::from_fn(gateway_auth_middleware));
 
+    let capability_router = Router::new()
+        .route("/dispatch", post(super::capability_handler::dispatch))
+        .layer(axum::extract::DefaultBodyLimit::max(70 * 1024))
+        .route_layer(middleware::from_fn(gateway_auth_middleware));
+
     // 主路由
     // 签发/刷新是"拿 token 之前"的接口，不能套 bearer 中间件；自己的鉴权（app 凭据 / 联调开关 /
     // 刷新用旧 token）在 handler 里做。生命周期实现不在网关（GATEWAY_SPEC 第 3 节）。
@@ -355,6 +363,7 @@ pub fn create_public_router(clients: Arc<GrpcClients>) -> Router {
                 .layer(axum::extract::DefaultBodyLimit::max(512)),
         )
         .nest("/api/v1/auth", auth_router)
+        .nest("/api/v1/capabilities", capability_router)
         .nest("/api/v1/medias", media_router)
         .nest("/api/v1/messages", message_router)
         .nest("/api/v1/conversations", conversation_router)

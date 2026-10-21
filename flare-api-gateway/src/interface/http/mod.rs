@@ -1,5 +1,6 @@
 pub mod auth_handler;
 mod auth_middleware;
+pub(crate) mod capability_handler;
 mod conversation_handler;
 mod downstream;
 mod media_handler;

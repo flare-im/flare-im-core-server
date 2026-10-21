@@ -51,6 +51,11 @@ pub enum EnvPurpose {
 
 pub const REGISTERED_ENV_VARS: &[EnvVarSpec] = &[
     env(
+        "FLARE_API_GATEWAY_GRPC_CAPABILITY_SERVICE_URL",
+        EnvOwner::ApiGateway,
+        EnvPurpose::ServiceEndpoint,
+    ),
+    env(
         "FLARE_PLUGIN_CALL_KEY_ID",
         EnvOwner::Capability,
         EnvPurpose::Auth,
