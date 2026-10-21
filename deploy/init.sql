@@ -992,6 +992,19 @@ CREATE TABLE IF NOT EXISTS plugin_authorization_snapshots (
  CHECK((snapshot->>'validUntilMs')::bigint=valid_until_ms)
 );
 
+-- Shared, leased callback quota; no message, config, credential or payload storage.
+CREATE TABLE capability_plugin_resource_calls (
+    tenant_id text NOT NULL CHECK(tenant_id ~ '^[0-9A-Za-z_-]{1,32}$'),
+    plugin_id text NOT NULL CHECK(char_length(plugin_id) BETWEEN 1 AND 128),
+    actor_id text NOT NULL CHECK(char_length(actor_id) BETWEEN 1 AND 192),
+    request_id text NOT NULL CHECK(char_length(request_id) BETWEEN 1 AND 192),
+    calls integer NOT NULL CHECK(calls BETWEEN 1 AND 8),
+    expires_at_ms bigint NOT NULL CHECK(expires_at_ms>0),
+    PRIMARY KEY(tenant_id,plugin_id,actor_id,request_id)
+);
+CREATE INDEX capability_plugin_resource_calls_expiry ON capability_plugin_resource_calls(tenant_id,expires_at_ms);
+CREATE INDEX capability_plugin_resource_calls_global_expiry ON capability_plugin_resource_calls(expires_at_ms);
+
 -- 插件端点登记（RegisterPluginEndpoint；与 migrations/0011 同一结构）：各实例启动载入、登记先写库、
 -- 周期重读、超过 TTL 不健康的登记被清理。配置发现的端点不入库。
 CREATE TABLE capability_plugin_endpoints (

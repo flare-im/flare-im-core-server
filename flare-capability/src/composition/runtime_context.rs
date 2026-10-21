@@ -16,6 +16,8 @@ use crate::interface::grpc::{
 
 /// 应用上下文：接口层 gRPC 依赖 + 能力注册表 + 策略后端。
 pub struct ApplicationContext {
+    pub plugin_resource_bridge:
+        Option<crate::interface::grpc::resource_bridge::PluginHostBridgeGrpc>,
     /// Source-owned queue delivery, independent of IM ordering. Disabled broker retains rows.
     pub audit_delivery: Option<(
         Arc<sqlx::PgPool>,

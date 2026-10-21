@@ -142,6 +142,7 @@ mod tests {
             restart.versions(&[]).await.unwrap(),
             vec![("201".into(), 20)]
         );
+        super::super::postgres_resource_budget::tests::run(pool.clone()).await;
         pool.close().await;
     }
 }

@@ -9,6 +9,7 @@ mod hook_runtime;
 pub(crate) use hook_runtime::HookExecutionBackground;
 mod internal_ctx;
 mod plugin_routes;
+mod resource_bridge;
 
 use std::sync::Arc;
 
@@ -93,6 +94,8 @@ pub(crate) async fn initialize(config: CapabilityServiceConfig) -> Result<Applic
     )
     .with_execution_guard(hook.execution_guard);
 
+    let plugin_resource_bridge =
+        resource_bridge::compose(&plugin_routes, &capability_policy, db_pool.as_ref()).await?;
     let audit_delivery = if let Some(pool) = db_pool {
         let publisher =
             flare_im_service_kit::audit_effects::AuditEffects::from_env("flare-capability").await?;
@@ -108,6 +111,7 @@ pub(crate) async fn initialize(config: CapabilityServiceConfig) -> Result<Applic
         None
     };
     Ok(ApplicationContext {
+        plugin_resource_bridge,
         audit_delivery,
         im_hook_plugin,
         hook_governance: hook.hook_governance,

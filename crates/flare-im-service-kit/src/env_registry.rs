@@ -373,6 +373,21 @@ pub const REGISTERED_ENV_VARS: &[EnvVarSpec] = &[
     ),
     env("DATABASE_URL", EnvOwner::Capability, EnvPurpose::Database),
     env(
+        "FLARE_PLUGIN_CALL_PUBLIC_KEYS",
+        EnvOwner::Capability,
+        EnvPurpose::Auth,
+    ),
+    env(
+        "FLARE_PLUGIN_RESOURCE_CONVERSATION_URL",
+        EnvOwner::Capability,
+        EnvPurpose::Auth,
+    ),
+    env(
+        "FLARE_PLUGIN_RESOURCE_SOCIAL_GROUP_URL",
+        EnvOwner::Capability,
+        EnvPurpose::Auth,
+    ),
+    env(
         "DEFAULT_TENANT_ID",
         EnvOwner::SignalingRoute,
         EnvPurpose::TenantDefaults,

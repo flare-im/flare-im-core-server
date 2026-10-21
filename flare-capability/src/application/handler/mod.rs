@@ -10,3 +10,6 @@ pub use hook_command::HookCommandHandler;
 pub use hook_query::HookQueryHandler;
 pub(crate) use remote_dispatch::VerifiedDispatchOrigin;
 pub(crate) use remote_dispatch::dispatch_remote;
+pub mod resource_bridge;
+#[cfg(test)]
+mod resource_bridge_tests;

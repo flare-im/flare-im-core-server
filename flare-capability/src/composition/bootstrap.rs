@@ -72,6 +72,7 @@ impl ApplicationBootstrap {
         let capability_grpc = context.capability_grpc;
         let extension_router = context.extension_router;
         let extension_verifier = context.extension_verifier;
+        let plugin_resource_bridge = context.plugin_resource_bridge;
         let tenant_projection = context.tenant_projection;
         let capability_admin = context.capability_admin;
         let hook_config_listener = context.hook_config_listener;
@@ -188,6 +189,8 @@ impl ApplicationBootstrap {
                     .add_optional_service(extension_plugin_unverified)
                     .add_service(capability_service)
                     .add_service(capability_admin_service)
+                    .add_optional_service(plugin_resource_bridge.map(|bridge| flare_grpc_proto::capability::plugin_host_bridge_server::PluginHostBridgeServer::new(bridge)
+                        .max_decoding_message_size(8192).max_encoding_message_size(66560)))
                     .add_optional_service(tenant_projection_service);
 
                 server

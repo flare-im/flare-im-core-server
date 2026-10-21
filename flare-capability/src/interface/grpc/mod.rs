@@ -4,6 +4,7 @@ pub mod capability;
 pub mod capability_admin;
 pub mod extensions;
 pub mod hooks;
+pub mod resource_bridge;
 pub mod shared;
 pub mod tenant_projection;
 

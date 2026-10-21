@@ -317,3 +317,4 @@ impl HookAdapter for LocalHookAdapter {
         LocalHookAdapter::recall(self, "", ctx, event).await
     }
 }
+pub mod resource_access;
