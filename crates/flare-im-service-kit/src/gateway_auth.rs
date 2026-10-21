@@ -163,9 +163,15 @@ pub fn header_value(headers: &HeaderMap, name: &str) -> Option<String> {
 /// Gateway auth failure envelope. A `Forbidden` whose detail is a typed error
 /// code (upper-case identifier such as `TENANT_UNAVAILABLE`) keeps it as the
 /// reason, so the tenant gate answers with the same code as `/ws`, kicks and
-/// message ingest; free-text details stay out of the response.
+/// message ingest; free-text details stay out of the response. An expired token
+/// answers `TOKEN_EXPIRED` so clients renew and retry instead of giving up.
 pub fn auth_error_response(error: AuthError, gateway_name: &'static str) -> Response {
     let (status, code, reason) = match &error {
+        AuthError::InvalidToken(_) if error.is_expired_token() => (
+            StatusCode::UNAUTHORIZED,
+            ErrorCode::HttpUnauthorized,
+            "TOKEN_EXPIRED",
+        ),
         AuthError::MissingToken | AuthError::InvalidToken(_) => (
             StatusCode::UNAUTHORIZED,
             ErrorCode::HttpUnauthorized,
@@ -265,6 +271,29 @@ mod tests {
             TenantRuntimeCacheOptions::default(),
         );
         TenantRuntimeGuard::new(cache, policy)
+    }
+
+    #[tokio::test]
+    async fn expired_tokens_answer_a_typed_reason_and_other_rejections_stay_generic() {
+        async fn body(error: AuthError) -> String {
+            let response = auth_error_response(error, "test-gateway");
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+            let bytes = axum::body::to_bytes(response.into_body(), 4096)
+                .await
+                .expect("auth error body");
+            String::from_utf8(bytes.to_vec()).expect("utf8 body")
+        }
+        let expired = body(AuthError::expired_token("auth hook verified expiration")).await;
+        assert!(expired.contains("TOKEN_EXPIRED"), "{expired}");
+        assert!(
+            !expired.contains("auth hook"),
+            "free-text detail stays out: {expired}"
+        );
+        let invalid = body(AuthError::InvalidToken("bad signature".into())).await;
+        assert!(
+            invalid.contains("UNAUTHORIZED") && !invalid.contains("TOKEN_EXPIRED"),
+            "{invalid}"
+        );
     }
 
     #[test]
