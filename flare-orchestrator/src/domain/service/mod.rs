@@ -2,7 +2,7 @@ pub mod event_domain_service;
 pub mod message_fanout_service;
 pub mod user_sync_compensation_worker;
 
-pub use event_domain_service::EventDomainService;
+pub use event_domain_service::{EventAdmission, EventDomainService, ReadWatermarkClaim};
 pub use flare_im_message_pipeline::{
     CompositeEventValidationStrategy, CompositeMessageValidationStrategy,
     EventRequiredFieldsValidationStrategy, EventTypeValidationStrategy, EventValidationStrategy,

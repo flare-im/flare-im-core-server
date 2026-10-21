@@ -2,8 +2,9 @@
 //!
 //! ## 核心职责
 //! 1. 事件校验（调用 EventDomainService）
-//! 2. 序列号分配（调用 EventDomainService）
-//! 3. 事件推送（调用 EventDomainService）
+//! 2. 准入：不推进读者水位的已读回执在此丢弃，不分配序列号、不扇出
+//! 3. 序列号分配（调用 EventDomainService）
+//! 4. 事件推送（调用 EventDomainService）
 //!
 //! ## 设计原则
 //! - 编排层：不包含业务逻辑，只负责流程编排
@@ -14,17 +15,36 @@ use std::sync::Arc;
 
 use flare_im_contracts::Ctx;
 use flare_im_contracts::utils::normalize_optional_tenant_id;
+use flare_im_message_pipeline::{MqPushRepository, PushRepository};
+use flare_im_seq::SequenceAllocator;
 use flare_proto::common::Event;
 use tracing::instrument;
 
-use crate::domain::{PersistenceMode, service::EventDomainService};
+use crate::domain::PersistenceMode;
+use crate::domain::service::event_domain_service::SequenceAllocatorPort;
+use crate::domain::service::{EventAdmission, EventDomainService};
 use flare_server_core::error::Result;
 
 /// 事件处理器（编排层）
-#[derive(Clone)]
-pub struct EventHandler {
+pub struct EventHandler<PR = MqPushRepository, SA = SequenceAllocator>
+where
+    PR: PushRepository,
+    SA: SequenceAllocatorPort,
+{
     /// 事件领域服务
-    event_domain_service: Arc<EventDomainService>,
+    event_domain_service: Arc<EventDomainService<PR, SA>>,
+}
+
+impl<PR, SA> Clone for EventHandler<PR, SA>
+where
+    PR: PushRepository,
+    SA: SequenceAllocatorPort,
+{
+    fn clone(&self) -> Self {
+        Self {
+            event_domain_service: Arc::clone(&self.event_domain_service),
+        }
+    }
 }
 
 /// 慢事件扇出日志阈值（毫秒），env `FLARE_EVENT_SLOW_LOG_MS`，默认 200。
@@ -54,8 +74,12 @@ fn event_tenant(ctx: &Ctx) -> Result<String> {
     })
 }
 
-impl EventHandler {
-    pub fn new(event_domain_service: Arc<EventDomainService>) -> Self {
+impl<PR, SA> EventHandler<PR, SA>
+where
+    PR: PushRepository,
+    SA: SequenceAllocatorPort,
+{
+    pub fn new(event_domain_service: Arc<EventDomainService<PR, SA>>) -> Self {
         Self {
             event_domain_service,
         }
@@ -93,8 +117,9 @@ impl EventHandler {
     ///
     /// # 编排流程
     /// 1. 校验事件
-    /// 2. 分配序列号
-    /// 3. 推送事件
+    /// 2. 准入（重复的已读回执到此为止）
+    /// 3. 分配序列号
+    /// 4. 推送事件
     ///
     /// # 参数
     /// - `ctx`: 上下文
@@ -123,20 +148,43 @@ impl EventHandler {
             .await?;
         let validate_ms = started.elapsed().as_millis() as u64;
 
-        // 2. 分配序列号
-        let allocate_started = std::time::Instant::now();
-        let event_with_seq = self
+        // 2. Admission. A read receipt that does not raise its reader's watermark is a
+        // repeat: without this gate each resend became a new seq fanned out to every
+        // member (a client loop drove a 4-message chat to seq 6463 at ~40 events/s).
+        let read_claim = match self
             .event_domain_service
-            .allocate_seq(ctx, tenant_id, event)
-            .await?;
-        let allocate_ms = allocate_started.elapsed().as_millis() as u64;
+            .admit_event(tenant_id, &event)
+            .await
+        {
+            EventAdmission::Admit { read_claim } => read_claim,
+            EventAdmission::StaleReadReceipt {
+                read_seq,
+                watermark,
+            } => {
+                tracing::debug!(
+                    conversation_id = %event.conversation_id,
+                    read_seq,
+                    watermark,
+                    "skip read receipt: read_seq does not advance the reader's watermark"
+                );
+                return Ok(());
+            }
+        };
 
-        // 3. 推送事件
-        let push_started = std::time::Instant::now();
-        self.event_domain_service
-            .push_event(ctx, event_with_seq.clone(), PersistenceMode::Auto)
-            .await?;
-        let push_ms = push_started.elapsed().as_millis() as u64;
+        // 3-4. Allocate and fan out. On failure hand the watermark back so the client's
+        // retry of the same position is admitted.
+        let (event_with_seq, allocate_ms, push_ms) =
+            match self.allocate_and_push(ctx, tenant_id, event).await {
+                Ok(done) => done,
+                Err(error) => {
+                    if let Some(claim) = read_claim {
+                        self.event_domain_service
+                            .release_read_claim(tenant_id, claim)
+                            .await;
+                    }
+                    return Err(error);
+                }
+            };
 
         let total_ms = started.elapsed().as_millis() as u64;
         if total_ms >= event_slow_log_threshold_ms() {
@@ -152,6 +200,29 @@ impl EventHandler {
         }
 
         Ok(())
+    }
+
+    /// Allocate the seq and fan out; returns the sequenced event and both timings (ms).
+    async fn allocate_and_push(
+        &self,
+        ctx: &Ctx,
+        tenant_id: &str,
+        event: Event,
+    ) -> Result<(Event, u64, u64)> {
+        let allocate_started = std::time::Instant::now();
+        let event_with_seq = self
+            .event_domain_service
+            .allocate_seq(ctx, tenant_id, event)
+            .await?;
+        let allocate_ms = allocate_started.elapsed().as_millis() as u64;
+
+        let push_started = std::time::Instant::now();
+        self.event_domain_service
+            .push_event(ctx, event_with_seq.clone(), PersistenceMode::Auto)
+            .await?;
+        let push_ms = push_started.elapsed().as_millis() as u64;
+
+        Ok((event_with_seq, allocate_ms, push_ms))
     }
 }
 
@@ -192,5 +263,425 @@ mod tests {
         assert_eq!(parse_event_slow_log_ms(Some("abc")), 200);
         assert_eq!(parse_event_slow_log_ms(Some("")), 200);
         assert_eq!(parse_event_slow_log_ms(Some("-1")), 200);
+    }
+}
+
+/// Client read acks reach the orchestrator as `EVENT_READ_RECEIPT` (route
+/// `ack_to_push_proxy`). Only a receipt that raises its reader's watermark may cost
+/// a conversation seq and a fanout.
+#[cfg(test)]
+mod read_ack_admission_tests {
+    use super::EventHandler;
+    use crate::domain::repository::{
+        ReadWatermarkAdvance, ReadWatermarkRepository, RecipientRepository,
+    };
+    use crate::domain::service::EventDomainService;
+    use crate::domain::service::event_domain_service::SequenceAllocatorPort;
+    use flare_im_contracts::Ctx;
+    use flare_im_message_pipeline::{ConversationType, PushRepository};
+    use flare_proto::common::{
+        Event, EventType, Message, PushEnvelope, ReadReceiptEvent, event::Payload,
+    };
+    use flare_server_core::Context;
+    use flare_server_core::error::{FlareError, Result};
+    use std::collections::HashMap;
+    use std::future::Future;
+    use std::pin::Pin;
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+    use std::sync::{Arc, Mutex};
+
+    const SINGLE_CHAT: &str = "1ADW0CVC4ESXQ0046R";
+
+    /// Captures what reaches the MQ boundary; `fail_publish` simulates a fanout outage.
+    #[derive(Default)]
+    struct RecordingPushRepository {
+        published: Mutex<Vec<(Event, Vec<String>)>>,
+        fail_publish: AtomicBool,
+    }
+
+    impl PushRepository for RecordingPushRepository {
+        async fn publish_message(
+            &self,
+            _ctx: &Ctx,
+            _message: Message,
+            _recipient_user_ids: Vec<String>,
+            _conversation_id: String,
+            _large_conversation: bool,
+        ) -> Result<()> {
+            unreachable!("event handling never publishes messages")
+        }
+
+        async fn publish_event(
+            &self,
+            _ctx: &Ctx,
+            event: Event,
+            recipient_user_ids: Vec<String>,
+            _conversation_id: String,
+        ) -> Result<()> {
+            if self.fail_publish.load(Ordering::SeqCst) {
+                return Err(FlareError::system("injected fanout outage"));
+            }
+            self.published
+                .lock()
+                .expect("published lock poisoned")
+                .push((event, recipient_user_ids));
+            Ok(())
+        }
+
+        async fn persistence_only_message(
+            &self,
+            _ctx: &Ctx,
+            _message: Message,
+            _conversation_id: String,
+        ) -> Result<()> {
+            unreachable!("event handling never persists messages")
+        }
+
+        async fn persistence_only_event(
+            &self,
+            _ctx: &Ctx,
+            _event: Event,
+            _conversation_id: String,
+        ) -> Result<()> {
+            unreachable!("durable events go through publish_event")
+        }
+
+        async fn push_only_message(
+            &self,
+            _ctx: &Ctx,
+            _message: Message,
+            _recipient_user_ids: Vec<String>,
+            _conversation_id: String,
+        ) -> Result<()> {
+            unreachable!("event handling never pushes messages")
+        }
+
+        async fn push_only_event(
+            &self,
+            _ctx: &Ctx,
+            _event: Event,
+            _recipient_user_ids: Vec<String>,
+            _conversation_id: String,
+        ) -> Result<()> {
+            unreachable!("durable events go through publish_event")
+        }
+
+        async fn publish_push_envelope(&self, _ctx: &Ctx, _envelope: PushEnvelope) -> Result<()> {
+            unreachable!("event handling never publishes push envelopes")
+        }
+    }
+
+    #[derive(Default)]
+    struct CountingSequenceAllocator {
+        allocated: AtomicU64,
+    }
+
+    impl SequenceAllocatorPort for CountingSequenceAllocator {
+        async fn allocate_seq(&self, _conversation_id: &str, _tenant_id: &str) -> Result<u64> {
+            Ok(self.allocated.fetch_add(1, Ordering::SeqCst) + 1)
+        }
+    }
+
+    struct TwoMembers;
+
+    impl RecipientRepository for TwoMembers {
+        fn get_message_recipients<'a>(
+            &'a self,
+            _ctx: &'a Ctx,
+            _conversation_id: &'a str,
+            _conversation_type: ConversationType,
+            _channel_id: Option<&'a str>,
+            _sender_id: &'a str,
+        ) -> Pin<Box<dyn Future<Output = Result<Vec<String>>> + Send + 'a>> {
+            unreachable!("event handling never resolves message recipients")
+        }
+
+        fn get_event_recipients<'a>(
+            &'a self,
+            _ctx: &'a Ctx,
+            _message_id: &'a str,
+            _conversation_id: &'a str,
+            _event_type: EventType,
+        ) -> Pin<Box<dyn Future<Output = Result<Vec<String>>> + Send + 'a>> {
+            unreachable!("event recipients come from the member list")
+        }
+
+        fn get_conversation_members<'a>(
+            &'a self,
+            _ctx: &'a Ctx,
+            _conversation_id: &'a str,
+        ) -> Pin<Box<dyn Future<Output = Result<Vec<String>>> + Send + 'a>> {
+            Box::pin(async { Ok(vec!["reader".to_string(), "peer".to_string()]) })
+        }
+
+        fn get_conversation_member_count<'a>(
+            &'a self,
+            _ctx: &'a Ctx,
+            _conversation_id: &'a str,
+        ) -> Pin<Box<dyn Future<Output = Result<usize>> + Send + 'a>> {
+            Box::pin(async { Ok(2) })
+        }
+    }
+
+    /// Same contract as `RedisReadWatermarkRepository`: strict compare-and-raise per
+    /// (tenant, conversation, reader), fenced rollback.
+    #[derive(Default)]
+    struct InMemoryReadWatermark {
+        positions: Mutex<HashMap<(String, String, String), u64>>,
+        unavailable: AtomicBool,
+    }
+
+    #[async_trait::async_trait]
+    impl ReadWatermarkRepository for InMemoryReadWatermark {
+        async fn advance(
+            &self,
+            tenant_id: &str,
+            conversation_id: &str,
+            user_id: &str,
+            read_seq: u64,
+        ) -> Result<ReadWatermarkAdvance> {
+            if self.unavailable.load(Ordering::SeqCst) {
+                return Err(FlareError::system("injected watermark outage"));
+            }
+            let mut positions = self.positions.lock().expect("positions lock poisoned");
+            let current = positions
+                .entry((
+                    tenant_id.to_string(),
+                    conversation_id.to_string(),
+                    user_id.to_string(),
+                ))
+                .or_insert(0);
+            if read_seq <= *current {
+                return Ok(ReadWatermarkAdvance::NotAdvanced { current: *current });
+            }
+            let previous = std::mem::replace(current, read_seq);
+            Ok(ReadWatermarkAdvance::Advanced { previous })
+        }
+
+        async fn rollback(
+            &self,
+            tenant_id: &str,
+            conversation_id: &str,
+            user_id: &str,
+            advanced_to: u64,
+            previous: u64,
+        ) -> Result<()> {
+            let mut positions = self.positions.lock().expect("positions lock poisoned");
+            let key = (
+                tenant_id.to_string(),
+                conversation_id.to_string(),
+                user_id.to_string(),
+            );
+            if let Some(current) = positions.get_mut(&key)
+                && *current == advanced_to
+            {
+                *current = previous;
+            }
+            Ok(())
+        }
+    }
+
+    struct Harness {
+        handler: EventHandler<RecordingPushRepository, CountingSequenceAllocator>,
+        push: Arc<RecordingPushRepository>,
+        seq: Arc<CountingSequenceAllocator>,
+        watermark: Arc<InMemoryReadWatermark>,
+    }
+
+    impl Harness {
+        fn new() -> Self {
+            let push = Arc::new(RecordingPushRepository::default());
+            let seq = Arc::new(CountingSequenceAllocator::default());
+            let watermark = Arc::new(InMemoryReadWatermark::default());
+            let service =
+                EventDomainService::new(push.clone(), Arc::new(TwoMembers), seq.clone(), None)
+                    .with_read_watermark(watermark.clone());
+            Self {
+                handler: EventHandler::new(Arc::new(service)),
+                push,
+                seq,
+                watermark,
+            }
+        }
+
+        fn allocated_seqs(&self) -> u64 {
+            self.seq.allocated.load(Ordering::SeqCst)
+        }
+
+        fn published(&self) -> Vec<(Event, Vec<String>)> {
+            self.push
+                .published
+                .lock()
+                .expect("published lock poisoned")
+                .clone()
+        }
+
+        /// `(user_id, read_seq, conversation_seq)` of every published read receipt.
+        fn published_reads(&self) -> Vec<(String, u64, u64)> {
+            self.published()
+                .into_iter()
+                .filter_map(|(event, _)| match event.payload {
+                    Some(Payload::Read(read)) => {
+                        Some((read.user_id, read.read_seq, event.conversation_seq))
+                    }
+                    _ => None,
+                })
+                .collect()
+        }
+    }
+
+    fn ctx(request_id: &str) -> Ctx {
+        Arc::new(Context::with_request_id(request_id).with_tenant_id("tenant-a"))
+    }
+
+    /// The event route builds from a client `ReadAck`.
+    fn read_ack_event(user_id: &str, read_seq: u64) -> Event {
+        Event {
+            conversation_id: SINGLE_CHAT.to_string(),
+            conversation_seq: 0,
+            r#type: EventType::EventReadReceipt as i32,
+            created_at: 1,
+            event_id: uuid::Uuid::new_v4().to_string(),
+            request_id: None,
+            payload: Some(Payload::Read(ReadReceiptEvent {
+                conversation_id: SINGLE_CHAT.to_string(),
+                read_seq,
+                user_id: user_id.to_string(),
+                message_ids: Vec::new(),
+                read_at: Some(1),
+            })),
+        }
+    }
+
+    #[tokio::test]
+    async fn repeated_read_acks_allocate_no_seq_and_emit_no_event() {
+        let h = Harness::new();
+
+        h.handler
+            .handle_event(&ctx("ack-1"), read_ack_event("reader", 3420))
+            .await
+            .expect("first ack");
+        assert_eq!(h.allocated_seqs(), 1);
+        assert_eq!(h.published_reads(), vec![("reader".to_string(), 3420, 1)]);
+        assert_eq!(h.published()[0].1, vec!["peer".to_string()]);
+
+        // The iOS loop: the same position resent on every inbound event, plus a second
+        // device of the same reader reporting it, plus a late, older position.
+        for attempt in 0..50 {
+            h.handler
+                .handle_event(
+                    &ctx(&format!("resend-{attempt}")),
+                    read_ack_event("reader", 3420),
+                )
+                .await
+                .expect("resent ack is a silent no-op");
+        }
+        h.handler
+            .handle_event(&ctx("device-2"), read_ack_event("reader", 3420))
+            .await
+            .expect("second device ack is a silent no-op");
+        h.handler
+            .handle_event(&ctx("late"), read_ack_event("reader", 3000))
+            .await
+            .expect("older ack is a silent no-op");
+        assert_eq!(h.allocated_seqs(), 1, "repeats must not allocate seqs");
+        assert_eq!(h.published().len(), 1, "repeats must not fan out");
+
+        // An advancing ack is sequenced and fanned out as before.
+        h.handler
+            .handle_event(&ctx("ack-2"), read_ack_event("reader", 3421))
+            .await
+            .expect("advancing ack");
+        assert_eq!(h.allocated_seqs(), 2);
+        assert_eq!(
+            h.published_reads(),
+            vec![
+                ("reader".to_string(), 3420, 1),
+                ("reader".to_string(), 3421, 2)
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn one_members_watermark_never_suppresses_another_members_ack() {
+        let h = Harness::new();
+
+        for (request_id, user_id) in [("a-1", "reader"), ("b-1", "peer"), ("b-2", "peer")] {
+            h.handler
+                .handle_event(&ctx(request_id), read_ack_event(user_id, 3420))
+                .await
+                .expect("read ack");
+        }
+
+        assert_eq!(h.allocated_seqs(), 2);
+        assert_eq!(
+            h.published_reads(),
+            vec![
+                ("reader".to_string(), 3420, 1),
+                ("peer".to_string(), 3420, 2)
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_fanout_hands_the_position_back_for_a_retry() {
+        let h = Harness::new();
+
+        h.push.fail_publish.store(true, Ordering::SeqCst);
+        h.handler
+            .handle_event(&ctx("ack-1"), read_ack_event("reader", 3420))
+            .await
+            .expect_err("fanout outage surfaces");
+        assert!(h.published().is_empty());
+
+        h.push.fail_publish.store(false, Ordering::SeqCst);
+        h.handler
+            .handle_event(&ctx("ack-1-retry"), read_ack_event("reader", 3420))
+            .await
+            .expect("retry of the same position");
+        assert_eq!(h.published_reads().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn watermark_outage_admits_read_acks() {
+        let h = Harness::new();
+        h.watermark.unavailable.store(true, Ordering::SeqCst);
+
+        for request_id in ["ack-1", "ack-1-again"] {
+            h.handler
+                .handle_event(&ctx(request_id), read_ack_event("reader", 3420))
+                .await
+                .expect("read ack");
+        }
+
+        assert_eq!(h.allocated_seqs(), 2);
+        assert_eq!(h.published().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn receipts_naming_messages_and_other_events_are_not_gated() {
+        let h = Harness::new();
+
+        let mut per_message = read_ack_event("reader", 3420);
+        if let Some(Payload::Read(read)) = per_message.payload.as_mut() {
+            read.message_ids = vec!["m-1".to_string()];
+        }
+        let mut recall = read_ack_event("reader", 3420);
+        recall.r#type = EventType::EventMessageRecall as i32;
+        recall.payload = None;
+
+        for event in [per_message.clone(), per_message, recall.clone(), recall] {
+            let event = Event {
+                event_id: uuid::Uuid::new_v4().to_string(),
+                ..event
+            };
+            h.handler
+                .handle_event(&ctx("other"), event)
+                .await
+                .expect("ungated event");
+        }
+
+        assert_eq!(h.allocated_seqs(), 4);
+        assert_eq!(h.published().len(), 4);
     }
 }

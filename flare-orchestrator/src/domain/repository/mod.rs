@@ -2,8 +2,10 @@ pub use flare_im_message_pipeline::{
     ConversationClient, PushRepository, RecipientRepository, needs_member_lookup,
 };
 
+mod read_watermark_repository;
 mod user_sync_compensation_repository;
 mod user_sync_index_repository;
+pub use read_watermark_repository::{ReadWatermarkAdvance, ReadWatermarkRepository};
 pub use user_sync_compensation_repository::{
     UserSyncCompensationKind, UserSyncCompensationRepository, UserSyncCompensationTask,
 };

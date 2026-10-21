@@ -29,8 +29,8 @@ use tracing::instrument;
 
 use crate::domain::PersistenceMode;
 use crate::domain::repository::{
-    RecipientRepository, UserSyncCompensationRepository, UserSyncCompensationTask,
-    UserSyncIndexRepository,
+    ReadWatermarkAdvance, ReadWatermarkRepository, RecipientRepository,
+    UserSyncCompensationRepository, UserSyncCompensationTask, UserSyncIndexRepository,
 };
 use flare_im_message_pipeline::{
     CompositeEventValidationStrategy, EventValidationStrategy, ValidationContext,
@@ -48,6 +48,29 @@ impl SequenceAllocatorPort for SequenceAllocator {
     }
 }
 
+/// Admission decision for an event, taken after validation and before a conversation
+/// seq is allocated.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EventAdmission {
+    /// Sequence and fan out the event. `read_claim` is set when the event raised its
+    /// reader's watermark; release it if the event never goes out.
+    Admit {
+        read_claim: Option<ReadWatermarkClaim>,
+    },
+    /// A read receipt at or below its reader's watermark: it carries nothing new, so it
+    /// gets no seq and no fanout.
+    StaleReadReceipt { read_seq: u64, watermark: u64 },
+}
+
+/// Watermark raise made on behalf of one admitted read receipt.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReadWatermarkClaim {
+    conversation_id: String,
+    user_id: String,
+    read_seq: u64,
+    previous: u64,
+}
+
 pub struct EventDomainService<PR = MqPushRepository, SA = SequenceAllocator>
 where
     PR: PushRepository,
@@ -63,6 +86,7 @@ where
     validation_strategy: Arc<dyn EventValidationStrategy>,
     user_sync_index: Option<Arc<dyn UserSyncIndexRepository>>,
     user_sync_compensation: Option<Arc<dyn UserSyncCompensationRepository>>,
+    read_watermark: Option<Arc<dyn ReadWatermarkRepository>>,
 }
 
 impl<PR, SA> EventDomainService<PR, SA>
@@ -84,6 +108,7 @@ where
                 .unwrap_or_else(|| Arc::new(CompositeEventValidationStrategy::default_composite())),
             user_sync_index: None,
             user_sync_compensation: None,
+            read_watermark: None,
         }
     }
 
@@ -100,6 +125,13 @@ where
         user_sync_compensation: Arc<dyn UserSyncCompensationRepository>,
     ) -> Self {
         self.user_sync_compensation = Some(user_sync_compensation);
+        self
+    }
+
+    /// Gate client read acks on the reader's watermark. Without it every read receipt
+    /// is sequenced, including repeats of a position the reader already reported.
+    pub fn with_read_watermark(mut self, read_watermark: Arc<dyn ReadWatermarkRepository>) -> Self {
+        self.read_watermark = Some(read_watermark);
         self
     }
 
@@ -144,6 +176,74 @@ where
         }
 
         Ok(())
+    }
+
+    /// Decide whether an event earns a conversation seq.
+    ///
+    /// Only cursor read receipts are gated: one whose `read_seq` does not raise its
+    /// reader's watermark is a repeat (a resend, or another device of the same user
+    /// reporting the same position) and is dropped before it costs a seq and a fanout
+    /// to every member. The watermark is keyed per reader, so one member's position
+    /// never suppresses another member's receipt. A watermark failure admits the event:
+    /// losing the dedupe for a moment is cheaper than losing a real read position.
+    pub async fn admit_event(&self, tenant_id: &str, event: &Event) -> EventAdmission {
+        let (Some(read_watermark), Some((user_id, read_seq))) =
+            (&self.read_watermark, cursor_read_receipt(event))
+        else {
+            return EventAdmission::Admit { read_claim: None };
+        };
+
+        match read_watermark
+            .advance(tenant_id, &event.conversation_id, user_id, read_seq)
+            .await
+        {
+            Ok(ReadWatermarkAdvance::Advanced { previous }) => EventAdmission::Admit {
+                read_claim: Some(ReadWatermarkClaim {
+                    conversation_id: event.conversation_id.clone(),
+                    user_id: user_id.to_string(),
+                    read_seq,
+                    previous,
+                }),
+            },
+            Ok(ReadWatermarkAdvance::NotAdvanced { current }) => EventAdmission::StaleReadReceipt {
+                read_seq,
+                watermark: current,
+            },
+            Err(error) => {
+                tracing::warn!(
+                    error = %error,
+                    conversation_id = %event.conversation_id,
+                    read_seq,
+                    "read watermark unavailable; admitting read receipt without dedupe"
+                );
+                EventAdmission::Admit { read_claim: None }
+            }
+        }
+    }
+
+    /// Hand back a watermark raise whose event was never sequenced or fanned out, so
+    /// the client's retry of the same position is admitted.
+    pub async fn release_read_claim(&self, tenant_id: &str, claim: ReadWatermarkClaim) {
+        let Some(read_watermark) = &self.read_watermark else {
+            return;
+        };
+        if let Err(error) = read_watermark
+            .rollback(
+                tenant_id,
+                &claim.conversation_id,
+                &claim.user_id,
+                claim.read_seq,
+                claim.previous,
+            )
+            .await
+        {
+            tracing::warn!(
+                error = %error,
+                conversation_id = %claim.conversation_id,
+                read_seq = claim.read_seq,
+                "read watermark rollback failed; a retry of this read position will be skipped"
+            );
+        }
     }
 
     /// 分配序列号
@@ -494,6 +594,23 @@ fn resolve_recipients_from_event_payload(event: &Event) -> Option<Vec<String>> {
     }
 }
 
+/// The reader and position of a read receipt that only moves a read cursor, which is
+/// what client read acks produce. Receipts naming individual `message_ids` say more
+/// than a cursor position and are never gated.
+fn cursor_read_receipt(event: &Event) -> Option<(&str, u64)> {
+    if event.r#type != EventType::EventReadReceipt as i32 {
+        return None;
+    }
+    let Some(EventPayload::Read(read)) = &event.payload else {
+        return None;
+    };
+    let user_id = read.user_id.trim();
+    if user_id.is_empty() || read.read_seq == 0 || !read.message_ids.is_empty() {
+        return None;
+    }
+    Some((user_id, read.read_seq))
+}
+
 /// 成员制（大）会话判定：按 CID 前缀，与消息路径 `needs_member_lookup` 语义一致。
 ///
 /// 群(2)/AI(3)/系统(4)/客服(5)/频道(7)/广播(8) 走会话级读扩散：事件/已读回执不物化收件人、
@@ -530,6 +647,38 @@ mod tests {
         };
 
         assert!(resolve_recipients_from_event_payload(&event).is_none());
+    }
+
+    #[test]
+    fn only_cursor_read_receipts_are_gated() {
+        let receipt = |user_id: &str, read_seq: u64, message_ids: Vec<String>| Event {
+            conversation_id: "c1".to_string(),
+            r#type: EventType::EventReadReceipt as i32,
+            event_id: "e1".to_string(),
+            payload: Some(event::Payload::Read(ReadReceiptEvent {
+                conversation_id: "c1".to_string(),
+                read_seq,
+                user_id: user_id.to_string(),
+                message_ids,
+                read_at: Some(1),
+            })),
+            ..Default::default()
+        };
+
+        assert_eq!(
+            cursor_read_receipt(&receipt(" reader ", 7, Vec::new())),
+            Some(("reader", 7))
+        );
+        assert_eq!(cursor_read_receipt(&receipt("reader", 0, Vec::new())), None);
+        assert_eq!(cursor_read_receipt(&receipt("  ", 7, Vec::new())), None);
+        assert_eq!(
+            cursor_read_receipt(&receipt("reader", 7, vec!["m1".to_string()])),
+            None
+        );
+
+        let mut recall = receipt("reader", 7, Vec::new());
+        recall.r#type = EventType::EventMessageRecall as i32;
+        assert_eq!(cursor_read_receipt(&recall), None);
     }
 
     #[test]

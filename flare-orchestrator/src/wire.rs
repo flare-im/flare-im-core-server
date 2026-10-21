@@ -34,7 +34,7 @@ use crate::domain::service::{
     EventDomainService, MessageFanoutService, UserSyncCompensationWorker,
 };
 use crate::infrastructure::persistence::{
-    RedisUserSyncCompensationRepository, RedisUserSyncIndexRepository,
+    RedisReadWatermarkRepository, RedisUserSyncCompensationRepository, RedisUserSyncIndexRepository,
 };
 use crate::interface::grpc::{MessageActionGrpcHandler, MessageEventExecuteGrpcHandler};
 use crate::interface::mq::StorageConsumerHandler;
@@ -128,6 +128,20 @@ pub async fn initialize(
             flare_server_core::error::FlareError::system(format!("sequence allocator: {}", e))
         })?;
 
+    // Client read acks that do not raise the reader's watermark are dropped before they
+    // get a seq; see EventDomainService::admit_event.
+    let read_watermark_connection = redis_client.get_connection_manager().await.map_err(|e| {
+        flare_server_core::error::FlareError::system(format!(
+            "read watermark redis connection: {}",
+            e
+        ))
+    })?;
+    let read_watermark_repository: Arc<dyn crate::domain::repository::ReadWatermarkRepository> =
+        Arc::new(RedisReadWatermarkRepository::new(
+            read_watermark_connection,
+            RedisReadWatermarkRepository::DEFAULT_TTL_SECONDS,
+        ));
+
     let message_fanout_service = Arc::new(
         MessageFanoutService::new(push_repository.clone())
             .with_inline_message_push_enabled(config.inline_message_push_enabled)
@@ -143,7 +157,8 @@ pub async fn initialize(
             None,
         )
         .with_user_sync_index(user_sync_index_repository)
-        .with_user_sync_compensation(user_sync_compensation_repository),
+        .with_user_sync_compensation(user_sync_compensation_repository)
+        .with_read_watermark(read_watermark_repository),
     );
 
     let event_handler = Arc::new(EventHandler::new(event_domain_service.clone()));
