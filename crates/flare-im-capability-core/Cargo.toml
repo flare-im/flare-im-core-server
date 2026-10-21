@@ -17,6 +17,7 @@ prost-types = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tonic = { workspace = true }
+flare-plugin-protocol = { version = "0.1.0", path = "../../../flare-proto/flare-plugin-protocol" }
 
 [lints]
 workspace = true

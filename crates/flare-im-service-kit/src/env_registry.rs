@@ -51,6 +51,16 @@ pub enum EnvPurpose {
 
 pub const REGISTERED_ENV_VARS: &[EnvVarSpec] = &[
     env(
+        "FLARE_PLUGIN_CALL_KEY_ID",
+        EnvOwner::Capability,
+        EnvPurpose::Auth,
+    ),
+    env(
+        "FLARE_PLUGIN_CALL_SIGNING_KEY",
+        EnvOwner::Capability,
+        EnvPurpose::Auth,
+    ),
+    env(
         "ACCESS_GATEWAY_AUTH_HOOK_SECRET",
         EnvOwner::AccessGateway,
         EnvPurpose::Auth,

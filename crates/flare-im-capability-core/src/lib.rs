@@ -20,10 +20,11 @@ pub use descriptor::CapabilityDescriptor;
 pub use dispatch::{CapabilityDispatchCommand, CapabilityDispatchResult};
 pub use error::{CapabilityError, GuardDecision, GuardRejection, Result};
 pub use extension_operation::{DynExtensionOperationHandler, ExtensionOperationHandler};
+pub use flare_plugin_protocol as plugin;
 pub use grant::{TenantCapabilitySwitch, UserCapabilityGrant};
 pub use ports::{
     CapabilityDispatchRoute, CapabilityPolicyBackend, PluginHealthProbe, PreSendGuard,
-    PreSendGuardPipeline, RecipientResolver, RtcCapability, SeatModel,
+    PreSendGuardPipeline, RecipientResolver, RtcCapability,
 };
 pub use recipient::{RecipientResolveRequest, RecipientResolveResult};
 pub use rtc::{

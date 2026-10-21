@@ -105,7 +105,7 @@ pub async fn init_capability_extension_stack(
     let dispatch_verifier = internal_ctx_verifier_from_env("Capability Dispatch")?;
     let staff_verifier = admin_staff_verifier_from_env("Capability management RPCs")?;
 
-    let capability_grpc = CapabilityGrpcServer::new(
+    let mut capability_grpc = CapabilityGrpcServer::new(
         registry.clone(),
         Arc::clone(&capability_policy),
         runtime,
@@ -117,6 +117,24 @@ pub async fn init_capability_extension_stack(
         dispatch_verifier,
         staff_verifier,
     );
+    match std::env::var("FLARE_PLATFORM_PUBLIC_KEY") {
+        Ok(key) => {
+            capability_grpc = capability_grpc.with_registration_verifier(
+                flare_server_core::TokenService::from_ed25519_public_key(&key, "flare-platform")
+                    .map_err(|_| {
+                        flare_server_core::error::FlareError::system(
+                            "invalid platform registration public key",
+                        )
+                    })?,
+            )
+        }
+        Err(std::env::VarError::NotPresent) => (),
+        Err(_) => {
+            return Err(flare_server_core::error::FlareError::system(
+                "invalid platform registration public key encoding",
+            ));
+        }
+    }
 
     tracing::info!("capability extension stack initialized (media plugins via service discovery)");
 

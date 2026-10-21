@@ -10,26 +10,164 @@ use flare_grpc_proto::capability::GenericRequest;
 use flare_grpc_proto::capability::RegisteredPluginInstance;
 use flare_grpc_proto::capability::extension_plugin_client::ExtensionPluginClient;
 use flare_server_core::context::{ActorContext, ActorType, Context};
-use flare_server_core::{
-    SignedActorType, SignedContextClaims, SignedContextVerifier, set_signed_context_token,
-};
+use flare_server_core::{SignedActorType, SignedContextClaims, SignedContextVerifier};
 use serde_json::Value;
 use tonic::metadata::MetadataMap;
 use tonic::{Request, Status};
 
+use crate::domain::capability::CapabilityPolicyBackend;
 use crate::domain::capability::{
     CapabilityDispatchCommand, CapabilityDispatchResult, CapabilityError, Result,
     require_dispatch_tenant,
 };
 use crate::infrastructure::capability::PluginRouteBook;
 use crate::infrastructure::capability::plugin_channel::resolve_plugin_channel;
+use flare_im_capability_core::plugin::{
+    authorization::PluginInvocation, invocation::PluginCallClaims,
+};
 
 /// Only the verifier can construct this marker; an untrusted request body or
 /// legacy Context metadata cannot create a dispatch identity.
 pub(crate) struct VerifiedDispatchOrigin {
     claims: SignedContextClaims,
-    token: String,
 }
+
+/// The local control projection is the sole remote routing/authorization source.
+/// No endpoint self-registration or diagnostic route can grant execution. A
+/// business command is attempted once: uncertain delivery must be resolved by
+/// its stable request id, especially for non-idempotent financial operations.
+pub(crate) async fn dispatch_remote(
+    ctx: &Ctx,
+    req: &CapabilityDispatchCommand,
+    routes: &Arc<PluginRouteBook>,
+    policy: &Arc<dyn CapabilityPolicyBackend>,
+    timeout: Duration,
+) -> Result<CapabilityDispatchResult> {
+    tokio::time::timeout(
+        timeout,
+        dispatch_remote_authorized(ctx, req, routes, policy, timeout),
+    )
+    .await
+    .map_err(|_| {
+        CapabilityError::Timeout("plugin authorization or invocation deadline exceeded".into())
+    })?
+}
+
+async fn dispatch_remote_authorized(
+    ctx: &Ctx,
+    req: &CapabilityDispatchCommand,
+    routes: &Arc<PluginRouteBook>,
+    policy: &Arc<dyn CapabilityPolicyBackend>,
+    timeout: Duration,
+) -> Result<CapabilityDispatchResult> {
+    let tenant = require_dispatch_tenant(req)?;
+    let user = req
+        .user_id
+        .as_deref()
+        .filter(|v| !v.is_empty())
+        .ok_or_else(|| CapabilityError::PolicyDenied("user identity required".into()))?;
+    let request_id = req
+        .request_id
+        .as_deref()
+        .filter(|v| !v.is_empty())
+        .ok_or_else(|| CapabilityError::PolicyDenied("request identity required".into()))?;
+    let denied =
+        |_| CapabilityError::PolicyDenied("plugin authorization is unavailable or denied".into());
+    ctx.get_data::<VerifiedDispatchOrigin>()
+        .ok_or_else(|| denied(()))?
+        .require_user_binding(&tenant, user, request_id)
+        .map_err(|_| denied(()))?;
+    if req.capability_id == flare_im_capability_core::plugin::ui::UI_CATALOG_OPERATION {
+        return client_ui_catalog(&tenant, user, request_id, routes, policy).await;
+    }
+    policy
+        .ensure_dispatch_allowed(&tenant, user, &req.capability_id)
+        .await?;
+    let snapshot = routes
+        .authorization
+        .as_ref()
+        .ok_or_else(|| denied(()))?
+        .plugin_snapshot(&tenant)
+        .await
+        .map_err(|_| denied(()))?
+        .ok_or_else(|| denied(()))?;
+    let now = chrono::Utc::now().timestamp_millis();
+    snapshot.validate(now).map_err(|_| denied(()))?;
+    let projected = snapshot
+        .plugins
+        .iter()
+        .find(|p| {
+            p.grant.enabled
+                && !p.grant.revoked
+                && p.manifest()
+                    .is_ok_and(|m| m.operation(&req.capability_id).is_some())
+        })
+        .ok_or_else(|| denied(()))?;
+    let manifest = projected.manifest().map_err(|_| denied(()))?;
+    let operation = manifest
+        .operation(&req.capability_id)
+        .ok_or_else(|| denied(()))?;
+    // The existing per-operation user policy has just authorized exactly this
+    // operation. Translate only its required IDs; payload metadata grants none.
+    let actor_permissions = operation.permission_ids.iter().cloned().collect();
+    projected
+        .authorize(&PluginInvocation {
+            tenant_id: &tenant,
+            actor_id: user,
+            operation: &req.capability_id,
+            actor_permissions: &actor_permissions,
+            platform_enabled: true,
+            now_ms: now,
+        })
+        .map_err(|_| denied(()))?;
+    let timeout = timeout.min(Duration::from_millis(u64::from(operation.timeout_ms)));
+    let claims = PluginCallClaims {
+        tenant_id: tenant.clone(),
+        plugin_id: projected.grant.plugin_id.clone(),
+        plugin_version: projected.grant.plugin_version.clone(),
+        manifest_digest: projected.grant.manifest_digest.clone(),
+        deployment_id: projected.deployment.deployment_id.clone(),
+        grant_id: projected.grant.grant_id.clone(),
+        grant_revision: projected.grant.revision,
+        configuration_digest: projected.configuration_digest.clone(),
+        actor_id: user.into(),
+        operation: req.capability_id.clone(),
+        request_id: request_id.into(),
+        conversation_id: req.conversation_id.clone(),
+        issued_at_ms: now,
+        expires_at_ms: now
+            .saturating_add(timeout.as_millis().min(120000) as i64)
+            .min(projected.grant.valid_until_ms),
+    };
+    let ticket = routes
+        .invocation_signer
+        .as_ref()
+        .ok_or_else(|| denied(()))?
+        .sign(&claims, now)
+        .map_err(|_| denied(()))?;
+    let endpoint = RegisteredPluginInstance {
+        plugin_id: manifest.plugin_id.clone(),
+        plugin_version: manifest.version.clone(),
+        api_version: manifest.api_version.clone(),
+        manifest_sha256: projected
+            .grant
+            .manifest_digest
+            .trim_start_matches("sha256:")
+            .into(),
+        declared_operations: manifest.operation_ids().into_iter().collect(),
+        capability_id: req.capability_id.clone(),
+        grpc_authority: projected.deployment.grpc_authority.clone(),
+        unverified: false,
+        labels: Default::default(),
+    };
+    tokio::time::timeout(timeout, invoke_once(ctx, req, &endpoint, timeout, &ticket))
+        .await
+        .map_err(|_| CapabilityError::Timeout("plugin invocation deadline exceeded".into()))?
+}
+
+#[cfg(test)]
+#[path = "remote_dispatch_tests.rs"]
+mod tests;
 
 impl VerifiedDispatchOrigin {
     pub(crate) fn verify(
@@ -48,10 +186,7 @@ impl VerifiedDispatchOrigin {
         let claims = verifier
             .verify(token)
             .map_err(|_| Status::unauthenticated("invalid signed dispatch context"))?;
-        Ok(Self {
-            claims,
-            token: token.to_owned(),
-        })
+        Ok(Self { claims })
     }
 
     pub(crate) fn require_user_binding(
@@ -85,10 +220,6 @@ impl VerifiedDispatchOrigin {
                 .insert_data(self),
         )
     }
-
-    fn token(&self) -> &str {
-        &self.token
-    }
 }
 
 fn build_request_payload(
@@ -121,6 +252,7 @@ async fn invoke_once(
     req: &CapabilityDispatchCommand,
     endpoint: &RegisteredPluginInstance,
     timeout: Duration,
+    ticket: &str,
 ) -> Result<CapabilityDispatchResult> {
     let tenant_id = require_dispatch_tenant(req)?;
     let user_id = req.user_id.clone().unwrap_or_default();
@@ -157,8 +289,15 @@ async fn invoke_once(
         payload: Some(payload),
         request_id: request_id.clone(),
     });
-    set_signed_context_token(&mut grpc_req, origin.token())
-        .map_err(|_| CapabilityError::PolicyDenied("invalid dispatch credential".into()))?;
+    let mut credential: tonic::metadata::MetadataValue<tonic::metadata::Ascii> =
+        ticket.parse().map_err(|_| {
+            CapabilityError::PolicyDenied("invalid plugin invocation credential".into())
+        })?;
+    credential.set_sensitive(true);
+    grpc_req.metadata_mut().insert(
+        flare_im_capability_core::plugin::invocation::PLUGIN_CALL_HEADER,
+        credential,
+    );
 
     let response = tokio::time::timeout(timeout, client.call(grpc_req))
         .await
@@ -170,11 +309,31 @@ async fn invoke_once(
         })?
         .into_inner();
 
+    if response.request_id != request_id {
+        return Err(CapabilityError::System(
+            "plugin response request identity mismatch".into(),
+        ));
+    }
     if !response.ok {
-        return Err(CapabilityError::System(format!(
-            "plugin {} returned error: {} {}",
-            endpoint.plugin_id, response.error_code, response.error_message
-        )));
+        let code = if !response.error_code.is_empty()
+            && response.error_code.len() <= 64
+            && response
+                .error_code
+                .bytes()
+                .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'_')
+        {
+            response.error_code
+        } else {
+            "PLUGIN_REJECTED".into()
+        };
+        return Ok(CapabilityDispatchResult {
+            request_id,
+            plugin_id: endpoint.plugin_id.clone(),
+            capability_id: req.capability_id.clone(),
+            success: false,
+            data: serde_json::json!({"errorCode":code}),
+            error: Some("plugin command rejected".into()),
+        });
     }
 
     Ok(CapabilityDispatchResult::ok(
@@ -185,357 +344,122 @@ async fn invoke_once(
     ))
 }
 
-/// 按 capability 动态调用远程插件，**候选实例由调用方传入**：
-/// 优先健康实例，失败自动降级到下一个，全部失败时返回最后一次错误。
-///
-/// 不在这里自己查路由簿：`list_filtered` 是全表扫描 + 逐个 clone 实例
-/// （含 declared_operations 向量与 labels 哈希），而上层为了判 `seat_model`
-/// 已经查过一次。两处各查一次就是每次分发扫两遍全表 —— 插件多起来后是纯浪费，
-/// 且这种回归**没有任何功能信号**：测试全绿、行为正确，只是慢。
-///
-/// 让调用方传候选，而不是把 seat_model 塞进 `CapabilityDispatchCommand`：
-/// 命令是**请求的描述**，不该携带路由查询的中间结果。
-pub async fn dispatch_remote_with_candidates(
-    ctx: &Ctx,
-    req: &CapabilityDispatchCommand,
-    routes: &Arc<PluginRouteBook>,
-    candidates: Vec<RegisteredPluginInstance>,
-    plugin_timeout: Duration,
-    health_stale: Duration,
+/// Leased data from the local control projection; never from the marketplace.
+async fn client_ui_catalog(
+    tenant: &str,
+    user: &str,
+    request_id: &str,
+    routes: &PluginRouteBook,
+    policy: &Arc<dyn CapabilityPolicyBackend>,
 ) -> Result<CapabilityDispatchResult> {
-    let tenant_id = require_dispatch_tenant(req)?;
-    let mut candidates = candidates;
-    if candidates.is_empty() {
-        return Err(CapabilityError::NotRegistered(format!(
-            "no plugin endpoint registered for capability {} (tenant={})",
-            req.capability_id, tenant_id
-        )));
-    }
-
-    // 声明即边界：插件声明过 declared_operations 的，声明之外的调用一律拒绝。
-    //
-    // unverified 插件（没带声明的旧插件、配置发现登记的端点）跳过这道检查——
-    // 否则核心一升级，所有已部署插件立刻全部失效。代价是它们的边界无法强制，
-    // 所以注册时已经打了 unverified 标并告警。
-    //
-    // 注意这里是**过滤**而不是直接报错：同一个 capability 可能有多个实例，
-    // 其中一部分声明了、一部分没有；把不该接管的滤掉，剩下的照常走降级链路。
-    let before = candidates.len();
-    candidates.retain(|i| {
-        i.unverified
-            || i.declared_operations.is_empty()
-            || i.declared_operations.contains(&req.capability_id)
-    });
-    if candidates.is_empty() {
-        return Err(CapabilityError::PolicyDenied(format!(
-            "capability {} is not in the declared operations of any registered plugin \
-             (tenant={}, {} endpoint(s) rejected by declaration)",
-            req.capability_id, tenant_id, before
-        )));
-    }
-
-    candidates.sort_by_key(|i| {
-        if routes.is_healthy(&tenant_id, &i.plugin_id, health_stale) {
-            0u8
-        } else {
-            1u8
-        }
-    });
-
-    let mut last_err: Option<CapabilityError> = None;
-    for endpoint in candidates {
-        match invoke_once(ctx, req, &endpoint, plugin_timeout).await {
-            Ok(result) => {
-                routes.mark_health(&tenant_id, &endpoint.plugin_id, true, None);
-                return Ok(result);
-            }
-            Err(e) => {
-                routes.mark_health(&tenant_id, &endpoint.plugin_id, false, Some(e.to_string()));
-                last_err = Some(e);
-            }
-        }
-    }
-
-    Err(last_err.unwrap_or_else(|| {
-        CapabilityError::System("all registered plugin endpoints failed".to_string())
-    }))
-}
-
-#[cfg(test)]
-mod declaration_tests {
-    use std::sync::Arc;
-    use std::time::Duration;
-
-    use ed25519_dalek::SigningKey;
-    use ed25519_dalek::pkcs8::{EncodePrivateKey, EncodePublicKey};
-    use flare_core_base::context::Ctx;
-    use flare_grpc_proto::capability::RegisteredPluginInstance;
-    use flare_server_core::{
-        Context, SignedActorType, SignedContextIdentity, SignedContextSigner, SignedContextVerifier,
+    use flare_im_capability_core::plugin::ui::{
+        ClientPlugin, UI_CATALOG_OPERATION, UiActionTarget, UiCatalog,
     };
-    use tonic::metadata::MetadataMap;
-
-    use super::{VerifiedDispatchOrigin, dispatch_remote_with_candidates, invoke_once};
-    use crate::domain::capability::{CapabilityDispatchCommand, CapabilityError};
-    use crate::infrastructure::capability::PluginRouteBook;
-
-    fn verified_origin(actor_type: SignedActorType) -> (VerifiedDispatchOrigin, String) {
-        let key = SigningKey::from_bytes(&[54; 32]);
-        let private = key.to_pkcs8_pem(Default::default()).unwrap();
-        let public = key
-            .verifying_key()
-            .to_public_key_pem(Default::default())
-            .unwrap();
-        let signer = SignedContextSigner::from_private_key(&private).unwrap();
-        let verifier = SignedContextVerifier::from_public_key(&public).unwrap();
-        let token = signer
-            .sign(&SignedContextIdentity::new(actor_type, "u1", "0", "r1"))
-            .unwrap();
-        let mut metadata = MetadataMap::new();
-        metadata.insert("x-flare-ctx", token.parse().unwrap());
-        (
-            VerifiedDispatchOrigin::verify(&metadata, &verifier).unwrap(),
-            token,
-        )
-    }
-
-    #[test]
-    fn dispatch_origin_requires_signed_user_and_exact_body_identity() {
-        let (origin, token) = verified_origin(SignedActorType::User);
-        origin.require_user_binding("0", "u1", "r1").unwrap();
-        for (tenant, user, request) in [
-            ("other", "u1", "r1"),
-            ("0", "other", "r1"),
-            ("0", "u1", "other"),
-            ("", "u1", "r1"),
-        ] {
-            assert!(origin.require_user_binding(tenant, user, request).is_err());
-        }
-        let ctx = origin.into_context();
-        assert_eq!(ctx.tenant_id(), Some("0"));
-        assert_eq!(ctx.user_id(), Some("u1"));
-        assert_eq!(
-            ctx.get_data::<VerifiedDispatchOrigin>().unwrap().token(),
-            token
-        );
-
-        let (service, _) = verified_origin(SignedActorType::Service);
-        assert!(service.require_user_binding("0", "u1", "r1").is_err());
-    }
-
-    #[test]
-    fn dispatch_origin_rejects_missing_invalid_and_duplicate_credentials() {
-        let key = SigningKey::from_bytes(&[54; 32]);
-        let public = key
-            .verifying_key()
-            .to_public_key_pem(Default::default())
-            .unwrap();
-        let verifier = SignedContextVerifier::from_public_key(&public).unwrap();
-        assert!(VerifiedDispatchOrigin::verify(&MetadataMap::new(), &verifier).is_err());
-        let mut invalid = MetadataMap::new();
-        invalid.insert("x-flare-ctx", "forged".parse().unwrap());
-        assert!(VerifiedDispatchOrigin::verify(&invalid, &verifier).is_err());
-        let (_, token) = verified_origin(SignedActorType::User);
-        let mut duplicate = MetadataMap::new();
-        duplicate.append("x-flare-ctx", token.parse().unwrap());
-        duplicate.append("x-flare-ctx", token.parse().unwrap());
-        assert!(VerifiedDispatchOrigin::verify(&duplicate, &verifier).is_err());
-    }
-
-    /// 构造一个已注册实例。`declared` 为空且 `unverified=true` 表示旧插件。
-    fn instance(
-        plugin_id: &str,
-        capability_id: &str,
-        declared: &[&str],
-    ) -> RegisteredPluginInstance {
-        RegisteredPluginInstance {
-            plugin_id: plugin_id.into(),
-            capability_id: capability_id.into(),
-            // 指向一个不会有人监听的地址：这些用例只验「有没有被声明挡下」，
-            // 挡下时返回 PolicyDenied，没挡下时才会去连而失败成别的错误。
-            grpc_authority: "127.0.0.1:1".into(),
-            labels: Default::default(),
-            plugin_version: String::new(),
-            api_version: String::new(),
-            manifest_sha256: String::new(),
-            declared_operations: declared.iter().map(|s| s.to_string()).collect(),
-            unverified: declared.is_empty(),
-            // 这些用例验的是声明边界，不涉及计费单位 —— 留空即旧语义。
-            seat_model: String::new(),
-        }
-    }
-
-    async fn dispatch(book: PluginRouteBook, capability_id: &str) -> Result<(), CapabilityError> {
-        let ctx: Ctx = verified_origin(SignedActorType::User).0.into_context();
-        let req = CapabilityDispatchCommand {
-            capability_id: capability_id.into(),
-            tenant_id: Some("0".into()),
-            user_id: Some("u1".into()),
-            conversation_id: None,
-            payload: None,
-            request_id: Some("r1".into()),
-        };
-        // 与生产路径一致：调用方先查候选再分发。
-        let book = Arc::new(book);
-        let candidates = book.list_filtered("0", capability_id);
-        dispatch_remote_with_candidates(
-            &ctx,
-            &req,
-            &book,
-            candidates,
-            Duration::from_millis(30),
-            Duration::from_secs(30),
-        )
-        .await
-        .map(|_| ())
-    }
-
-    #[tokio::test]
-    async fn bare_context_cannot_dispatch_to_plugin() {
-        let book = PluginRouteBook::new();
-        book.upsert("0", instance("p1", "vendorx.do", &["vendorx.do"]));
-        let book = Arc::new(book);
-        let req = CapabilityDispatchCommand {
-            capability_id: "vendorx.do".into(),
-            tenant_id: Some("0".into()),
-            user_id: Some("u1".into()),
-            conversation_id: None,
-            payload: None,
-            request_id: Some("r1".into()),
-        };
-        let ctx: Ctx = Arc::new(Context::default());
-        let err = dispatch_remote_with_candidates(
-            &ctx,
-            &req,
-            &book,
-            book.list_filtered("0", "vendorx.do"),
-            Duration::from_millis(30),
-            Duration::from_secs(30),
-        )
-        .await
-        .unwrap_err();
-        assert!(matches!(err, CapabilityError::PolicyDenied(_)));
-    }
-
-    /// 声明之外的调用被拒，且拒绝原因是「声明」而不是「没注册」。
-    #[tokio::test]
-    async fn undeclared_operation_is_denied_by_declaration() {
-        let book = PluginRouteBook::new();
-        book.upsert("0", instance("p1", "vendorx.do", &["vendorx.other"]));
-
-        let err = dispatch(book, "vendorx.do").await.unwrap_err();
-        assert!(
-            matches!(err, CapabilityError::PolicyDenied(_)),
-            "应当因声明被拒，实际: {err:?}"
-        );
-    }
-
-    /// 声明内的调用放行（会因为连不上而失败，但**不是** PolicyDenied）。
-    #[tokio::test]
-    async fn declared_operation_passes_the_declaration_gate() {
-        let book = PluginRouteBook::new();
-        book.upsert("0", instance("p1", "vendorx.do", &["vendorx.do"]));
-
-        let err = dispatch(book, "vendorx.do").await.unwrap_err();
-        assert!(
-            !matches!(err, CapabilityError::PolicyDenied(_)),
-            "不该被声明挡下，实际: {err:?}"
-        );
-    }
-
-    /// **兼容窗口**：没带声明的旧插件照常放行。
-    ///
-    /// 这条是整个 v2 契约能不能上线的前提——要求必填的话，核心升级的瞬间
-    /// 所有已部署插件都会失效。
-    #[tokio::test]
-    async fn unverified_legacy_plugin_still_works() {
-        let book = PluginRouteBook::new();
-        book.upsert("0", instance("legacy", "vendorx.do", &[]));
-
-        let err = dispatch(book, "vendorx.do").await.unwrap_err();
-        assert!(
-            !matches!(err, CapabilityError::PolicyDenied(_)),
-            "旧插件不该被声明挡下，实际: {err:?}"
-        );
-    }
-
-    /// 多实例混合：声明不匹配的被滤掉，匹配的仍然可用。
-    #[tokio::test]
-    async fn mixed_instances_keep_the_declaring_one() {
-        let book = PluginRouteBook::new();
-        book.upsert("0", instance("bad", "vendorx.do", &["vendorx.other"]));
-        book.upsert("0", instance("good", "vendorx.do", &["vendorx.do"]));
-
-        let err = dispatch(book, "vendorx.do").await.unwrap_err();
-        assert!(
-            !matches!(err, CapabilityError::PolicyDenied(_)),
-            "还有合法实例时不该整体被拒，实际: {err:?}"
-        );
-    }
-
-    /// 缺租户（含空白）的远程调度在挑实例、对签名身份、连插件之前就以 `PolicyDenied` 拒绝，
-    /// 不再按租户 "0" 处理（W13-D）。签名身份恰好是租户 "0" 时，以前会一路连到租户 0 的插件，
-    /// 连接失败还会把该实例记成不健康。
-    #[tokio::test]
-    async fn remote_dispatch_without_a_tenant_is_denied_not_sent_as_tenant_zero() {
-        let book = PluginRouteBook::new();
-        book.upsert("0", instance("p1", "vendorx.do", &["vendorx.do"]));
-        let book = Arc::new(book);
-
-        for tenant_id in [None, Some(""), Some("  ")] {
-            let ctx: Ctx = verified_origin(SignedActorType::User).0.into_context();
-            let req = CapabilityDispatchCommand {
-                capability_id: "vendorx.do".into(),
-                tenant_id: tenant_id.map(str::to_string),
-                user_id: Some("u1".into()),
-                conversation_id: None,
-                payload: None,
-                request_id: Some("r1".into()),
-            };
-            let err = dispatch_remote_with_candidates(
-                &ctx,
-                &req,
-                &book,
-                book.list_filtered("0", "vendorx.do"),
-                Duration::from_millis(30),
-                Duration::from_secs(30),
-            )
+    let now = chrono::Utc::now().timestamp_millis();
+    let snapshot = match &routes.authorization {
+        Some(reader) => reader
+            .plugin_snapshot(tenant)
             .await
-            .unwrap_err();
-            assert!(
-                matches!(&err, CapabilityError::PolicyDenied(reason) if reason == crate::domain::capability::DISPATCH_TENANT_REQUIRED),
-                "{tenant_id:?}: {err:?}"
-            );
+            .map_err(|_| CapabilityError::PolicyDenied("plugin catalog unavailable".into()))?,
+        None => None,
+    };
+    let mut result = UiCatalog {
+        tenant_id: tenant.into(),
+        version: 0,
+        valid_until_ms: now + 30000,
+        plugins: vec![],
+    };
+    if let Some(snapshot) = snapshot {
+        snapshot
+            .validate(now)
+            .map_err(|_| CapabilityError::PolicyDenied("plugin catalog expired".into()))?;
+        result.version = snapshot.version;
+        result.valid_until_ms = snapshot.valid_until_ms.min(now.saturating_add(30000));
+        for projected in &snapshot.plugins {
+            if !projected.grant.enabled
+                || projected.grant.revoked
+                || now < projected.grant.valid_from_ms
+                || now >= projected.grant.valid_until_ms
+            {
+                continue;
+            }
+            let manifest = projected
+                .manifest()
+                .map_err(|_| CapabilityError::PolicyDenied("plugin catalog invalid".into()))?;
+            let mut operations = std::collections::BTreeSet::new();
+            let mut permissions = std::collections::BTreeSet::new();
+            for operation in manifest.operation_ids() {
+                if projected.grant.approved_operations.contains(&operation)
+                    && manifest.operation(&operation).is_some_and(|op| {
+                        op.permission_ids
+                            .iter()
+                            .all(|p| projected.grant.approved_permissions.contains(p))
+                    })
+                    && policy
+                        .ensure_dispatch_allowed(tenant, user, &operation)
+                        .await
+                        .is_ok()
+                {
+                    if let Some(op) = manifest.operation(&operation) {
+                        permissions.extend(op.permission_ids.iter().cloned());
+                    }
+                    operations.insert(operation);
+                }
+            }
+            let mut extensions = manifest.client_extensions;
+            extensions.contributions.retain(|c| {
+                c.required_permissions
+                    .iter()
+                    .all(|p| permissions.contains(p))
+            });
+            let pages = extensions
+                .contributions
+                .iter()
+                .filter(|c| {
+                    c.kind == flare_im_capability_core::plugin::manifest::UiContributionKind::Page
+                })
+                .map(|c| c.id.clone())
+                .collect::<std::collections::BTreeSet<_>>();
+            for contribution in &mut extensions.contributions {
+                contribution
+                    .schema
+                    .actions
+                    .retain(|action| match &action.target {
+                        UiActionTarget::Operation { operation } => operations.contains(operation),
+                        UiActionTarget::Page { page } => pages.contains(page),
+                        UiActionTarget::Native { .. } => true,
+                    });
+                let action_ids = contribution
+                    .schema
+                    .actions
+                    .iter()
+                    .map(|action| action.id.as_str())
+                    .collect::<std::collections::BTreeSet<_>>();
+                for translation in contribution.schema.translations.values_mut() {
+                    translation
+                        .actions
+                        .retain(|id, _| action_ids.contains(id.as_str()));
+                }
+            }
+            if !extensions.contributions.is_empty() {
+                result.valid_until_ms = result.valid_until_ms.min(projected.grant.valid_until_ms);
+                result.plugins.push(ClientPlugin {
+                    plugin_id: manifest.plugin_id,
+                    version: manifest.version,
+                    manifest_digest: projected.grant.manifest_digest.clone(),
+                    grant_revision: projected.grant.revision,
+                    extensions,
+                    operations,
+                });
+            }
         }
-        assert_eq!(
-            book.last_error("0", "p1"),
-            None,
-            "缺租户的调度不该以租户 0 去调插件"
-        );
     }
-
-    /// 单个实例的调用自己也要求租户（纵深防御）：缺租户时在对签名身份、连插件之前拒绝，
-    /// 不再按租户 "0" 对上签名身份后去连插件（W13-D）。
-    #[tokio::test]
-    async fn invoke_once_without_a_tenant_is_denied_before_calling_the_plugin() {
-        let endpoint = instance("p1", "vendorx.do", &["vendorx.do"]);
-        for tenant_id in [None, Some(""), Some("  ")] {
-            let ctx: Ctx = verified_origin(SignedActorType::User).0.into_context();
-            let req = CapabilityDispatchCommand {
-                capability_id: "vendorx.do".into(),
-                tenant_id: tenant_id.map(str::to_string),
-                user_id: Some("u1".into()),
-                conversation_id: None,
-                payload: None,
-                request_id: Some("r1".into()),
-            };
-            let err = invoke_once(&ctx, &req, &endpoint, Duration::from_millis(30))
-                .await
-                .unwrap_err();
-            assert!(
-                matches!(&err, CapabilityError::PolicyDenied(reason) if reason == crate::domain::capability::DISPATCH_TENANT_REQUIRED),
-                "{tenant_id:?}: {err:?}"
-            );
-        }
-    }
+    let value = serde_json::to_value(result)
+        .map_err(|_| CapabilityError::System("plugin UI encoding failed".into()))?;
+    Ok(CapabilityDispatchResult::ok(
+        request_id,
+        "flare.plugin",
+        UI_CATALOG_OPERATION,
+        value,
+    ))
 }

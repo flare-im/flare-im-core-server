@@ -66,6 +66,9 @@ struct RouteEntry {
 /// `(tenant_id, plugin_id)` -> 最近一次上报的实例描述。
 #[derive(Clone, Default)]
 pub struct PluginRouteBook {
+    pub(crate) authorization: Option<Arc<dyn crate::domain::repository::PluginAuthorizationReader>>,
+    pub(crate) invocation_signer:
+        Option<Arc<flare_im_capability_core::plugin::invocation::PluginCallSigner>>,
     inner: Arc<DashMap<String, RouteEntry>>,
     health: Arc<DashMap<String, PluginHealthStatus>>,
     /// 本进程注销的时刻：注销前开始的重读不得把它们再加回来。
@@ -74,6 +77,17 @@ pub struct PluginRouteBook {
 }
 
 impl PluginRouteBook {
+    /// Endpoint discovery remains diagnostics. Only the durable authenticated
+    /// authorization projection may supply a business dispatch target.
+    pub fn with_runtime_authorization(
+        mut self,
+        reader: Arc<dyn crate::domain::repository::PluginAuthorizationReader>,
+        signer: Option<Arc<flare_im_capability_core::plugin::invocation::PluginCallSigner>>,
+    ) -> Self {
+        self.authorization = Some(reader);
+        self.invocation_signer = signer;
+        self
+    }
     pub fn new() -> Self {
         Self::default()
     }

@@ -22,34 +22,10 @@ use flare_core_base::context::Ctx;
 
 use crate::domain::capability::{
     CapabilityDispatchCommand, CapabilityDispatchResult, CapabilityPolicyBackend, Result,
-    SeatModel, require_dispatch_tenant,
+    require_dispatch_tenant,
 };
-use flare_grpc_proto::capability::RegisteredPluginInstance;
 
 use crate::infrastructure::capability::{CapabilityExtensionRegistry, PluginRouteBook};
-
-/// 取该能力在本租户下注册的计费单位。
-///
-/// 多个实例注册了同一能力却声明了不同单位时，取**最严格**的那个（per_user）：
-/// 授权判定上宁可多要一次授权，也不能因为某个实例声明宽松就放行。
-fn seat_model_of(instances: &[RegisteredPluginInstance]) -> SeatModel {
-    if instances.is_empty() {
-        // 没有注册记录时不做租户级判定 —— 交给旧路径，最终会在路由阶段
-        // 报「未注册」，那个错误比「未安装」更贴近真实原因。
-        return SeatModel::Unspecified;
-    }
-    let models: Vec<SeatModel> = instances
-        .iter()
-        .map(|i| SeatModel::parse(&i.seat_model))
-        .collect();
-    if models.contains(&SeatModel::PerUser) {
-        return SeatModel::PerUser;
-    }
-    if models.contains(&SeatModel::Unspecified) {
-        return SeatModel::Unspecified;
-    }
-    SeatModel::Tenant
-}
 
 /// `CapabilityService.Dispatch` 的应用入口：装配端口后调用领域服务。
 pub async fn dispatch_capability_command(
@@ -58,7 +34,7 @@ pub async fn dispatch_capability_command(
     plugin_routes: &Arc<PluginRouteBook>,
     policy: &Arc<dyn CapabilityPolicyBackend>,
     plugin_timeout: Duration,
-    plugin_health_stale: Duration,
+    _plugin_health_stale: Duration,
     req: &CapabilityDispatchCommand,
 ) -> Result<CapabilityDispatchResult> {
     let tenant = require_dispatch_tenant(req)?;
@@ -66,37 +42,13 @@ pub async fn dispatch_capability_command(
         crate::domain::capability::CapabilityError::PolicyDenied("user_id required".into())
     })?;
 
-    // 授权是 fail-closed：拒绝就是拒绝，不降级。
-    // （可用性类失败才降级——那发生在下面各后端内部的超时/健康判定里。）
-    //
-    // 走哪条校验由**插件自己声明的计费单位**决定，平台不替插件决定它怎么卖：
-    //
-    //   tenant   装了就全员可用 —— 只看租户开关，且**开关缺失即拒**（没装就是没装）
-    //   per_user 还需逐人授权 —— 旧语义
-    //   未声明   沿用旧语义，让现有插件行为一字不变
-    //
-    // 之所以租户模型能从第一天就严格：它是新增语义，现存插件一个都没用它，
-    // 不存在「升级当天全员被拒」的反转。迁移由各插件自己声明触发。
-    // 路由簿只查这一次：既用来判计费单位，也直接当分发候选。
-    // 此前这里查一次、下面路由再查一次，而 list_filtered 是全表扫描 +
-    // 逐个 clone 实例 —— 每次分发扫两遍全表纯属浪费。
-    let candidates = plugin_routes.list_filtered(&tenant, &req.capability_id);
-
-    match seat_model_of(&candidates) {
-        SeatModel::Tenant => {
-            policy
-                .ensure_tenant_capability_enabled(&tenant, &req.capability_id)
-                .await?;
-        }
-        SeatModel::PerUser | SeatModel::Unspecified => {
+    // 插件声明不能选择或降低宿主授权策略。所有调用都检查租户开关和用户
+    // operation 权限；平台审批投影将通过独立插件授权端口叠加，不能替代此检查。
+    for route in registry.dispatch_routes().await {
+        if route.matches(&req.capability_id) {
             policy
                 .ensure_dispatch_allowed(&tenant, &user, &req.capability_id)
                 .await?;
-        }
-    }
-
-    for route in registry.dispatch_routes().await {
-        if route.matches(&req.capability_id) {
             tracing::trace!(
                 capability_id = %req.capability_id,
                 route = %route.route_id(),
@@ -106,15 +58,7 @@ pub async fn dispatch_capability_command(
         }
     }
 
-    super::dispatch_remote_with_candidates(
-        ctx,
-        req,
-        plugin_routes,
-        candidates,
-        plugin_timeout,
-        plugin_health_stale,
-    )
-    .await
+    super::dispatch_remote(ctx, req, plugin_routes, policy, plugin_timeout).await
 }
 
 #[cfg(test)]

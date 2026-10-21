@@ -62,6 +62,8 @@ etcd-client = { workspace = true }
 
 dashmap = "6.0"
 [dev-dependencies]
+flare-plugin-host = { path = "../../flare-plugin/flare-plugin-host" }
+tokio-stream = { workspace = true, features = ["net"] }
 tokio-test = { workspace = true }
 tracing-subscriber = { workspace = true }
 prost-types = { workspace = true }

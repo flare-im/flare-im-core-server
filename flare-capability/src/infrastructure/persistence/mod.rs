@@ -16,3 +16,4 @@ pub use postgres_tenant_projection::PostgresTenantProjectionRepository;
 
 #[cfg(test)]
 mod plugin_endpoints_pg_tests;
+pub mod postgres_plugin_authorization;

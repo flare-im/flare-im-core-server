@@ -219,7 +219,7 @@ impl ExtensionPlugin for LinkPreviewPlugin {
     }
 }
 
-/// 把自己登记进核心。这一步就是「安装」。
+/// 登记实例地址。平台部署、租户审批和启用由控制面单独管理。
 async fn register(core_addr: &str, tenant: &str, authority: &str) -> Result<(), String> {
     let mut client = CapabilityServiceClient::connect(core_addr.to_string())
         .await
@@ -235,15 +235,12 @@ async fn register(core_addr: &str, tenant: &str, authority: &str) -> Result<(), 
             grpc_authority: authority.to_string(),
             labels,
             request_id: uuid::Uuid::new_v4().to_string(),
-            // 注册契约 v2：填满这些字段才是 verified 的实例。
-            // 留空协议上也接受，但实例会被标成 unverified —— 那样
-            // declared_operations 这条边界对它就无从强制了。
+            // 完整声明是注册前提，不等同于平台审批或发布者签名验证。
             plugin_version: env!("CARGO_PKG_VERSION").to_string(),
-            api_version: "1".to_string(),
-            manifest_sha256: String::new(),
+            api_version: "1.0".to_string(),
+            manifest_sha256: std::env::var("FLARE_PLUGIN_MANIFEST_SHA256")
+                .map_err(|_| "FLARE_PLUGIN_MANIFEST_SHA256 required".to_string())?,
             declared_operations: vec![CAPABILITY_ID.to_string()],
-            // 装了就全员可用。链接预览没有按人计费的边际成本。
-            seat_model: "tenant".to_string(),
         })
         .await
         .map_err(|e| format!("注册失败：{e}"))?;

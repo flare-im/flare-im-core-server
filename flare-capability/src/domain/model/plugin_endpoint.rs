@@ -70,10 +70,9 @@ pub fn validate_plugin_endpoint(endpoint: &PluginEndpoint) -> Result<(), &'stati
     if !within(&instance.plugin_version, 0, 64)
         || !within(&instance.api_version, 0, 64)
         || !within(&instance.manifest_sha256, 0, 128)
-        || !within(&instance.seat_model, 0, 32)
     {
         return Err(
-            "plugin_version and api_version are at most 64, manifest_sha256 128, seat_model 32 characters",
+            "plugin_version and api_version are at most 64, manifest_sha256 128 characters",
         );
     }
     if instance.declared_operations.len() > 256 {
@@ -123,20 +122,11 @@ mod tests {
         long_plugin.instance.plugin_id = "p".repeat(129);
         let mut no_authority = endpoint();
         no_authority.instance.grpc_authority.clear();
-        let mut seat = endpoint();
-        seat.instance.seat_model = "s".repeat(33);
         let mut operations = endpoint();
         operations.instance.declared_operations = vec!["op".into(); 257];
         let mut labels = endpoint();
         labels.instance.labels.insert("k".into(), "v".repeat(8_192));
-        for invalid in [
-            wildcard,
-            long_plugin,
-            no_authority,
-            seat,
-            operations,
-            labels,
-        ] {
+        for invalid in [wildcard, long_plugin, no_authority, operations, labels] {
             assert!(validate_plugin_endpoint(&invalid).is_err(), "{invalid:?}");
         }
     }

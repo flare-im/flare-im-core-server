@@ -980,6 +980,18 @@ COMMENT ON COLUMN capability_audit_log.detail IS '扩展字段 JSON';
 CREATE INDEX IF NOT EXISTS idx_capability_audit_tenant_time ON capability_audit_log(tenant_id, occurred_at DESC);
 CREATE INDEX IF NOT EXISTS idx_capability_audit_action_time ON capability_audit_log(action, occurred_at DESC);
 
+-- Authenticated control-plane plugin snapshots. Empty snapshots retain the
+-- monotonic watermark; invocation never queries the Marketplace.
+CREATE TABLE IF NOT EXISTS plugin_authorization_snapshots (
+ app_id text PRIMARY KEY CHECK(app_id ~ '^[0-9A-Za-z_-]{1,32}$'),
+ version bigint NOT NULL CHECK(version>0),
+ snapshot jsonb NOT NULL CHECK(jsonb_typeof(snapshot)='object' AND octet_length(snapshot::text)<=4194304),
+ valid_until_ms bigint NOT NULL CHECK(valid_until_ms>0),
+ CHECK(snapshot->>'tenantId'=app_id),
+ CHECK((snapshot->>'version')::bigint=version),
+ CHECK((snapshot->>'validUntilMs')::bigint=valid_until_ms)
+);
+
 -- 插件端点登记（RegisterPluginEndpoint；与 migrations/0011 同一结构）：各实例启动载入、登记先写库、
 -- 周期重读、超过 TTL 不健康的登记被清理。配置发现的端点不入库。
 CREATE TABLE capability_plugin_endpoints (
@@ -993,7 +1005,6 @@ CREATE TABLE capability_plugin_endpoints (
     manifest_sha256 TEXT NOT NULL DEFAULT '',
     declared_operations TEXT[] NOT NULL DEFAULT '{}',
     unverified BOOLEAN NOT NULL,
-    seat_model TEXT NOT NULL DEFAULT '',
     registered_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     last_healthy_at TIMESTAMPTZ,
@@ -1010,7 +1021,7 @@ CREATE TABLE capability_plugin_endpoints (
         CHECK (jsonb_typeof(labels) = 'object' AND octet_length(labels::text) <= 16384),
     CONSTRAINT capability_plugin_endpoints_manifest_check
         CHECK (char_length(plugin_version) <= 64 AND char_length(api_version) <= 64
-               AND char_length(manifest_sha256) <= 128 AND char_length(seat_model) <= 32),
+               AND char_length(manifest_sha256) <= 128),
     CONSTRAINT capability_plugin_endpoints_operations_check
         CHECK (cardinality(declared_operations) <= 256
                AND array_position(declared_operations, NULL) IS NULL),

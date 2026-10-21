@@ -5,6 +5,8 @@
 //! `core:capabilities:write`，插件簿读 `core:plugins:read`，插件登记与注销 `core:plugins:write`
 //! （仅平台员工），Hook 治理 `core:hooks:read` / `core:hooks:write`。插件登记、注销与列表另接受
 //! Cell 签的 Service 上下文（插件宿主自注册），其签名租户须等于请求租户。
+//! 登记/注销还接受平台签发、完整请求绑定的 `x-flare-plugin-registration`；
+//! 此专用凭据不产生 Cell 上下文，也不用于列表、管理、Dispatch 或资源回调。
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -108,6 +110,7 @@ pub struct CapabilityGrpcServer {
     dispatch_verifier: Option<SignedContextVerifier>,
     /// The same key set with Staff pinned to `kid=gateway`: the admin RPCs.
     staff_verifier: Option<SignedContextVerifier>,
+    pub(super) registration_verifier: Option<flare_server_core::TokenService>,
 }
 
 impl CapabilityGrpcServer {
@@ -135,6 +138,7 @@ impl CapabilityGrpcServer {
             plugin_routes,
             dispatch_verifier,
             staff_verifier,
+            registration_verifier: None,
         };
         server.register_discovered_plugin_endpoints();
         server.spawn_plugin_health_checker();
@@ -158,7 +162,7 @@ impl CapabilityGrpcServer {
     /// Plugin route-book RPCs: platform staff with `permission`, or a Cell-signed `Service`
     /// context (a plugin host registering itself) whose signed tenant is `tenant_id`. The two
     /// are told apart by the verified actor type; the key set is shared.
-    fn plugin_route_actor<T>(
+    pub(super) fn plugin_route_actor<T>(
         &self,
         request: &Request<T>,
         permission: &str,
@@ -179,7 +183,10 @@ impl CapabilityGrpcServer {
                     "plugin service context tenant mismatch",
                 ));
             }
-            return Ok(PluginRouteActor::Service(claims.actor_id.clone()));
+            return Ok(PluginRouteActor::Service {
+                plugin_id: claims.actor_id.clone(),
+                request_id: claims.request_id.clone(),
+            });
         }
         let staff = self.staff(request, permission)?;
         if permission == PLUGINS_WRITE && !staff.is_platform_staff() {
@@ -225,7 +232,6 @@ impl CapabilityGrpcServer {
                 declared_operations: Vec::new(),
                 unverified: true,
                 // 配置发现来的端点没有清单，也就无从得知计费单位：沿用旧语义。
-                seat_model: String::new(),
             };
             self.plugin_routes.upsert(ep.tenant_id.as_str(), instance);
             tracing::trace!(
@@ -379,22 +385,42 @@ async fn check_plugin_health(
 
 /// Who may touch the plugin route book: platform staff, or the plugin host's own service identity.
 #[derive(Debug, Clone)]
-enum PluginRouteActor {
+pub(super) enum PluginRouteActor {
     Staff(VerifiedStaff),
-    Service(String),
+    Service {
+        plugin_id: String,
+        request_id: String,
+    },
 }
 
 impl PluginRouteActor {
     fn id(&self) -> &str {
         match self {
             Self::Staff(staff) => &staff.actor_id,
-            Self::Service(id) => id,
+            Self::Service { plugin_id, .. } => plugin_id,
         }
+    }
+    fn require_registration_binding(
+        &self,
+        plugin_id: &str,
+        request_id: &str,
+    ) -> Result<(), Status> {
+        if let Self::Service {
+            plugin_id: signed_plugin,
+            request_id: signed_request,
+        } = self
+            && (signed_plugin != plugin_id || request_id.is_empty() || signed_request != request_id)
+        {
+            return Err(Status::permission_denied(
+                "plugin registration identity does not match signed context",
+            ));
+        }
+        Ok(())
     }
     async fn run<F: std::future::Future>(&self, work: F) -> F::Output {
         match self {
             Self::Staff(staff) => work.staff_audit(&staff.ctx, "flare-capability").await,
-            Self::Service(_) => work.await,
+            Self::Service { .. } => work.await,
         }
     }
 }
@@ -720,9 +746,12 @@ impl CapabilityService for CapabilityGrpcServer {
         &self,
         request: Request<RegisterPluginEndpointRequest>,
     ) -> Result<Response<RegisterPluginEndpointResponse>, Status> {
-        let actor =
-            self.plugin_route_actor(&request, PLUGINS_WRITE, &request.get_ref().tenant_id)?;
+        let actor = self.registration_actor(
+            &request,
+            &super::registration::register_intent(request.get_ref()),
+        )?;
         let r = request.into_inner();
+        actor.require_registration_binding(&r.plugin_id, &r.request_id)?;
         if r.tenant_id.is_empty() || r.plugin_id.is_empty() || r.capability_id.is_empty() {
             return Err(Status::invalid_argument(
                 "tenant_id, plugin_id, capability_id required",
@@ -731,11 +760,7 @@ impl CapabilityService for CapabilityGrpcServer {
         if r.grpc_authority.is_empty() {
             return Err(Status::invalid_argument("grpc_authority required"));
         }
-        // 注册契约 v2：声明缺失时降级为 unverified 而不是拒绝。
-        //
-        // 这里是兼容窗口的关键位置——要求必填的话，核心升级的瞬间所有已部署
-        // 插件都会注册失败。降级 + 告警，让新旧插件能在同一集群共存。
-        let unverified = r.declared_operations.is_empty();
+        // 声明是注册的必要条件；配置发现不能代替可信目录/授权流程。
         let endpoint = PluginEndpoint {
             tenant_id: r.tenant_id,
             instance: RegisteredPluginInstance {
@@ -747,34 +772,22 @@ impl CapabilityService for CapabilityGrpcServer {
                 api_version: r.api_version,
                 manifest_sha256: r.manifest_sha256,
                 declared_operations: r.declared_operations,
-                unverified,
-                seat_model: r.seat_model,
+                unverified: false,
             },
         };
         // 先校验再记日志或回显：plugin_id、capability_id 与声明的每一项来自 Admin 接口和插件自报，
         // 校验过的才是标识（见 `is_plugin_identifier`），带换行的值伪造不了日志行。
         validate_plugin_endpoint(&endpoint).map_err(Status::invalid_argument)?;
         let instance = &endpoint.instance;
-        if unverified {
-            tracing::warn!(
-                tenant_id = %endpoint.tenant_id,
-                plugin_id = %instance.plugin_id,
-                capability_id = %instance.capability_id,
-                registered_by = actor.id(),
-                "plugin registered without declared_operations;                  running unverified — declaration cannot be enforced"
-            );
-        } else if !instance
-            .declared_operations
-            .iter()
-            .any(|op| op == &instance.capability_id)
-        {
-            // 声明了却不包含自己注册的 capability_id —— 这是清单与注册对不上，
-            // 属于配置错误，早拒早发现，而不是等第一次调用时报 unknown op。
-            return Err(Status::invalid_argument(format!(
-                "capability_id {} not present in declared_operations {:?}",
-                instance.capability_id, instance.declared_operations
-            )));
-        }
+        flare_im_capability_core::plugin::registration::validate_declaration(
+            &instance.plugin_version,
+            &instance.api_version,
+            &instance.manifest_sha256,
+            &instance.declared_operations,
+            &instance.capability_id,
+        )
+        .map_err(Status::invalid_argument)?;
+        tracing::debug!(registered_by = actor.id(), plugin_id = %instance.plugin_id, "plugin declaration validated");
         // 有库时先写 capability_plugin_endpoints，写成功才进本进程的读模型；其他实例重读后收敛。
         actor
             .run(
@@ -785,12 +798,7 @@ impl CapabilityService for CapabilityGrpcServer {
             .map_err(|_| Status::unavailable("plugin registration storage is unavailable"))?;
         Ok(Response::new(RegisterPluginEndpointResponse {
             accepted: true,
-            message: if unverified {
-                "registered (unverified)"
-            } else {
-                "registered"
-            }
-            .into(),
+            message: "registered".into(),
         }))
     }
 
@@ -798,9 +806,12 @@ impl CapabilityService for CapabilityGrpcServer {
         &self,
         request: Request<DeregisterPluginEndpointRequest>,
     ) -> Result<Response<DeregisterPluginEndpointResponse>, Status> {
-        let actor =
-            self.plugin_route_actor(&request, PLUGINS_WRITE, &request.get_ref().tenant_id)?;
+        let actor = self.registration_actor(
+            &request,
+            &super::registration::deregister_intent(request.get_ref()),
+        )?;
         let r = request.into_inner();
+        actor.require_registration_binding(&r.plugin_id, &r.request_id)?;
         if r.tenant_id.is_empty() || r.plugin_id.is_empty() {
             return Err(Status::invalid_argument("tenant_id, plugin_id required"));
         }
@@ -820,15 +831,18 @@ impl CapabilityService for CapabilityGrpcServer {
         &self,
         request: Request<ListRegisteredPluginsRequest>,
     ) -> Result<Response<ListRegisteredPluginsResponse>, Status> {
-        let _actor =
+        let actor =
             self.plugin_route_actor(&request, PLUGINS_READ, &request.get_ref().tenant_id)?;
         let r = request.into_inner();
         if r.tenant_id.is_empty() {
             return Err(Status::invalid_argument("tenant_id required"));
         }
-        let instances = self
+        let mut instances = self
             .plugin_routes
             .list_filtered(r.tenant_id.as_str(), r.capability_id.as_str());
+        if let PluginRouteActor::Service { plugin_id, .. } = actor {
+            instances.retain(|instance| instance.plugin_id == plugin_id);
+        }
         Ok(Response::new(ListRegisteredPluginsResponse { instances }))
     }
 
@@ -930,6 +944,9 @@ mod plugin_route_book_tests {
             plugin_id: plugin_id.to_string(),
             capability_id: "rtc.call".to_string(),
             grpc_authority: "http://127.0.0.1:9".to_string(),
+            plugin_version: "1.0.0".to_string(),
+            api_version: "1.0".to_string(),
+            manifest_sha256: "a".repeat(64),
             ..Default::default()
         }
     }
@@ -977,15 +994,147 @@ mod plugin_route_book_tests {
             .unwrap()
     }
 
-    fn service_token(tenant: &str) -> String {
+    fn service_token(tenant: &str, plugin_id: &str) -> String {
         signer(GATEWAY_KEY, kid::GATEWAY)
             .sign(&SignedContextIdentity::new(
                 SignedActorType::Service,
-                "flare-plugin-host",
+                plugin_id,
                 tenant,
                 "req-2",
             ))
             .unwrap()
+    }
+
+    #[tokio::test]
+    async fn delegated_registration_binds_body_and_cannot_become_a_cell_or_admin_credential() {
+        use flare_im_capability_core::plugin::workload::*;
+        use flare_server_core::TokenService;
+        let (private, public) = pem([83; 32]);
+        let issuer = TokenService::from_ed25519_private_key(
+            &private,
+            REGISTRATION_ISSUER,
+            REGISTRATION_TTL_SECS,
+        )
+        .unwrap();
+        let registration_verifier =
+            TokenService::from_ed25519_public_key(&public, REGISTRATION_ISSUER).unwrap();
+        let server = server().with_registration_verifier(registration_verifier);
+        let body = register("unused", "tenant-a", "plugin-c").into_inner();
+        let intent = super::super::registration::register_intent(&body);
+        let token = issuer
+            .generate_with_ed25519(
+                &intent.plugin_id,
+                Some(&intent.tenant_id),
+                REGISTRATION_TOKEN_USE,
+                &intent.audience().unwrap(),
+            )
+            .unwrap();
+        let delegated = |body| {
+            let mut req = Request::new(body);
+            req.metadata_mut()
+                .insert(REGISTRATION_HEADER, token.parse().unwrap());
+            req
+        };
+        assert!(
+            server
+                .register_plugin_endpoint(delegated(body.clone()))
+                .await
+                .unwrap()
+                .get_ref()
+                .accepted
+        );
+        // Exact retries are idempotent, never a grant or arbitrary re-signing capability.
+        assert!(
+            server
+                .register_plugin_endpoint(delegated(body.clone()))
+                .await
+                .unwrap()
+                .get_ref()
+                .accepted
+        );
+        for field in 0..7 {
+            let mut changed = body.clone();
+            match field {
+                0 => changed.tenant_id = "tenant-b".into(),
+                1 => changed.plugin_id = "plugin-d".into(),
+                2 => changed.request_id = "another".into(),
+                3 => changed.grpc_authority = "http://127.0.0.1:10".into(),
+                4 => changed.manifest_sha256 = "b".repeat(64),
+                5 => changed.plugin_version = "2.0.0".into(),
+                _ => {
+                    changed
+                        .labels
+                        .insert("health_protocol".into(), "other".into());
+                }
+            }
+            assert!(
+                server
+                    .register_plugin_endpoint(delegated(changed))
+                    .await
+                    .is_err()
+            );
+        }
+        for (subject, tenant, purpose, ttl) in [
+            ("other-plugin", "tenant-a", REGISTRATION_TOKEN_USE, 60),
+            ("plugin-c", "tenant-b", REGISTRATION_TOKEN_USE, 60),
+            ("plugin-c", "tenant-a", "control", 60),
+            ("plugin-c", "tenant-a", REGISTRATION_TOKEN_USE, 3600),
+        ] {
+            let token = TokenService::from_ed25519_private_key(&private, REGISTRATION_ISSUER, ttl)
+                .unwrap()
+                .generate_with_ed25519(subject, Some(tenant), purpose, &intent.audience().unwrap())
+                .unwrap();
+            let mut req = Request::new(body.clone());
+            req.metadata_mut()
+                .insert(REGISTRATION_HEADER, token.parse().unwrap());
+            assert!(server.register_plugin_endpoint(req).await.is_err());
+        }
+        let mut duplicate = delegated(body.clone());
+        duplicate
+            .metadata_mut()
+            .append(REGISTRATION_HEADER, token.parse().unwrap());
+        assert!(server.register_plugin_endpoint(duplicate).await.is_err());
+        let mut ambiguous = delegated(body.clone());
+        ambiguous.metadata_mut().insert(
+            "x-flare-ctx",
+            service_token("tenant-a", "plugin-c").parse().unwrap(),
+        );
+        assert!(server.register_plugin_endpoint(ambiguous).await.is_err());
+        let mut listing = request(None, "tenant-a");
+        listing
+            .metadata_mut()
+            .insert(REGISTRATION_HEADER, token.parse().unwrap());
+        assert!(server.list_registered_plugins(listing).await.is_err());
+        assert!(verifier().verify(&token).is_err());
+        let withdraw = DeregisterPluginEndpointRequest {
+            tenant_id: body.tenant_id,
+            plugin_id: body.plugin_id,
+            request_id: body.request_id,
+        };
+        let mut req = Request::new(withdraw.clone());
+        req.metadata_mut()
+            .insert(REGISTRATION_HEADER, token.parse().unwrap());
+        assert!(server.deregister_plugin_endpoint(req).await.is_err());
+        let intent = super::super::registration::deregister_intent(&withdraw);
+        let token = issuer
+            .generate_with_ed25519(
+                &intent.plugin_id,
+                Some(&intent.tenant_id),
+                REGISTRATION_TOKEN_USE,
+                &intent.audience().unwrap(),
+            )
+            .unwrap();
+        let mut req = Request::new(withdraw);
+        req.metadata_mut()
+            .insert(REGISTRATION_HEADER, token.parse().unwrap());
+        assert!(
+            server
+                .deregister_plugin_endpoint(req)
+                .await
+                .unwrap()
+                .get_ref()
+                .accepted
+        );
     }
 
     fn request(token: Option<&str>, tenant_id: &str) -> Request<ListRegisteredPluginsRequest> {
@@ -999,6 +1148,100 @@ mod plugin_route_book_tests {
                 .insert("x-flare-ctx", token.parse().unwrap());
         }
         request
+    }
+
+    #[tokio::test]
+    async fn delegated_host_sdk_interoperates_with_core_over_real_grpc() {
+        use flare_im_capability_core::plugin::workload::*;
+        use flare_plugin_host::{
+            PluginDeclaration, PluginHost, RegistrationTokenFuture, RegistrationTokenProvider,
+        };
+        use flare_server_core::{TokenService, middleware::ContextLayer};
+        struct BrokerFixture(TokenService);
+        impl RegistrationTokenProvider for BrokerFixture {
+            fn token<'a>(
+                &'a self,
+                request: &'a RegistrationRequest,
+            ) -> RegistrationTokenFuture<'a> {
+                Box::pin(async move {
+                    self.0
+                        .generate_with_ed25519(
+                            &request.plugin_id,
+                            Some(&request.tenant_id),
+                            REGISTRATION_TOKEN_USE,
+                            &request.audience().unwrap(),
+                        )
+                        .map_err(|_| {
+                            flare_plugin_host::HostError::Sign("fixture issuer failed".into())
+                        })
+                })
+            }
+        }
+        struct OwnedServer(tokio::task::JoinHandle<()>);
+        impl Drop for OwnedServer {
+            fn drop(&mut self) {
+                self.0.abort();
+            }
+        }
+        let (private, public) = pem([85; 32]);
+        let server = server().with_registration_verifier(
+            TokenService::from_ed25519_public_key(&public, REGISTRATION_ISSUER).unwrap(),
+        );
+        let routes = server.plugin_routes.clone();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        // The same outer layer as the production CapabilityService listener.
+        let service = ContextLayer::new().allow_missing().layer(
+            flare_grpc_proto::capability::capability_service_server::CapabilityServiceServer::new(
+                server,
+            ),
+        );
+        let _server = OwnedServer(tokio::spawn(async move {
+            tonic::transport::Server::builder()
+                .add_service(service)
+                .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(listener))
+                .await
+                .unwrap();
+        }));
+        let mut host = PluginHost::connect_with_token_provider(
+            endpoint,
+            "example.notice",
+            Arc::new(BrokerFixture(
+                TokenService::from_ed25519_private_key(
+                    &private,
+                    REGISTRATION_ISSUER,
+                    REGISTRATION_TTL_SECS,
+                )
+                .unwrap(),
+            )),
+        )
+        .await
+        .unwrap();
+        let declaration = PluginDeclaration {
+            tenant_id: "tenant-a".into(),
+            plugin_id: "example.notice".into(),
+            capability_id: "example.notice.read".into(),
+            grpc_authority: "http://127.0.0.1:9".into(),
+            plugin_version: "1.0.0".into(),
+            api_version: "1.0".into(),
+            manifest_sha256: "a".repeat(64),
+            declared_operations: vec!["example.notice.read".into()],
+            labels: std::collections::HashMap::new(),
+        };
+        host.announce(&declaration).await.unwrap();
+        assert!(
+            routes
+                .list_filtered("tenant-a", "")
+                .iter()
+                .any(|p| p.plugin_id == declaration.plugin_id)
+        );
+        host.withdraw("tenant-a", "example.notice").await.unwrap();
+        assert!(
+            !routes
+                .list_filtered("tenant-a", "")
+                .iter()
+                .any(|p| p.plugin_id == declaration.plugin_id)
+        );
     }
 
     async fn listed(
@@ -1031,6 +1274,10 @@ mod plugin_route_book_tests {
             capability_id: "rtc.call".to_string(),
             grpc_authority: "http://127.0.0.1:9".to_string(),
             declared_operations: vec!["rtc.call".to_string()],
+            request_id: "req-2".to_string(),
+            plugin_version: "1.0.0".to_string(),
+            api_version: "1.0".to_string(),
+            manifest_sha256: "a".repeat(64),
             ..Default::default()
         });
         request
@@ -1050,7 +1297,7 @@ mod plugin_route_book_tests {
             PLUGINS_READ,
             Some("org-1"),
         );
-        let service = service_token("tenant-a");
+        let service = service_token("tenant-a", "plugin-a");
         for token in [&platform, &org, &service] {
             assert_eq!(
                 listed(&server, Some(token), "tenant-a").await,
@@ -1142,7 +1389,7 @@ mod plugin_route_book_tests {
             Code::PermissionDenied
         );
         // 插件宿主以自己的 Service 上下文自注册，租户须一致。
-        let service = service_token("tenant-b");
+        let service = service_token("tenant-b", "plugin-d");
         assert!(
             server
                 .register_plugin_endpoint(register(&service, "tenant-b", "plugin-d"))
@@ -1161,11 +1408,29 @@ mod plugin_route_book_tests {
         );
         let mut ids = listed(&server, Some(&service), "tenant-b").await.unwrap();
         ids.sort();
-        assert_eq!(ids, ["plugin-b", "plugin-d"]);
+        assert_eq!(ids, ["plugin-d"]);
+        assert_eq!(
+            server
+                .register_plugin_endpoint(register(&service, "tenant-b", "plugin-b"))
+                .await
+                .unwrap_err()
+                .code(),
+            Code::PermissionDenied
+        );
+        let mut mismatched_request = register(&service, "tenant-b", "plugin-d");
+        mismatched_request.get_mut().request_id = "another-request".into();
+        assert_eq!(
+            server
+                .register_plugin_endpoint(mismatched_request)
+                .await
+                .unwrap_err()
+                .code(),
+            Code::PermissionDenied
+        );
 
         // Registrations the table would refuse are INVALID_ARGUMENT before anything is stored:
         // a wildcard tenant, an over-long plugin id.
-        let wildcard = service_token("*");
+        let wildcard = service_token("*", "plugin-e");
         assert_eq!(
             server
                 .register_plugin_endpoint(register(&wildcard, "*", "plugin-e"))
@@ -1176,7 +1441,7 @@ mod plugin_route_book_tests {
         );
         assert_eq!(
             server
-                .register_plugin_endpoint(register(&service, "tenant-b", &"p".repeat(129)))
+                .register_plugin_endpoint(register(&platform, "tenant-a", &"p".repeat(129)))
                 .await
                 .unwrap_err()
                 .code(),
@@ -1185,7 +1450,7 @@ mod plugin_route_book_tests {
     }
 
     /// plugin_id、capability_id 与声明的每一项须是标识（ASCII 字母、数字、`_ - . :`），在记日志
-    /// 之前校验：不带声明的登记会记一条 unverified 告警，带换行的值若先被记下就能伪造日志行。
+    /// 之前校验，错误中不回显可伪造日志行的原始值。
     #[tokio::test]
     async fn plugin_registration_refuses_non_identifiers_before_logging_them() {
         let server = server();
@@ -1221,28 +1486,22 @@ mod plugin_route_book_tests {
             status.message().contains("declared_operations"),
             "{status:?}"
         );
-        // 合规的不带声明的登记照常受理，并记一条告警。
-        assert!(
+        // 标识合法也不能省略 operation 声明。
+        assert_eq!(
             server
                 .register_plugin_endpoint(unverified("plugin-c", "rtc.call"))
                 .await
-                .unwrap()
-                .into_inner()
-                .accepted
+                .unwrap_err()
+                .code(),
+            Code::InvalidArgument
         );
         let output = capture.finish();
-        let lines: Vec<&str> = output.lines().collect();
-        assert_eq!(lines.len(), 1, "{output}");
-        assert!(
-            lines[0].contains("without declared_operations") && lines[0].contains("plugin-c"),
-            "{output}"
-        );
         assert!(!output.contains("forged"), "{output}");
 
         let read = staff_token(GATEWAY_KEY, kid::GATEWAY, "tenant-a", PLUGINS_READ, None);
         assert_eq!(
             listed(&server, Some(&read), "tenant-a").await.unwrap(),
-            ["plugin-a", "plugin-c"]
+            ["plugin-a"]
         );
     }
 

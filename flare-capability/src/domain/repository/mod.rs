@@ -23,6 +23,20 @@ pub trait HookConfigRepository: Send + Sync {
 /// 用 `async_trait`：实现被 tonic 服务持有并跨线程执行，future 必须是 `Send`。
 #[async_trait::async_trait]
 pub trait TenantProjectionRepository: Send + Sync {
+    async fn replace_plugins(
+        &self,
+        _snapshot: &flare_im_capability_core::plugin::runtime::PluginRuntimeSnapshot,
+    ) -> flare_server_core::error::Result<crate::domain::model::TenantProjectionOutcome> {
+        Err(flare_server_core::error::FlareError::system(
+            "plugin projection store unavailable",
+        ))
+    }
+    async fn plugin_versions(
+        &self,
+        _app_ids: &[String],
+    ) -> flare_server_core::error::Result<Vec<(String, u64)>> {
+        Ok(vec![])
+    }
     /// Validated full app snapshot; replace keys and version atomically. Empty
     /// snapshots keep their watermarks, and old/equal versions do nothing.
     async fn replace_credentials(
@@ -46,6 +60,17 @@ pub trait TenantProjectionRepository: Send + Sync {
         &self,
         tenant_ids: &[String],
     ) -> flare_server_core::error::Result<Vec<(String, u64)>>;
+}
+
+/// Local, durable authorization. No Marketplace call is permitted on this port.
+#[async_trait::async_trait]
+pub trait PluginAuthorizationReader: Send + Sync {
+    async fn plugin_snapshot(
+        &self,
+        tenant: &str,
+    ) -> flare_server_core::error::Result<
+        Option<flare_im_capability_core::plugin::runtime::PluginRuntimeSnapshot>,
+    >;
 }
 
 /// 租户运行时只读（管理员查看本进程持有的投影）。与写路径分开，读侧不需要写权限。

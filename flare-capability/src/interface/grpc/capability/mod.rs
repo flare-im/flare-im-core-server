@@ -5,6 +5,7 @@ mod administer;
 mod hook_executions_pg_tests;
 #[cfg(test)]
 mod hook_secret_invalidation_pg_tests;
+mod registration;
 mod service;
 #[cfg(test)]
 mod source_audit_pg_tests;

@@ -40,7 +40,10 @@ pub(crate) async fn initialize(config: CapabilityServiceConfig) -> Result<Applic
         .as_ref()
         .map(|r| r.connection_pool());
     // 有库时登记写 capability_plugin_endpoints；没有库时只在本进程（plugin_routes 里说明一次）。
-    let plugin_routes = Arc::new(plugin_routes::plugin_route_book(db_pool.as_ref()));
+    let plugin_routes = Arc::new(plugin_routes::runtime_authorization(
+        plugin_routes::plugin_route_book(db_pool.as_ref()),
+        db_pool.as_ref(),
+    )?);
     let (capability_registry, capability_policy, capability_grpc) =
         init_capability_extension_stack(
             runtime_config_file,

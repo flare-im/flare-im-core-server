@@ -104,7 +104,6 @@ fn instance(plugin_id: &str, declared: &[&str]) -> RegisteredPluginInstance {
         manifest_sha256: "ab".repeat(32),
         declared_operations: declared.iter().map(|op| op.to_string()).collect(),
         unverified: declared.is_empty(),
-        seat_model: "per_user".to_string(),
     }
 }
 

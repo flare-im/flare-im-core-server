@@ -29,6 +29,34 @@ pub(super) fn plugin_route_book(db_pool: Option<&Arc<PgPool>>) -> PluginRouteBoo
     }
 }
 
+pub(super) fn runtime_authorization(
+    routes: PluginRouteBook,
+    pool: Option<&Arc<PgPool>>,
+) -> Result<PluginRouteBook> {
+    use base64::Engine;
+    use flare_im_capability_core::plugin::invocation::PluginCallSigner;
+    let signer = match std::env::var("FLARE_PLUGIN_CALL_SIGNING_KEY") {
+        Ok(raw) => {
+            let seed: [u8; 32] = base64::engine::general_purpose::STANDARD
+                .decode(raw.trim())
+                .ok()
+                .and_then(|v| v.try_into().ok())
+                .ok_or_else(|| FlareError::system("invalid plugin invocation signing key"))?;
+            let id = std::env::var("FLARE_PLUGIN_CALL_KEY_ID")
+                .map_err(|_| FlareError::system("plugin invocation key id required"))?;
+            Some(Arc::new(PluginCallSigner::new(id, seed).map_err(|_| {
+                FlareError::system("invalid plugin invocation key id")
+            })?))
+        }
+        Err(std::env::VarError::NotPresent) => {
+            tracing::warn!("plugin invocation signer absent; remote plugin calls fail closed");
+            None
+        }
+        Err(_) => return Err(FlareError::system("invalid plugin invocation key encoding")),
+    };
+    Ok(match pool{Some(pool)=>routes.with_runtime_authorization(Arc::new(crate::infrastructure::persistence::postgres_plugin_authorization::PostgresPluginAuthorization{pool:pool.clone()}),signer),None=>routes})
+}
+
 /// 载入库里的登记（失败则启动失败：表不在说明迁移没跑），再起后台任务按周期重读、按分钟清理。
 pub(super) async fn load_and_maintain(
     routes: &Arc<PluginRouteBook>,

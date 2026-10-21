@@ -273,7 +273,7 @@ impl CapabilityPolicyBackend for InMemoryCapabilityGrants {
 }
 
 #[cfg(test)]
-mod seat_model_tests {
+mod tenant_switch_tests {
     use super::InMemoryCapabilityGrants;
 
     const CAP: &str = "social.moments.feed";

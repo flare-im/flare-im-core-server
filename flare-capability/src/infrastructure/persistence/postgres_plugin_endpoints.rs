@@ -49,9 +49,9 @@ impl PluginEndpointRepository for PostgresPluginEndpointRepository {
         sqlx::query(
             "INSERT INTO capability_plugin_endpoints (
                  tenant_id, plugin_id, capability_id, grpc_authority, labels, plugin_version,
-                 api_version, manifest_sha256, declared_operations, unverified, seat_model,
+                 api_version, manifest_sha256, declared_operations, unverified,
                  registered_at, updated_at)
-             VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7, $8, $9, $10, $11, now(), now())
+             VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7, $8, $9, $10, now(), now())
              ON CONFLICT (tenant_id, plugin_id) DO UPDATE SET
                  capability_id = EXCLUDED.capability_id,
                  grpc_authority = EXCLUDED.grpc_authority,
@@ -61,7 +61,6 @@ impl PluginEndpointRepository for PostgresPluginEndpointRepository {
                  manifest_sha256 = EXCLUDED.manifest_sha256,
                  declared_operations = EXCLUDED.declared_operations,
                  unverified = EXCLUDED.unverified,
-                 seat_model = EXCLUDED.seat_model,
                  updated_at = now()",
         )
         .bind(&endpoint.tenant_id)
@@ -74,7 +73,6 @@ impl PluginEndpointRepository for PostgresPluginEndpointRepository {
         .bind(&instance.manifest_sha256)
         .bind(&instance.declared_operations)
         .bind(instance.unverified)
-        .bind(&instance.seat_model)
         .execute(&mut *tx)
         .await
         .map_err(|e| storage_error("upsert", e))?;
@@ -129,7 +127,7 @@ impl PluginEndpointRepository for PostgresPluginEndpointRepository {
         let rows = sqlx::query(
             "SELECT tenant_id, plugin_id, capability_id, grpc_authority, labels::text AS labels,
                     plugin_version, api_version, manifest_sha256, declared_operations,
-                    unverified, seat_model
+                    unverified
              FROM capability_plugin_endpoints
              ORDER BY tenant_id, plugin_id",
         )
@@ -164,7 +162,6 @@ impl PluginEndpointRepository for PostgresPluginEndpointRepository {
                     manifest_sha256: row.get("manifest_sha256"),
                     declared_operations: row.get("declared_operations"),
                     unverified: row.get("unverified"),
-                    seat_model: row.get("seat_model"),
                 },
             });
         }

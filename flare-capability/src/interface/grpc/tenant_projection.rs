@@ -83,6 +83,35 @@ impl<R: TenantProjectionRepository + 'static> Clone for TenantProjectionGrpcServ
 
 #[tonic::async_trait]
 impl<R: TenantProjectionRepository + 'static> TenantProjection for TenantProjectionGrpcServer<R> {
+    async fn upsert_plugins(
+        &self,
+        request: Request<flare_grpc_proto::control::PluginsProjectionUpsert>,
+    ) -> Result<Response<ProjectionAck>, Status> {
+        let actor = require_platform_assertion(&request, self.control_verifier.as_ref())?;
+        actor.require_kind(PlatformActorKind::ProjectionWorker)?;
+        actor.require_tenant(&request.get_ref().app_id)?;
+        let wire = request.into_inner();
+        let now = chrono::Utc::now().timestamp_millis();
+        let snapshot = flare_im_capability_core::plugin::runtime::PluginRuntimeSnapshot::from_json(
+            &wire.snapshot_json,
+            now,
+        )
+        .map_err(|_| Status::invalid_argument("invalid plugin authorization projection"))?;
+        if snapshot.tenant_id != wire.app_id || snapshot.version != wire.version {
+            return Err(Status::invalid_argument(
+                "plugin projection binding mismatch",
+            ));
+        }
+        let outcome = self
+            .repository
+            .replace_plugins(&snapshot)
+            .await
+            .into_grpc()?;
+        Ok(Response::new(ProjectionAck {
+            accepted: outcome.accepted,
+            current_version: outcome.current_version,
+        }))
+    }
     async fn upsert_credentials(
         &self,
         request: Request<CredentialsProjectionUpsert>,
@@ -190,6 +219,7 @@ impl<R: TenantProjectionRepository + 'static> TenantProjection for TenantProject
                         features_version: 0,
                         credentials_version: 0,
                         role_bundle_version: 0,
+                        plugins_version: 0,
                     },
                 )
             })
@@ -201,6 +231,9 @@ impl<R: TenantProjectionRepository + 'static> TenantProjection for TenantProject
             .into_grpc()?
         {
             versions.entry(app_id).or_default().credentials_version = version;
+        }
+        for (app, version) in self.repository.plugin_versions(&ids).await.into_grpc()? {
+            versions.entry(app).or_default().plugins_version = version;
         }
         Ok(Response::new(ProjectionVersions { versions }))
     }
@@ -221,10 +254,37 @@ mod tests {
     struct MemoryRepo {
         rows: Mutex<HashMap<String, (TenantProjectionRecord, u64)>>,
         credentials: Mutex<HashMap<String, CredentialSnapshot>>,
+        plugins: Mutex<
+            HashMap<String, flare_im_capability_core::plugin::runtime::PluginRuntimeSnapshot>,
+        >,
     }
 
     #[async_trait::async_trait]
     impl TenantProjectionRepository for MemoryRepo {
+        async fn replace_plugins(
+            &self,
+            p: &flare_im_capability_core::plugin::runtime::PluginRuntimeSnapshot,
+        ) -> FlareResult<TenantProjectionOutcome> {
+            let mut rows = self.plugins.lock().unwrap();
+            let current = rows.get(&p.tenant_id).map(|p| p.version).unwrap_or(0);
+            if p.version > current {
+                rows.insert(p.tenant_id.clone(), p.clone());
+            }
+            Ok(TenantProjectionOutcome {
+                accepted: p.version > current,
+                current_version: current.max(p.version),
+            })
+        }
+        async fn plugin_versions(&self, ids: &[String]) -> FlareResult<Vec<(String, u64)>> {
+            Ok(self
+                .plugins
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|(id, _)| ids.is_empty() || ids.contains(id))
+                .map(|(id, p)| (id.clone(), p.version))
+                .collect())
+        }
         async fn replace_credentials(
             &self,
             p: &CredentialSnapshot,
@@ -316,6 +376,96 @@ mod tests {
             flare_im_service_kit::control_auth::PROJECTION_WORKER_SUBJECT,
             flare_im_service_kit::control_auth::CORE_PROJECTION_AUDIENCE,
         )
+    }
+
+    #[tokio::test]
+    async fn plugins_require_worker_and_exact_app_and_keep_empty_revocation_watermark() {
+        use flare_grpc_proto::control::PluginsProjectionUpsert;
+        use flare_im_capability_core::plugin::runtime::PluginRuntimeSnapshot;
+        let (_, server) = server();
+        let now = chrono::Utc::now().timestamp_millis();
+        let snapshot = PluginRuntimeSnapshot {
+            tenant_id: "app-a".into(),
+            version: 17,
+            issued_at_ms: now,
+            valid_until_ms: now + 60000,
+            plugins: vec![],
+        };
+        let body = PluginsProjectionUpsert {
+            app_id: "app-a".into(),
+            version: 17,
+            snapshot_json: serde_json::to_vec(&snapshot).unwrap(),
+        };
+        assert_eq!(
+            server
+                .upsert_plugins(Request::new(body.clone()))
+                .await
+                .unwrap_err()
+                .code(),
+            tonic::Code::Unauthenticated
+        );
+        assert!(
+            server
+                .upsert_plugins(authed(body.clone(), "other"))
+                .await
+                .is_err()
+        );
+        assert!(
+            server
+                .upsert_plugins(signed_request(
+                    body.clone(),
+                    "app-a",
+                    "employee",
+                    flare_im_service_kit::control_auth::CORE_PROJECTION_AUDIENCE
+                ))
+                .await
+                .is_err()
+        );
+        assert!(
+            server
+                .upsert_plugins(authed(body.clone(), "app-a"))
+                .await
+                .unwrap()
+                .into_inner()
+                .accepted
+        );
+        assert!(
+            !server
+                .upsert_plugins(authed(body.clone(), "app-a"))
+                .await
+                .unwrap()
+                .into_inner()
+                .accepted
+        );
+        let mut changed = body.clone();
+        changed.version += 1;
+        assert!(
+            server
+                .upsert_plugins(authed(changed, "app-a"))
+                .await
+                .is_err()
+        );
+        let mut expired = snapshot.clone();
+        expired.valid_until_ms = 1;
+        let mut changed = body;
+        changed.snapshot_json = serde_json::to_vec(&expired).unwrap();
+        assert!(
+            server
+                .upsert_plugins(authed(changed, "app-a"))
+                .await
+                .is_err()
+        );
+        let versions = server
+            .get_versions(authed(
+                GetVersionsRequest {
+                    im_tenant_ids: vec!["app-a".into()],
+                },
+                "app-a",
+            ))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(versions.versions["app-a"].plugins_version, 17);
     }
 
     #[tokio::test]

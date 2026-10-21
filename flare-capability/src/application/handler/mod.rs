@@ -9,4 +9,4 @@ pub use capability_dispatch::dispatch_capability_command;
 pub use hook_command::HookCommandHandler;
 pub use hook_query::HookQueryHandler;
 pub(crate) use remote_dispatch::VerifiedDispatchOrigin;
-pub(crate) use remote_dispatch::dispatch_remote_with_candidates;
+pub(crate) use remote_dispatch::dispatch_remote;
