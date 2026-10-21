@@ -819,6 +819,12 @@ for service in "${CORE_SERVICES[@]}"; do
             env_args+=("FLARE_INTERNAL_CTX_PRIVATE_KEY=$CORE_INTERNAL_PRIVATE_KEY") ;;
     esac
     case "$service" in
+        capability)
+            # The plugin resource bridge re-signs the invoking user's context for
+            # Core conversation and Social group reads with this Cell's key.
+            [ -n "${FLARE_PLUGIN_RESOURCE_CONVERSATION_URL:-}" ] && env_args+=("FLARE_INTERNAL_CTX_PRIVATE_KEY=$CORE_INTERNAL_PRIVATE_KEY") ;;
+    esac
+    case "$service" in
         signaling-online|capability)
             [ -n "$CORE_PLATFORM_PUBLIC_KEY" ] && env_args+=("FLARE_PLATFORM_PUBLIC_KEY=$CORE_PLATFORM_PUBLIC_KEY") ;;
         admin-gateway)
