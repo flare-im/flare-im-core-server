@@ -393,6 +393,16 @@ pub const REGISTERED_ENV_VARS: &[EnvVarSpec] = &[
         EnvPurpose::Auth,
     ),
     env(
+        "FLARE_PLUGIN_RUNTIME_PUBLIC_KEYS",
+        EnvOwner::Capability,
+        EnvPurpose::Auth,
+    ),
+    env(
+        "FLARE_PLUGIN_STATE_EVENT_URL",
+        EnvOwner::Capability,
+        EnvPurpose::ServiceEndpoint,
+    ),
+    env(
         "DEFAULT_TENANT_ID",
         EnvOwner::SignalingRoute,
         EnvPurpose::TenantDefaults,

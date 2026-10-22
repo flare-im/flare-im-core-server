@@ -39,6 +39,7 @@ use tonic::{Request, Response, Status};
 use super::administer::{
     HookAdministrator, READ_OPERATIONS, WRITE_OPERATIONS, dispatch_hook_administer,
 };
+use crate::application::handler::admin_dispatch::{AdminCall, AdminPluginRequest, dispatch_admin};
 use crate::application::handler::{VerifiedDispatchOrigin, dispatch_capability_command};
 use crate::application::queries::list_registered_capabilities;
 use crate::domain::capability::PluginHealthProbe;
@@ -151,6 +152,48 @@ impl CapabilityGrpcServer {
 
     /// The admin gate: the forwarded Staff context with `permission`; without a key set every
     /// admin RPC is UNAUTHENTICATED.
+    /// `dispatch_admin` (`flare.plugin.v1.admin.query` / `.dispatch`): the payload is
+    /// `PayloadJson` `{"pluginId","operation","input"}`; the Staff context must carry
+    /// `plugin:<pluginId>:admin` for one concrete application. The answer is `PayloadJson`
+    /// `{"pluginId","operation","requestId","success","data","errorCode"?}`; a plugin rejection is
+    /// `success: false`, not an RPC error.
+    async fn administer_plugin(
+        &self,
+        request: Request<GenericRequest>,
+        call: AdminCall,
+    ) -> Result<Response<GenericResponse>, Status> {
+        let admin = request
+            .get_ref()
+            .payload
+            .as_ref()
+            .ok_or_else(|| Status::invalid_argument("payload required"))
+            .and_then(|payload| {
+                AdminPluginRequest::parse(&payload.value).map_err(Status::invalid_argument)
+            })?;
+        let staff = self.staff(&request, &admin.permission())?;
+        let result = dispatch_admin(
+            &staff,
+            &self.plugin_routes,
+            call,
+            admin,
+            self.runtime.plugin_call_timeout,
+        )
+        .await
+        .map_err(capability_error_to_status)?;
+        let value = serde_json::to_vec(&result)
+            .map_err(|_| Status::internal("plugin admin result encoding"))?;
+        Ok(Response::new(GenericResponse {
+            ok: true,
+            request_id: result.request_id,
+            payload: Some(prost_types::Any {
+                type_url: "type.googleapis.com/flare.capability.v1.PayloadJson".into(),
+                value,
+            }),
+            error_code: String::new(),
+            error_message: String::new(),
+        }))
+    }
+
     fn staff<T>(&self, request: &Request<T>, permission: &str) -> Result<VerifiedStaff, Status> {
         let verifier = self
             .staff_verifier
@@ -854,6 +897,9 @@ impl CapabilityService for CapabilityGrpcServer {
         // core:hooks:read, writes core:hooks:write; an unknown operation is refused with the
         // read code so it cannot probe for a weaker gate.
         let operation = request.get_ref().operation.as_str();
+        if let Some(call) = AdminCall::from_operation(operation) {
+            return self.administer_plugin(request, call).await;
+        }
         let permission = if WRITE_OPERATIONS.contains(&operation) {
             HOOKS_WRITE
         } else if READ_OPERATIONS.contains(&operation) {

@@ -63,6 +63,11 @@ etcd-client = { workspace = true }
 dashmap = "6.0"
 [dev-dependencies]
 flare-plugin-host = { path = "../../flare-plugin/flare-plugin-host" }
+# Plugin shared state end to end on PostgreSQL (plugin_state_pg_tests): Orchestrator, Writer, Reader.
+flare-im-message-pipeline = { workspace = true }
+flare-orchestrator = { path = "../flare-orchestrator" }
+flare-storage-reader = { path = "../flare-storage/reader" }
+flare-storage-writer = { path = "../flare-storage/writer" }
 tokio-stream = { workspace = true, features = ["net"] }
 tokio-test = { workspace = true }
 tracing-subscriber = { workspace = true }

@@ -23,7 +23,7 @@ use crate::domain::capability::{
 use crate::infrastructure::capability::PluginRouteBook;
 use crate::infrastructure::capability::plugin_channel::resolve_plugin_channel;
 use flare_im_capability_core::plugin::{
-    authorization::PluginInvocation, invocation::PluginCallClaims,
+    authorization::PluginInvocation, invocation::PluginCallClaims, resource::HostCapability,
 };
 
 /// Only the verifier can construct this marker; an untrusted request body or
@@ -121,6 +121,10 @@ async fn dispatch_remote_authorized(
         })
         .map_err(|_| denied(()))?;
     let timeout = timeout.min(Duration::from_millis(u64::from(operation.timeout_ms)));
+    let input = req.payload.as_ref().unwrap_or(&Value::Null);
+    if let Some(rejection) = recalled_card_guard(routes, &tenant, &manifest, req, input).await {
+        return Ok(rejection);
+    }
     let claims = PluginCallClaims {
         tenant_id: tenant.clone(),
         plugin_id: projected.grant.plugin_id.clone(),
@@ -160,9 +164,127 @@ async fn dispatch_remote_authorized(
         unverified: false,
         labels: Default::default(),
     };
-    tokio::time::timeout(timeout, invoke_once(ctx, req, &endpoint, timeout, &ticket))
+    let result = tokio::time::timeout(timeout, invoke_once(ctx, req, &endpoint, timeout, &ticket))
         .await
-        .map_err(|_| CapabilityError::Timeout("plugin invocation deadline exceeded".into()))?
+        .map_err(|_| CapabilityError::Timeout("plugin invocation deadline exceeded".into()))??;
+    if result.success {
+        let declares_publish = operation
+            .host_capabilities
+            .contains(&HostCapability::EntityStatePublish);
+        publish_call_result(
+            routes,
+            &tenant,
+            &projected.grant.plugin_id,
+            req.conversation_id.as_deref(),
+            declares_publish,
+            &result.data,
+        );
+    }
+    Ok(result)
+}
+
+/// `PLUGIN_MESSAGE_RECALLED`: the call names the entity of a card that was recalled.
+pub const PLUGIN_MESSAGE_RECALLED: &str = "PLUGIN_MESSAGE_RECALLED";
+
+/// Core refuses a call that names the entity of a recalled card (every card bound to it was
+/// recalled). The entity is the value a card action of this operation binds from the
+/// contribution's `entityPath`; calls naming none (creating a card) pass. Without the bindings
+/// (no publisher configured, or the store unavailable) the call passes and the plugin still
+/// authorizes it.
+async fn recalled_card_guard(
+    routes: &PluginRouteBook,
+    tenant: &str,
+    manifest: &flare_im_capability_core::plugin::PluginManifest,
+    req: &CapabilityDispatchCommand,
+    input: &Value,
+) -> Option<CapabilityDispatchResult> {
+    let publisher = routes.state_publisher.as_ref()?;
+    let entity = super::plugin_state::invocation_entity(manifest, &req.capability_id, input)?;
+    match publisher
+        .entity_recalled(tenant, &manifest.plugin_id, &entity)
+        .await
+    {
+        Ok(false) => None,
+        Ok(true) => Some(CapabilityDispatchResult {
+            request_id: req.request_id.clone().unwrap_or_default(),
+            plugin_id: manifest.plugin_id.clone(),
+            capability_id: req.capability_id.clone(),
+            success: false,
+            data: serde_json::json!({ "errorCode": PLUGIN_MESSAGE_RECALLED }),
+            error: Some("plugin card was recalled".into()),
+        }),
+        Err(error) => {
+            tracing::warn!(%error, tenant, plugin_id = %manifest.plugin_id, %entity, "recall check unavailable; call passed to the plugin");
+            None
+        }
+    }
+}
+
+/// Publish `data.sharedState` of a successful user call in the background: only for an operation
+/// that declares `im.plugin.entity_state.publish`, bound to the ticket's conversation. Never
+/// changes the call result; problems are logged and counted.
+fn publish_call_result(
+    routes: &PluginRouteBook,
+    tenant: &str,
+    plugin_id: &str,
+    conversation_id: Option<&str>,
+    declares_publish: bool,
+    data: &Value,
+) {
+    use super::plugin_state::{PublishScope, PublishSource};
+    use flare_im_capability_core::plugin::state::SharedState;
+    let state = match SharedState::from_result(data) {
+        Ok(None) => return,
+        Ok(Some(state)) => state,
+        Err(_) => {
+            if let Some(publisher) = &routes.state_publisher {
+                publisher
+                    .metrics()
+                    .record(PublishSource::Invocation, "invalid");
+            }
+            tracing::warn!(
+                tenant,
+                plugin_id,
+                "plugin returned a malformed sharedState; not published"
+            );
+            return;
+        }
+    };
+    let Some(publisher) = routes.state_publisher.clone() else {
+        tracing::debug!(tenant, plugin_id, entity = %state.entity, "plugin shared state publishing is not configured");
+        return;
+    };
+    if !declares_publish {
+        publisher
+            .metrics()
+            .record(PublishSource::Invocation, "undeclared");
+        tracing::warn!(tenant, plugin_id, entity = %state.entity, "operation does not declare im.plugin.entity_state.publish; sharedState not published");
+        return;
+    }
+    let Some(conversation_id) = conversation_id.map(str::to_owned) else {
+        publisher
+            .metrics()
+            .record(PublishSource::Invocation, "unbound");
+        tracing::debug!(tenant, plugin_id, entity = %state.entity, "call without a conversation; sharedState not published");
+        return;
+    };
+    let (tenant, plugin_id) = (tenant.to_owned(), plugin_id.to_owned());
+    tokio::spawn(async move {
+        let entity = state.entity.clone();
+        let version = state.version;
+        if let Err(error) = publisher
+            .submit(
+                &tenant,
+                &plugin_id,
+                PublishScope::Conversation(&conversation_id),
+                state,
+                PublishSource::Invocation,
+            )
+            .await
+        {
+            tracing::warn!(%error, %tenant, %plugin_id, %conversation_id, %entity, version, "call result sharedState not published");
+        }
+    });
 }
 
 #[cfg(test)]
@@ -222,15 +344,10 @@ impl VerifiedDispatchOrigin {
     }
 }
 
-fn build_request_payload(
-    req: &CapabilityDispatchCommand,
-) -> flare_server_core::error::Result<prost_types::Any> {
-    let payload_json = serde_json::to_string(req.payload.as_ref().unwrap_or(&Value::Null))
-        .map_err(|e| {
-            flare_server_core::error::FlareError::system(format!(
-                "serialize request payload_json: {e}"
-            ))
-        })?;
+fn build_request_payload(payload: &Value) -> flare_server_core::error::Result<prost_types::Any> {
+    let payload_json = serde_json::to_string(payload).map_err(|e| {
+        flare_server_core::error::FlareError::system(format!("serialize request payload_json: {e}"))
+    })?;
     Ok(prost_types::Any {
         type_url: "type.googleapis.com/flare.capability.v1.PayloadJson".to_string(),
         value: payload_json.into_bytes(),
@@ -267,30 +384,65 @@ async fn invoke_once(
     origin
         .require_user_binding(&tenant_id, &user_id, &request_id)
         .map_err(|_| CapabilityError::PolicyDenied("dispatch identity mismatch".into()))?;
+    call_plugin(
+        PluginCall {
+            grpc_authority: &endpoint.grpc_authority,
+            plugin_id: &endpoint.plugin_id,
+            operation: &req.capability_id,
+            tenant_id: &tenant_id,
+            user_id: (!user_id.is_empty()).then_some(user_id.as_str()),
+            request_id: &request_id,
+            trace_id: ctx.trace_id(),
+            payload: req.payload.as_ref().unwrap_or(&Value::Null),
+            ticket,
+        },
+        timeout,
+    )
+    .await
+}
 
-    let payload = build_request_payload(req).map_err(|e| CapabilityError::System(e.to_string()))?;
-    let channel = resolve_plugin_channel(endpoint.grpc_authority.as_str())
+/// One `ExtensionPlugin.Call` with a signed ticket (user or staff) in `x-flare-plugin-call`.
+pub(crate) struct PluginCall<'a> {
+    pub grpc_authority: &'a str,
+    pub plugin_id: &'a str,
+    pub operation: &'a str,
+    pub tenant_id: &'a str,
+    /// The invoking user (metadata only; the ticket is the identity). `None` for staff calls.
+    pub user_id: Option<&'a str>,
+    pub request_id: &'a str,
+    pub trace_id: &'a str,
+    pub payload: &'a Value,
+    pub ticket: &'a str,
+}
+
+/// Sends `call` once. A plugin rejection is `success: false` with its `errorCode`.
+pub(crate) async fn call_plugin(
+    call: PluginCall<'_>,
+    timeout: Duration,
+) -> Result<CapabilityDispatchResult> {
+    let payload =
+        build_request_payload(call.payload).map_err(|e| CapabilityError::System(e.to_string()))?;
+    let channel = resolve_plugin_channel(call.grpc_authority)
         .await
         .map_err(CapabilityError::System)?;
     let mut client = ExtensionPluginClient::new(channel);
 
     let mut metadata = std::collections::HashMap::new();
-    metadata.insert("tenant_id".to_string(), tenant_id);
-    if !user_id.is_empty() {
-        metadata.insert("user_id".to_string(), user_id);
+    metadata.insert("tenant_id".to_string(), call.tenant_id.to_string());
+    if let Some(user_id) = call.user_id {
+        metadata.insert("user_id".to_string(), user_id.to_string());
     }
-    let trace_id = ctx.trace_id();
-    if !trace_id.is_empty() {
-        metadata.insert("trace_id".to_string(), trace_id.to_string());
+    if !call.trace_id.is_empty() {
+        metadata.insert("trace_id".to_string(), call.trace_id.to_string());
     }
     let mut grpc_req = Request::new(GenericRequest {
-        operation: req.capability_id.clone(),
+        operation: call.operation.to_string(),
         metadata,
         payload: Some(payload),
-        request_id: request_id.clone(),
+        request_id: call.request_id.to_string(),
     });
     let mut credential: tonic::metadata::MetadataValue<tonic::metadata::Ascii> =
-        ticket.parse().map_err(|_| {
+        call.ticket.parse().map_err(|_| {
             CapabilityError::PolicyDenied("invalid plugin invocation credential".into())
         })?;
     credential.set_sensitive(true);
@@ -301,15 +453,13 @@ async fn invoke_once(
 
     let response = tokio::time::timeout(timeout, client.call(grpc_req))
         .await
-        .map_err(|_| {
-            CapabilityError::Timeout(format!("plugin call timeout: {}", endpoint.plugin_id))
-        })?
+        .map_err(|_| CapabilityError::Timeout(format!("plugin call timeout: {}", call.plugin_id)))?
         .map_err(|s| {
-            CapabilityError::System(format!("plugin {} call failed: {s}", endpoint.plugin_id))
+            CapabilityError::System(format!("plugin {} call failed: {s}", call.plugin_id))
         })?
         .into_inner();
 
-    if response.request_id != request_id {
+    if response.request_id != call.request_id {
         return Err(CapabilityError::System(
             "plugin response request identity mismatch".into(),
         ));
@@ -327,9 +477,9 @@ async fn invoke_once(
             "PLUGIN_REJECTED".into()
         };
         return Ok(CapabilityDispatchResult {
-            request_id,
-            plugin_id: endpoint.plugin_id.clone(),
-            capability_id: req.capability_id.clone(),
+            request_id: call.request_id.to_string(),
+            plugin_id: call.plugin_id.to_string(),
+            capability_id: call.operation.to_string(),
             success: false,
             data: serde_json::json!({"errorCode":code}),
             error: Some("plugin command rejected".into()),
@@ -337,9 +487,9 @@ async fn invoke_once(
     }
 
     Ok(CapabilityDispatchResult::ok(
-        request_id,
-        endpoint.plugin_id.clone(),
-        req.capability_id.clone(),
+        call.request_id,
+        call.plugin_id,
+        call.operation,
         decode_response_payload(response.payload),
     ))
 }
@@ -406,11 +556,16 @@ async fn client_ui_catalog(
                     operations.insert(operation);
                 }
             }
+            let configuration = client_configuration(&manifest, projected);
             let mut extensions = manifest.client_extensions;
+            // Console-only surfaces (admin-page) never reach clients; then every reference to
+            // an action the viewer may not invoke goes with it (choices, rows, translations, a
+            // detail whose operation is not offered).
             extensions.contributions.retain(|c| {
-                c.required_permissions
-                    .iter()
-                    .all(|p| permissions.contains(p))
+                c.kind.is_client_surface()
+                    && c.required_permissions
+                        .iter()
+                        .all(|p| permissions.contains(p))
             });
             let pages = extensions
                 .contributions
@@ -421,25 +576,11 @@ async fn client_ui_catalog(
                 .map(|c| c.id.clone())
                 .collect::<std::collections::BTreeSet<_>>();
             for contribution in &mut extensions.contributions {
-                contribution
-                    .schema
-                    .actions
-                    .retain(|action| match &action.target {
-                        UiActionTarget::Operation { operation } => operations.contains(operation),
-                        UiActionTarget::Page { page } => pages.contains(page),
-                        UiActionTarget::Native { .. } => true,
-                    });
-                let action_ids = contribution
-                    .schema
-                    .actions
-                    .iter()
-                    .map(|action| action.id.as_str())
-                    .collect::<std::collections::BTreeSet<_>>();
-                for translation in contribution.schema.translations.values_mut() {
-                    translation
-                        .actions
-                        .retain(|id, _| action_ids.contains(id.as_str()));
-                }
+                contribution.retain_targets(|target| match target {
+                    UiActionTarget::Operation { operation } => operations.contains(operation),
+                    UiActionTarget::Page { page } => pages.contains(page),
+                    UiActionTarget::Native { .. } => true,
+                });
             }
             if !extensions.contributions.is_empty() {
                 result.valid_until_ms = result.valid_until_ms.min(projected.grant.valid_until_ms);
@@ -450,6 +591,7 @@ async fn client_ui_catalog(
                     grant_revision: projected.grant.revision,
                     extensions,
                     operations,
+                    configuration,
                 });
             }
         }
@@ -462,4 +604,25 @@ async fn client_ui_catalog(
         UI_CATALOG_OPERATION,
         value,
     ))
+}
+
+/// The client-visible configuration of a projected plugin: the projection's subset, kept to the
+/// top-level keys the manifest marks `x-flare-client-visible` and to the protocol size limit. A
+/// subset outside those bounds is dropped (logged), never sent partially.
+fn client_configuration(
+    manifest: &flare_im_capability_core::plugin::PluginManifest,
+    projected: &flare_im_capability_core::plugin::runtime::ProjectedPlugin,
+) -> serde_json::Map<String, Value> {
+    if projected.client_configuration.is_empty() {
+        return Default::default();
+    }
+    manifest
+        .client_visible_configuration(&Value::Object(projected.client_configuration.clone()))
+        .unwrap_or_else(|_| {
+            tracing::warn!(
+                plugin_id = %manifest.plugin_id,
+                "client-visible plugin configuration exceeds its limit; not sent to clients"
+            );
+            Default::default()
+        })
 }

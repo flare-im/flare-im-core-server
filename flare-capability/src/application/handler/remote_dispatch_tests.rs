@@ -63,6 +63,7 @@ fn snapshot(authority: String) -> PluginRuntimeSnapshot {
                 grpc_authority: authority,
             },
             configuration_digest: configuration_digest(&serde_json::json!({})).unwrap(),
+            client_configuration: Default::default(),
         }],
     }
 }
@@ -336,4 +337,270 @@ async fn ui_catalog_uses_local_projection_actor_policy_and_strips_runtime_detail
         .await
         .unwrap();
     assert!(result.data["plugins"].as_array().unwrap().is_empty());
+}
+
+mod plugin_state_and_catalog {
+    use super::*;
+    use crate::application::handler::plugin_state::tests::{
+        MemoryBindings, RecordingSink, poll_snapshot, publisher,
+    };
+    use crate::application::handler::plugin_test_server::PluginServer;
+    use serde_json::json;
+
+    fn poll_policy() -> Arc<InMemoryCapabilityGrants> {
+        let policy = Arc::new(InMemoryCapabilityGrants::new());
+        for operation in [
+            "example.poll.create",
+            "example.poll.vote",
+            "example.poll.close",
+            "example.poll.details",
+            "example.poll.list",
+            "example.poll.remove",
+        ] {
+            policy.grant_user_capability("app-a", "u1", operation, None, None, None);
+        }
+        policy
+    }
+
+    fn poll_command(operation: &str, input: Value) -> CapabilityDispatchCommand {
+        CapabilityDispatchCommand {
+            capability_id: operation.into(),
+            tenant_id: Some("app-a".into()),
+            user_id: Some("u1".into()),
+            conversation_id: Some("2-group".into()),
+            payload: Some(input),
+            request_id: Some("r1".into()),
+        }
+    }
+
+    struct Harness {
+        routes: Arc<PluginRouteBook>,
+        plugin: PluginServer,
+        reader: Arc<Projection>,
+        bindings: Arc<MemoryBindings>,
+        sink: Arc<RecordingSink>,
+    }
+
+    async fn harness() -> Harness {
+        let plugin = PluginServer::start(Arc::new(|operation, _| {
+            let state = json!({"entity": "poll-1", "version": 2, "values": {"counts": [1, 0]}});
+            Ok(match operation {
+                // vote declares im.plugin.entity_state.publish; details does not.
+                "example.poll.vote" => json!({"messageState": {"version": 1, "values": {"mySelection": [0]}}, "sharedState": state}),
+                "example.poll.details" => json!({"voters": [], "sharedState": state}),
+                _ => json!({}),
+            })
+        }))
+        .await;
+        let reader = Arc::new(Projection(Mutex::new(Some(poll_snapshot(
+            plugin.authority.clone(),
+        )))));
+        let bindings = Arc::new(MemoryBindings::default());
+        let sink = Arc::new(RecordingSink::default());
+        let routes = Arc::new(
+            PluginRouteBook::new()
+                .with_runtime_authorization(
+                    reader.clone(),
+                    Some(Arc::new(
+                        PluginCallSigner::new("call".into(), [29; 32]).unwrap(),
+                    )),
+                )
+                .with_state_publisher(Some(publisher(bindings.clone(), sink.clone()))),
+        );
+        Harness {
+            routes,
+            plugin,
+            reader,
+            bindings,
+            sink,
+        }
+    }
+
+    async fn until(mut done: impl FnMut() -> bool) {
+        for _ in 0..100 {
+            if done() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn a_call_result_shared_state_reaches_the_bound_card_of_its_conversation() {
+        let h = harness().await;
+        h.bindings
+            .bind("app-a", "example.poll", "poll-1", "2-group", "m-1");
+        let (ctx, _, _) = identity(SignedActorType::User);
+        let backend: Arc<dyn CapabilityPolicyBackend> = poll_policy();
+        let result = dispatch_remote(
+            &ctx,
+            &poll_command(
+                "example.poll.vote",
+                json!({"pollId": "poll-1", "selection": [0]}),
+            ),
+            &h.routes,
+            &backend,
+            Duration::from_secs(2),
+        )
+        .await
+        .unwrap();
+        // The result is returned unchanged; the publish runs behind it.
+        assert!(result.success);
+        assert_eq!(result.data["sharedState"]["version"], 2);
+        until(|| !h.sink.versions().is_empty()).await;
+        assert_eq!(h.sink.versions(), vec![2]);
+        let (tenant, conversation, event) = h.sink.events.lock().unwrap()[0].clone();
+        assert_eq!(
+            (
+                tenant.as_str(),
+                conversation.as_str(),
+                event.server_msg_id.as_str()
+            ),
+            ("app-a", "2-group", "m-1")
+        );
+        assert_eq!(event.values_json, r#"{"counts":[1,0]}"#);
+
+        // An operation that does not declare the capability publishes nothing.
+        let mut snapshot = poll_snapshot(h.plugin.authority.clone());
+        snapshot.version += 1;
+        *h.reader.0.lock().unwrap() = Some(snapshot);
+        let result = dispatch_remote(
+            &ctx,
+            &poll_command("example.poll.details", json!({"pollId": "poll-1"})),
+            &h.routes,
+            &backend,
+            Duration::from_secs(2),
+        )
+        .await
+        .unwrap();
+        assert!(result.success);
+        tokio::time::sleep(Duration::from_millis(600)).await;
+        assert_eq!(h.sink.versions(), vec![2]);
+    }
+
+    #[tokio::test]
+    async fn a_card_in_another_conversation_gets_no_state_from_this_call() {
+        let h = harness().await;
+        h.bindings
+            .bind("app-a", "example.poll", "poll-1", "2-other-group", "m-9");
+        let (ctx, _, _) = identity(SignedActorType::User);
+        let backend: Arc<dyn CapabilityPolicyBackend> = poll_policy();
+        let result = dispatch_remote(
+            &ctx,
+            &poll_command(
+                "example.poll.vote",
+                json!({"pollId": "poll-1", "selection": [0]}),
+            ),
+            &h.routes,
+            &backend,
+            Duration::from_secs(2),
+        )
+        .await
+        .unwrap();
+        assert!(result.success, "the call itself is unaffected");
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert!(h.sink.versions().is_empty());
+    }
+
+    #[tokio::test]
+    async fn calls_naming_a_recalled_card_are_refused_before_the_plugin() {
+        let h = harness().await;
+        h.bindings
+            .bind("app-a", "example.poll", "poll-1", "2-group", "m-1");
+        h.bindings.recall("m-1");
+        let (ctx, _, _) = identity(SignedActorType::User);
+        let backend: Arc<dyn CapabilityPolicyBackend> = poll_policy();
+        let result = dispatch_remote(
+            &ctx,
+            &poll_command(
+                "example.poll.vote",
+                json!({"pollId": "poll-1", "selection": [0]}),
+            ),
+            &h.routes,
+            &backend,
+            Duration::from_secs(2),
+        )
+        .await
+        .unwrap();
+        assert!(!result.success);
+        assert_eq!(result.data["errorCode"], PLUGIN_MESSAGE_RECALLED);
+        assert!(h.plugin.calls().is_empty());
+        // Creating a new poll names no card and passes.
+        assert!(
+            dispatch_remote(
+                &ctx,
+                &poll_command("example.poll.create", json!({"question": "Again?"})),
+                &h.routes,
+                &backend,
+                Duration::from_secs(2),
+            )
+            .await
+            .unwrap()
+            .success
+        );
+        assert_eq!(h.plugin.calls().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn the_client_catalog_drops_admin_pages_and_sends_visible_configuration_only() {
+        let h = harness().await;
+        let mut snapshot = poll_snapshot(h.plugin.authority.clone());
+        snapshot.plugins[0].client_configuration = serde_json::from_value(
+            json!({"maxOptions": 6, "allowAnonymous": true, "webhookSecret": "s3cret"}),
+        )
+        .unwrap();
+        *h.reader.0.lock().unwrap() = Some(snapshot);
+        let (ctx, _, _) = identity(SignedActorType::User);
+        let mut command = poll_command(
+            flare_im_capability_core::plugin::ui::UI_CATALOG_OPERATION,
+            Value::Null,
+        );
+        command.conversation_id = None;
+        let backend: Arc<dyn CapabilityPolicyBackend> = poll_policy();
+        let result = dispatch_remote(&ctx, &command, &h.routes, &backend, Duration::from_secs(2))
+            .await
+            .unwrap();
+        let text = result.data.to_string();
+        assert!(!text.contains("admin-page") && !text.contains("example.poll.admin"));
+        assert!(!text.contains("s3cret") && !text.contains("webhookSecret"));
+        let catalog: flare_im_capability_core::plugin::ui::UiCatalog =
+            serde_json::from_value(result.data).unwrap();
+        let plugin = &catalog.plugins[0];
+        assert_eq!(
+            Value::Object(plugin.configuration.clone()),
+            json!({"maxOptions": 6, "allowAnonymous": true})
+        );
+        let kinds: Vec<_> = plugin
+            .extensions
+            .contributions
+            .iter()
+            .map(|c| c.id.as_str())
+            .collect();
+        assert_eq!(kinds, ["example.poll.card", "example.poll.create"]);
+        let card = &plugin.extensions.contributions[0];
+        assert!(card.detail.is_some(), "details is offered to this user");
+
+        // A user without the details and close operations: the detail and the close action go.
+        let narrow = Arc::new(InMemoryCapabilityGrants::new());
+        for operation in ["example.poll.create", "example.poll.vote"] {
+            narrow.grant_user_capability("app-a", "u1", operation, None, None, None);
+        }
+        let narrow: Arc<dyn CapabilityPolicyBackend> = narrow;
+        let result = dispatch_remote(&ctx, &command, &h.routes, &narrow, Duration::from_secs(2))
+            .await
+            .unwrap();
+        let catalog: flare_im_capability_core::plugin::ui::UiCatalog =
+            serde_json::from_value(result.data).unwrap();
+        let card = &catalog.plugins[0].extensions.contributions[0];
+        assert!(card.detail.is_none());
+        assert_eq!(
+            card.schema
+                .actions
+                .iter()
+                .map(|a| a.id.as_str())
+                .collect::<Vec<_>>(),
+            ["vote"]
+        );
+        card.schema.validate().unwrap();
+    }
 }

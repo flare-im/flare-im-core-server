@@ -108,6 +108,7 @@ fn fixture() -> (
                 grpc_authority: "http://127.0.0.1:1".into(),
             },
             configuration_digest: config.clone(),
+            client_configuration: Default::default(),
         }],
     })));
     let signer = PluginCallSigner::new("resource-test".into(), [43; 32]).unwrap();

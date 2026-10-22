@@ -54,7 +54,45 @@ pub(super) fn runtime_authorization(
         }
         Err(_) => return Err(FlareError::system("invalid plugin invocation key encoding")),
     };
-    Ok(match pool{Some(pool)=>routes.with_runtime_authorization(Arc::new(crate::infrastructure::persistence::postgres_plugin_authorization::PostgresPluginAuthorization{pool:pool.clone()}),signer),None=>routes})
+    let publisher = plugin_state_publisher(pool)?;
+    Ok(match pool{Some(pool)=>routes.with_runtime_authorization(Arc::new(crate::infrastructure::persistence::postgres_plugin_authorization::PostgresPluginAuthorization{pool:pool.clone()}),signer),None=>routes}.with_state_publisher(publisher))
+}
+
+/// Shared state publishing needs the bindings (the database) and the internal event entry
+/// (`FLARE_PLUGIN_STATE_EVENT_URL`: Orchestrator `MessageEventService`, `http(s)://` or
+/// `discovery://`). Without either, call results' `data.sharedState` is dropped with a debug log
+/// and the bridge write answers unavailable.
+fn plugin_state_publisher(
+    pool: Option<&Arc<PgPool>>,
+) -> Result<Option<Arc<crate::application::handler::plugin_state::PluginStatePublisher>>> {
+    use crate::application::handler::plugin_state::PluginStatePublisher;
+    use crate::infrastructure::adapters::plugin_state_events::GrpcPluginStateEvents;
+    use crate::infrastructure::persistence::postgres_plugin_entity_bindings::PostgresPluginEntityBindings;
+    let authority = match std::env::var("FLARE_PLUGIN_STATE_EVENT_URL") {
+        Ok(value) => value,
+        Err(std::env::VarError::NotPresent) => {
+            tracing::warn!(
+                "FLARE_PLUGIN_STATE_EVENT_URL absent; plugin shared state is not published"
+            );
+            return Ok(None);
+        }
+        Err(_) => return Err(FlareError::system("invalid FLARE_PLUGIN_STATE_EVENT_URL")),
+    };
+    if !(authority.starts_with("discovery://") && authority.len() > "discovery://".len()
+        || flare_im_capability_core::plugin::runtime::valid_grpc_authority(&authority))
+    {
+        return Err(FlareError::system("invalid FLARE_PLUGIN_STATE_EVENT_URL"));
+    }
+    let Some(pool) = pool else {
+        tracing::warn!(
+            "no database: plugin entity bindings unavailable; shared state is not published"
+        );
+        return Ok(None);
+    };
+    Ok(Some(Arc::new(PluginStatePublisher::new(
+        Arc::new(PostgresPluginEntityBindings { pool: pool.clone() }),
+        Arc::new(GrpcPluginStateEvents { authority }),
+    ))))
 }
 
 /// 载入库里的登记（失败则启动失败：表不在说明迁移没跑），再起后台任务按周期重读、按分钟清理。

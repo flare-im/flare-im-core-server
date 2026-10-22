@@ -52,17 +52,32 @@ pub async fn compose(
     let service_signer =
         flare_im_service_kit::signed_read::service_signer_from_env("plugin resource bridge")?
             .ok_or_else(invalid)?;
+    // Plugin deployments' runtime credentials (`x-flare-plugin-runtime`) for the write
+    // capability: `[{"key_id","deployment_id","public_key_base64"}]`. Absent: refused.
+    let runtime_verifier = match std::env::var("FLARE_PLUGIN_RUNTIME_PUBLIC_KEYS") {
+        Ok(raw) => Some(
+            flare_im_capability_core::plugin::invocation::PluginRuntimeVerifier::from_public_keys_json(
+                &raw,
+            )
+            .map_err(|_| FlareError::system("invalid FLARE_PLUGIN_RUNTIME_PUBLIC_KEYS"))?,
+        ),
+        Err(std::env::VarError::NotPresent) => None,
+        Err(_) => return Err(FlareError::system("invalid FLARE_PLUGIN_RUNTIME_PUBLIC_KEYS")),
+    };
     let budget = Arc::new(PostgresResourceBudget(pool.cloned().ok_or_else(invalid)?));
     budget.check_schema().await.map_err(|_| invalid())?;
-    Ok(Some(PluginHostBridgeGrpc(Arc::new(ResourceBridge::new(
-        authorization,
-        policy.clone(),
-        verifier,
-        Arc::new(GrpcResourceAccess {
-            conversation_authority: conversation,
-            social_group_authority: social,
-            signer: Arc::new(service_signer),
-        }),
-        budget,
-    )))))
+    Ok(Some(PluginHostBridgeGrpc(Arc::new(
+        ResourceBridge::new(
+            authorization,
+            policy.clone(),
+            verifier,
+            Arc::new(GrpcResourceAccess {
+                conversation_authority: conversation,
+                social_group_authority: social,
+                signer: Arc::new(service_signer),
+            }),
+            budget,
+        )
+        .with_writes(routes.state_publisher.clone(), runtime_verifier),
+    ))))
 }

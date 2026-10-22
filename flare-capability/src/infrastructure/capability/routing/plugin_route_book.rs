@@ -69,6 +69,10 @@ pub struct PluginRouteBook {
     pub(crate) authorization: Option<Arc<dyn crate::domain::repository::PluginAuthorizationReader>>,
     pub(crate) invocation_signer:
         Option<Arc<flare_im_capability_core::plugin::invocation::PluginCallSigner>>,
+    /// Plugin entity shared state publishing (call results and the bridge write); `None` without
+    /// a database or an Orchestrator authority: shared state is then never published.
+    pub(crate) state_publisher:
+        Option<Arc<crate::application::handler::plugin_state::PluginStatePublisher>>,
     inner: Arc<DashMap<String, RouteEntry>>,
     health: Arc<DashMap<String, PluginHealthStatus>>,
     /// 本进程注销的时刻：注销前开始的重读不得把它们再加回来。
@@ -86,6 +90,13 @@ impl PluginRouteBook {
     ) -> Self {
         self.authorization = Some(reader);
         self.invocation_signer = signer;
+        self
+    }
+    pub fn with_state_publisher(
+        mut self,
+        publisher: Option<Arc<crate::application::handler::plugin_state::PluginStatePublisher>>,
+    ) -> Self {
+        self.state_publisher = publisher;
         self
     }
     pub fn new() -> Self {

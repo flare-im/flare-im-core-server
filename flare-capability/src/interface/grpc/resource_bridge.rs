@@ -1,9 +1,9 @@
-use crate::application::handler::resource_bridge::ResourceBridge;
+use crate::application::handler::resource_bridge::{BridgeCredential, ResourceBridge};
 use crate::domain::capability::CapabilityError;
 use flare_grpc_proto::capability::{
     GenericRequest, GenericResponse, plugin_host_bridge_server::PluginHostBridge,
 };
-use flare_im_capability_core::plugin::invocation::PLUGIN_CALL_HEADER;
+use flare_im_capability_core::plugin::invocation::{PLUGIN_CALL_HEADER, PLUGIN_RUNTIME_HEADER};
 use std::sync::Arc;
 use tonic::{Request, Response, Status};
 
@@ -14,16 +14,34 @@ impl PluginHostBridge for PluginHostBridgeGrpc {
         &self,
         request: Request<GenericRequest>,
     ) -> Result<Response<GenericResponse>, Status> {
-        let mut values = request.metadata().get_all(PLUGIN_CALL_HEADER).iter();
-        let token = values
-            .next()
-            .and_then(|v| v.to_str().ok())
-            .ok_or_else(|| Status::unauthenticated("plugin invocation ticket required"))?;
-        if values.next().is_some() {
-            return Err(Status::unauthenticated(
-                "one plugin invocation ticket required",
-            ));
-        }
+        // Exactly one credential: a call ticket (user or staff) or the plugin runtime credential.
+        let one = |name: &str| -> Result<Option<&str>, Status> {
+            let mut values = request.metadata().get_all(name).iter();
+            let Some(first) = values.next() else {
+                return Ok(None);
+            };
+            if values.next().is_some() {
+                return Err(Status::unauthenticated(
+                    "one plugin invocation ticket required",
+                ));
+            }
+            first
+                .to_str()
+                .map(Some)
+                .map_err(|_| Status::unauthenticated("invalid plugin invocation ticket"))
+        };
+        let credential = match (one(PLUGIN_CALL_HEADER)?, one(PLUGIN_RUNTIME_HEADER)?) {
+            (Some(ticket), None) => BridgeCredential::Call(ticket),
+            (None, Some(runtime)) => BridgeCredential::Runtime(runtime),
+            (None, None) => {
+                return Err(Status::unauthenticated("plugin invocation ticket required"));
+            }
+            (Some(_), Some(_)) => {
+                return Err(Status::unauthenticated(
+                    "one plugin invocation ticket required",
+                ));
+            }
+        };
         let body = request.get_ref();
         // Caller-supplied legacy identity metadata has no role on this listener.
         if !body.metadata.is_empty() {
@@ -38,7 +56,7 @@ impl PluginHostBridge for PluginHostBridgeGrpc {
             .unwrap_or(b"{}");
         let value = self
             .0
-            .call(token, &body.operation, &body.request_id, bytes)
+            .call_with(credential, &body.operation, &body.request_id, bytes)
             .await
             .map_err(|error| match error {
                 CapabilityError::Timeout(_) => {
