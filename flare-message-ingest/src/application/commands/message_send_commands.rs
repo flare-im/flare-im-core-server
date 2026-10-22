@@ -11,8 +11,6 @@ pub struct SendMessageCommand {
     pub message: Message,
     /// 会话ID
     pub conversation_id: String,
-    /// 是否同步
-    pub sync: bool,
     /// 是否启用阅后即焚
     pub burn_enabled: bool,
     /// 首次阅读后多少秒焚毁

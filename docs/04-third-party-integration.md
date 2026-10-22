@@ -107,10 +107,11 @@ curl -X POST "http://127.0.0.1:50050/api/v1/messages/send" \
       "order_id": "order-9",
       "text": "订单已支付"
     },
-    "sync": false,
     "svid": "mall-service"
   }'
 ```
+
+发送是异步落库的：成功应答表示已被摄入受理，不等落库；需要确认已落库时以存储侧的持久化事件为准。没有同步落库的发送，请求带 `"sync": true` 回 400 `INVALID_MESSAGE`。
 
 响应：
 

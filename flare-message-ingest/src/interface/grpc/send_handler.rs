@@ -178,18 +178,26 @@ fn authorize_message_claims(
 /// PreSend 扩展明确拒绝（策略拒绝，见 [`is_pre_send_rejection`]）回 `FAILED_PRECONDITION`：它是
 /// 发送方可预期的业务结果，不是下游故障。以前按错误码 `OPERATION_FAILED` 映射为 `UNKNOWN`，
 /// signaling-route 把它当成故障记 ERROR。`ErrorDetail` 不变，网关与客户端看到的错误码、原因
-/// 与说明都照旧；扩展不可用、超时等其余失败仍按错误码映射。
+/// 与说明都照旧；details 里 `google.rpc.Status` 的 code 随状态码一起换（不一致时 grpc-go 等
+/// 客户端只给 Internal）。扩展不可用、超时等其余失败仍按错误码映射。
 fn send_failure_status(err: flare_server_core::error::FlareError) -> Status {
     let policy_rejection = is_pre_send_rejection(&err);
     let status = Status::from(err);
     if !policy_rejection {
         return status;
     }
-    Status::with_details(
-        tonic::Code::FailedPrecondition,
-        status.message().to_string(),
-        status.details().to_vec().into(),
+    flare_server_core::error::grpc::with_code(status, tonic::Code::FailedPrecondition)
+}
+
+/// `sync=true`（落库后才应答）不提供：消息经 WAL 与 JetStream 异步落库，成功应答的 `durability`
+/// 说明已跨过的可靠性边界，要等落库的调用方等存储侧的持久化事件。显式以 `INVALID_ARGUMENT`
+/// 拒绝，不悄悄当异步发送；批量发送里这一条进 `failures`。
+fn sync_send_unsupported() -> flare_server_core::error::FlareError {
+    flare_server_core::error::ErrorBuilder::new(
+        flare_server_core::error::ErrorCode::InvalidParameter,
+        "sync persisted send is not supported; send asynchronously and read durability from the response",
     )
+    .build_error()
 }
 
 #[tonic::async_trait]
@@ -213,6 +221,11 @@ impl MessageSendService for MessageSendGrpcHandler {
         };
 
         let req = request.into_inner();
+        if req.sync {
+            self.metrics
+                .observe_send_stage("grpc_request_decode", "error", decode_start.elapsed());
+            return Err(Status::from(sync_send_unsupported()));
+        }
         let message = req.message.clone().ok_or_else(|| {
             self.metrics
                 .observe_send_stage("grpc_request_decode", "error", decode_start.elapsed());
@@ -227,7 +240,6 @@ impl MessageSendService for MessageSendGrpcHandler {
             burn_after_read_seconds: None,
             message,
             conversation_id: req.conversation_id.clone(),
-            sync: req.sync,
         };
 
         match self
@@ -282,6 +294,15 @@ impl MessageSendService for MessageSendGrpcHandler {
         let mut messages = Vec::with_capacity(req.messages.len());
         let mut failures = Vec::new();
         for m in req.messages {
+            if m.sync {
+                let error = sync_send_unsupported();
+                failures.push(FailedMessage {
+                    message_id: String::new(),
+                    code: error.code().map(|code| code.as_u32() as i32).unwrap_or(1),
+                    error_message: error.to_string(),
+                });
+                continue;
+            }
             match m.message {
                 Some(msg) => {
                     authorize_message(&ctx, &msg, false)?;
@@ -290,7 +311,6 @@ impl MessageSendService for MessageSendGrpcHandler {
                         burn_after_read_seconds: None,
                         message: msg,
                         conversation_id: m.conversation_id,
-                        sync: m.sync,
                     })
                 }
                 None => failures.push(FailedMessage {
@@ -457,10 +477,22 @@ mod tests {
     /// PreSend 扩展的策略拒绝回 `FAILED_PRECONDITION`，`ErrorDetail`（网关据此给客户端的错误码、
     /// 原因与说明）不变；扩展不可用仍是 `UNAVAILABLE`，其余未标记的 `OPERATION_FAILED` 仍是
     /// `UNKNOWN`。
+    /// The code `grpc-status-details-bin` (a `google.rpc.Status`) carries: grpc-go and grpc-java
+    /// clients refuse a status whose details disagree with it.
+    fn details_code(status: &Status) -> i32 {
+        #[derive(Clone, PartialEq, prost::Message)]
+        struct RpcStatusCode {
+            #[prost(int32, tag = "1")]
+            code: i32,
+        }
+        <RpcStatusCode as prost::Message>::decode(status.details())
+            .expect("google.rpc.Status details")
+            .code
+    }
+
     #[test]
     fn pre_send_policy_rejection_is_failed_precondition_with_the_same_error_detail() {
         use flare_server_core::error::{ErrorBuilder, ErrorCode};
-        use prost::Message as _;
 
         let rejection = flare_im_hooks::pre_send_rejection(
             ErrorBuilder::new(ErrorCode::OperationFailed, "pre-send hook rejected")
@@ -468,14 +500,20 @@ mod tests {
         );
         let status = send_failure_status(rejection);
         assert_eq!(status.code(), tonic::Code::FailedPrecondition);
-        let detail = flare_proto::common::ErrorDetail::decode(status.details()).expect("detail");
+        assert_eq!(
+            details_code(&status),
+            tonic::Code::FailedPrecondition as i32
+        );
+        let detail = flare_server_core::error::grpc::decode_error_detail(&status).expect("detail");
         assert_eq!(detail.code, ErrorCode::OperationFailed.as_u32() as i32);
         assert_eq!(detail.reason, "pre-send hook rejected");
         assert_eq!(detail.message, "allow=false");
 
         let unmarked =
             ErrorBuilder::new(ErrorCode::OperationFailed, "extension failed").build_error();
-        assert_eq!(send_failure_status(unmarked).code(), tonic::Code::Unknown);
+        let unmarked = send_failure_status(unmarked);
+        assert_eq!(unmarked.code(), tonic::Code::Unknown);
+        assert_eq!(details_code(&unmarked), tonic::Code::Unknown as i32);
 
         let unavailable = ErrorBuilder::new(ErrorCode::ServiceUnavailable, "pre-send hook failed")
             .details("transport error")
@@ -483,6 +521,24 @@ mod tests {
         assert_eq!(
             send_failure_status(unavailable).code(),
             tonic::Code::Unavailable
+        );
+    }
+
+    /// `sync=true` 显式以 `INVALID_ARGUMENT` 拒绝，details 与状态码一致，网关回 400。
+    #[test]
+    fn sync_send_is_refused_as_an_invalid_argument() {
+        let status = Status::from(sync_send_unsupported());
+        assert_eq!(status.code(), tonic::Code::InvalidArgument);
+        assert_eq!(details_code(&status), tonic::Code::InvalidArgument as i32);
+        let detail = flare_server_core::error::grpc::decode_error_detail(&status).expect("detail");
+        assert_eq!(
+            detail.code,
+            flare_server_core::error::ErrorCode::InvalidParameter.as_u32() as i32
+        );
+        assert!(
+            detail
+                .reason
+                .starts_with("sync persisted send is not supported")
         );
     }
 

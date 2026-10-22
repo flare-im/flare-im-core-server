@@ -243,7 +243,6 @@ fn command() -> SendMessageCommand {
     SendMessageCommand {
         conversation_id: message.conversation_id.clone(),
         message,
-        sync: false,
         burn_enabled: false,
         burn_after_read_seconds: None,
     }

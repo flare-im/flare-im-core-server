@@ -341,14 +341,6 @@ impl MessageIngestHandler {
         ctx: &Ctx,
         cmd: SendMessageCommand,
     ) -> Result<SendMessageOutcome> {
-        if cmd.sync {
-            return Err(ErrorBuilder::new(
-                ErrorCode::OperationNotSupported,
-                "sync persisted send is not implemented; use async send and wait for persistence ack",
-            )
-            .build_error());
-        }
-
         // A revoked tenant must not bypass admission through idempotency replay.
         // Run the tenant gate before limiter, WAL, hooks and every dedup path.
         // 租户只来自已验证的上下文；缺失即拒绝，不再按租户 "0" 处理（显式的 "0" 照常）。
@@ -676,7 +668,6 @@ impl MessageIngestHandler {
         let send_cmd = SendMessageCommand {
             message: cmd.message,
             conversation_id: cmd.conversation_id,
-            sync: false,
             burn_enabled: false,
             burn_after_read_seconds: None,
         };
