@@ -697,7 +697,7 @@ impl MessageForwarder {
                         .await;
                     }
                 }
-                if let Ok(detail) = flare_proto::common::ErrorDetail::decode(e.details()) {
+                if let Some(detail) = flare_server_core::error::grpc::decode_error_detail(&e) {
                     let code = ErrorCode::from_u32(detail.code.max(0) as u32)
                         .unwrap_or(ErrorCode::GeneralError);
                     return Err(ErrorBuilder::new(code, detail.reason)

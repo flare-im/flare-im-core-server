@@ -105,7 +105,7 @@ impl IMessageCommandPort for RouterMessageCommandPort {
             .route_message(request)
             .await
             .map_err(|status| {
-                if let Ok(detail) = flare_proto::common::ErrorDetail::decode(status.details()) {
+                if let Some(detail) = flare_server_core::error::grpc::decode_error_detail(&status) {
                     let code = ServerErrorCode::from_u32(detail.code.max(0) as u32)
                         .unwrap_or(ServerErrorCode::GeneralError);
                     return ErrorBuilder::new(code, detail.reason)

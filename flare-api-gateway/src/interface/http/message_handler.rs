@@ -263,8 +263,7 @@ fn send_status_failure(status: tonic::Status) -> GatewayError {
 
 /// 摄入侧结构化 `ErrorDetail` 里的原因；没有结构化详情（例如纯文本的 `Status`）时为 `None`。
 fn ingest_detail_reason(status: &tonic::Status) -> Option<String> {
-    <flare_proto::common::ErrorDetail as prost::Message>::decode(status.details())
-        .ok()
+    flare_server_core::error::grpc::decode_error_detail(status)
         .map(|detail| detail.reason)
         .filter(|reason| !reason.trim().is_empty())
 }

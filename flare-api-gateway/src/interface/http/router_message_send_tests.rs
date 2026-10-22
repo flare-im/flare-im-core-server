@@ -67,11 +67,9 @@ fn ingest_policy_rejection() -> tonic::Status {
         .details("allow=false")
         .param("pre_send_rejection", "true")
         .build_error();
-    let status = tonic::Status::from(rejection);
-    tonic::Status::with_details(
+    flare_server_core::error::grpc::with_code(
+        tonic::Status::from(rejection),
         tonic::Code::FailedPrecondition,
-        status.message().to_string(),
-        status.details().to_vec().into(),
     )
 }
 
