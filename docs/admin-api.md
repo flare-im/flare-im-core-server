@@ -103,6 +103,8 @@ All paths are under `/api/v1/admin`. The code column is the signed `permission` 
 | `PUT /hooks/{hook_id}/status` | `core:hooks:write` | `Administer` `hook_config.set_status` | yes |
 | `GET /hooks/{hook_id}/statistics` | `core:hooks:read` | `Administer` `hook_config.get_statistics` | no |
 | `GET /hooks/{hook_id}/executions` | `core:hooks:read` | `Administer` `hook_config.query_executions` | no |
+| `POST /plugin-admin/{plugin_id}/query` | `plugin:<plugin_id>:admin` | `Administer` `flare.plugin.v1.admin.query` (tenant from the context) | no |
+| `POST /plugin-admin/{plugin_id}/dispatch` | `plugin:<plugin_id>:admin` | `Administer` `flare.plugin.v1.admin.dispatch` (tenant from the context) | yes |
 
 ### Conversations
 
@@ -141,6 +143,10 @@ These routes use the Admin-Gateway-only Capability downstream. When it is disabl
 `POST /plugins/register` (platform staff only) takes `{plugin_id, capability_id, grpc_authority, labels, plugin_version, api_version, manifest_sha256, declared_operations, seat_model}`; the first three are required (400 `ADMIN_PLUGIN_FIELD_REQUIRED` otherwise), and `plugin_id`, `capability_id` and every `declared_operations` entry must be 1 to 128 ASCII letters, digits or `_ - . :` (400 `ADMIN_PLUGIN_FIELD_INVALID` otherwise; Capability applies the same rule and answers `INVALID_ARGUMENT`); the tenant and the request id come from the context. It returns `{tenant_id, plugin_id, accepted, message}`; `message` says `registered (unverified)` when `declared_operations` was empty, and Capability refuses a `capability_id` outside a non-empty declaration with 400 `BAD_REQUEST`. `POST /plugins/deregister` takes `{plugin_id}` and returns `{tenant_id, plugin_id, accepted}`; `accepted=false` means the instance was not registered.
 
 Plugin registrations persist across Capability restarts: Capability writes them to `capability_plugin_endpoints` (migration 0011) before it accepts them, and every Capability instance re-reads the table, so a registration made through one instance is listed by all of them within `FLARE_CAPABILITY_PLUGIN_ROUTE_REFRESH_SECS` (10 seconds by default). A registration that is neither re-registered nor healthy within `FLARE_CAPABILITY_PLUGIN_ROUTE_TTL_SECS` (one day by default) is removed. When Capability cannot write the table, register and deregister answer 503 `ADMIN_UPSTREAM_UNAVAILABLE` and nothing changes. Endpoints that Capability discovers from its own configuration are listed too, but are never stored and never expire; see the Capability README.
+
+### Plugin admin pages
+
+The two `plugin-admin/*` routes serve a plugin's `admin-page` contribution. The signed permission is the plugin's own code, `plugin:<plugin_id>:admin` (the shared route table builds it from the path, `core_admin::route_permission`); a plugin id whose code would exceed 128 bytes does not resolve. Both take `{"operation": "...", "input": {...}}` (`input` defaults to `{}`, at most 16 KiB with the plugin id and operation; 400 `ADMIN_PLUGIN_FIELD_INVALID` / `ADMIN_PLUGIN_INPUT_TOO_LARGE`) and return `{tenant_id, plugin_id, operation, request_id, success, data, error_code}`. `query` is a read: the operation must be a rows source or a detail operation of the plugin's admin pages. `dispatch` is a write (audit reason and correlation key required): the operation must be an action target of its admin pages. Capability checks that the plugin is enabled for the signed application and the grant approves the operation, signs a staff ticket (`flare.plugin.staff-call.v1`, no conversation) and calls the plugin; anything else is 403 `FORBIDDEN`. A plugin rejection is a 200 with `success=false` and the plugin's `error_code`. When an action's result carries `data.sharedState`, Capability publishes it to every card bound to the entity.
 
 ### Hooks
 

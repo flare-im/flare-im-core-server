@@ -268,6 +268,15 @@ pub fn build_admin_capabilities() -> AdminCapabilitiesResponse {
             admin_write_endpoint("PUT", "/api/v1/admin/hooks/{hook_id}/status"),
             admin_endpoint("/api/v1/admin/hooks/{hook_id}/statistics"),
             admin_endpoint("/api/v1/admin/hooks/{hook_id}/executions"),
+            // Plugin admin pages: permission `plugin:<plugin_id>:admin`; the query POST is a read.
+            AdminEndpointDescriptor {
+                method: "POST".to_string(),
+                path: "/api/v1/admin/plugin-admin/{plugin_id}/query".to_string(),
+                scope: "admin_gateway:admin".to_string(),
+                write: false,
+                status: "available".to_string(),
+            },
+            admin_write_endpoint("POST", "/api/v1/admin/plugin-admin/{plugin_id}/dispatch"),
         ],
         organization_policy: AdminOrganizationPolicyDescriptor {
             status: EnterprisePolicyStatus::ExternalPolicyRequired,

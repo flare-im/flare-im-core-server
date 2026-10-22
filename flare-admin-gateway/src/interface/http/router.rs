@@ -20,6 +20,7 @@ use super::admin_handler;
 use super::hooks_handler;
 use super::media_handler;
 use super::ops_handler::{self, AdminCapability, AdminCapabilityDownstream};
+use super::plugin_admin_handler;
 use flare_im_service_kit::clients::AdminGrpcClients;
 
 #[allow(dead_code)]
@@ -64,9 +65,13 @@ use flare_im_service_kit::clients::AdminGrpcClients;
         hooks_handler::set_hook_status,
         hooks_handler::get_hook_statistics,
         hooks_handler::query_hook_executions,
+        plugin_admin_handler::query_plugin_admin,
+        plugin_admin_handler::dispatch_plugin_admin,
     ),
     components(
         schemas(
+            plugin_admin_handler::AdminPluginCallHttpRequest,
+            plugin_admin_handler::AdminPluginCallHttp,
             media_handler::ListObjectsQuery,
             media_handler::AdminMediaObjects,
             media_handler::AdminMediaObject,
@@ -412,6 +417,14 @@ pub fn create_admin_router(
         .route(
             "/hooks/{hook_id}/executions",
             get(hooks_handler::query_hook_executions),
+        )
+        .route(
+            "/plugin-admin/{plugin_id}/query",
+            post(plugin_admin_handler::query_plugin_admin),
+        )
+        .route(
+            "/plugin-admin/{plugin_id}/dispatch",
+            post(plugin_admin_handler::dispatch_plugin_admin),
         )
         .layer(axum::Extension(clients))
         .layer(axum::Extension(AdminCapability::new(capability)))

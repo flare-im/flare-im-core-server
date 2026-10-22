@@ -28,6 +28,8 @@ POST /api/v1/admin/medias/object-acl
 POST /api/v1/admin/messages/export
 POST /api/v1/admin/messages/query
 POST /api/v1/admin/messages/write-ledger/query
+POST /api/v1/admin/plugin-admin/{plugin_id}/dispatch
+POST /api/v1/admin/plugin-admin/{plugin_id}/query
 POST /api/v1/admin/plugins/deregister
 POST /api/v1/admin/plugins/register
 POST /api/v1/admin/tenant/kick-all

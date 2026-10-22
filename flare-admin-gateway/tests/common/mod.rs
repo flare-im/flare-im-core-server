@@ -1052,12 +1052,12 @@ impl Gateway {
             .split('?')
             .next()
             .unwrap();
-        let route = core_admin::resolve(method, relative)
+        let (route, permission) = core_admin::resolve_with_permission(method, relative)
             .unwrap_or_else(|| panic!("{method} {relative} is not a Core admin route"));
         if route.platform_only {
-            self.platform_staff_token(EMPLOYEE, tenant, route.permission)
+            self.platform_staff_token(EMPLOYEE, tenant, &permission)
         } else {
-            self.staff_token(EMPLOYEE, tenant, route.permission)
+            self.staff_token(EMPLOYEE, tenant, &permission)
         }
     }
 
@@ -1365,6 +1365,6 @@ pub fn assert_forwarded_for_route(call: &Call, gateway: &Gateway, method: &str, 
         .split('?')
         .next()
         .unwrap();
-    let route = core_admin::resolve(method, relative).unwrap();
-    assert_forwarded_only_the_staff_context(call, gateway, TENANT, route.permission);
+    let (_, permission) = core_admin::resolve_with_permission(method, relative).unwrap();
+    assert_forwarded_only_the_staff_context(call, gateway, TENANT, &permission);
 }

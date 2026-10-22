@@ -105,13 +105,13 @@ async fn openapi_responses_match_the_committed_snapshot() {
 
 /// 在调用下游之前就会回的 400 逐条写进每个操作：审计头超长与审计原因编码不合规（中间件，读写
 /// 都查）、请求体解析
-/// 失败（带请求体的 11 条）、查询串解析失败（带查询参数的 9 条）、路径参数解析失败（带路径参数
-/// 的 15 条）。网关不再回 422，文档里也不再有 422。
+/// 失败（带请求体的 13 条）、查询串解析失败（带查询参数的 9 条）、路径参数解析失败（带路径参数
+/// 的 17 条）。网关不再回 422，文档里也不再有 422。
 #[tokio::test]
 async fn every_admin_operation_documents_its_request_rejections() {
     let doc = openapi_document().await;
     let operations = admin_operations(&doc);
-    assert_eq!(operations.len(), 38);
+    assert_eq!(operations.len(), 40);
     let (mut with_body, mut with_query, mut with_path) = (0, 0, 0);
     for (operation_name, operation) in &operations {
         let bad_request = response_description(operation, "400")
@@ -156,7 +156,7 @@ async fn every_admin_operation_documents_its_request_rejections() {
             "{operation_name} still documents 422"
         );
     }
-    assert_eq!((with_body, with_query, with_path), (11, 9, 15));
+    assert_eq!((with_body, with_query, with_path), (13, 9, 17));
 }
 
 /// 文档里的操作集合就是共享路由表 `core_admin::ROUTES`：一条不多、一条不少。网关 admin 分区
@@ -225,7 +225,9 @@ async fn contract_inventory_and_openapi_list_the_same_operations() {
         assert_eq!(route["write"], endpoint.write, "{}", endpoint.path);
         let read_only_query = matches!(
             endpoint.path.as_str(),
-            "/api/v1/admin/messages/query" | "/api/v1/admin/messages/write-ledger/query"
+            "/api/v1/admin/messages/query"
+                | "/api/v1/admin/messages/write-ledger/query"
+                | "/api/v1/admin/plugin-admin/{plugin_id}/query"
         );
         assert_eq!(
             endpoint.write,
@@ -300,6 +302,7 @@ async fn downstream_routes_document_every_typed_downstream_failure() {
         "/api/v1/admin/medias/",
         "/api/v1/admin/messages/",
         "/api/v1/admin/hooks",
+        "/api/v1/admin/plugin-admin/",
     ];
     let mut checked = 0;
     for (path, item) in doc["paths"].as_object().expect("paths object") {
@@ -328,7 +331,7 @@ async fn downstream_routes_document_every_typed_downstream_failure() {
             checked += 1;
         }
     }
-    assert_eq!(checked, 32);
+    assert_eq!(checked, 34);
 }
 
 const HTTP_METHODS: &[&str] = &["GET", "POST", "PUT", "PATCH", "DELETE"];

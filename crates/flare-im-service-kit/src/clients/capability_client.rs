@@ -202,4 +202,29 @@ impl CapabilityAdminClientWrapper {
             .await?;
         Ok(response.into_inner())
     }
+
+    /// `CapabilityService.Administer` with a `PayloadJson` body (plugin admin pages:
+    /// `flare.plugin.v1.admin.query` / `.dispatch`), forwarding the verified Staff token.
+    pub async fn administer_json(
+        &mut self,
+        staff_token: &str,
+        operation: &str,
+        payload_json: Vec<u8>,
+        request_id: &str,
+    ) -> Result<GenericResponse> {
+        let request = GenericRequest {
+            operation: operation.to_string(),
+            metadata: Default::default(),
+            payload: Some(prost_types::Any {
+                type_url: format!("{TYPE_URL_PREFIX}PayloadJson"),
+                value: payload_json,
+            }),
+            request_id: request_id.to_string(),
+        };
+        let response = self
+            .service
+            .administer(staff_context_request(request, staff_token)?)
+            .await?;
+        Ok(response.into_inner())
+    }
 }
