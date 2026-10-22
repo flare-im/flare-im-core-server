@@ -2590,6 +2590,7 @@ dependencies = [
  "ed25519-dalek",
  "flare-core-runtime",
  "flare-grpc-proto",
+ "flare-im-capability-core",
  "flare-im-contracts",
  "flare-im-service-kit",
  "flare-im-usage",

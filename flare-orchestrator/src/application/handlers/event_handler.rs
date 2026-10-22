@@ -684,4 +684,66 @@ mod read_ack_admission_tests {
         assert_eq!(h.allocated_seqs(), 4);
         assert_eq!(h.published().len(), 4);
     }
+
+    fn plugin_state_event(conversation_id: &str, version: u64) -> Event {
+        Event {
+            conversation_id: conversation_id.to_string(),
+            r#type: EventType::EventMessagePluginState as i32,
+            created_at: 1,
+            event_id: uuid::Uuid::new_v4().to_string(),
+            payload: Some(Payload::PluginState(
+                flare_proto::common::PluginStateEvent {
+                    server_msg_id: "m-1".into(),
+                    plugin_id: "example.poll".into(),
+                    entity: "poll-1".into(),
+                    version,
+                    values_json: r#"{"counts":[1,1]}"#.into(),
+                },
+            )),
+            ..Default::default()
+        }
+    }
+
+    /// Plugin shared state rides the generic event path: a seq per event, a single chat goes to
+    /// every member (both sides see the card change), a group is a conversation broadcast.
+    #[tokio::test]
+    async fn plugin_state_events_get_a_seq_and_reach_every_member() {
+        let h = Harness::new();
+        for version in [1, 2] {
+            h.handler
+                .handle_event(&ctx("state"), plugin_state_event(SINGLE_CHAT, version))
+                .await
+                .expect("plugin state event");
+        }
+        h.handler
+            .handle_event(&ctx("state"), plugin_state_event("2AW1QQ2SKVWFEPJRXN", 3))
+            .await
+            .expect("group plugin state event");
+        assert_eq!(h.allocated_seqs(), 3);
+        let published = h.published();
+        assert_eq!(
+            published
+                .iter()
+                .map(|(event, recipients)| (event.conversation_seq, recipients.clone()))
+                .collect::<Vec<_>>(),
+            vec![
+                (1, vec!["reader".to_string(), "peer".to_string()]),
+                (2, vec!["reader".to_string(), "peer".to_string()]),
+                (3, Vec::new()),
+            ]
+        );
+
+        // A malformed state never costs a seq.
+        let mut broken = plugin_state_event(SINGLE_CHAT, 0);
+        h.handler
+            .handle_event(&ctx("broken"), broken.clone())
+            .await
+            .expect_err("version 0");
+        broken.payload = None;
+        h.handler
+            .handle_event(&ctx("broken"), broken)
+            .await
+            .expect_err("no payload");
+        assert_eq!(h.allocated_seqs(), 3);
+    }
 }

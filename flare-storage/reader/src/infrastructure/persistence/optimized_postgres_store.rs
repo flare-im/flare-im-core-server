@@ -368,6 +368,11 @@ const MESSAGE_ROW_PROJECTION_WITH_VISIBILITY: &str = r#"                    m.te
                         FROM message_reactions mr
                         WHERE mr.tenant_id = m.tenant_id AND mr.message_id = m.server_id
                     ), '[]'::jsonb) AS reactions_json,
+                    (
+                        SELECT jsonb_build_object('version', ps.version, 'valuesJson', ps.values_json, 'entity', ps.entity)
+                        FROM message_plugin_states ps
+                        WHERE ps.tenant_id = m.tenant_id AND ps.server_msg_id = m.server_id
+                    ) AS plugin_shared_state,
                     EXISTS (
                         SELECT 1 FROM pinned_messages pm
                         WHERE pm.tenant_id = m.tenant_id
@@ -595,6 +600,11 @@ impl MessageStorage for OptimizedPostgresMessageStorageImpl {
                         FROM message_reactions mr
                         WHERE mr.tenant_id = m.tenant_id AND mr.message_id = m.server_id
                     ), '[]'::jsonb) AS reactions_json,
+                    (
+                        SELECT jsonb_build_object('version', ps.version, 'valuesJson', ps.values_json, 'entity', ps.entity)
+                        FROM message_plugin_states ps
+                        WHERE ps.tenant_id = m.tenant_id AND ps.server_msg_id = m.server_id
+                    ) AS plugin_shared_state,
                     EXISTS (
                         SELECT 1 FROM pinned_messages pm
                         WHERE pm.tenant_id = m.tenant_id
@@ -642,6 +652,11 @@ impl MessageStorage for OptimizedPostgresMessageStorageImpl {
                         FROM message_reactions mr
                         WHERE mr.tenant_id = messages.tenant_id AND mr.message_id = messages.server_id
                     ), '[]'::jsonb) AS reactions_json,
+                    (
+                        SELECT jsonb_build_object('version', ps.version, 'valuesJson', ps.values_json, 'entity', ps.entity)
+                        FROM message_plugin_states ps
+                        WHERE ps.tenant_id = messages.tenant_id AND ps.server_msg_id = messages.server_id
+                    ) AS plugin_shared_state,
                     EXISTS (
                         SELECT 1 FROM pinned_messages pm
                         WHERE pm.tenant_id = messages.tenant_id
@@ -828,6 +843,11 @@ impl MessageStorage for OptimizedPostgresMessageStorageImpl {
                         FROM message_reactions mr
                         WHERE mr.tenant_id = messages.tenant_id AND mr.message_id = messages.server_id
                     ), '[]'::jsonb) AS reactions_json,
+                    (
+                        SELECT jsonb_build_object('version', ps.version, 'valuesJson', ps.values_json, 'entity', ps.entity)
+                        FROM message_plugin_states ps
+                        WHERE ps.tenant_id = messages.tenant_id AND ps.server_msg_id = messages.server_id
+                    ) AS plugin_shared_state,
                     EXISTS (
                         SELECT 1 FROM pinned_messages pm
                         WHERE pm.tenant_id = messages.tenant_id
@@ -977,6 +997,11 @@ impl MessageStorage for OptimizedPostgresMessageStorageImpl {
                     FROM message_reactions mr
                     WHERE mr.tenant_id = messages.tenant_id AND mr.message_id = messages.server_id
                 ), '[]'::jsonb) AS reactions_json,
+                (
+                    SELECT jsonb_build_object('version', ps.version, 'valuesJson', ps.values_json, 'entity', ps.entity)
+                    FROM message_plugin_states ps
+                    WHERE ps.tenant_id = messages.tenant_id AND ps.server_msg_id = messages.server_id
+                ) AS plugin_shared_state,
                 EXISTS (
                     SELECT 1 FROM pinned_messages pm
                     WHERE pm.tenant_id = messages.tenant_id
@@ -1282,6 +1307,11 @@ impl MessageStorage for OptimizedPostgresMessageStorageImpl {
                     WHERE mr.tenant_id = messages.tenant_id
                       AND mr.message_id = messages.server_id
                 ), '[]'::jsonb) AS reactions_json,
+                (
+                    SELECT jsonb_build_object('version', ps.version, 'valuesJson', ps.values_json, 'entity', ps.entity)
+                    FROM message_plugin_states ps
+                    WHERE ps.tenant_id = messages.tenant_id AND ps.server_msg_id = messages.server_id
+                ) AS plugin_shared_state,
                 EXISTS (
                     SELECT 1 FROM pinned_messages pm
                     WHERE pm.tenant_id = messages.tenant_id
@@ -2199,6 +2229,11 @@ impl MessageStorage for OptimizedPostgresMessageStorageImpl {
                         FROM message_reactions mr
                         WHERE mr.tenant_id = messages.tenant_id AND mr.message_id = messages.server_id
                     ), '[]'::jsonb) AS reactions_json,
+                    (
+                        SELECT jsonb_build_object('version', ps.version, 'valuesJson', ps.values_json, 'entity', ps.entity)
+                        FROM message_plugin_states ps
+                        WHERE ps.tenant_id = messages.tenant_id AND ps.server_msg_id = messages.server_id
+                    ) AS plugin_shared_state,
                     EXISTS (
                         SELECT 1 FROM pinned_messages pm
                         WHERE pm.tenant_id = messages.tenant_id

@@ -3,8 +3,8 @@
 
 use crate::domain::model::{
     BurnScheduledPayload, BurnedPayload, DeletePayload, EditPayload, Event, EventPayload,
-    EventType, HardDeletedPayload, MarkPayload, PinPayload, ReactionPayload, ReadPayload,
-    RecallPayload, RequestContext, TenantContext, UnmarkPayload, UnpinPayload,
+    EventType, HardDeletedPayload, MarkPayload, PinPayload, PluginStatePayload, ReactionPayload,
+    ReadPayload, RecallPayload, RequestContext, TenantContext, UnmarkPayload, UnpinPayload,
 };
 use flare_im_contracts::Ctx;
 use flare_im_contracts::utils::{
@@ -103,6 +103,7 @@ fn event_type_to_proto_i32(t: EventType) -> i32 {
         EventType::MessageBurnScheduled => P::EventMessageRetentionScheduled,
         EventType::MessageBurned => P::EventMessageRetentionExpired,
         EventType::MessageHardDeleted => P::EventMessageRetentionPurged,
+        EventType::PluginState => P::EventMessagePluginState,
         EventType::Custom => P::EventCustom,
         EventType::Typing
         | EventType::Presence
@@ -130,6 +131,7 @@ fn event_type_from_i32(v: i32) -> EventType {
         Ok(common::EventType::EventMessageRetentionExpired) => EventType::MessageBurned,
         Ok(common::EventType::EventMessageRetentionPurged) => EventType::MessageHardDeleted,
         Ok(common::EventType::EventCustom) => EventType::Custom,
+        Ok(common::EventType::EventMessagePluginState) => EventType::PluginState,
         Ok(common::EventType::Unspecified) | Err(_) => EventType::Unspecified,
     }
 }
@@ -242,6 +244,13 @@ fn event_payload_from_proto(p: &flare_proto::common::event::Payload) -> Option<E
             burned_at: b.state.as_ref().and_then(|state| state.expired_at),
             event_time: b.purged_at,
         }),
+        P::PluginState(s) => EventPayload::PluginState(PluginStatePayload {
+            server_msg_id: s.server_msg_id.clone(),
+            plugin_id: s.plugin_id.clone(),
+            entity: s.entity.clone(),
+            version: s.version,
+            values_json: s.values_json.clone(),
+        }),
         _ => return None,
     })
 }
@@ -337,6 +346,13 @@ fn event_payload_to_proto(p: &EventPayload) -> Option<flare_proto::common::event
                 b.event_time,
             )),
             purged_at: b.event_time,
+        }),
+        EventPayload::PluginState(s) => P::PluginState(common::PluginStateEvent {
+            server_msg_id: s.server_msg_id.clone(),
+            plugin_id: s.plugin_id.clone(),
+            entity: s.entity.clone(),
+            version: s.version,
+            values_json: s.values_json.clone(),
         }),
         EventPayload::Message(msg) => P::Message(message_to_proto(msg)),
         _ => return None,
@@ -548,6 +564,7 @@ mod tests {
             (EventType::MessageBurned, 14),
             (EventType::MessageHardDeleted, 15),
             (EventType::Custom, 16),
+            (EventType::PluginState, 17),
             (EventType::Typing, 0),
             (EventType::Presence, 0),
             (EventType::CallSignal, 0),

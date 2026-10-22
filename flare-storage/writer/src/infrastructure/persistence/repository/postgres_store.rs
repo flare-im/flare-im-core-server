@@ -100,6 +100,13 @@ impl PostgresMessageStore {
         Ok(Some(Self::from_pool(pool)))
     }
 
+    /// 插件实体绑定的登记（同一个连接池）。
+    pub fn plugin_entity_bindings(
+        &self,
+    ) -> super::plugin_entity_bindings::PostgresPluginEntityBindings {
+        super::plugin_entity_bindings::PostgresPluginEntityBindings::new(self.pool.clone())
+    }
+
     /// 用已有连接池构造（真库用例等）。
     pub fn from_pool(pool: Pool<Postgres>) -> Self {
         let operation_store = operation_store::OperationStore::new(pool.clone());
@@ -950,6 +957,20 @@ impl ArchiveStoreRepository for PostgresMessageStore {
         let _ = ctx; // 上下文用于日志追踪
         self.operation_store
             .upsert_message_reaction(tenant_id, message_id, emoji, user_id, add)
+            .await
+    }
+
+    #[instrument(skip(self, state), fields(tenant_id, conversation_id, message_id = %state.server_msg_id, version = state.version))]
+    async fn upsert_message_plugin_state(
+        &self,
+        ctx: &Ctx,
+        tenant_id: &str,
+        conversation_id: &str,
+        state: &crate::domain::model::PluginStatePayload,
+    ) -> Result<crate::domain::repository::PluginStateWrite> {
+        let _ = ctx; // 上下文用于日志追踪
+        self.operation_store
+            .upsert_message_plugin_state(tenant_id, conversation_id, state)
             .await
     }
 

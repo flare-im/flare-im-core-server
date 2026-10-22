@@ -171,6 +171,20 @@ impl OperationStore {
             .execute(&self.pool)
             .await?;
         }
+        if status_int == MessageStatus::Recalled as i32 {
+            // 撤回的插件卡片不再接收共享状态，针对它的插件调用也被拒绝（Capability 读这一列）。
+            // 走 (tenant_id, server_msg_id) 索引；不是插件卡片的消息命中零行。
+            sqlx::query(
+                r#"
+                UPDATE plugin_entity_bindings SET recalled_at = CURRENT_TIMESTAMP
+                WHERE tenant_id = $1 AND server_msg_id = $2 AND recalled_at IS NULL
+                "#,
+            )
+            .bind(tenant_id)
+            .bind(message_id)
+            .execute(&self.pool)
+            .await?;
+        }
         Ok(())
     }
 
@@ -387,6 +401,81 @@ impl OperationStore {
 
         tx.commit().await?;
         Ok(())
+    }
+
+    /// `message_plugin_states` 的单调写：只在 `plugin_entity_bindings` 里有这条消息、这个插件实体、
+    /// 这个会话、且未撤回的绑定时写；已有行只被更高版本覆盖（同一实体）。
+    pub async fn upsert_message_plugin_state(
+        &self,
+        tenant_id: &str,
+        conversation_id: &str,
+        state: &crate::domain::model::PluginStatePayload,
+    ) -> Result<crate::domain::repository::PluginStateWrite> {
+        use crate::domain::repository::PluginStateWrite;
+        let version = i64::try_from(state.version)
+            .ok()
+            .filter(|version| *version > 0)
+            .ok_or_else(|| {
+                flare_server_core::error::FlareError::system(
+                    "plugin state version out of range".to_string(),
+                )
+            })?;
+        let applied: Option<i64> = sqlx::query_scalar(
+            r#"
+            INSERT INTO message_plugin_states (
+                tenant_id, server_msg_id, conversation_id, plugin_id, entity, version, values_json, updated_at
+            )
+            SELECT $1, $2, $3, $4, $5, $6, $7, CURRENT_TIMESTAMP
+            WHERE EXISTS (
+                SELECT 1 FROM plugin_entity_bindings b
+                WHERE b.tenant_id = $1 AND b.plugin_id = $4 AND b.entity = $5
+                  AND b.server_msg_id = $2 AND b.conversation_id = $3
+                  AND b.recalled_at IS NULL
+            )
+            ON CONFLICT (tenant_id, server_msg_id) DO UPDATE
+            SET version = EXCLUDED.version,
+                values_json = EXCLUDED.values_json,
+                updated_at = EXCLUDED.updated_at
+            WHERE message_plugin_states.version < EXCLUDED.version
+              AND message_plugin_states.plugin_id = EXCLUDED.plugin_id
+              AND message_plugin_states.entity = EXCLUDED.entity
+            RETURNING version
+            "#,
+        )
+        .bind(tenant_id)
+        .bind(&state.server_msg_id)
+        .bind(conversation_id)
+        .bind(&state.plugin_id)
+        .bind(&state.entity)
+        .bind(version)
+        .bind(&state.values_json)
+        .fetch_optional(&self.pool)
+        .await?;
+        if applied.is_some() {
+            return Ok(PluginStateWrite::Applied);
+        }
+        let bound: bool = sqlx::query_scalar(
+            r#"
+            SELECT EXISTS (
+                SELECT 1 FROM plugin_entity_bindings b
+                WHERE b.tenant_id = $1 AND b.plugin_id = $3 AND b.entity = $4
+                  AND b.server_msg_id = $2 AND b.conversation_id = $5
+                  AND b.recalled_at IS NULL
+            )
+            "#,
+        )
+        .bind(tenant_id)
+        .bind(&state.server_msg_id)
+        .bind(&state.plugin_id)
+        .bind(&state.entity)
+        .bind(conversation_id)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(if bound {
+            PluginStateWrite::Unchanged
+        } else {
+            PluginStateWrite::Unbound
+        })
     }
 
     #[allow(clippy::too_many_arguments)]

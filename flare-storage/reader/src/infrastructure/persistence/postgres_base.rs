@@ -20,6 +20,32 @@ use crate::domain::model::{MessageWriteLedgerEntry, MessageWriteLedgerQuery};
 use crate::infrastructure::persistence::DbResultExt;
 use crate::infrastructure::persistence::redis_cache::RedisMessageCache;
 
+/// Extra keys of a plugin card's shared layer (`message_plugin_states`): the values JSON text, the
+/// version as a decimal string and the entity id. Only Core writes them.
+pub const PLUGIN_SHARED_STATE_JSON_KEY: &str = "pluginSharedStateJson";
+pub const PLUGIN_SHARED_STATE_VERSION_KEY: &str = "pluginSharedStateVersion";
+pub const PLUGIN_SHARED_ENTITY_KEY: &str = "pluginSharedEntity";
+
+/// The shared layer of one message, as its extra values.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PluginSharedStateExtra {
+    pub values_json: String,
+    pub version: String,
+    pub entity: String,
+}
+
+/// The `plugin_shared_state` column (`{"version", "valuesJson", "entity"}`) as extra values, when the
+/// message has a stored shared state.
+pub fn plugin_shared_state_extra(column: Option<&Value>) -> Option<PluginSharedStateExtra> {
+    let column = column?;
+    let version = column.get("version")?.as_u64().filter(|v| *v > 0)?;
+    Some(PluginSharedStateExtra {
+        values_json: column.get("valuesJson")?.as_str()?.to_owned(),
+        version: version.to_string(),
+        entity: column.get("entity")?.as_str()?.to_owned(),
+    })
+}
+
 const LEGACY_BURN_STATUS_BURN_PENDING: i32 = 3;
 const LEGACY_BURN_STATUS_BURNED: i32 = 4;
 const LEGACY_BURN_STATUS_HARD_DELETED: i32 = 5;
@@ -151,6 +177,21 @@ impl PostgresBaseStorage {
                 "user_ids",
                 "count",
                 "last_updated",
+            ],
+        )
+        .await?;
+
+        self.require_table("message_plugin_states").await?;
+        self.require_columns(
+            "message_plugin_states",
+            &[
+                "tenant_id",
+                "server_msg_id",
+                "conversation_id",
+                "plugin_id",
+                "entity",
+                "version",
+                "values_json",
             ],
         )
         .await?;
@@ -388,6 +429,7 @@ impl PostgresBaseStorage {
         let extra: Option<Value> = row.get("extra");
         let extensions: Option<Value> = row.get("extensions");
         let reactions_json: Option<Value> = row.try_get("reactions_json").ok();
+        let plugin_shared_state: Option<Value> = row.try_get("plugin_shared_state").ok().flatten();
         let is_pinned: bool = row.try_get("is_pinned").unwrap_or(false);
 
         let mut extra_map = HashMap::new();
@@ -410,6 +452,20 @@ impl PostgresBaseStorage {
         }
         if is_pinned {
             extra_map.insert("pinned".to_string(), "true".to_string());
+        }
+        // 插件卡片的共享层（`message_plugin_states`）：拉历史时直接带着最新状态。两个键由服务端写，
+        // 客户端按版本单调应用；发送方在 attributes 里伪造的同名键在这里被覆盖或去掉。
+        for key in [
+            PLUGIN_SHARED_STATE_JSON_KEY,
+            PLUGIN_SHARED_STATE_VERSION_KEY,
+            PLUGIN_SHARED_ENTITY_KEY,
+        ] {
+            extra_map.remove(key);
+        }
+        if let Some(shared) = plugin_shared_state_extra(plugin_shared_state.as_ref()) {
+            extra_map.insert(PLUGIN_SHARED_STATE_JSON_KEY.to_string(), shared.values_json);
+            extra_map.insert(PLUGIN_SHARED_STATE_VERSION_KEY.to_string(), shared.version);
+            extra_map.insert(PLUGIN_SHARED_ENTITY_KEY.to_string(), shared.entity);
         }
 
         let offline_push_proto = offline_push_info.as_ref().and_then(|v| {
@@ -444,6 +500,15 @@ impl PostgresBaseStorage {
             .and_then(|v| v.as_object())
             .map(|o| {
                 o.iter()
+                    // The shared layer travels in extra only, written by Core.
+                    .filter(|(k, _)| {
+                        ![
+                            PLUGIN_SHARED_STATE_JSON_KEY,
+                            PLUGIN_SHARED_STATE_VERSION_KEY,
+                            PLUGIN_SHARED_ENTITY_KEY,
+                        ]
+                        .contains(&k.as_str())
+                    })
                     .filter_map(|(k, v)| {
                         let s = v.as_str()?;
                         base64::Engine::decode(&base64::engine::general_purpose::STANDARD, s)
@@ -516,6 +581,38 @@ fn legacy_retention_state(
         },
         triggered_by_user_id: None,
     })
+}
+
+#[cfg(test)]
+mod plugin_shared_state_tests {
+    use super::*;
+
+    #[test]
+    fn the_stored_shared_state_becomes_two_extra_values() {
+        let column = serde_json::json!({
+            "version": 4,
+            "valuesJson": r#"{"counts":[1,2]}"#,
+            "entity": "poll-1"
+        });
+        assert_eq!(
+            plugin_shared_state_extra(Some(&column)),
+            Some(PluginSharedStateExtra {
+                values_json: r#"{"counts":[1,2]}"#.to_string(),
+                version: "4".to_string(),
+                entity: "poll-1".to_string(),
+            })
+        );
+        assert_eq!(plugin_shared_state_extra(None), None);
+        for broken in [
+            serde_json::json!({"version": 0, "valuesJson": "{}", "entity": "e"}),
+            serde_json::json!({"version": 4, "entity": "e"}),
+            serde_json::json!({"valuesJson": "{}", "entity": "e"}),
+            serde_json::json!({"version": 4, "valuesJson": "{}"}),
+            serde_json::Value::Null,
+        ] {
+            assert_eq!(plugin_shared_state_extra(Some(&broken)), None, "{broken}");
+        }
+    }
 }
 
 #[cfg(test)]

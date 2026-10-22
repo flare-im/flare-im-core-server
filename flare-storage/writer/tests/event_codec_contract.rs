@@ -14,15 +14,15 @@ use flare_storage_reader::infrastructure::persistence::optimized_postgres_store:
 use flare_storage_writer::convert as writer_convert;
 use flare_storage_writer::domain::model::{
     BurnScheduledPayload, BurnedPayload, CustomPayload, DeletePayload, EditPayload, Event,
-    EventPayload, EventType, HardDeletedPayload, MarkPayload, Message, PinPayload, ReactionPayload,
-    ReadPayload, RecallPayload, UnmarkPayload, UnpinPayload,
+    EventPayload, EventType, HardDeletedPayload, MarkPayload, Message, PinPayload,
+    PluginStatePayload, ReactionPayload, ReadPayload, RecallPayload, UnmarkPayload, UnpinPayload,
 };
 use flare_storage_writer::infrastructure::persistence::repository::event_stream::event_to_insert_row;
 use flare_storage_writer::infrastructure::persistence::repository::operation_store::operation_type_name;
 
 /// Writer 领域 `EventType` 的全部变体。新增变体时 `writer_variant_list_is_exhaustive` 的 match 不再
 /// 编译，提醒把它加进来。
-const WRITER_EVENT_TYPES: [EventType; 20] = [
+const WRITER_EVENT_TYPES: [EventType; 21] = [
     EventType::Unspecified,
     EventType::Message,
     EventType::MessageRecall,
@@ -42,6 +42,7 @@ const WRITER_EVENT_TYPES: [EventType; 20] = [
     EventType::MessageBurnScheduled,
     EventType::MessageBurned,
     EventType::MessageHardDeleted,
+    EventType::PluginState,
     EventType::Custom,
 ];
 
@@ -69,6 +70,7 @@ fn writer_variant_list_is_exhaustive() {
             | EventType::MessageBurnScheduled
             | EventType::MessageBurned
             | EventType::MessageHardDeleted
+            | EventType::PluginState
             | EventType::Custom => {}
         }
     }
@@ -220,6 +222,13 @@ fn sample_payload(event_type: EventType) -> Option<EventPayload> {
             burn_at: Some(1_700_000_200_000),
             burned_at: Some(1_700_000_201_000),
             event_time: 1_700_000_300_000,
+        }),
+        EventType::PluginState => EventPayload::PluginState(PluginStatePayload {
+            server_msg_id,
+            plugin_id: "example.poll".to_string(),
+            entity: "poll-1".to_string(),
+            version: 3,
+            values_json: r#"{"counts":[2,1],"closed":false}"#.to_string(),
         }),
         EventType::Custom => EventPayload::Custom(CustomPayload {
             namespace: "biz".to_string(),

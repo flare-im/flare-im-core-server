@@ -11,6 +11,7 @@ mod delete;
 mod edit;
 mod mark;
 mod pin;
+mod plugin_state;
 mod reaction;
 mod read;
 mod recall;
@@ -92,6 +93,7 @@ pub fn primary_message_id_for_metrics(event: &Event) -> String {
             EventPayload::BurnScheduled(b) => Some(b.message_id.clone()),
             EventPayload::Burned(b) => Some(b.message_id.clone()),
             EventPayload::HardDeleted(b) => Some(b.message_id.clone()),
+            EventPayload::PluginState(s) => Some(s.server_msg_id.clone()),
             _ => None,
         })
         .unwrap_or_default()
@@ -116,6 +118,7 @@ where
         Some(EventPayload::BurnScheduled(p)) => burn::apply_burn_scheduled(ctx, event, p).await,
         Some(EventPayload::Burned(p)) => burn::apply_burned(ctx, event, p).await,
         Some(EventPayload::HardDeleted(p)) => burn::apply_hard_deleted(ctx, event, p).await,
+        Some(EventPayload::PluginState(p)) => plugin_state::apply_plugin_state(ctx, event, p).await,
         _ => {
             tracing::trace!(r#type = ?event.r#type, "Unsupported or non-operation event, skip");
             Ok(())

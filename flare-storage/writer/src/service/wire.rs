@@ -185,7 +185,8 @@ pub async fn initialize(
         )
         .with_write_ledger_repo(Some(write_ledger_repo))
         .with_metrics(Some(metrics.clone()))
-        .with_usage(usage.recorder()),
+        .with_usage(usage.recorder())
+        .with_plugin_entity_bindings(Some(Arc::new(archive_repo.plugin_entity_bindings()))),
     );
 
     let event_service: Arc<EventApplicationServiceType> = Arc::new(EventApplicationService::new(

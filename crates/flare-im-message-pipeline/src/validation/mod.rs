@@ -197,6 +197,7 @@ impl EventTypeValidationStrategy {
             EventType::EventMessageRetentionExpired,
             EventType::EventMessageRetentionPurged,
             EventType::EventCustom,
+            EventType::EventMessagePluginState,
         ])
     }
 }
@@ -249,6 +250,53 @@ impl EventValidationStrategy for EventRequiredFieldsValidationStrategy {
                 result = result.merge(ValidationResult::invalid("event_id is required for event"));
             }
 
+            Ok(result)
+        })
+    }
+}
+
+/// 插件实体共享状态事件（`EVENT_MESSAGE_PLUGIN_STATE`）的载荷校验：类型与载荷一致，消息、插件、实体
+/// 非空且有界，版本 `1..=i64::MAX`，`values_json` 不超过 8 KiB。内容规则（键、值形状）由发布方
+/// （Capability）按插件协议校验，Writer 落库前再校验一次。
+pub struct PluginStateEventValidationStrategy;
+
+/// `PluginStateEvent.values_json` 的上限（与插件协议 `MAX_SHARED_STATE_BYTES` 相同）。
+pub const MAX_PLUGIN_STATE_VALUES_BYTES: usize = 8 * 1024;
+
+impl EventValidationStrategy for PluginStateEventValidationStrategy {
+    fn validate<'a>(
+        &'a self,
+        _context: &'a ValidationContext<'a>,
+        event: &'a Event,
+    ) -> Pin<Box<dyn Future<Output = Result<ValidationResult>> + Send + 'a>> {
+        use flare_proto::common::{EventType, event::Payload};
+        Box::pin(async move {
+            let is_plugin_state = event.r#type == EventType::EventMessagePluginState as i32;
+            let result = match (&event.payload, is_plugin_state) {
+                (Some(Payload::PluginState(state)), true) => {
+                    let entity_ok = !state.entity.is_empty()
+                        && state.entity.len() <= 128
+                        && state.entity.bytes().all(|b| {
+                            b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-' | b':')
+                        });
+                    if state.server_msg_id.is_empty()
+                        || state.plugin_id.is_empty()
+                        || state.plugin_id.len() > 128
+                        || !entity_ok
+                        || state.version == 0
+                        || state.version > i64::MAX as u64
+                        || state.values_json.len() > MAX_PLUGIN_STATE_VALUES_BYTES
+                    {
+                        ValidationResult::invalid("invalid plugin state event")
+                    } else {
+                        ValidationResult::valid()
+                    }
+                }
+                (Some(Payload::PluginState(_)), false) | (_, true) => {
+                    ValidationResult::invalid("plugin state type and payload disagree")
+                }
+                _ => ValidationResult::valid(),
+            };
             Ok(result)
         })
     }
@@ -316,6 +364,7 @@ impl CompositeEventValidationStrategy {
         Self::new(vec![
             Arc::new(EventTypeValidationStrategy::all_supported()),
             Arc::new(EventRequiredFieldsValidationStrategy),
+            Arc::new(PluginStateEventValidationStrategy),
         ])
     }
 }
@@ -341,5 +390,86 @@ impl EventValidationStrategy for CompositeEventValidationStrategy {
 
             Ok(result)
         })
+    }
+}
+
+#[cfg(test)]
+mod plugin_state_tests {
+    use super::*;
+    use flare_proto::common::{EventType, PluginStateEvent, event::Payload};
+
+    fn state_event(state: PluginStateEvent) -> Event {
+        Event {
+            conversation_id: "2-group".into(),
+            event_id: "e-1".into(),
+            r#type: EventType::EventMessagePluginState as i32,
+            payload: Some(Payload::PluginState(state)),
+            ..Default::default()
+        }
+    }
+
+    fn valid_state() -> PluginStateEvent {
+        PluginStateEvent {
+            server_msg_id: "m-1".into(),
+            plugin_id: "example.poll".into(),
+            entity: "poll-1".into(),
+            version: 3,
+            values_json: r#"{"counts":[1,2]}"#.into(),
+        }
+    }
+
+    async fn check(event: &Event) -> bool {
+        let ctx: Ctx = std::sync::Arc::new(flare_server_core::Context::with_request_id("r"));
+        let context = ValidationContext {
+            ctx: &ctx,
+            tenant_id: "app-a",
+            conversation_id: "2-group",
+        };
+        CompositeEventValidationStrategy::default_composite()
+            .validate(&context, event)
+            .await
+            .unwrap()
+            .is_valid
+    }
+
+    #[tokio::test]
+    async fn plugin_state_events_are_supported_and_bounded() {
+        assert!(check(&state_event(valid_state())).await);
+        let invalid = [
+            PluginStateEvent {
+                server_msg_id: String::new(),
+                ..valid_state()
+            },
+            PluginStateEvent {
+                plugin_id: String::new(),
+                ..valid_state()
+            },
+            PluginStateEvent {
+                entity: "has space".into(),
+                ..valid_state()
+            },
+            PluginStateEvent {
+                version: 0,
+                ..valid_state()
+            },
+            PluginStateEvent {
+                version: u64::MAX,
+                ..valid_state()
+            },
+            PluginStateEvent {
+                values_json: "x".repeat(8193),
+                ..valid_state()
+            },
+        ];
+        for state in invalid {
+            assert!(!check(&state_event(state.clone())).await, "{state:?}");
+        }
+        // Type and payload must agree.
+        let mut without_payload = state_event(valid_state());
+        without_payload.payload = None;
+        assert!(!check(&without_payload).await);
+        let mut mislabeled = state_event(valid_state());
+        mislabeled.r#type = EventType::EventReaction as i32;
+        assert!(!check(&mislabeled).await);
     }
 }

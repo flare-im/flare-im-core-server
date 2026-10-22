@@ -95,6 +95,7 @@ pub fn event_type_from_proto_i32(v: i32) -> EventType {
         Ok(ProtoEventType::EventMessageRetentionExpired) => EventType::MessageBurned,
         Ok(ProtoEventType::EventMessageRetentionPurged) => EventType::MessageHardDeleted,
         Ok(ProtoEventType::EventCustom) => EventType::Custom,
+        Ok(ProtoEventType::EventMessagePluginState) => EventType::PluginState,
         _ => EventType::Unspecified,
     }
 }
@@ -117,6 +118,7 @@ pub fn event_type_to_proto_i32(v: EventType) -> i32 {
         EventType::MessageBurned => ProtoEventType::EventMessageRetentionExpired as i32,
         EventType::MessageHardDeleted => ProtoEventType::EventMessageRetentionPurged as i32,
         EventType::Custom => ProtoEventType::EventCustom as i32,
+        EventType::PluginState => ProtoEventType::EventMessagePluginState as i32,
         EventType::Typing
         | EventType::Presence
         | EventType::CallSignal

@@ -26,6 +26,7 @@ fn encode_payload_bytes(payload: &Payload) -> Result<Vec<u8>> {
         Payload::RetentionScheduled(b) => encode_proto_payload(b, &mut buf, "retention_scheduled")?,
         Payload::RetentionExpired(b) => encode_proto_payload(b, &mut buf, "retention_expired")?,
         Payload::RetentionPurged(b) => encode_proto_payload(b, &mut buf, "retention_purged")?,
+        Payload::PluginState(s) => encode_proto_payload(s, &mut buf, "plugin_state")?,
         _ => {}
     }
     Ok(buf)
@@ -172,6 +173,7 @@ fn decode_event_payload(event_type: i32, payload: &[u8]) -> Option<Payload> {
         T::EventMessageRetentionExpired => Payload::RetentionExpired(decode(payload)?),
         T::EventMessageRetentionPurged => Payload::RetentionPurged(decode(payload)?),
         T::EventCustom => Payload::Custom(decode(payload)?),
+        T::EventMessagePluginState => Payload::PluginState(decode(payload)?),
         T::Unspecified => return None,
     })
 }

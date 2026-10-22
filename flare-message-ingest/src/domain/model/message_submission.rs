@@ -8,6 +8,15 @@ use uuid::Uuid;
 
 use crate::domain::model::message_kind::MessageProfile;
 
+/// Message attributes only Core writes: the plugin card shared layer (`pluginSharedStateJson`,
+/// `pluginSharedStateVersion`, `pluginSharedEntity`). Removed from the attributes and extensions of
+/// every submitted message: a preset version would hold back every later state of the card.
+pub const SERVER_OWNED_ATTRIBUTES: &[&str] = &[
+    "pluginSharedStateJson",
+    "pluginSharedStateVersion",
+    "pluginSharedEntity",
+];
+
 #[derive(Clone, Debug)]
 pub struct MessageDefaults {
     pub default_business_type: String,
@@ -74,6 +83,13 @@ impl MessageSubmission {
             request.status = 1;
         }
 
+        // The shared layer of a plugin card is written by Core only (Storage Reader projects
+        // `message_plugin_states` under these keys); a sender cannot preset it on its message.
+        for key in SERVER_OWNED_ATTRIBUTES {
+            request.attributes.remove(*key);
+            request.extensions.remove(*key);
+        }
+
         // Ordering is server-authoritative. Client-provided sequence hints must not leak into
         // pre-allocation stages; `MessageIngestService::allocate_seq_for_submission` assigns the
         // durable conversation sequence after ensure/decorate succeeds.
@@ -131,6 +147,41 @@ mod tests {
             default_sender_type: "user".to_string(),
             default_tenant_id: Some("tenant-1".to_string()),
         }
+    }
+
+    /// 插件卡片的共享层只由 Core 写：发送方在 attributes 里预置的同名键在提交时去掉。
+    #[test]
+    fn a_sender_cannot_preset_the_plugin_shared_layer() {
+        let submission = MessageSubmission::prepare(
+            Message {
+                conversation_id: "conv-1".to_string(),
+                sender_id: "user-1".to_string(),
+                attributes: [
+                    ("pluginSharedStateJson", r#"{"counts":[999]}"#),
+                    ("pluginSharedStateVersion", "9223372036854775807"),
+                    ("pluginSharedEntity", "poll-1"),
+                    ("kept", "yes"),
+                ]
+                .into_iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
+                extensions: [
+                    ("pluginSharedStateVersion", b"9223372036854775807".to_vec()),
+                    ("pluginSharedEntity", b"poll-1".to_vec()),
+                    ("kept", b"yes".to_vec()),
+                ]
+                .into_iter()
+                .map(|(k, v)| (k.to_string(), v))
+                .collect(),
+                ..Default::default()
+            },
+            &defaults(),
+        )
+        .expect("prepare");
+        assert_eq!(submission.message.attributes.len(), 1);
+        assert_eq!(submission.message.attributes["kept"], "yes");
+        assert_eq!(submission.message.extensions.len(), 1);
+        assert_eq!(submission.message.extensions["kept"], b"yes".to_vec());
     }
 
     /// created_at 必须由服务端接管，客户端声称的时刻退到 timeline.emit_ts。

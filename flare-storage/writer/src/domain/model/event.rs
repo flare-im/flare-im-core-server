@@ -25,6 +25,7 @@ pub enum EventType {
     MessageBurnScheduled = 16,
     MessageBurned = 17,
     MessageHardDeleted = 18,
+    PluginState = 19,
     Custom = 99,
 }
 
@@ -56,6 +57,7 @@ pub enum EventPayload {
     BurnScheduled(BurnScheduledPayload),
     Burned(BurnedPayload),
     HardDeleted(HardDeletedPayload),
+    PluginState(PluginStatePayload),
     Message(Box<super::Message>),
     Custom(CustomPayload),
     Other,
@@ -172,6 +174,17 @@ pub struct HardDeletedPayload {
     pub burn_at: Option<i64>,
     pub burned_at: Option<i64>,
     pub event_time: i64,
+}
+
+/// 插件实体共享状态（`PluginStateEvent`）：`values_json` 原样保留，读侧挂到消息 extra 上时与事件里的
+/// 字节一致。
+#[derive(Debug, Clone)]
+pub struct PluginStatePayload {
+    pub server_msg_id: String,
+    pub plugin_id: String,
+    pub entity: String,
+    pub version: u64,
+    pub values_json: String,
 }
 
 #[derive(Debug, Clone)]

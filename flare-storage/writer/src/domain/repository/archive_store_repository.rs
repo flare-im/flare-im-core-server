@@ -1,8 +1,20 @@
 //! 归档存储仓储（Port）- 使用领域类型，不依赖 proto
 
-use crate::domain::model::{Event, Message};
+use crate::domain::model::{Event, Message, PluginStatePayload};
 use flare_im_contracts::Ctx;
 use flare_server_core::error::{FlareError, Result};
+
+/// What [`ArchiveStoreRepository::upsert_message_plugin_state`] did with a shared state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PluginStateWrite {
+    /// Newer than the stored state (or the first one): stored.
+    Applied,
+    /// The stored version is the same or newer: nothing changed.
+    Unchanged,
+    /// The message is not bound to this plugin entity in this conversation, or was recalled: not
+    /// stored.
+    Unbound,
+}
 
 /// 未实现守卫：把“忘记 override 的写方法静默成功”变成显式失败。
 ///
@@ -173,6 +185,19 @@ pub trait ArchiveStoreRepository: Send + Sync {
     ) -> Result<()> {
         let _ = (ctx, tenant_id, message_id, emoji, user_id, add);
         Err(unimplemented_archive_method("upsert_message_reaction"))
+    }
+
+    /// 插件卡片的共享状态（`message_plugin_states`，每条消息一行）：只写已绑定到该插件实体的消息，
+    /// 版本单调——新版本覆盖，同版本幂等，旧版本丢弃。
+    async fn upsert_message_plugin_state(
+        &self,
+        ctx: &Ctx,
+        tenant_id: &str,
+        conversation_id: &str,
+        state: &PluginStatePayload,
+    ) -> Result<PluginStateWrite> {
+        let _ = (ctx, tenant_id, conversation_id, state);
+        Err(unimplemented_archive_method("upsert_message_plugin_state"))
     }
 
     /// 置顶或取消置顶消息

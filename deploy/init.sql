@@ -400,6 +400,49 @@ COMMENT ON COLUMN message_reactions.last_updated IS '最后更新时间';
 COMMENT ON COLUMN message_reactions.created_at IS '首次添加时间';
 CREATE INDEX IF NOT EXISTS idx_message_reactions_tenant_message ON message_reactions(tenant_id, message_id);
 
+-- 插件实体共享状态（migrations/0016）：实体绑定与每条插件卡片的最新共享状态。
+DROP TABLE IF EXISTS message_plugin_states CASCADE;
+DROP TABLE IF EXISTS plugin_entity_bindings CASCADE;
+CREATE TABLE plugin_entity_bindings (
+    tenant_id TEXT NOT NULL,
+    plugin_id TEXT NOT NULL,
+    entity TEXT NOT NULL,
+    server_msg_id TEXT NOT NULL,
+    conversation_id TEXT NOT NULL,
+    contribution_id TEXT NOT NULL,
+    published_version BIGINT NOT NULL DEFAULT 0,
+    recalled_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT plugin_entity_bindings_pkey PRIMARY KEY (tenant_id, plugin_id, entity, server_msg_id),
+    CONSTRAINT plugin_entity_bindings_tenant_check
+        CHECK (char_length(tenant_id) BETWEEN 1 AND 256 AND tenant_id <> '*'),
+    CONSTRAINT plugin_entity_bindings_plugin_check
+        CHECK (char_length(plugin_id) BETWEEN 1 AND 128 AND char_length(contribution_id) BETWEEN 1 AND 160),
+    CONSTRAINT plugin_entity_bindings_entity_check
+        CHECK (entity ~ '^[A-Za-z0-9._:-]{1,128}$'),
+    CONSTRAINT plugin_entity_bindings_message_check
+        CHECK (char_length(server_msg_id) BETWEEN 1 AND 256 AND char_length(conversation_id) BETWEEN 1 AND 256),
+    CONSTRAINT plugin_entity_bindings_version_check
+        CHECK (published_version >= 0)
+);
+CREATE INDEX idx_plugin_entity_bindings_message
+    ON plugin_entity_bindings(tenant_id, server_msg_id);
+CREATE TABLE message_plugin_states (
+    tenant_id TEXT NOT NULL,
+    server_msg_id TEXT NOT NULL,
+    conversation_id TEXT NOT NULL,
+    plugin_id TEXT NOT NULL,
+    entity TEXT NOT NULL,
+    version BIGINT NOT NULL,
+    values_json TEXT NOT NULL,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT message_plugin_states_pkey PRIMARY KEY (tenant_id, server_msg_id),
+    CONSTRAINT message_plugin_states_version_check CHECK (version > 0),
+    CONSTRAINT message_plugin_states_values_check CHECK (octet_length(values_json) <= 8192)
+);
+COMMENT ON TABLE plugin_entity_bindings IS '插件实体绑定（与 migrations/0016 同一结构）：插件卡片落库时由 Storage Writer 按目录投影的 entityPath 登记；Capability 只给已绑定的实体发布共享状态，published_version 以比较并设置单调抬高';
+COMMENT ON TABLE message_plugin_states IS '插件卡片最新共享状态（EVENT_MESSAGE_PLUGIN_STATE，与 migrations/0016 同一结构）：每条消息一行，按版本单调覆盖；读侧挂到 extra.pluginSharedStateJson / pluginSharedStateVersion';
+
 DROP TABLE IF EXISTS pinned_messages CASCADE;
 CREATE TABLE pinned_messages (
     id BIGSERIAL PRIMARY KEY,

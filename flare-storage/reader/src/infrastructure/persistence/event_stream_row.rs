@@ -7,8 +7,8 @@ use flare_proto::common::{
     ConversationDeleteEvent, ConversationUpdateEvent, CustomEvent, Event,
     EventType as ProtoEventType, MarkEvent, Message, MessageDeleteEvent, MessageEditEvent,
     MessageRecallEvent, MessageRetentionExpiredEvent, MessageRetentionPurgedEvent,
-    MessageRetentionScheduledEvent, PinEvent, ReactionEvent, ReadReceiptEvent, UnmarkEvent,
-    UnpinEvent,
+    MessageRetentionScheduledEvent, PinEvent, PluginStateEvent, ReactionEvent, ReadReceiptEvent,
+    UnmarkEvent, UnpinEvent,
 };
 use flare_server_core::error::{ErrorCode, FlareError, map_infra_error};
 use prost::Message as ProstMessage;
@@ -115,6 +115,9 @@ fn decode_payload_oneof(
         ProtoEventType::EventCustom => {
             EventPayload::Custom(CustomEvent::decode(payload).map_err(decode_failure("Custom"))?)
         }
+        ProtoEventType::EventMessagePluginState => EventPayload::PluginState(
+            PluginStateEvent::decode(payload).map_err(decode_failure("PluginState"))?,
+        ),
         ProtoEventType::Unspecified => return Ok(None),
     };
     Ok(Some(p))

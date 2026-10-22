@@ -8,6 +8,7 @@
 //! - [MessageWriteLedgerRepository]：写入链路状态机（恢复、审计、管理查询）
 //! - [WalCleanupRepository]：WAL 清理（持久化后移除 WAL 条目）
 //! - [AckPublisher]：回执发布（ack 下发）
+//! - [PluginEntityBindingRepository]：插件卡片落库时登记实体绑定
 
 mod ack_publisher;
 mod archive_store_repository;
@@ -15,14 +16,16 @@ mod event_stream_repository;
 mod hot_cache_repository;
 mod message_idempotency_repository;
 mod message_write_ledger_repository;
+mod plugin_entity_binding_repository;
 mod wal_cleanup_repository;
 
 pub use ack_publisher::AckPublisher;
-pub use archive_store_repository::ArchiveStoreRepository;
+pub use archive_store_repository::{ArchiveStoreRepository, PluginStateWrite};
 pub use event_stream_repository::{EventStreamRepository, StoredEventMatch};
 pub use hot_cache_repository::HotCacheRepository;
 pub use message_idempotency_repository::{
     MessageIdempotencyRepository, scoped_client_idempotency_key,
 };
 pub use message_write_ledger_repository::{MessageWriteLedgerRepository, MessageWriteStage};
+pub use plugin_entity_binding_repository::PluginEntityBindingRepository;
 pub use wal_cleanup_repository::WalCleanupRepository;

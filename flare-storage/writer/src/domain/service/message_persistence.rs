@@ -22,7 +22,7 @@ use crate::domain::model::{Event, EventPayload, EventType, PersistenceResult, Pr
 use crate::domain::repository::{
     AckPublisher, ArchiveStoreRepository, EventStreamRepository, HotCacheRepository,
     MessageIdempotencyRepository, MessageWriteLedgerRepository, MessageWriteStage,
-    WalCleanupRepository,
+    PluginEntityBindingRepository, WalCleanupRepository,
 };
 
 /// 消息持久化领域服务
@@ -49,6 +49,8 @@ where
     metrics: Option<Arc<StorageWriterMetrics>>,
     /// 用量计数点（`messages.persisted`）：新消息提交后按租户计；去重命中的不计。
     usage: UsageRecorder,
+    /// 插件卡片的实体绑定登记（归档之后、确认之前）；没有时插件卡片不绑定实体。
+    plugin_entity_bindings: Option<Arc<dyn PluginEntityBindingRepository>>,
 }
 
 #[derive(Debug, Clone)]
@@ -95,6 +97,60 @@ where
             write_ledger_repo: None,
             metrics: None,
             usage: UsageRecorder::disabled(),
+            plugin_entity_bindings: None,
+        }
+    }
+
+    pub fn with_plugin_entity_bindings(
+        mut self,
+        plugin_entity_bindings: Option<Arc<dyn PluginEntityBindingRepository>>,
+    ) -> Self {
+        self.plugin_entity_bindings = plugin_entity_bindings;
+        self
+    }
+
+    /// 登记已归档消息里插件卡片的实体绑定。只是插件状态发布的前提，不影响消息本身：失败只记 WARN
+    /// 与计数（`storage_writer_persist_total{path="plugin_entity_binding",result="error"}`），消息照常确认；
+    /// 该实体此后的共享状态发布会因未绑定被拒绝（插件调用本身不受影响）。
+    async fn register_plugin_entity_bindings(
+        &self,
+        ctx: &Ctx,
+        messages: &[crate::domain::model::Message],
+    ) {
+        let Some(bindings) = &self.plugin_entity_bindings else {
+            return;
+        };
+        let mut by_tenant: std::collections::BTreeMap<String, Vec<crate::domain::model::Message>> =
+            Default::default();
+        for message in messages {
+            if let Ok(tenant_id) = prepared_tenant_id(message) {
+                by_tenant
+                    .entry(tenant_id)
+                    .or_default()
+                    .push(message.clone());
+            }
+        }
+        for (tenant_id, messages) in by_tenant {
+            match bindings.register(ctx, &tenant_id, &messages).await {
+                Ok(0) => {}
+                Ok(registered) => {
+                    tracing::debug!(tenant_id = %tenant_id, registered, "plugin entity bindings registered");
+                    if let Some(metrics) = &self.metrics {
+                        metrics.record_storage_persist("plugin_entity_binding", "ok");
+                    }
+                }
+                Err(error) => {
+                    if let Some(metrics) = &self.metrics {
+                        metrics.record_storage_persist("plugin_entity_binding", "error");
+                    }
+                    warn!(
+                        error = ?error,
+                        tenant_id = %tenant_id,
+                        batch_size = messages.len(),
+                        "plugin entity binding registration failed after durable message write"
+                    );
+                }
+            }
         }
     }
 
@@ -395,6 +451,8 @@ where
                 .map_err(|e| {
                     map_infra_error(e, ErrorCode::DatabaseError, "Failed to store archive")
                 })?;
+            self.register_plugin_entity_bindings(ctx, std::slice::from_ref(&prepared.message))
+                .await;
         }
         let repo = self.event_stream_repo.as_ref().ok_or_else(|| {
             flare_err!(
@@ -446,6 +504,7 @@ where
                 .map_err(|e| {
                     map_infra_error(e, ErrorCode::DatabaseError, "Failed to store archive batch")
                 })?;
+            self.register_plugin_entity_bindings(ctx, &messages).await;
         }
         let repo = self.event_stream_repo.as_ref().ok_or_else(|| {
             flare_err!(

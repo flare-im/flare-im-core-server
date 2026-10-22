@@ -23,6 +23,7 @@ pub enum EventType {
     MessageBurnScheduled = 16,
     MessageBurned = 17,
     MessageHardDeleted = 18,
+    PluginState = 19,
     Custom = 99,
 }
 

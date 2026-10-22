@@ -1,7 +1,8 @@
 use flare_proto::common::EventType;
 
 /// 默认必须参与离线/增量回放的事件类型（与 `flare-storage/im-sync-design.md` 的事件分级一致：影响最终状态、需参与 seq 补齐）。
-pub const DEFAULT_CRITICAL_EVENT_TYPES: [i32; 9] = [
+/// 插件卡片共享状态（`EVENT_MESSAGE_PLUGIN_STATE`）也在其中：离线回来后卡片要收敛到最新状态。
+pub const DEFAULT_CRITICAL_EVENT_TYPES: [i32; 10] = [
     EventType::EventMessageRecall as i32,
     EventType::EventMessageEdit as i32,
     EventType::EventMessageDelete as i32,
@@ -11,6 +12,7 @@ pub const DEFAULT_CRITICAL_EVENT_TYPES: [i32; 9] = [
     EventType::EventUnpin as i32,
     EventType::EventMark as i32,
     EventType::EventUnmark as i32,
+    EventType::EventMessagePluginState as i32,
 ];
 
 /// 若请求未指定 `event_types`，则补全为关键事件集合，避免客户端漏传导致状态不一致。

@@ -21,6 +21,8 @@ flare-grpc-proto = { workspace = true }
 flare-im-contracts = { workspace = true }
 flare-im-service-kit = { workspace = true }
 flare-im-usage = { workspace = true }
+# 插件卡片的实体绑定：读插件目录投影里 message-content 贡献的 entityPath。
+flare-im-capability-core = { workspace = true }
 redis = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

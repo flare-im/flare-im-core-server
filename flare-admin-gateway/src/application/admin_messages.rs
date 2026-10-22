@@ -676,6 +676,7 @@ fn event_type_kind(event_type: i32) -> String {
         Ok(ProtoEventType::EventMessageRetentionExpired) => "message_retention_expired",
         Ok(ProtoEventType::EventMessageRetentionPurged) => "message_retention_purged",
         Ok(ProtoEventType::EventCustom) => "custom",
+        Ok(ProtoEventType::EventMessagePluginState) => "message_plugin_state",
         Ok(ProtoEventType::Unspecified) | Err(_) => "unknown",
     }
     .to_string()
