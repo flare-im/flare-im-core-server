@@ -333,6 +333,105 @@ fn required_tenant(ctx: &flare_server_core::context::Context) -> Result<&str> {
         })
 }
 
+/// 受信内部调用（Service/System actor，如网关读扩散成员订阅 bootstrap）：成员读跳过"调用者须为成员"
+/// 的鉴权，仅按 tenant + conversation 范围读取；用户态调用仍要求 user_id 且必须是会话成员。
+fn is_internal_actor(ctx: &flare_server_core::context::Context) -> bool {
+    ctx.actor()
+        .map(|actor| {
+            matches!(
+                actor.actor_type,
+                flare_server_core::context::ActorType::Service
+                    | flare_server_core::context::ActorType::System
+            )
+        })
+        .unwrap_or(false)
+}
+
+/// 成员读的列：`list_conversation_participants` 与 `find_conversation_participants` 共用，
+/// 行由 [`participant_from_row`] 解出。
+const PARTICIPANT_COLUMNS: &str = r#"
+                user_id::text AS user_id,
+                COALESCE(roles, ARRAY[]::text[]) AS roles,
+                COALESCE(muted, false) AS muted,
+                COALESCE(pinned, false) AS pinned,
+                COALESCE(attributes, '{}'::jsonb) AS attributes,
+                joined_at,
+                COALESCE(nickname, '') AS nickname,
+                COALESCE(visible_from_seq, 0) AS visible_from_seq,
+                COALESCE(mention_only, false) AS mention_only"#;
+
+fn participant_from_row(row: &sqlx::postgres::PgRow) -> ConversationParticipant {
+    let mut attributes: HashMap<String, String> = row
+        .get::<serde_json::Value, _>("attributes")
+        .as_object()
+        .map(|obj| {
+            obj.iter()
+                .map(|(k, v)| {
+                    (
+                        k.clone(),
+                        v.as_str()
+                            .map(ToOwned::to_owned)
+                            .unwrap_or_else(|| v.to_string()),
+                    )
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let nickname: String = row.get("nickname");
+    if !nickname.trim().is_empty() {
+        attributes.insert("nickname".to_string(), nickname);
+    }
+    ConversationParticipant {
+        user_id: row.get("user_id"),
+        roles: row.get("roles"),
+        muted: row.get("muted"),
+        pinned: row.get("pinned"),
+        attributes,
+        visible_from_seq: row.get("visible_from_seq"),
+        mention_only: row.get("mention_only"),
+    }
+}
+
+impl PostgresConversationRepository {
+    /// 用户态成员读的前置条件：调用者自己是该会话的在席成员，否则按"会话不存在"拒绝。
+    async fn ensure_caller_participant(
+        &self,
+        ctx: &flare_server_core::context::Context,
+        tenant_id: &str,
+        conversation_id: &str,
+    ) -> Result<()> {
+        let user_id = require_user_id(ctx)?;
+        let membership_exists: Option<i64> = sqlx::query_scalar(
+            r#"
+            SELECT 1::BIGINT
+            FROM conversation_participants
+            WHERE tenant_id = $1
+              AND conversation_id = $2
+              AND user_id = $3
+              AND NOT COALESCE(is_deleted, false)
+              AND quit_at IS NULL
+            LIMIT 1
+            "#,
+        )
+        .bind(tenant_id)
+        .bind(conversation_id)
+        .bind(&user_id)
+        .fetch_optional(&*self.pool)
+        .await
+        .map_err(|e| {
+            map_infra_error(e, ErrorCode::DatabaseError, "check participant membership")
+        })?;
+        if membership_exists.is_none() {
+            return Err(flare_server_core::error::ErrorBuilder::new(
+                ErrorCode::MessageNotFound,
+                "conversation not found",
+            )
+            .build_error());
+        }
+        Ok(())
+    }
+}
+
 impl ConversationRepository for PostgresConversationRepository {
     async fn load_bootstrap(
         &self,
@@ -1456,18 +1555,7 @@ impl ConversationRepository for PostgresConversationRepository {
         skip_metadata: bool,
     ) -> Result<ConversationParticipantsPage> {
         let tenant_id = required_tenant(ctx)?;
-        // 受信内部调用（Service/System actor，如网关读扩散成员订阅 bootstrap）跳过"调用者须为成员"的鉴权，
-        // 仅按 tenant + conversation 范围读取成员；用户态调用仍要求 user_id 且必须是会话成员。
-        let is_internal = ctx
-            .actor()
-            .map(|actor| {
-                matches!(
-                    actor.actor_type,
-                    flare_server_core::context::ActorType::Service
-                        | flare_server_core::context::ActorType::System
-                )
-            })
-            .unwrap_or(false);
+        let is_internal = is_internal_actor(ctx);
         let conversation_id = conversation_id.trim();
         if conversation_id.is_empty() {
             return Err(flare_server_core::error::ErrorBuilder::new(
@@ -1480,34 +1568,8 @@ impl ConversationRepository for PostgresConversationRepository {
         let limit = clamp_participant_page_limit(limit);
 
         if !is_internal {
-            let user_id = require_user_id(ctx)?;
-            let membership_exists: Option<i64> = sqlx::query_scalar(
-                r#"
-                SELECT 1::BIGINT
-                FROM conversation_participants
-                WHERE tenant_id = $1
-                  AND conversation_id = $2
-                  AND user_id = $3
-                  AND NOT COALESCE(is_deleted, false)
-                  AND quit_at IS NULL
-                LIMIT 1
-                "#,
-            )
-            .bind(tenant_id)
-            .bind(conversation_id)
-            .bind(&user_id)
-            .fetch_optional(&*self.pool)
-            .await
-            .map_err(|e| {
-                map_infra_error(e, ErrorCode::DatabaseError, "check participant membership")
-            })?;
-            if membership_exists.is_none() {
-                return Err(flare_server_core::error::ErrorBuilder::new(
-                    ErrorCode::MessageNotFound,
-                    "conversation not found",
-                )
-                .build_error());
-            }
+            self.ensure_caller_participant(ctx, tenant_id, conversation_id)
+                .await?;
         }
 
         let active_filter = if include_removed {
@@ -1566,16 +1628,6 @@ impl ConversationRepository for PostgresConversationRepository {
         // 多取一行用来判断还有没有下一页，这样 has_more 不依赖 total
         // （total 现在可能是上一页带过来的旧值）。
         let fetch_limit = limit as i64 + 1;
-        const PARTICIPANT_COLUMNS: &str = r#"
-                user_id::text AS user_id,
-                COALESCE(roles, ARRAY[]::text[]) AS roles,
-                COALESCE(muted, false) AS muted,
-                COALESCE(pinned, false) AS pinned,
-                COALESCE(attributes, '{}'::jsonb) AS attributes,
-                joined_at,
-                COALESCE(nickname, '') AS nickname,
-                COALESCE(visible_from_seq, 0) AS visible_from_seq,
-                COALESCE(mention_only, false) AS mention_only"#;
 
         let mut rows = match &page_cursor.keyset {
             // keyset 分页：按 (joined_at, user_id) 的行值比较定位，每页恒为 O(limit)。
@@ -1644,40 +1696,7 @@ impl ConversationRepository for PostgresConversationRepository {
             None
         };
 
-        let participants = rows
-            .into_iter()
-            .map(|row| {
-                let mut attributes: HashMap<String, String> = row
-                    .get::<serde_json::Value, _>("attributes")
-                    .as_object()
-                    .map(|obj| {
-                        obj.iter()
-                            .map(|(k, v)| {
-                                (
-                                    k.clone(),
-                                    v.as_str()
-                                        .map(ToOwned::to_owned)
-                                        .unwrap_or_else(|| v.to_string()),
-                                )
-                            })
-                            .collect()
-                    })
-                    .unwrap_or_default();
-                let nickname: String = row.get("nickname");
-                if !nickname.trim().is_empty() {
-                    attributes.insert("nickname".to_string(), nickname.clone());
-                }
-                ConversationParticipant {
-                    user_id: row.get("user_id"),
-                    roles: row.get("roles"),
-                    muted: row.get("muted"),
-                    pinned: row.get("pinned"),
-                    attributes,
-                    visible_from_seq: row.get("visible_from_seq"),
-                    mention_only: row.get("mention_only"),
-                }
-            })
-            .collect::<Vec<_>>();
+        let participants = rows.iter().map(participant_from_row).collect::<Vec<_>>();
         Ok(ConversationParticipantsPage {
             conversation_id: conversation_id.to_string(),
             participants,
@@ -1686,6 +1705,51 @@ impl ConversationRepository for PostgresConversationRepository {
             participant_version: participant_version.max(0) as u64,
             member_count: total.max(0) as i32,
         })
+    }
+
+    async fn find_conversation_participants(
+        &self,
+        ctx: &flare_server_core::context::Context,
+        conversation_id: &str,
+        user_ids: &[String],
+    ) -> Result<Vec<ConversationParticipant>> {
+        let tenant_id = required_tenant(ctx)?;
+        let conversation_id = conversation_id.trim();
+        if conversation_id.is_empty() {
+            return Err(flare_server_core::error::ErrorBuilder::new(
+                ErrorCode::InvalidParameter,
+                "conversation_id is required",
+            )
+            .build_error());
+        }
+        if !is_internal_actor(ctx) {
+            self.ensure_caller_participant(ctx, tenant_id, conversation_id)
+                .await?;
+        }
+        if user_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        // 主键 (tenant_id, conversation_id, user_id) 上的 ANY 查找：O(ids)，与群规模无关。
+        let sql = format!(
+            r#"
+            SELECT {PARTICIPANT_COLUMNS}
+            FROM conversation_participants
+            WHERE tenant_id = $1
+              AND conversation_id = $2
+              AND user_id = ANY($3)
+              AND NOT COALESCE(is_deleted, false)
+              AND quit_at IS NULL
+            ORDER BY joined_at ASC, user_id ASC
+            "#
+        );
+        let rows = sqlx::query(&sql)
+            .bind(tenant_id)
+            .bind(conversation_id)
+            .bind(user_ids)
+            .fetch_all(&*self.pool)
+            .await
+            .map_err(|e| map_infra_error(e, ErrorCode::DatabaseError, "find participants"))?;
+        Ok(rows.iter().map(participant_from_row).collect())
     }
 
     async fn search_conversations(

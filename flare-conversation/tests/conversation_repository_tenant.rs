@@ -184,6 +184,11 @@ async fn every_repository_method_requires_a_context_tenant() {
                 .await,
         );
         assert_tenant_required(
+            "find_conversation_participants",
+            repo.find_conversation_participants(&ctx, CID, &["bob".to_string()])
+                .await,
+        );
+        assert_tenant_required(
             "search_conversations",
             repo.search_conversations(
                 &ctx,

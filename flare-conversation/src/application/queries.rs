@@ -47,6 +47,17 @@ pub struct ListConversationParticipantsQuery {
     pub skip_metadata: bool,
 }
 
+/// 一次查出会话里哪些 id 是在席成员（不分页）：插件资源桥的成员核对等按 id 判成员的读。
+#[derive(Debug, Clone)]
+pub struct FindConversationParticipantsQuery {
+    pub conversation_id: String,
+    /// `1..=MAX_PARTICIPANT_LOOKUP_IDS` 个互不相同的 user id。
+    pub user_ids: Vec<String>,
+}
+
+/// [`FindConversationParticipantsQuery::user_ids`] 的上限。
+pub const MAX_PARTICIPANT_LOOKUP_IDS: usize = 500;
+
 /// 同步消息查询
 #[derive(Debug, Clone)]
 pub struct SyncMessagesQuery {

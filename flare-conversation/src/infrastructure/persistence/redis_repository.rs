@@ -289,6 +289,15 @@ impl ConversationRepository for RedisConversationRepository {
         Err(redis_not_supported("list_conversation_participants"))
     }
 
+    async fn find_conversation_participants(
+        &self,
+        _ctx: &flare_server_core::context::Context,
+        _conversation_id: &str,
+        _user_ids: &[String],
+    ) -> Result<Vec<ConversationParticipant>> {
+        Err(redis_not_supported("find_conversation_participants"))
+    }
+
     async fn search_conversations(
         &self,
         _ctx: &flare_server_core::context::Context,

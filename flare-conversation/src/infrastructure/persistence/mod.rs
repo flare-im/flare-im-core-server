@@ -6,3 +6,6 @@ pub mod redis_repository;
 
 pub use postgres_admin_repository::PostgresConversationAdminRepository;
 pub use postgres_repository::PostgresConversationRepository;
+
+#[cfg(test)]
+mod participant_lookup_pg_tests;

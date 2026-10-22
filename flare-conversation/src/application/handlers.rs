@@ -388,6 +388,37 @@ impl ConversationQueryHandler {
             .await
     }
 
+    /// 处理按 id 查成员：id 须非空、互不相同、不超过
+    /// [`MAX_PARTICIPANT_LOOKUP_IDS`](crate::application::queries::MAX_PARTICIPANT_LOOKUP_IDS)。
+    pub async fn handle_find_conversation_participants(
+        &self,
+        ctx: &Context,
+        query: crate::application::queries::FindConversationParticipantsQuery,
+    ) -> Result<Vec<crate::domain::model::ConversationParticipant>> {
+        use crate::application::queries::MAX_PARTICIPANT_LOOKUP_IDS;
+        let conversation_id = query.conversation_id.trim();
+        let distinct = query
+            .user_ids
+            .iter()
+            .collect::<std::collections::BTreeSet<_>>()
+            .len();
+        if conversation_id.is_empty()
+            || query.user_ids.is_empty()
+            || query.user_ids.len() > MAX_PARTICIPANT_LOOKUP_IDS
+            || distinct != query.user_ids.len()
+            || query.user_ids.iter().any(|id| id.trim().is_empty())
+        {
+            return Err(ErrorBuilder::new(
+                ErrorCode::InvalidParameter,
+                "conversation_id and 1..=500 distinct user_ids are required",
+            )
+            .build_error());
+        }
+        self.domain_service
+            .find_conversation_participants(ctx, conversation_id, &query.user_ids)
+            .await
+    }
+
     /// 处理搜索会话查询
     pub async fn handle_search_conversations(
         &self,

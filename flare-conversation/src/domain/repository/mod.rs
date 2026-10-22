@@ -93,6 +93,16 @@ pub trait ConversationRepository: Send + Sync {
         include_removed: bool,
         skip_metadata: bool,
     ) -> Result<ConversationParticipantsPage>;
+
+    /// 会话里 `user_ids` 中仍在席的成员（未删除、未退出），一次查询、不分页，
+    /// 按 `(joined_at, user_id)` 排序；不在席的 id 不出现。调用方规则同
+    /// [`Self::list_conversation_participants`]：用户态调用者自己须是在席成员。
+    async fn find_conversation_participants(
+        &self,
+        ctx: &flare_server_core::context::Context,
+        conversation_id: &str,
+        user_ids: &[String],
+    ) -> Result<Vec<ConversationParticipant>>;
     async fn search_conversations(
         &self,
         ctx: &flare_server_core::context::Context,

@@ -832,6 +832,18 @@ impl<CR: ConversationRepository, PR: PresenceRepository, MP: MessageProvider>
             .await
     }
 
+    /// 会话里 `user_ids` 中在席的成员（一次主键查找，不分页）。
+    pub async fn find_conversation_participants(
+        &self,
+        ctx: &Context,
+        conversation_id: &str,
+        user_ids: &[String],
+    ) -> Result<Vec<ConversationParticipant>> {
+        self.conversation_repo
+            .find_conversation_participants(ctx, conversation_id, user_ids)
+            .await
+    }
+
     /// 标记会话为已读（业务逻辑）
     ///
     /// 更新用户的 last_read_msg_seq，并重新计算未读数

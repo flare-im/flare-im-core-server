@@ -11,9 +11,31 @@ use flare_server_core::utils::require_ctx_from_request;
 use tonic::{Request, Response, Status};
 
 use crate::application::queries::{
-    ConversationBootstrapQuery, GetConversationDetailQuery, ListConversationParticipantsQuery,
-    ListConversationsQuery,
+    ConversationBootstrapQuery, FindConversationParticipantsQuery, GetConversationDetailQuery,
+    ListConversationParticipantsQuery, ListConversationsQuery,
 };
+use crate::domain::model::ConversationParticipant;
+
+/// `ListConversationParticipantsRequest.ext` 的按 id 查成员键：逗号分隔的 user id（至多 500 个）。
+/// 带上它时这次读只返回其中在席的成员——一次主键查找，与群规模无关；游标、`limit`、
+/// `include_removed` 不参与，`has_more` 恒为 false，`member_count`/`participant_version` 为 0。
+/// 不认这个键的旧服务照常分页返回全部成员，调用方翻页核对仍得到同样的结果。
+pub const PARTICIPANT_LOOKUP_EXT_KEY: &str = "user_ids";
+
+fn participant_to_proto(
+    p: ConversationParticipant,
+) -> flare_proto::common::ConversationParticipant {
+    flare_proto::common::ConversationParticipant {
+        user_id: p.user_id,
+        roles: p.roles,
+        muted: p.muted,
+        pinned: p.pinned,
+        attributes: p.attributes,
+        joined_at: 0,
+        visible_from_seq: p.visible_from_seq,
+        mention_only: p.mention_only,
+    }
+}
 
 use super::ConversationGrpcHandler;
 use super::shared::{domain_to_conversation_detail, proto_device, proto_policy, proto_summary};
@@ -124,6 +146,24 @@ impl ConversationReadService for ConversationGrpcHandler {
     ) -> Result<Response<ListConversationParticipantsResponse>, Status> {
         let ctx = require_ctx_from_request(&request)?;
         let req = request.into_inner();
+        if let Some(ids) = req.ext.get(PARTICIPANT_LOOKUP_EXT_KEY) {
+            let participants = self
+                .query_handler
+                .handle_find_conversation_participants(
+                    &ctx,
+                    FindConversationParticipantsQuery {
+                        conversation_id: req.conversation_id.clone(),
+                        user_ids: ids.split(',').map(|id| id.trim().to_string()).collect(),
+                    },
+                )
+                .await
+                .into_grpc()?;
+            return Ok(Response::new(ListConversationParticipantsResponse {
+                conversation_id: req.conversation_id.trim().to_string(),
+                participants: participants.into_iter().map(participant_to_proto).collect(),
+                ..Default::default()
+            }));
+        }
         let page = self
             .query_handler
             .handle_list_conversation_participants(
@@ -153,16 +193,7 @@ impl ConversationReadService for ConversationGrpcHandler {
             participants: page
                 .participants
                 .into_iter()
-                .map(|p| flare_proto::common::ConversationParticipant {
-                    user_id: p.user_id,
-                    roles: p.roles,
-                    muted: p.muted,
-                    pinned: p.pinned,
-                    attributes: p.attributes,
-                    joined_at: 0,
-                    visible_from_seq: p.visible_from_seq,
-                    mention_only: p.mention_only,
-                })
+                .map(participant_to_proto)
                 .collect(),
             next_cursor: page.next_cursor.unwrap_or_default(),
             has_more: page.has_more,

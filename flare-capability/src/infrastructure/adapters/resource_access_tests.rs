@@ -13,6 +13,7 @@ use flare_grpc_proto::{
 use flare_proto::common::{ConversationDetail, ConversationParticipant};
 use flare_server_core::SignedContextVerifier;
 use serde_json::json;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use tonic::{Request, Response, Status};
 
@@ -21,6 +22,25 @@ struct OwnerFixture {
     member: AtomicBool,
     mismatch: AtomicBool,
     social_hits: AtomicUsize,
+    /// The conversation's active participants, in Conversation's page order.
+    roster: Vec<(String, String)>,
+    /// Conversation answers the `user_ids` lookup key; false is an older
+    /// Conversation that pages every participant whatever the key says.
+    lookup: AtomicBool,
+    participant_calls: Mutex<Vec<ListConversationParticipantsRequest>>,
+}
+/// `u1` (the caller, owner), `u2`, `u3`, then 1 200 members with 128-byte ids.
+fn roster() -> Vec<(String, String)> {
+    let mut roster = vec![
+        ("u1".to_string(), "owner".to_string()),
+        ("u2".to_string(), "member".to_string()),
+        ("u3".to_string(), "member".to_string()),
+    ];
+    roster.extend((0..1200).map(|i| (long_id(i), "member".to_string())));
+    roster
+}
+fn long_id(i: usize) -> String {
+    format!("m{i:0>127}")
 }
 impl OwnerFixture {
     fn actor<T>(&self, request: &Request<T>) {
@@ -95,17 +115,50 @@ impl conversation_read_service_server::ConversationReadService for OwnerFixture 
         self.actor(&request);
         let body = request.into_inner();
         assert_eq!(body.conversation_id, "conversation-1");
-        assert_eq!(body.limit, 1);
         assert!(!body.include_removed);
-        assert!(body.ext.is_empty());
+        assert_eq!(
+            body.ext.get("skip_meta").map(String::as_str),
+            Some("1"),
+            "plugin reads never need totals"
+        );
+        self.participant_calls.lock().unwrap().push(body.clone());
+        let view = |(id, role): &(String, String)| ConversationParticipant {
+            user_id: id.clone(),
+            roles: vec![role.clone()],
+            attributes: [("secret".into(), "hidden".into())].into(),
+            ..Default::default()
+        };
+        if self.lookup.load(Ordering::SeqCst)
+            && let Some(ids) = body.ext.get("user_ids")
+        {
+            let ids: Vec<&str> = ids.split(',').collect();
+            return Ok(Response::new(ListConversationParticipantsResponse {
+                conversation_id: "conversation-1".into(),
+                participants: self
+                    .roster
+                    .iter()
+                    .filter(|(id, _)| ids.contains(&id.as_str()))
+                    .map(view)
+                    .collect(),
+                ..Default::default()
+            }));
+        }
+        // Conversation's paging: a number is an offset, `k:<n>` its own keyset cursor.
+        let start: usize = match body.cursor.as_str() {
+            "" => 0,
+            cursor => cursor.strip_prefix("k:").unwrap_or(cursor).parse().unwrap(),
+        };
+        let end = (start + body.limit as usize).min(self.roster.len());
+        let has_more = end < self.roster.len();
         Ok(Response::new(ListConversationParticipantsResponse {
             conversation_id: "conversation-1".into(),
-            participants: vec![ConversationParticipant {
-                user_id: "u2".into(),
-                roles: vec!["member".into()],
-                attributes: [("secret".into(), "hidden".into())].into(),
-                ..Default::default()
-            }],
+            participants: self.roster[start..end].iter().map(view).collect(),
+            next_cursor: if has_more {
+                format!("k:{end}")
+            } else {
+                String::new()
+            },
+            has_more,
             ..Default::default()
         }))
     }
@@ -146,8 +199,23 @@ impl PluginResourceBackend for OwnerFixture {
         }))
     }
 }
-#[tokio::test]
-async fn resource_wire_uses_user_context_derived_group_and_whitelisted_views() {
+struct Harness {
+    owner: Arc<OwnerFixture>,
+    adapter: GrpcResourceAccess,
+    actor: ResourceActor,
+    stop: tokio::sync::oneshot::Sender<()>,
+    server: tokio::task::JoinHandle<std::result::Result<(), tonic::transport::Error>>,
+}
+impl Harness {
+    async fn finish(self) {
+        self.stop.send(()).unwrap();
+        self.server.await.unwrap().unwrap();
+    }
+    fn participant_calls(&self) -> Vec<ListConversationParticipantsRequest> {
+        std::mem::take(&mut *self.owner.participant_calls.lock().unwrap())
+    }
+}
+async fn harness() -> Harness {
     let key = SigningKey::from_bytes(&[59; 32]);
     let signer =
         SignedContextSigner::from_private_key(&key.to_pkcs8_pem(Default::default()).unwrap())
@@ -162,6 +230,9 @@ async fn resource_wire_uses_user_context_derived_group_and_whitelisted_views() {
         member: AtomicBool::new(true),
         mismatch: AtomicBool::new(false),
         social_hits: AtomicUsize::new(0),
+        roster: roster(),
+        lookup: AtomicBool::new(true),
+        participant_calls: Mutex::new(Vec::new()),
     });
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let authority = format!("http://{}", listener.local_addr().unwrap());
@@ -192,8 +263,20 @@ async fn resource_wire_uses_user_context_derived_group_and_whitelisted_views() {
         conversation_id: "conversation-1".into(),
         request_id: "request-1".into(),
     };
+    Harness {
+        owner,
+        adapter,
+        actor,
+        stop,
+        server,
+    }
+}
+#[tokio::test]
+async fn resource_wire_uses_user_context_derived_group_and_whitelisted_views() {
+    let harness = harness().await;
+    let (owner, adapter, actor) = (&harness.owner, &harness.adapter, &harness.actor);
     let detail = adapter
-        .read(&actor, &ResourceRequest::ConversationRead {})
+        .read(actor, &ResourceRequest::ConversationRead {})
         .await
         .unwrap();
     assert_eq!(
@@ -202,7 +285,7 @@ async fn resource_wire_uses_user_context_derived_group_and_whitelisted_views() {
     );
     let participants = adapter
         .read(
-            &actor,
+            actor,
             &ResourceRequest::ConversationParticipantsRead {
                 cursor: "".into(),
                 limit: 1,
@@ -212,17 +295,17 @@ async fn resource_wire_uses_user_context_derived_group_and_whitelisted_views() {
         .unwrap();
     assert_eq!(
         participants["participants"],
-        json!([{"userId":"u2","roles":["member"]}])
+        json!([{"userId":"u1","roles":["owner"]}])
     );
     assert!(!participants.to_string().contains("hidden"));
     let request = ResourceRequest::SocialGroupMemberRead {
         user_id: "u2".into(),
     };
-    let member = adapter.read(&actor, &request).await.unwrap();
+    let member = adapter.read(actor, &request).await.unwrap();
     assert_eq!(member["groupId"], "group-derived-from-im");
     assert_eq!(owner.social_hits.load(Ordering::SeqCst), 1);
     owner.member.store(false, Ordering::SeqCst);
-    assert!(adapter.read(&actor, &request).await.is_err());
+    assert!(adapter.read(actor, &request).await.is_err());
     assert_eq!(
         owner.social_hits.load(Ordering::SeqCst),
         1,
@@ -230,12 +313,188 @@ async fn resource_wire_uses_user_context_derived_group_and_whitelisted_views() {
     );
     owner.member.store(true, Ordering::SeqCst);
     owner.mismatch.store(true, Ordering::SeqCst);
-    assert!(adapter.read(&actor, &request).await.is_err());
+    assert!(adapter.read(actor, &request).await.is_err());
     assert_eq!(
         owner.social_hits.load(Ordering::SeqCst),
         1,
         "mismatched IM identity denied before Social"
     );
-    stop.send(()).unwrap();
-    server.await.unwrap().unwrap();
+    harness.finish().await;
+}
+
+fn page(value: &Value) -> ParticipantPage {
+    serde_json::from_value(value.clone()).unwrap()
+}
+async fn participants(harness: &Harness, cursor: &str, limit: u32) -> Result<Value> {
+    let request = ResourceRequest::ConversationParticipantsRead {
+        cursor: cursor.into(),
+        limit,
+    };
+    request.validate().expect("a request the bridge accepts");
+    harness.adapter.read(&harness.actor, &request).await
+}
+
+/// Pages of up to 500 fit the plugin response bound, and the cursor a plugin
+/// gets back is the decimal offset the protocol accepts, never Conversation's
+/// keyset cursor.
+#[tokio::test]
+async fn participant_pages_take_500_and_hand_out_offset_cursors() {
+    let harness = harness().await;
+    let first = participants(&harness, "", MAX_PARTICIPANTS_PAGE)
+        .await
+        .unwrap();
+    assert!(serde_json::to_vec(&first).unwrap().len() <= MAX_RESOURCE_BYTES);
+    let first = page(&first);
+    assert_eq!(first.participants.len(), 500);
+    assert_eq!(first.participants[0].user_id, "u1");
+    assert!(first.has_more);
+    assert_eq!(first.next_cursor, "500");
+    let calls = harness.participant_calls();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].cursor, "", "the first page sends no cursor");
+    assert_eq!(calls[0].limit, 500);
+    assert!(!calls[0].ext.contains_key("user_ids"));
+
+    let mut seen: Vec<String> = first
+        .participants
+        .iter()
+        .map(|p| p.user_id.clone())
+        .collect();
+    let mut cursor = first.next_cursor;
+    while !cursor.is_empty() {
+        let next = page(&participants(&harness, &cursor, 500).await.unwrap());
+        assert_eq!(
+            harness.participant_calls()[0].cursor,
+            cursor,
+            "an offset reaches Conversation as is"
+        );
+        seen.extend(next.participants.iter().map(|p| p.user_id.clone()));
+        assert_eq!(next.has_more, !next.next_cursor.is_empty());
+        cursor = next.next_cursor;
+    }
+    assert_eq!(
+        seen,
+        harness
+            .owner
+            .roster
+            .iter()
+            .map(|(id, _)| id.clone())
+            .collect::<Vec<_>>(),
+        "every participant once, in order"
+    );
+
+    let small = page(&participants(&harness, "1", 2).await.unwrap());
+    assert_eq!(
+        small
+            .participants
+            .iter()
+            .map(|p| p.user_id.as_str())
+            .collect::<Vec<_>>(),
+        ["u2", "u3"]
+    );
+    assert_eq!(small.next_cursor, "3");
+    let last = page(&participants(&harness, "1202", 500).await.unwrap());
+    assert_eq!(last.participants.len(), 1);
+    assert!(!last.has_more);
+    assert_eq!(last.next_cursor, "");
+    harness.participant_calls();
+    assert!(
+        participants(&harness, &"9".repeat(40), 1).await.is_err(),
+        "an offset past u64 is refused, not read as the first page"
+    );
+    assert!(harness.participant_calls().is_empty());
+    harness.finish().await;
+}
+
+fn members_check(user_ids: &[&str]) -> ResourceRequest {
+    let request = ResourceRequest::ConversationMembersCheck {
+        user_ids: user_ids.iter().map(|id| id.to_string()).collect(),
+    };
+    request.validate().expect("a request the bridge accepts");
+    request
+}
+async fn check(harness: &Harness, user_ids: &[&str]) -> MembersCheckView {
+    let request = members_check(user_ids);
+    let answer: MembersCheckView = serde_json::from_value(
+        harness
+            .adapter
+            .read(&harness.actor, &request)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    let ResourceRequest::ConversationMembersCheck { user_ids } = &request else {
+        unreachable!()
+    };
+    answer
+        .validate_for(user_ids)
+        .expect("the answer a plugin checks with validate_for");
+    answer
+}
+
+/// The members check answers in request order from one lookup of the ids,
+/// whatever the size of the conversation.
+#[tokio::test]
+async fn members_check_partitions_the_ids_with_one_lookup() {
+    let harness = harness().await;
+    let far = long_id(1100);
+    let answer = check(&harness, &["ghost", "u2", &far, "u1", "left-user"]).await;
+    assert_eq!(answer.members, ["u2", far.as_str(), "u1"]);
+    assert_eq!(answer.non_members, ["ghost", "left-user"]);
+    assert_eq!(
+        serde_json::to_value(&answer).unwrap(),
+        json!({"members": ["u2", far, "u1"], "nonMembers": ["ghost", "left-user"]})
+    );
+    let calls = harness.participant_calls();
+    assert_eq!(calls.len(), 1, "one lookup, no paging");
+    assert_eq!(
+        calls[0].ext.get("user_ids").map(String::as_str),
+        Some(format!("ghost,u2,{far},u1,left-user").as_str())
+    );
+    assert_eq!(calls[0].cursor, "");
+
+    let none = check(&harness, &["ghost"]).await;
+    assert!(none.members.is_empty());
+    assert_eq!(none.non_members, ["ghost"]);
+
+    // A removed caller is refused by the conversation detail before any lookup.
+    harness.participant_calls();
+    harness.owner.member.store(false, Ordering::SeqCst);
+    assert!(
+        harness
+            .adapter
+            .read(&harness.actor, &members_check(&["u2"]))
+            .await
+            .is_err()
+    );
+    assert!(harness.participant_calls().is_empty());
+    harness.finish().await;
+}
+
+/// An older Conversation ignores the lookup key and pages every participant:
+/// the check walks the pages until each id is found or the list ends, and
+/// gives the same answer.
+#[tokio::test]
+async fn members_check_walks_pages_when_conversation_ignores_the_lookup() {
+    let harness = harness().await;
+    harness.owner.lookup.store(false, Ordering::SeqCst);
+    let far = long_id(1100);
+    let answer = check(&harness, &["ghost", "u2", &far, "u1"]).await;
+    assert_eq!(answer.members, ["u2", far.as_str(), "u1"]);
+    assert_eq!(answer.non_members, ["ghost"]);
+    let calls = harness.participant_calls();
+    assert_eq!(
+        calls.iter().map(|c| c.cursor.as_str()).collect::<Vec<_>>(),
+        ["", "k:500", "k:1000"],
+        "a missing id reads to the end, through Conversation's own cursors"
+    );
+
+    let found = check(&harness, &["u3", "u1"]).await;
+    assert_eq!(found.members, ["u3", "u1"]);
+    assert_eq!(
+        harness.participant_calls().len(),
+        1,
+        "stops once every id is found"
+    );
+    harness.finish().await;
 }
