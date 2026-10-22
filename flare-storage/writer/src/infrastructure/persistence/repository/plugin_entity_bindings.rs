@@ -259,7 +259,7 @@ impl PluginEntityBindingRepository for PostgresPluginEntityBindings {
 }
 
 #[cfg(test)]
-pub(crate) mod tests {
+mod tests {
     use super::*;
     use flare_im_capability_core::plugin::authorization::TenantPluginGrant;
     use flare_im_capability_core::plugin::runtime::{
