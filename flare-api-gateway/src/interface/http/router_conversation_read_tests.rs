@@ -45,7 +45,14 @@ impl TokenValidator for Validator {
             "alice-a" => ("alice", "tenant-a"),
             // 旧令牌的租户写法：签名与元数据都用规范化后的 "0"。
             "carol-default" => ("carol", "default"),
+            // 带网关管理权限的后台令牌。
+            "ops-a" => ("ops", "tenant-a"),
             _ => return Err(AuthError::InvalidToken("unknown test token".into())),
+        };
+        let scopes = if user == "ops" {
+            vec!["gateway:admin".to_string()]
+        } else {
+            vec![]
         };
         Ok(AuthenticatedPrincipal {
             user_id: user.into(),
@@ -53,7 +60,7 @@ impl TokenValidator for Validator {
             device_id: None,
             app_id: None,
             expires_at: None,
-            scopes: vec![],
+            scopes,
             metadata: Default::default(),
         })
     }
@@ -310,5 +317,53 @@ async fn without_a_signer_a_signing_conversation_service_refuses() {
     let (status, body) = get(&router, "/api/v1/conversations", "alice-a", &[]).await;
     assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{body}");
     assert_eq!(body["reason"], json!("CONVERSATION_LIST_FAILED"), "{body}");
+    assert!(seen.lock().unwrap().is_empty());
+}
+
+/// 成员管理只给带网关管理权限的令牌：终端用户令牌在网关就回 403，请求不到会话服务（这里的
+/// 会话管理通道连不上，放行的请求回 503）；管理令牌放行到下游。
+#[tokio::test]
+async fn participant_management_refuses_end_user_tokens() {
+    let (signer, verifier) = cell_keys(51);
+    let (router, seen) = router(Some(signer), verifier).await;
+    let manage = |token: &'static str| {
+        let router = router.clone();
+        async move {
+            let request = Request::builder()
+                .method("POST")
+                .uri("/api/v1/conversations/participants/manage")
+                .header("authorization", format!("Bearer {token}"))
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "conversation_id": "conv-1",
+                        "to_add": [{"user_id": "alice", "roles": ["owner"]}],
+                        "to_remove": ["bob"],
+                    })
+                    .to_string(),
+                ))
+                .unwrap();
+            let response = router.oneshot(request).await.unwrap();
+            let status = response.status();
+            let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+            (
+                status,
+                serde_json::from_slice::<Value>(&body).unwrap_or(Value::Null),
+            )
+        }
+    };
+
+    for token in ["alice-a", "carol-default"] {
+        let (status, body) = manage(token).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+        assert_eq!(
+            body["reason"],
+            json!("PARTICIPANT_MANAGEMENT_DENIED"),
+            "{body}"
+        );
+    }
+    let (status, body) = manage("ops-a").await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+    assert_eq!(body["reason"], json!("SERVICE_UNAVAILABLE"), "{body}");
     assert!(seen.lock().unwrap().is_empty());
 }

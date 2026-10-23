@@ -170,15 +170,16 @@ impl MessageEventServiceClientWrapper {
         Ok(())
     }
 
-    /// 执行操作事件（透传网关上下文）
+    /// 执行操作事件：带网关为已验证用户签的上下文（`signed`），Orchestrator 以签名为准。
     pub async fn execute_event_with_ctx(
         &mut self,
         ctx: &Ctx,
+        signed: &str,
         request: ExecuteEventRequest,
     ) -> Result<()> {
-        self.client
-            .execute_event(Self::request_with_ctx(ctx, request))
-            .await?;
+        let mut request = Self::request_with_ctx(ctx, request);
+        flare_server_core::set_signed_context_token(&mut request, signed)?;
+        self.client.execute_event(request).await?;
         Ok(())
     }
 }
@@ -209,16 +210,16 @@ impl MessageActionServiceClientWrapper {
         Ok(response.into_inner())
     }
 
-    /// 撤回消息（透传网关上下文）
+    /// 撤回消息：带网关为已验证用户签的上下文（`signed`），Orchestrator 以签名为准。
     pub async fn recall_message_with_ctx(
         &mut self,
         ctx: &Ctx,
+        signed: &str,
         request: RecallMessageRequest,
     ) -> Result<RecallMessageResponse> {
-        let response = self
-            .client
-            .recall_message(Self::request_with_ctx(ctx, request))
-            .await?;
+        let mut request = Self::request_with_ctx(ctx, request);
+        flare_server_core::set_signed_context_token(&mut request, signed)?;
+        let response = self.client.recall_message(request).await?;
         Ok(response.into_inner())
     }
 }

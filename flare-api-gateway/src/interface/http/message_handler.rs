@@ -21,7 +21,7 @@ use flare_proto::common::{
 use flare_server_core::{
     AuthenticatedPrincipal,
     auth::{SignedActorType, SignedContextIdentity, SignedContextSigner},
-    context::Ctx,
+    context::{ActorContext, ActorType, Context, Ctx},
     http::{ApiResponse, ContextFromHeaders, HttpApiError as GatewayError, Result},
 };
 
@@ -302,6 +302,61 @@ fn send_failure(err: FlareError) -> GatewayError {
     GatewayError(error)
 }
 
+/// 消息操作（撤回、自定义事件）的身份：只取令牌验出的用户与规范化的租户，请求头里的身份字段
+/// 一概不用；转发时带网关签的 User 上下文（与 HTTP 发送相同），Orchestrator 以签名为准。
+/// 网关没配签名私钥时拒绝，不退回未签名的元数据。
+fn signed_message_operator(
+    headers: &HeaderMap,
+    principal: &AuthenticatedPrincipal,
+    signer: &MessageContextSigner,
+) -> Result<(Ctx, String)> {
+    let user_id = principal.user_id.trim();
+    let tenant_id = principal
+        .tenant_id
+        .as_deref()
+        .map(flare_im_contracts::utils::normalize_tenant_id)
+        .ok_or_else(|| {
+            GatewayError::bad_request("TENANT_REQUIRED", "authenticated tenant required")
+        })?;
+    if user_id.is_empty()
+        || principal.has_gateway_admin_scope()
+        || !flare_im_contracts::domain::tenant::is_valid_tenant_id(&tenant_id)
+    {
+        return Err(GatewayError::bad_request(
+            "USER_REQUIRED",
+            "authenticated user and tenant required",
+        ));
+    }
+    let signer = signer.0.as_ref().ok_or_else(|| {
+        GatewayError::internal(
+            "MESSAGE_SIGNER_UNAVAILABLE",
+            "internal identity signer not configured",
+        )
+    })?;
+    let from_headers = Ctx::from_headers(headers);
+    let mut ctx = Context::with_request_id(from_headers.request_id())
+        .with_tenant_id(&tenant_id)
+        .with_user_id(user_id)
+        .with_actor(ActorContext::new(user_id).with_type(ActorType::User));
+    if !from_headers.trace_id().is_empty() {
+        ctx = ctx.with_trace_id(from_headers.trace_id());
+    }
+    let token = signer
+        .sign(
+            &SignedContextIdentity::new(
+                SignedActorType::User,
+                user_id,
+                &tenant_id,
+                ctx.request_id(),
+            )
+            .with_credential_id("api-gateway"),
+        )
+        .map_err(|_| {
+            GatewayError::internal("MESSAGE_SIGNING_FAILED", "internal identity signing failed")
+        })?;
+    Ok((Arc::new(ctx), token))
+}
+
 /// 执行业务自定义事件
 #[utoipa::path(
     post,
@@ -314,15 +369,15 @@ fn send_failure(err: FlareError) -> GatewayError {
         (status = 503, description = "下游不可用或超过请求超时（reason=SERVICE_UNAVAILABLE），可退避重试"),
     ),
 )]
-#[instrument(skip(headers, clients))]
+#[instrument(skip(headers, clients, principal, signer))]
 pub async fn execute_custom_event(
     headers: HeaderMap,
     Extension(clients): Extension<Arc<GrpcClients>>,
+    Extension(principal): Extension<AuthenticatedPrincipal>,
+    Extension(signer): Extension<MessageContextSigner>,
     Json(req): Json<ExecuteCustomEventHttpRequest>,
 ) -> Result<Json<ApiResponse<ExecuteCustomEventHttpResponse>>> {
-    let ctx = Ctx::from_headers(&headers);
-    ctx.require_user_id()
-        .map_err(|e| GatewayError::bad_request("USER_REQUIRED", e))?;
+    let (ctx, token) = signed_message_operator(&headers, &principal, &signer)?;
 
     let (event_id, grpc_req) = build_execute_custom_event_request(&ctx, req)?;
     debug!(
@@ -334,7 +389,9 @@ pub async fn execute_custom_event(
     clients
         .bounded(async {
             let mut event_client = clients.message_event.lock().await;
-            event_client.execute_event_with_ctx(&ctx, grpc_req).await
+            event_client
+                .execute_event_with_ctx(&ctx, &token, grpc_req)
+                .await
         })
         .await
         .map_err(|err| downstream_failure("MESSAGE_EVENT_EXECUTE_FAILED", err))?;
@@ -357,13 +414,15 @@ pub async fn execute_custom_event(
         (status = 503, description = "下游不可用或超过请求超时（reason=SERVICE_UNAVAILABLE），可退避重试"),
     ),
 )]
-#[instrument(skip(headers, clients))]
+#[instrument(skip(headers, clients, principal, signer))]
 pub async fn recall_message(
     headers: HeaderMap,
     Extension(clients): Extension<Arc<GrpcClients>>,
+    Extension(principal): Extension<AuthenticatedPrincipal>,
+    Extension(signer): Extension<MessageContextSigner>,
     Json(req): Json<RecallMessageHttpRequest>,
 ) -> Result<Json<ApiResponse<RecallMessageHttpResponse>>> {
-    let ctx = Ctx::from_headers(&headers);
+    let (ctx, token) = signed_message_operator(&headers, &principal, &signer)?;
     debug!(
         trace_id = %ctx.trace_id(),
         conversation_id = %req.conversation_id,
@@ -380,7 +439,9 @@ pub async fn recall_message(
     let grpc_res = clients
         .bounded(async {
             let mut action_client = clients.message_action.lock().await;
-            action_client.recall_message_with_ctx(&ctx, grpc_req).await
+            action_client
+                .recall_message_with_ctx(&ctx, &token, grpc_req)
+                .await
         })
         .await
         .map_err(|err| downstream_failure("MESSAGE_RECALL_FAILED", err))?;

@@ -434,6 +434,10 @@ mod downstream_timeout_tests;
 mod read_receipt_tests;
 
 #[cfg(test)]
+#[path = "router_message_operation_tests.rs"]
+mod message_operation_tests;
+
+#[cfg(test)]
 mod api_docs_tests {
     use super::*;
     use axum::body::{Body, to_bytes};

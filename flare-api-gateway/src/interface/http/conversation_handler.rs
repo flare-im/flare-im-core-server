@@ -352,15 +352,29 @@ pub async fn list_conversation_participants(
     request_body = ManageParticipantsHttpRequest,
     responses(
         (status = 200, description = "成功", body = ApiResponse<ManageParticipantsHttpResponse>),
+        (status = 403, description = "令牌没有网关管理权限（reason=PARTICIPANT_MANAGEMENT_DENIED）：终端用户令牌不能管理成员"),
         (status = 503, description = "下游不可用或超过请求超时（reason=SERVICE_UNAVAILABLE），可退避重试"),
     ),
 )]
-#[instrument(skip(headers, clients))]
+#[instrument(skip(headers, clients, principal))]
 pub async fn manage_participants(
     headers: HeaderMap,
     Extension(clients): Extension<Arc<GrpcClients>>,
+    Extension(principal): Extension<AuthenticatedPrincipal>,
     Json(req): Json<ManageParticipantsHttpRequest>,
 ) -> Result<Json<ApiResponse<ManageParticipantsHttpResponse>>> {
+    // 会话服务的成员管理不核对操作者（加人、移人、改角色都照单执行），它是给后台与业务服务
+    // 用的。终端用户令牌在这里就拒绝，否则任何用户都能把自己加进本租户的任意会话。
+    if !principal.has_gateway_admin_scope() {
+        return Err(GatewayError(
+            flare_server_core::error::ErrorBuilder::new(
+                flare_server_core::error::ErrorCode::HttpForbidden,
+                "PARTICIPANT_MANAGEMENT_DENIED",
+            )
+            .details("participant management requires a gateway admin token")
+            .build_error(),
+        ));
+    }
     let ctx = Ctx::from_headers(&headers);
     let grpc_req = ManageParticipantsRequest {
         conversation_id: req.conversation_id,

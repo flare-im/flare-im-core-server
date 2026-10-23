@@ -37,12 +37,12 @@
 | 路由 | 方法 | 说明 | 认证 |
 |------|------|------|------|
 | `/api/v1/messages/send` | POST | HTTP 发消息，内部转 `SendMessage` | 必须 |
-| `/api/v1/messages/recall` | POST | 撤回消息 | 必须 |
+| `/api/v1/messages/recall` | POST | 撤回消息；身份只取令牌，转 Orchestrator 时带网关签的用户上下文（`/api/v1/messages/events/custom` 相同） | 必须 |
 | `/api/v1/messages/read-summaries` | POST | 群聊里自己发送的一批消息（≤50）的已读摘要，转会话服务 `MessageReadReceiptService` | 必须 |
 | `/api/v1/messages/readers` | GET | 群聊里自己发送的一条消息的已读 / 未读成员，按 cursor 分页；不是自己发的消息与不存在的消息同样回 404 | 必须 |
 | `/api/v1/conversations` | GET | 会话列表/摘要 | 必须 |
 | `/api/v1/conversations/participants` | GET | 分页读取会话成员；`muted`、`pinned`、`mention_only` 只在调用者本人那一行有值，其余成员恒为 false | 必须 |
-| `/api/v1/conversations/participants/manage` | POST | 管理会话参与者，供后台/业务 bridge 使用 | 管理权限 |
+| `/api/v1/conversations/participants/manage` | POST | 管理会话参与者，供后台/业务 bridge 使用；已有成员只更新角色、属性与历史下限，`muted`、`pinned` 只在新加入的成员上生效 | 管理权限：令牌须带网关管理 scope，终端用户令牌回 403 `PARTICIPANT_MANAGEMENT_DENIED` |
 | `/api/v1/medias/*` | GET/POST/DELETE | 媒体能力 | 除公开下载外必须 |
 | `/api/v1/devices/{device_id}/push-token` | PUT/DELETE | 登记/注销本用户设备的推送令牌，转 Push Proxy | 必须（租户绑定的终端用户令牌） |
 | `/api/v1/capabilities/*` | GET/POST | 能力管理面，后续补齐 | 管理权限 |

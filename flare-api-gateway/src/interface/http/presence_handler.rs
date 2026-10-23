@@ -309,10 +309,8 @@ pub async fn get_device(
 ) -> Result<Json<ApiResponse<DevicePresenceHttp>>> {
     let ctx = Ctx::from_headers(&headers);
     let token = signed_online_user(&principal, &signer)?;
-    let user_id = ctx
-        .require_user_id()
-        .map_err(|e| GatewayError::bad_request("USER_REQUIRED", e))?
-        .to_string();
+    // 与签名同一身份：只取令牌验出的用户。
+    let user_id = principal.user_id.trim().to_string();
     let did = device_id.trim();
     if did.is_empty() {
         return Err(GatewayError::bad_request(
@@ -424,10 +422,8 @@ pub async fn logout_presence(
 ) -> Result<Json<ApiResponse<LogoutPresenceHttpResponse>>> {
     let ctx = Ctx::from_headers(&headers);
     let token = signed_online_user(&principal, &signer)?;
-    let user_id = ctx
-        .require_user_id()
-        .map_err(|e| GatewayError::bad_request("USER_REQUIRED", e))?
-        .to_string();
+    // 与签名同一身份：只取令牌验出的用户。
+    let user_id = principal.user_id.trim().to_string();
     let conversation_id = req.conversation_id.trim();
     if conversation_id.is_empty() {
         return Err(GatewayError::bad_request(
@@ -481,10 +477,8 @@ pub async fn kick_device(
 ) -> Result<Json<ApiResponse<KickDeviceHttpResponse>>> {
     let ctx = Ctx::from_headers(&headers);
     let token = signed_online_user(&principal, &signer)?;
-    let user_id = ctx
-        .require_user_id()
-        .map_err(|e| GatewayError::bad_request("USER_REQUIRED", e))?
-        .to_string();
+    // 与签名同一身份：只取令牌验出的用户。
+    let user_id = principal.user_id.trim().to_string();
     let did = device_id.trim();
     if did.is_empty() {
         return Err(GatewayError::bad_request(
