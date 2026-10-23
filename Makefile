@@ -65,6 +65,11 @@ test: test-opensource-runner
 test-opensource-runner:
 	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest scripts/test_smoke_opensource_container.py scripts/lib/test_timeout_process.py
 
+# The development launcher gives each key only to the processes release/supervise-core.toml does.
+.PHONY: test-launcher-keys
+test-launcher-keys:
+	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest scripts/test_start_server_keys.py
+
 .PHONY: db-migrate check-schema dev-reset test-migrations
 .PHONY: test-credential-projection
 test-credential-projection:

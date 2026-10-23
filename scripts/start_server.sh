@@ -251,6 +251,39 @@ load_platform_public_key() {
     export -n CORE_USAGE_NATS_URL CORE_USAGE_WINDOW_SECS
 }
 
+# Capability's own context key (kid=capability) and its plugin endpoints and keys: only
+# Capability reads them, and release/supervise-core.toml gives them to capability alone. They
+# leave the inherited environment here and go to the capability process only, so no other
+# Core process holds the key that posts plugin cards and publishes plugin shared state.
+CAPABILITY_ONLY_ENV=(
+    FLARE_CAPABILITY_CTX_PRIVATE_KEY
+    FLARE_PLUGIN_CARD_INGEST_URL
+    FLARE_PLUGIN_STATE_EVENT_URL
+    FLARE_PLUGIN_RESOURCE_CONVERSATION_URL
+    FLARE_PLUGIN_RESOURCE_SOCIAL_GROUP_URL
+    FLARE_PLUGIN_CALL_KEY_ID
+    FLARE_PLUGIN_CALL_SIGNING_KEY
+    FLARE_PLUGIN_CALL_PUBLIC_KEYS
+    FLARE_PLUGIN_RUNTIME_PUBLIC_KEYS
+)
+load_capability_env() {
+    CORE_CAPABILITY_ENV=()
+    # The plugin resource bridge and the card route read sign as this Cell: Capability then
+    # needs the Cell private key as well.
+    CORE_CAPABILITY_SIGNS_READS=""
+    local name value
+    for name in "${CAPABILITY_ONLY_ENV[@]}"; do
+        if value="$(printenv "$name")"; then
+            CORE_CAPABILITY_ENV+=("$name=$value")
+            case "$name" in
+                FLARE_PLUGIN_RESOURCE_CONVERSATION_URL|FLARE_PLUGIN_CARD_INGEST_URL)
+                    [ -n "$value" ] && CORE_CAPABILITY_SIGNS_READS=1 ;;
+            esac
+        fi
+        unset "$name"
+    done
+}
+
 FLARE_BUILD_PROFILE="${FLARE_BUILD_PROFILE:-debug}"
 case "$FLARE_BUILD_PROFILE" in
     debug|release)
@@ -369,6 +402,7 @@ unset FLARE_API_GATEWAY_TOKEN_SECRET ACCESS_GATEWAY_TOKEN_SECRET FLARE_API_GATEW
 export -n CORE_API_TOKEN_SECRET CORE_ACCESS_TOKEN_SECRET CORE_API_APP_CREDENTIALS
 load_internal_context_keys
 load_platform_public_key
+load_capability_env
 echo -e "${BLUE}🔐 本地网关 token secret 已准备: logs/.dev-token-secret（内容不会打印；本地客户端可将该文件内容作为 TOKEN_SECRET）${NC}"
 echo ""
 
@@ -805,10 +839,15 @@ for service in "${CORE_SERVICES[@]}"; do
             [ -n "$CORE_API_APP_CREDENTIALS" ] && env_args+=("FLARE_API_GATEWAY_AUTH_APP_CREDENTIALS=$CORE_API_APP_CREDENTIALS") ;;
     esac
     case "$service" in
-        signaling-online|signaling-route|message-ingest|capability|push-proxy|media|conversation|storage-reader)
+        signaling-online|signaling-route|capability|push-proxy|media|conversation|storage-reader)
             env_args+=("FLARE_INTERNAL_CTX_PUBLIC_KEY=$CORE_INTERNAL_PUBLIC_KEY") ;;
         api-gateway)
             env_args+=("FLARE_INTERNAL_CTX_PRIVATE_KEY=$CORE_INTERNAL_PRIVATE_KEY") ;;
+        message-ingest)
+            # Verifies sends, and signs its own Service identity for the seq floor reads of
+            # Storage Reader, as release/supervise-core.toml gives it.
+            env_args+=("FLARE_INTERNAL_CTX_PRIVATE_KEY=$CORE_INTERNAL_PRIVATE_KEY")
+            env_args+=("FLARE_INTERNAL_CTX_PUBLIC_KEY=$CORE_INTERNAL_PUBLIC_KEY") ;;
         message-orchestrator)
             # Signs its own reads (message targets, single-chat members) and verifies the
             # x-flare-ctx of event and action RPCs, as release/supervise-core.toml gives it.
@@ -825,9 +864,11 @@ for service in "${CORE_SERVICES[@]}"; do
     esac
     case "$service" in
         capability)
-            # The plugin resource bridge re-signs the invoking user's context for
-            # Core conversation and Social group reads with this Cell's key.
-            [ -n "${FLARE_PLUGIN_RESOURCE_CONVERSATION_URL:-}" ] && env_args+=("FLARE_INTERNAL_CTX_PRIVATE_KEY=$CORE_INTERNAL_PRIVATE_KEY") ;;
+            env_args+=("${CORE_CAPABILITY_ENV[@]}")
+            # The plugin resource bridge re-signs the invoking user's context for Core
+            # conversation and Social group reads, and the card path reads the card's route,
+            # with this Cell's key.
+            [ -n "$CORE_CAPABILITY_SIGNS_READS" ] && env_args+=("FLARE_INTERNAL_CTX_PRIVATE_KEY=$CORE_INTERNAL_PRIVATE_KEY") ;;
     esac
     case "$service" in
         signaling-online|capability)
