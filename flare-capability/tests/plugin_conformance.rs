@@ -81,6 +81,82 @@ fn strip_test_modules(source: &str) -> String {
     }
 }
 
+/// 整个文件只在测试里编译：父模块用 `#[cfg(test)]` 引入的 `mod x;`（可带 `#[path = "..."]`），
+/// 以及这些文件再引入的子模块。这类文件里没有 `#[cfg(test)]` 字样，[`strip_test_modules`]
+/// 认不出来（`source_audit_pg_tests.rs` 就是这样被误判的）。只认父模块的引入声明，不按文件名
+/// 猜：一个叫 `*_tests.rs` 却被正常引入的文件照样要扫。
+fn test_only_files(files: &[PathBuf]) -> BTreeSet<PathBuf> {
+    let mut test_only = BTreeSet::new();
+    let mut pending: Vec<(PathBuf, bool)> = files.iter().map(|f| (f.clone(), false)).collect();
+    // 先从每个文件里找 cfg(test) 引入；被引入的文件里的全部子模块也是测试代码。
+    while let Some((file, inherited)) = pending.pop() {
+        let Ok(source) = fs::read_to_string(&file) else {
+            continue;
+        };
+        for (child, gated) in module_declarations(&file, &source) {
+            if (inherited || gated) && test_only.insert(child.clone()) {
+                pending.push((child, true));
+            }
+        }
+    }
+    test_only
+}
+
+/// `file` 里每一条文件外模块声明（`mod x;`）解析到的文件，以及它是否带 `#[cfg(test)]`。
+fn module_declarations(file: &Path, source: &str) -> Vec<(PathBuf, bool)> {
+    let dir = file.parent().expect("源码目录");
+    let owns_dir = matches!(
+        file.file_name().and_then(|n| n.to_str()),
+        Some("mod.rs" | "lib.rs" | "main.rs")
+    );
+    let mut out = Vec::new();
+    let mut cfg_test = false;
+    let mut path_attr: Option<String> = None;
+    for line in source.lines() {
+        let t = line.trim();
+        if t.starts_with("#[") {
+            if t.replace(' ', "") == "#[cfg(test)]" {
+                cfg_test = true;
+            }
+            if let Some(rest) = t.strip_prefix("#[path") {
+                path_attr = rest.split('"').nth(1).map(str::to_owned);
+            }
+            continue;
+        }
+        if t.is_empty() || t.starts_with("//") {
+            continue;
+        }
+        let decl = t
+            .strip_prefix("pub(crate) ")
+            .or_else(|| t.strip_prefix("pub(super) "))
+            .or_else(|| t.strip_prefix("pub "))
+            .unwrap_or(t);
+        if let Some(name) = decl.strip_prefix("mod ").and_then(|r| r.strip_suffix(';')) {
+            let base = if owns_dir {
+                dir.to_path_buf()
+            } else {
+                dir.join(file.file_stem().expect("文件名"))
+            };
+            let target = match path_attr.take() {
+                // 非 mod.rs 文件里的 `#[path]` 相对该文件所在目录。
+                Some(path) => dir.join(path),
+                None => {
+                    let flat = base.join(format!("{}.rs", name.trim()));
+                    if flat.exists() {
+                        flat
+                    } else {
+                        base.join(name.trim()).join("mod.rs")
+                    }
+                }
+            };
+            out.push((target, cfg_test));
+        }
+        cfg_test = false;
+        path_attr = None;
+    }
+    out
+}
+
 /// 判断是否是**模块树接线**行：`mod x;` 与 `pub use x::Y;`。
 ///
 /// 模块树必须给子模块起名字，`routing/mod.rs` 里出现 `mod sfu_health_probe;`
@@ -136,10 +212,17 @@ fn generic_paths_do_not_know_specific_plugins() {
 
     let mut violations = BTreeSet::new();
     let mut scanned = 0usize;
+    let test_only = test_only_files(&files);
+    assert!(
+        test_only
+            .iter()
+            .any(|f| f.ends_with("source_audit_pg_tests.rs")),
+        "认不出父模块以 #[cfg(test)] 引入的测试文件，判据是坏的"
+    );
 
     for file in files {
         let rel = relative(&file);
-        if is_kind_specific(&rel) {
+        if is_kind_specific(&rel) || test_only.contains(&file) {
             continue;
         }
         scanned += 1;
@@ -187,9 +270,10 @@ fn generic_host_types_carry_no_kind_specific_types() {
     const KIND_TYPES: &[&str] = &["RtcBackendDescriptor", "SfuControlClient"];
 
     let mut violations = BTreeSet::new();
+    let test_only = test_only_files(&files);
     for file in files {
         let rel = relative(&file);
-        if is_kind_specific(&rel) {
+        if is_kind_specific(&rel) || test_only.contains(&file) {
             continue;
         }
         // 领域端口与注册表是 RTC 能力的定义与装配处，不算通用宿主。
@@ -252,6 +336,42 @@ fn the_scanner_actually_catches_a_violation() {
             .any(|m| strip_comments(comment_only).contains(m)),
         "注释被误判成违规，会逼人删掉解释历史的注释"
     );
+
+    // 只跳过父模块以 #[cfg(test)] 引入的文件（及其子模块），不按文件名猜。
+    let root = std::env::temp_dir().join(format!("plugin-conformance-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(root.join("dispatch")).expect("临时目录");
+    let write = |path: &str, text: &str| fs::write(root.join(path), text).expect("写临时文件");
+    write(
+        "mod.rs",
+        "#[cfg(test)]\n#[path = \"gated_tests.rs\"]\nmod gated;\nmod plain_tests;\nmod dispatch;\n",
+    );
+    write(
+        "gated_tests.rs",
+        "mod nested;\nconst X: &str = \"rtc.call\";\n",
+    );
+    write("plain_tests.rs", "const X: &str = \"rtc.call\";\n");
+    write("dispatch.rs", "#[cfg(test)]\nmod inner;\n");
+    fs::create_dir_all(root.join("gated_tests")).expect("临时目录");
+    write("gated_tests/nested.rs", "");
+    write("dispatch/inner.rs", "");
+    let files: Vec<PathBuf> = ["mod.rs", "gated_tests.rs", "plain_tests.rs", "dispatch.rs"]
+        .iter()
+        .map(|f| root.join(f))
+        .collect();
+    let gated = test_only_files(&files);
+    let _ = fs::remove_dir_all(&root);
+    assert!(gated.contains(&root.join("gated_tests.rs")), "{gated:?}");
+    assert!(
+        gated.contains(&root.join("gated_tests/nested.rs")),
+        "{gated:?}"
+    );
+    assert!(gated.contains(&root.join("dispatch/inner.rs")), "{gated:?}");
+    assert!(
+        !gated.contains(&root.join("plain_tests.rs")),
+        "正常引入的 *_tests.rs 也被跳过了：名字不是测试的证据"
+    );
+    assert!(!gated.contains(&root.join("dispatch.rs")), "{gated:?}");
 }
 
 /// 每一个**策略变更** RPC 都必须留痕。
