@@ -951,9 +951,11 @@ impl ConversationRepository for PostgresConversationRepository {
                         .push("CURRENT_TIMESTAMP")
                         .push("CURRENT_TIMESTAMP");
                 });
+                // 已有成员行（并发的 ensure）只更新成员身份，本人的免打扰、置顶不随请求改写，
+                // 与 manage_participants 一致。
                 qb.push(
                     " ON CONFLICT (tenant_id, conversation_id, user_id) DO UPDATE SET \
-                     roles = EXCLUDED.roles, muted = EXCLUDED.muted, pinned = EXCLUDED.pinned, \
+                     roles = EXCLUDED.roles, \
                      attributes = EXCLUDED.attributes, is_deleted = FALSE, \
                      visible_from_seq = GREATEST(conversation_participants.visible_from_seq, EXCLUDED.visible_from_seq), \
                      updated_at = CURRENT_TIMESTAMP",
@@ -1537,9 +1539,10 @@ impl ConversationRepository for PostgresConversationRepository {
                     CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
                 ON CONFLICT (tenant_id, conversation_id, user_id)
                 DO UPDATE SET
+                    -- 已有成员只更新成员身份（角色、属性、历史下限、回到列表）。免打扰、置顶、
+                    -- 只接收提到我是本人的设置，只经本人的设置接口改；请求里的 muted、pinned
+                    -- 由加人的一方给出，只在新插入的行生效（重复加人、补成员都不改写它们）。
                     roles = $4,
-                    muted = $5,
-                    pinned = $6,
                     attributes = $7,
                     -- 历史下限只升不降：重复加人（旧客户端不带该字段即 0）绝不能把
                     -- 已经设好的下限抹平、把入群前的历史泄露出去。要放开历史需走显式接口。

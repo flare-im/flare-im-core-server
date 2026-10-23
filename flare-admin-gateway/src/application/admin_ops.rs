@@ -93,13 +93,11 @@ pub struct AdminConversationDetailHttp {
     pub conversation: AdminConversationHttp,
 }
 
+/// 员工视图里的一名成员。免打扰、置顶、只接收提到我是成员本人的列表设置，不在员工视图里。
 #[derive(Debug, Clone, Serialize, ToSchema)]
 pub struct AdminParticipantHttp {
     pub user_id: String,
     pub roles: Vec<String>,
-    pub muted: bool,
-    pub pinned: bool,
-    pub mention_only: bool,
     /// 该成员可见的历史下限（只能看到 `conversation_seq` 大于它的消息）；0 = 不限。
     pub visible_from_seq: i64,
     /// Unix 毫秒。
@@ -527,9 +525,6 @@ pub fn participant_http(participant: ConversationParticipant) -> AdminParticipan
     AdminParticipantHttp {
         user_id: participant.user_id,
         roles: participant.roles,
-        muted: participant.muted,
-        pinned: participant.pinned,
-        mention_only: participant.mention_only,
         visible_from_seq: participant.visible_from_seq,
         joined_at: participant.joined_at,
         attributes: participant.attributes,

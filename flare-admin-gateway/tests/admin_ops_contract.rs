@@ -302,9 +302,6 @@ async fn list_participants_shape() {
         sorted(&[
             "user_id",
             "roles",
-            "muted",
-            "pinned",
-            "mention_only",
             "visible_from_seq",
             "joined_at",
             "attributes",

@@ -112,7 +112,7 @@ All paths are under `/api/v1/admin`. The code column is the signed `permission` 
 
 `GET /conversations/{conversation_id}` returns `{conversation}` with the same fields and no member list.
 
-`GET /conversations/{conversation_id}/participants?cursor=&limit=&include_removed=` returns `{conversation_id, participants, next_cursor, has_more, member_count, limit}`, oldest join first. `limit` defaults to 200 and is capped at 500. Each participant has `user_id`, `roles`, `muted`, `pinned`, `mention_only`, `visible_from_seq` (0 = whole history), `joined_at` and `attributes`.
+`GET /conversations/{conversation_id}/participants?cursor=&limit=&include_removed=` returns `{conversation_id, participants, next_cursor, has_more, member_count, limit}`, oldest join first. `limit` defaults to 200 and is capped at 500. Each participant has `user_id`, `roles`, `visible_from_seq` (0 = whole history), `joined_at` and `attributes`. A member's own list settings (muted, pinned, mention only) are not part of the staff view, the same rule as the member list users read, where they appear only on the caller's own row.
 
 ### Sessions and presence
 

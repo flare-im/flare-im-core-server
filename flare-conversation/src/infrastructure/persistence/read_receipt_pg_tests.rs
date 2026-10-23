@@ -1433,3 +1433,153 @@ async fn member_rows_carry_personal_settings_only_for_their_owner() {
     drop(handler);
     drop_schema(admin, pool, &schema).await;
 }
+
+/// The stored membership of one participant: (roles, muted, pinned, mention_only, is_deleted,
+/// attributes, settings_version).
+type StoredMember = (Vec<String>, bool, bool, bool, bool, serde_json::Value, i64);
+
+async fn stored_member(pool: &PgPool, cid: &str, user: &str) -> StoredMember {
+    sqlx::query_as(
+        "SELECT COALESCE(roles, ARRAY[]::text[]), COALESCE(muted, false), \
+         COALESCE(pinned, false), mention_only, COALESCE(is_deleted, false), \
+         COALESCE(attributes, '{}'::jsonb), settings_version \
+         FROM conversation_participants \
+         WHERE tenant_id = $1 AND conversation_id = $2 AND user_id = $3",
+    )
+    .bind(TENANT)
+    .bind(cid)
+    .bind(user)
+    .fetch_one(pool)
+    .await
+    .unwrap()
+}
+
+/// Adding someone who is already a member (the add-members flow run again, the message pipeline
+/// repairing the members of an existing conversation, a concurrent ensure) updates what makes them
+/// a member, their roles, attributes, history floor and their place in the list, and leaves their
+/// own muted, pinned and mention-only settings alone: whoever adds them does not decide those. A
+/// new member still starts with what the request gives.
+#[tokio::test]
+#[ignore = "requires FLARE_CONVERSATION_TEST_DATABASE_URL pointing at a disposable PostgreSQL"]
+async fn adding_an_existing_member_keeps_their_own_settings() {
+    let url = std::env::var(ENV_DATABASE_URL)
+        .unwrap_or_else(|_| panic!("set {ENV_DATABASE_URL} to a disposable PostgreSQL instance"));
+    let (admin, pool, schema) = isolated_schema(&url).await;
+    let group = generate_group_conversation_id("readd-g1");
+    conversation(&pool, &group, 2).await;
+    for who in ["alice", "bob"] {
+        member(&pool, &group, who, 0, false, false).await;
+    }
+    let repo = PostgresConversationRepository::new(Arc::new(pool.clone()), test_config());
+    repo.update_user_settings(
+        &user("bob"),
+        &crate::domain::model::UpdateConversationUserSettingsPatch {
+            conversation_id: group.clone(),
+            is_mention_only: Some(true),
+            is_pinned: Some(true),
+            is_muted: Some(true),
+            is_archived: None,
+            draft: None,
+            base_settings_version: 0,
+        },
+    )
+    .await
+    .unwrap();
+    // Bob also hides the group: being added again brings it back to his list.
+    repo.delete_conversation(&user("bob"), &group, false)
+        .await
+        .unwrap();
+    let (.., bobs_version) = stored_member(&pool, &group, "bob").await;
+    assert!(bobs_version > 0, "the settings update bumps the version");
+
+    let participant = |user_id: &str, roles: &[&str], muted: bool, pinned: bool| {
+        crate::domain::model::ConversationParticipant {
+            user_id: user_id.into(),
+            roles: roles.iter().map(|role| role.to_string()).collect(),
+            muted,
+            pinned,
+            attributes: [("source".to_string(), "invite".to_string())].into(),
+            visible_from_seq: 0,
+            mention_only: false,
+        }
+    };
+    let invite = serde_json::json!({"source": "invite"});
+
+    // The add-members flow: Bob again with the request's defaults, Carol new and muted by it.
+    repo.manage_participants(
+        &orchestrator(),
+        &group,
+        &[
+            participant("bob", &["admin"], false, false),
+            participant("carol", &["member"], true, true),
+        ],
+        &[],
+        &[],
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        stored_member(&pool, &group, "bob").await,
+        (
+            vec!["admin".to_string()],
+            true,
+            true,
+            true,
+            false,
+            invite.clone(),
+            bobs_version
+        )
+    );
+    assert_eq!(
+        stored_member(&pool, &group, "carol").await,
+        (
+            vec!["member".to_string()],
+            true,
+            true,
+            false,
+            false,
+            invite.clone(),
+            0
+        )
+    );
+
+    // A concurrent ensure of the same conversation writes its members through the same upsert.
+    let now = chrono::Utc::now();
+    repo.create_conversation(
+        &orchestrator(),
+        &crate::domain::model::Conversation {
+            tenant_id: TENANT.into(),
+            conversation_id: group.clone(),
+            conversation_type: crate::domain::model::ConversationType::Group,
+            business_type: String::new(),
+            channel_id: String::new(),
+            display_name: None,
+            attributes: Default::default(),
+            participants: vec![
+                participant("alice", &["owner"], false, false),
+                participant("bob", &["member"], false, false),
+            ],
+            visibility: crate::domain::model::ConversationVisibility::Private,
+            lifecycle_state: crate::domain::model::ConversationLifecycleState::Active,
+            policy: None,
+            created_at: now,
+            updated_at: now,
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        stored_member(&pool, &group, "bob").await,
+        (
+            vec!["member".to_string()],
+            true,
+            true,
+            true,
+            false,
+            invite,
+            bobs_version
+        )
+    );
+
+    drop_schema(admin, pool, &schema).await;
+}

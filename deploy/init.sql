@@ -762,7 +762,7 @@ COMMENT ON COLUMN conversation_participants.attributes IS '参与者属性（JSO
 COMMENT ON COLUMN conversation_participants.joined_at IS '加入时间';
 COMMENT ON COLUMN conversation_participants.nickname IS '群昵称';
 COMMENT ON COLUMN conversation_participants.last_read_seq IS '已读到的 seq（未读数 = max_seq - last_read_seq）';
-COMMENT ON COLUMN conversation_participants.last_sync_seq IS 'Sync 游标 last_seq';
+COMMENT ON COLUMN conversation_participants.last_sync_seq IS '本人列表清到的 seq：只在隐藏会话（用户侧软删）时推进到会话尾部。本人未读从它之后算，本人列表的已读位置取它与 last_read_seq 的较大者；他人看到的已读（单聊 peer_read_seq、群已读摘要与名单）只看 last_read_seq。不是同步游标（同步游标在 user_sync_cursor）';
 COMMENT ON COLUMN conversation_participants.unread_count IS '未读数（冗余）';
 COMMENT ON COLUMN conversation_participants.is_deleted IS '用户侧删除会话（软删）';
 COMMENT ON COLUMN conversation_participants.mute_until IS '静音截止时间（空=长期免打扰）';

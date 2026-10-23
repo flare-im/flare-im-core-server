@@ -6,6 +6,7 @@ use flare_server_core::error::{ErrorBuilder, ErrorCode, Result};
 
 use crate::domain::model::{
     AdminConversation, AdminConversationPage, ConversationParticipantsPage,
+    keep_personal_settings_of,
 };
 use crate::domain::repository::ConversationAdminRepository;
 
@@ -67,9 +68,14 @@ impl<R: ConversationAdminRepository> ConversationAdminQueryHandler<R> {
         include_removed: bool,
     ) -> Result<ConversationParticipantsPage> {
         let conversation_id = required_conversation_id(conversation_id)?;
-        self.repository
+        let mut page = self
+            .repository
             .admin_list_participants(tenant_id, conversation_id, cursor, limit, include_removed)
             .await?
-            .ok_or_else(not_found)
+            .ok_or_else(not_found)?;
+        // 员工视图与用户态成员名单同一条规则：免打扰、置顶、只接收提到我是成员本人的列表
+        // 设置，员工不是名单里的任何一个人，所以一行都不带。
+        keep_personal_settings_of(&mut page.participants, None);
+        Ok(page)
     }
 }

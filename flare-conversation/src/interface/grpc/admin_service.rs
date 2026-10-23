@@ -276,14 +276,15 @@ mod tests {
                     conversation_id: conversation_id.to_string(),
                     participants: members
                         .iter()
+                        // 每个人在库里都设了免打扰、置顶与只接收提到我。
                         .map(|user_id| ConversationParticipant {
                             user_id: user_id.clone(),
                             roles: Vec::new(),
-                            muted: false,
-                            pinned: false,
+                            muted: true,
+                            pinned: true,
                             attributes: HashMap::new(),
                             visible_from_seq: 0,
-                            mention_only: false,
+                            mention_only: true,
                         })
                         .collect(),
                     next_cursor: None,
@@ -587,9 +588,24 @@ mod tests {
             .into_inner();
         assert_eq!(members.member_count, 1);
         assert_eq!(members.participants[0].user_id, "mallory");
+        // 员工看不到成员本人的列表设置。
+        let staff_view = conversations
+            .admin_list_participants(admin(participants("g-a"), "tenant-a"))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(staff_view.participants.len(), 2);
+        assert!(
+            staff_view
+                .participants
+                .iter()
+                .all(|p| !p.muted && !p.pinned && !p.mention_only)
+        );
         assert_eq!(
             *repo.tenants_seen.lock().unwrap(),
-            vec!["tenant-a", "tenant-a", "tenant-a", "tenant-a", "tenant-b"]
+            vec![
+                "tenant-a", "tenant-a", "tenant-a", "tenant-a", "tenant-b", "tenant-a"
+            ]
         );
 
         assert_eq!(

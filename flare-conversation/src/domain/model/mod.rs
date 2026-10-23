@@ -381,7 +381,8 @@ impl ConversationParticipant {
 }
 
 /// 面向成员的读取（成员名单、按 id 查成员、成员管理的应答、会话摘要的成员预览）只在 `viewer`
-/// 本人那一行保留个人设置，其余行一律清空；`viewer` 为 `None`（服务读名单）时一行都不留。
+/// 本人那一行保留个人设置，其余行一律清空；`viewer` 为 `None`（服务读名单、员工视图的成员分页）
+/// 时一行都不留。
 /// 投递读取（在席口径的扇出、离线推送）是内部读取，要按每个人的免打扰判定推送，不经这里。
 pub fn keep_personal_settings_of(
     participants: &mut [ConversationParticipant],
