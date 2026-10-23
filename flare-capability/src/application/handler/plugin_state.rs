@@ -6,7 +6,9 @@
 //!
 //! 1. the state is well formed ([`SharedState::validate`]);
 //! 2. the entity is bound to a live (not recalled) card of the plugin, and for a user call the card
-//!    is in the conversation the ticket was issued for;
+//!    is in the conversation the ticket was issued for. An entity whose every card was recalled is
+//!    refused `PLUGIN_MESSAGE_RECALLED` and one without any card `PLUGIN_CARD_UNBOUND`, so the plugin
+//!    can tell an ended entity from a passing failure and stop publishing it;
 //! 3. it is compared with the stored and pending versions: only a newer one is published, the same
 //!    one is a duplicate, an older one is stale;
 //! 4. publishes of one entity within [`COALESCE_WINDOW`] are coalesced, only the highest version is
@@ -24,6 +26,7 @@ use flare_im_capability_core::plugin::resource::EntityStatePublishOutcome;
 use flare_im_capability_core::plugin::state::{SharedState, SharedStateOrder, valid_entity_id};
 use flare_im_capability_core::plugin::ui::{UiActionTarget, UiDocument};
 use flare_im_service_kit::metrics::REGISTRY;
+use flare_im_service_kit::plugin_platform::{PLUGIN_CARD_UNBOUND, PLUGIN_MESSAGE_RECALLED};
 use flare_proto::common::PluginStateEvent;
 use once_cell::sync::Lazy;
 use prometheus::{IntCounterVec, Opts};
@@ -230,8 +233,9 @@ impl PluginStatePublisher {
     }
 
     /// Steps 1-4 of the module docs; the fan-out (5) runs in the background. Every outcome is a
-    /// success for the caller; a malformed state, an unbound entity or a card in another
-    /// conversation is a policy rejection.
+    /// success for the caller; a malformed state or a card in another conversation is a policy
+    /// rejection, an entity whose cards were all recalled `PLUGIN_MESSAGE_RECALLED` and one with no
+    /// card of the plugin `PLUGIN_CARD_UNBOUND` (platform refusals the plugin reads as final).
     pub async fn submit(
         self: &Arc<Self>,
         tenant_id: &str,
@@ -267,9 +271,13 @@ impl PluginStatePublisher {
         };
         if !in_scope {
             self.metrics.record(source, "unbound");
-            return Err(rejected(
-                "entity is not bound to a card of this plugin in scope",
-            ));
+            return Err(if !live.is_empty() {
+                rejected("entity is not bound to a card of this plugin in scope")
+            } else if bindings.is_empty() {
+                CapabilityError::plugin(PLUGIN_CARD_UNBOUND, "entity has no card of this plugin")
+            } else {
+                CapabilityError::plugin(PLUGIN_MESSAGE_RECALLED, "the entity's card was recalled")
+            });
         }
         let key = EntityKey {
             tenant_id: tenant_id.to_owned(),

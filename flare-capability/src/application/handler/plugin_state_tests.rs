@@ -369,18 +369,27 @@ async fn unbound_other_conversation_recalled_and_malformed_states_are_refused() 
     bindings.bind("app-a", "example.poll", "poll-1", "2-group", "m-1");
     let sink = Arc::new(RecordingSink::default());
     let publisher = publisher(bindings.clone(), sink.clone());
-    let refused = |scope: PublishScope<'static>, plugin: &'static str, state| {
+    // The refusal: a policy denial (`None`) or a platform code the plugin reads as final.
+    let refusal = |scope: PublishScope<'static>, plugin: &'static str, state| {
         let publisher = publisher.clone();
         async move {
-            matches!(
-                publisher
-                    .submit("app-a", plugin, scope, state, PublishSource::Bridge)
-                    .await,
-                Err(CapabilityError::PolicyDenied(_))
-            )
+            match publisher
+                .submit("app-a", plugin, scope, state, PublishSource::Bridge)
+                .await
+            {
+                Err(CapabilityError::PolicyDenied(_)) => Some(None),
+                Err(CapabilityError::Plugin { code, .. }) => Some(Some(code)),
+                _ => None,
+            }
         }
     };
-    // A card of another conversation, another plugin's entity, an unknown entity.
+    let refused = |scope: PublishScope<'static>, plugin: &'static str, state| {
+        let refusal = refusal(scope, plugin, state);
+        async move { refusal.await == Some(None) }
+    };
+    let unbound = Some(Some(PLUGIN_CARD_UNBOUND.to_owned()));
+    // A card of another conversation is a denial; another plugin's entity and an unknown entity
+    // have no card.
     assert!(
         refused(
             PublishScope::Conversation("1-single"),
@@ -389,10 +398,25 @@ async fn unbound_other_conversation_recalled_and_malformed_states_are_refused() 
         )
         .await
     );
-    assert!(refused(PublishScope::Tenant, "example.other", state(1, 1)).await);
+    assert_eq!(
+        refusal(PublishScope::Tenant, "example.other", state(1, 1)).await,
+        unbound
+    );
     let mut unknown = state(1, 1);
     unknown.entity = "poll-2".into();
-    assert!(refused(PublishScope::Tenant, "example.poll", unknown).await);
+    assert_eq!(
+        refusal(PublishScope::Tenant, "example.poll", unknown.clone()).await,
+        unbound
+    );
+    assert_eq!(
+        refusal(
+            PublishScope::Conversation("2-group"),
+            "example.poll",
+            unknown
+        )
+        .await,
+        unbound
+    );
     // A malformed state (object value, version 0).
     let mut nested = state(1, 1);
     nested.values.insert("bad".into(), json!({"x": 1}));
@@ -413,9 +437,22 @@ async fn unbound_other_conversation_recalled_and_malformed_states_are_refused() 
         EntityStatePublishOutcome::Published
     );
     settle(Duration::from_millis(1)).await;
-    // A recalled card takes no more state.
+    // A recalled card takes no more state, in either scope.
     bindings.recall("m-1");
-    assert!(refused(PublishScope::Tenant, "example.poll", state(2, 2)).await);
+    let recalled = Some(Some(PLUGIN_MESSAGE_RECALLED.to_owned()));
+    assert_eq!(
+        refusal(PublishScope::Tenant, "example.poll", state(2, 2)).await,
+        recalled
+    );
+    assert_eq!(
+        refusal(
+            PublishScope::Conversation("2-group"),
+            "example.poll",
+            state(2, 2)
+        )
+        .await,
+        recalled
+    );
     settle(Duration::from_secs(1)).await;
     assert_eq!(sink.versions(), vec![1]);
     // The binding store being down is an error, not a silent drop.
