@@ -1,9 +1,10 @@
 //! The platform card path to Message Ingest (plugin platform v2 §1).
 //!
-//! The route of the ticket's conversation is read from Conversation as the ticket's user (an
-//! active member, or the read is refused): the conversation type comes from the CID prefix and is
-//! checked against the detail, the channel is the group of a group chat or the peer of a single
-//! chat. The card is then sent with `MessageSendService.SendMessage` under Capability's own context
+//! The route of the ticket's conversation is read from Conversation as the ticket's user (a
+//! member, or the read is refused): the conversation type comes from the CID prefix and is checked
+//! against the detail, the channel is the group of a group chat or the peer of a single chat. The
+//! peer is read in Conversation's member scope: a peer who hid the chat from their own list is
+//! still its other member, so a card to them is still routed. The card is then sent with `MessageSendService.SendMessage` under Capability's own context
 //! key (`kid=capability`): the user's identity, the single role `plugin.card.post` and the request
 //! id that binds the context to this exact post ([`plugin_platform::card_post_request_id`]).
 use crate::domain::repository::plugin_card::{
@@ -26,6 +27,10 @@ use std::time::Duration;
 
 /// Bound of one Conversation read or Ingest send.
 const CALL_TIMEOUT: Duration = Duration::from_secs(2);
+/// `ListConversationParticipantsRequest.ext` key asking Conversation for its member scope
+/// (`flare-conversation` `PARTICIPANT_MEMBERS_SCOPE_EXT_KEY`): members who have not left, whether
+/// or not they hid the conversation.
+const PARTICIPANT_MEMBERS_SCOPE_EXT_KEY: &str = "members";
 
 pub struct GrpcPluginCardDelivery {
     /// Message Ingest `MessageSendService` (`http(s)://` or `discovery://`).
@@ -138,18 +143,27 @@ impl PluginCardDelivery for GrpcPluginCardDelivery {
             ConversationType::Group => detail.channel_id,
             _ => {
                 let page = conversations
-                    .list_conversation_participants(self.read(
-                        tenant_id,
-                        user_id,
-                        request_id,
-                        ListConversationParticipantsRequest {
-                            conversation_id: conversation_id.into(),
-                            cursor: String::new(),
-                            limit: 8,
-                            include_removed: false,
-                            ext: [("skip_meta".to_string(), "1".to_string())].into(),
-                        },
-                    )?)
+                    .list_conversation_participants(
+                        self.read(
+                            tenant_id,
+                            user_id,
+                            request_id,
+                            ListConversationParticipantsRequest {
+                                conversation_id: conversation_id.into(),
+                                cursor: String::new(),
+                                limit: 8,
+                                include_removed: false,
+                                ext: [
+                                    ("skip_meta".to_string(), "1".to_string()),
+                                    (
+                                        PARTICIPANT_MEMBERS_SCOPE_EXT_KEY.to_string(),
+                                        "1".to_string(),
+                                    ),
+                                ]
+                                .into(),
+                            },
+                        )?,
+                    )
                     .await
                     .map_err(|status| classify(&status))?
                     .into_inner();
@@ -226,6 +240,115 @@ impl PluginCardDelivery for GrpcPluginCardDelivery {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ed25519_dalek::SigningKey;
+    use ed25519_dalek::pkcs8::EncodePrivateKey;
+    use flare_grpc_proto::conversation::conversation_read_service_server::{
+        ConversationReadService, ConversationReadServiceServer,
+    };
+    use flare_grpc_proto::conversation::*;
+    use flare_proto::common::{ConversationDetail, ConversationParticipant};
+    use std::sync::Mutex;
+
+    /// A single chat whose peer `bob` hid it: Conversation's in-seat pages leave him out, its
+    /// member scope keeps him.
+    #[derive(Default)]
+    struct HiddenPeer {
+        scopes: Mutex<Vec<Option<String>>>,
+    }
+
+    #[tonic::async_trait]
+    impl ConversationReadService for HiddenPeer {
+        async fn conversation_bootstrap(
+            &self,
+            _: tonic::Request<ConversationBootstrapRequest>,
+        ) -> Result<tonic::Response<ConversationBootstrapResponse>, tonic::Status> {
+            Err(tonic::Status::unimplemented("fixture"))
+        }
+        async fn list_conversations(
+            &self,
+            _: tonic::Request<ListConversationsRequest>,
+        ) -> Result<tonic::Response<ListConversationsResponse>, tonic::Status> {
+            Err(tonic::Status::unimplemented("fixture"))
+        }
+        async fn get_conversation_detail(
+            &self,
+            request: tonic::Request<GetConversationDetailRequest>,
+        ) -> Result<tonic::Response<GetConversationDetailResponse>, tonic::Status> {
+            Ok(tonic::Response::new(GetConversationDetailResponse {
+                detail: Some(ConversationDetail {
+                    conversation_id: request.into_inner().conversation_id,
+                    conversation_type: "single".into(),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }))
+        }
+        async fn list_conversation_participants(
+            &self,
+            request: tonic::Request<ListConversationParticipantsRequest>,
+        ) -> Result<tonic::Response<ListConversationParticipantsResponse>, tonic::Status> {
+            let body = request.into_inner();
+            let scope = body.ext.get("members").cloned();
+            let members = scope.as_deref() == Some("1");
+            self.scopes.lock().unwrap().push(scope);
+            let participant = |id: &str| ConversationParticipant {
+                user_id: id.into(),
+                ..Default::default()
+            };
+            let mut participants = vec![participant("alice")];
+            if members {
+                participants.push(participant("bob"));
+            }
+            Ok(tonic::Response::new(ListConversationParticipantsResponse {
+                conversation_id: body.conversation_id,
+                participants,
+                ..Default::default()
+            }))
+        }
+    }
+
+    /// The platform still routes a card to a single-chat peer who hid the chat: the peer is read
+    /// in the member scope.
+    #[tokio::test]
+    async fn a_card_reaches_a_peer_who_hid_the_single_chat() {
+        let fixture = std::sync::Arc::new(HiddenPeer::default());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let authority = format!("http://{}", listener.local_addr().unwrap());
+        let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+        let server = tokio::spawn(
+            tonic::transport::Server::builder()
+                .add_service(ConversationReadServiceServer::from_arc(fixture.clone()))
+                .serve_with_incoming_shutdown(
+                    tokio_stream::wrappers::TcpListenerStream::new(listener),
+                    async {
+                        let _ = stopped.await;
+                    },
+                ),
+        );
+        let key = SigningKey::from_bytes(&[73; 32]);
+        let signer = std::sync::Arc::new(
+            SignedContextSigner::from_private_key(&key.to_pkcs8_pem(Default::default()).unwrap())
+                .unwrap(),
+        );
+        let delivery = GrpcPluginCardDelivery {
+            ingest_authority: "http://127.0.0.1:9".into(),
+            conversation_authority: authority,
+            post_signer: signer.clone(),
+            read_signer: signer,
+        };
+        let route = delivery
+            .route("tenant-a", "alice", "1ADW0CVC4ESXQ0046R", "request-1")
+            .await
+            .expect("routed to the peer");
+        assert_eq!(route.channel_id, "bob");
+        assert_eq!(route.conversation_type, ConversationType::Single as i32);
+        assert_eq!(
+            fixture.scopes.lock().unwrap().as_slice(),
+            [Some("1".to_string())]
+        );
+        stop.send(()).unwrap();
+        server.await.unwrap().unwrap();
+    }
 
     #[test]
     fn plugin_cards_route_to_single_and_group_chats_only() {

@@ -384,38 +384,88 @@ impl ConversationQueryHandler {
                 query.limit,
                 query.include_removed,
                 query.skip_metadata,
+                query.scope,
             )
             .await
     }
 
-    /// 处理按 id 查成员：id 须非空、互不相同、不超过
+    /// 处理按 id 查成员（未退出；隐藏了会话的也算）：id 须非空、互不相同、不超过
     /// [`MAX_PARTICIPANT_LOOKUP_IDS`](crate::application::queries::MAX_PARTICIPANT_LOOKUP_IDS)。
-    pub async fn handle_find_conversation_participants(
+    /// 上行事件的成员核对、插件资源桥的成员核对走这条。
+    pub async fn handle_find_conversation_members(
         &self,
         ctx: &Context,
-        query: crate::application::queries::FindConversationParticipantsQuery,
+        query: crate::application::queries::FindConversationMembersQuery,
     ) -> Result<Vec<crate::domain::model::ConversationParticipant>> {
-        use crate::application::queries::MAX_PARTICIPANT_LOOKUP_IDS;
+        let conversation_id = valid_lookup(&query)?;
+        self.domain_service
+            .find_conversation_members(ctx, conversation_id, &query.user_ids)
+            .await
+    }
+
+    /// 处理已读摘要查询：会话 ID 非空；消息 ID 非空、互不相同、不超过
+    /// [`MAX_READ_SUMMARY_MESSAGES`](crate::domain::model::read_receipt::MAX_READ_SUMMARY_MESSAGES)。
+    pub async fn handle_get_message_read_summaries(
+        &self,
+        ctx: &Context,
+        query: crate::application::queries::GetMessageReadSummariesQuery,
+    ) -> Result<crate::domain::model::MessageReadSummaries> {
+        use crate::domain::model::read_receipt::MAX_READ_SUMMARY_MESSAGES;
         let conversation_id = query.conversation_id.trim();
         let distinct = query
-            .user_ids
+            .server_msg_ids
             .iter()
             .collect::<std::collections::BTreeSet<_>>()
             .len();
         if conversation_id.is_empty()
-            || query.user_ids.is_empty()
-            || query.user_ids.len() > MAX_PARTICIPANT_LOOKUP_IDS
-            || distinct != query.user_ids.len()
-            || query.user_ids.iter().any(|id| id.trim().is_empty())
+            || query.server_msg_ids.is_empty()
+            || query.server_msg_ids.len() > MAX_READ_SUMMARY_MESSAGES
+            || distinct != query.server_msg_ids.len()
+            || query.server_msg_ids.iter().any(|id| id.trim().is_empty())
         {
             return Err(ErrorBuilder::new(
                 ErrorCode::InvalidParameter,
-                "conversation_id and 1..=500 distinct user_ids are required",
+                "conversation_id and 1..=50 distinct server_msg_ids are required",
             )
             .build_error());
         }
         self.domain_service
-            .find_conversation_participants(ctx, conversation_id, &query.user_ids)
+            .message_read_summaries(ctx, conversation_id, &query.server_msg_ids)
+            .await
+    }
+
+    /// 处理已读名单查询：会话与消息 ID 非空，`limit` 在 `0..=MAX_READER_PAGE`（0 取默认）。
+    pub async fn handle_list_message_readers(
+        &self,
+        ctx: &Context,
+        query: crate::application::queries::ListMessageReadersQuery,
+    ) -> Result<crate::domain::model::MessageReaderPage> {
+        use crate::domain::model::read_receipt::{DEFAULT_READER_PAGE, MAX_READER_PAGE};
+        let conversation_id = query.conversation_id.trim();
+        let server_msg_id = query.server_msg_id.trim();
+        let limit = match usize::try_from(query.limit) {
+            Ok(0) => Some(DEFAULT_READER_PAGE),
+            Ok(limit) if limit <= MAX_READER_PAGE => Some(limit),
+            _ => None,
+        };
+        let (Some(limit), false, false) =
+            (limit, conversation_id.is_empty(), server_msg_id.is_empty())
+        else {
+            return Err(ErrorBuilder::new(
+                ErrorCode::InvalidParameter,
+                "conversation_id, server_msg_id and a limit of 0..=200 are required",
+            )
+            .build_error());
+        };
+        self.domain_service
+            .message_readers(
+                ctx,
+                conversation_id,
+                server_msg_id,
+                query.state,
+                query.cursor.trim(),
+                limit,
+            )
             .await
     }
 
@@ -496,4 +546,29 @@ impl ConversationQueryHandler {
 
         Ok(result)
     }
+}
+
+/// 按 id 查成员的请求：会话 ID 非空；id 非空、互不相同、不超过
+/// [`MAX_PARTICIPANT_LOOKUP_IDS`](crate::application::queries::MAX_PARTICIPANT_LOOKUP_IDS)。
+fn valid_lookup(query: &crate::application::queries::FindConversationMembersQuery) -> Result<&str> {
+    use crate::application::queries::MAX_PARTICIPANT_LOOKUP_IDS;
+    let conversation_id = query.conversation_id.trim();
+    let distinct = query
+        .user_ids
+        .iter()
+        .collect::<std::collections::BTreeSet<_>>()
+        .len();
+    if conversation_id.is_empty()
+        || query.user_ids.is_empty()
+        || query.user_ids.len() > MAX_PARTICIPANT_LOOKUP_IDS
+        || distinct != query.user_ids.len()
+        || query.user_ids.iter().any(|id| id.trim().is_empty())
+    {
+        return Err(ErrorBuilder::new(
+            ErrorCode::InvalidParameter,
+            "conversation_id and 1..=500 distinct user_ids are required",
+        )
+        .build_error());
+    }
+    Ok(conversation_id)
 }

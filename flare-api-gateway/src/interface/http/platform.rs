@@ -423,7 +423,13 @@ async fn participants(
         cursor: query.cursor,
         limit: query.limit,
         include_removed: false,
-        ext: [("skip_meta".into(), "1".into())].into_iter().collect(),
+        // A roster: members who hid the conversation from their own list are still members.
+        ext: [
+            ("skip_meta".into(), "1".into()),
+            ("members".into(), "1".into()),
+        ]
+        .into_iter()
+        .collect(),
     });
     if flare_server_core::set_signed_context_token(&mut request, &token).is_err() {
         return unavailable();

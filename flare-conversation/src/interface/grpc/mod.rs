@@ -3,6 +3,7 @@
 
 mod admin_service;
 mod manage_service;
+mod read_receipt_service;
 mod read_service;
 mod shared;
 
@@ -11,6 +12,7 @@ pub use admin_service::ConversationAdminGrpcHandler;
 use std::sync::Arc;
 
 use flare_grpc_proto::conversation::conversation_read_service_server::ConversationReadServiceServer;
+use flare_grpc_proto::conversation::message_read_receipt_service_server::MessageReadReceiptServiceServer;
 use flare_server_core::auth::SignedContextVerifier;
 use flare_server_core::{SignedFirstContextLayer, SignedFirstContextService};
 
@@ -53,4 +55,18 @@ pub fn signed_read_service(
     layer: &SignedFirstContextLayer,
 ) -> SignedFirstContextService<ConversationReadServiceServer<ConversationGrpcHandler>> {
     layer.layer(ConversationReadServiceServer::new(handler))
+}
+
+/// 套上读接口身份边界的 `MessageReadReceiptService`：只认网关代签的用户（已读摘要与名单只回答
+/// 调用者自己发送的消息）。与 [`signed_read_service`] 共用验签器，但**一律要求签名**，不跟随
+/// `FLARE_REQUIRE_SIGNED_READ_CTX`：这个服务没有需要兼容的未签名调用方，开关关着时也不能让
+/// 网内进程带裸 `x-tenant-id`/`x-user-id` 读别人消息的已读名单。没有配置公钥时所有调用都被拒。
+pub fn signed_read_receipt_service(
+    handler: ConversationGrpcHandler,
+    layer: &SignedFirstContextLayer,
+) -> SignedFirstContextService<MessageReadReceiptServiceServer<ConversationGrpcHandler>> {
+    layer
+        .clone()
+        .require_signed(true)
+        .layer(MessageReadReceiptServiceServer::new(handler))
 }

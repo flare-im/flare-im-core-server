@@ -897,7 +897,9 @@ where
                     cursor: req.cursor,
                     limit: req.limit,
                     include_removed: req.include_removed,
-                    ..Default::default()
+                    // The member list the client shows: members who hid the conversation from
+                    // their own list are still members (the conversation service's member scope).
+                    ext: [("members".to_string(), "1".to_string())].into(),
                 },
             )
             .await?;
@@ -1933,6 +1935,7 @@ mod tests {
         detail_queries: Mutex<Vec<(String, String, String)>>,
         head_queries: Mutex<Vec<String>>,
         batch_queries: Mutex<Vec<Vec<(String, i64)>>>,
+        participant_requests: Mutex<Vec<ListConversationParticipantsRequest>>,
     }
 
     #[derive(Clone, Debug, PartialEq, Eq)]
@@ -2011,6 +2014,7 @@ mod tests {
             req: ListConversationParticipantsRequest,
         ) -> Result<flare_grpc_proto::conversation::ListConversationParticipantsResponse, FlareError>
         {
+            self.participant_requests.lock().unwrap().push(req.clone());
             Ok(
                 flare_grpc_proto::conversation::ListConversationParticipantsResponse {
                     conversation_id: req.conversation_id,
@@ -2248,6 +2252,32 @@ mod tests {
                 assert_eq!(infra.detail_queries.lock().unwrap().len(), 1);
             }
         }
+    }
+
+    /// The client's member list asks Conversation for the member scope: a member who hid the
+    /// conversation from their own list is still listed.
+    #[tokio::test]
+    async fn participant_sync_asks_for_the_member_scope() {
+        let infra = Arc::new(MockInfra::default());
+        let handler =
+            SyncOrchestrationHandler::new(infra.clone(), Arc::new(MemorySyncCursorCache::new()));
+        handler
+            .conversation_participants_sync(
+                &ctx(),
+                ConversationParticipantsSync {
+                    conversation_id: "2AGROUP".into(),
+                    limit: 50,
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("participants");
+        let requests = infra.participant_requests.lock().unwrap().clone();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(
+            requests[0].ext.get("members").map(String::as_str),
+            Some("1")
+        );
     }
 
     #[tokio::test]

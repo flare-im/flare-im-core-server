@@ -180,12 +180,20 @@ async fn every_repository_method_requires_a_context_tenant() {
         );
         assert_tenant_required(
             "list_conversation_participants",
-            repo.list_conversation_participants(&ctx, CID, None, 10, false, false)
-                .await,
+            repo.list_conversation_participants(
+                &ctx,
+                CID,
+                None,
+                10,
+                false,
+                false,
+                Default::default(),
+            )
+            .await,
         );
         assert_tenant_required(
-            "find_conversation_participants",
-            repo.find_conversation_participants(&ctx, CID, &["bob".to_string()])
+            "find_conversation_members",
+            repo.find_conversation_members(&ctx, CID, &["bob".to_string()])
                 .await,
         );
         assert_tenant_required(

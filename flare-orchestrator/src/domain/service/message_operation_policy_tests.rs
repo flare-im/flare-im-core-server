@@ -32,6 +32,8 @@ const NOW: i64 = 1_800_000_000_000;
 struct Messages {
     stored: Mutex<HashMap<String, Message>>,
     reads: Mutex<usize>,
+    /// The ids of every batch lookup, one entry per lookup.
+    batches: Mutex<Vec<Vec<String>>>,
 }
 
 impl Messages {
@@ -44,6 +46,10 @@ impl Messages {
 
     fn reads(&self) -> usize {
         *self.reads.lock().unwrap()
+    }
+
+    fn batches(&self) -> Vec<Vec<String>> {
+        self.batches.lock().unwrap().clone()
     }
 }
 
@@ -58,6 +64,78 @@ impl MessageTargetRepository for Messages {
         assert_eq!(tenant_id, "tenant-a");
         *self.reads.lock().unwrap() += 1;
         Ok(self.stored.lock().unwrap().get(server_msg_id).cloned())
+    }
+
+    async fn conversations_of(
+        &self,
+        _ctx: &Ctx,
+        tenant_id: &str,
+        server_msg_ids: &[String],
+    ) -> Result<HashMap<String, String>> {
+        assert_eq!(tenant_id, "tenant-a");
+        self.batches.lock().unwrap().push(server_msg_ids.to_vec());
+        let stored = self.stored.lock().unwrap();
+        Ok(server_msg_ids
+            .iter()
+            .filter_map(|id| {
+                stored
+                    .get(id)
+                    .map(|message| (id.clone(), message.conversation_id.clone()))
+            })
+            .collect())
+    }
+}
+
+/// In-seat members by (conversation, user); records every lookup; `down` fails them.
+#[derive(Default)]
+struct Members {
+    seated: Mutex<Vec<(String, String)>>,
+    asked: Mutex<Vec<(String, String, String)>>,
+    /// How recent each lookup asked the answer to be.
+    reads: Mutex<Vec<MembershipRead>>,
+    down: Mutex<bool>,
+}
+
+impl Members {
+    fn seat(&self, conversation: &str, user: &str) {
+        self.seated
+            .lock()
+            .unwrap()
+            .push((conversation.into(), user.into()));
+    }
+
+    fn asked(&self) -> Vec<(String, String, String)> {
+        self.asked.lock().unwrap().clone()
+    }
+
+    fn reads(&self) -> Vec<MembershipRead> {
+        self.reads.lock().unwrap().clone()
+    }
+}
+
+#[async_trait::async_trait]
+impl ConversationMembershipRepository for Members {
+    async fn is_member(
+        &self,
+        _ctx: &Ctx,
+        tenant_id: &str,
+        conversation_id: &str,
+        user_id: &str,
+        read: MembershipRead,
+    ) -> Result<bool> {
+        self.asked
+            .lock()
+            .unwrap()
+            .push((tenant_id.into(), conversation_id.into(), user_id.into()));
+        self.reads.lock().unwrap().push(read);
+        if *self.down.lock().unwrap() {
+            return Err(ErrorBuilder::new(ErrorCode::ServiceUnavailable, "down").build_error());
+        }
+        Ok(self
+            .seated
+            .lock()
+            .unwrap()
+            .contains(&(conversation_id.to_owned(), user_id.to_owned())))
     }
 }
 
@@ -112,6 +190,7 @@ fn stored(
 struct Fixture {
     policy: MessageOperationPolicy,
     messages: Arc<Messages>,
+    members: Arc<Members>,
 }
 
 fn fixture() -> Fixture {
@@ -154,9 +233,16 @@ fn fixture() -> Fixture {
             content: Some(Content::Image(ImageContent::default())),
         },
     ));
+    let members = Arc::new(Members::default());
+    members.seat(GROUP, "alice");
+    members.seat(GROUP, "mallory");
+    members.seat(OTHER_GROUP, "alice");
     Fixture {
-        policy: MessageOperationPolicy::new(Some(messages.clone())).with_clock(|| NOW),
+        policy: MessageOperationPolicy::new(Some(messages.clone()))
+            .with_members(Some(members.clone()))
+            .with_clock(|| NOW),
         messages,
+        members,
     }
 }
 
@@ -689,4 +775,267 @@ async fn an_unreadable_or_unstored_target_is_retryable_never_allowed() {
         .await
         .expect("receipt");
     assert_eq!(f.messages.reads(), before);
+}
+
+fn reaction(id: &str) -> Event {
+    event(
+        Payload::Reaction(ReactionEvent {
+            server_msg_id: id.into(),
+            emoji: "+1".into(),
+            ..Default::default()
+        }),
+        EventType::EventReaction,
+    )
+}
+
+fn receipt(message_ids: &[&str]) -> Event {
+    event(
+        Payload::Read(ReadReceiptEvent {
+            conversation_id: GROUP.into(),
+            read_seq: 3,
+            message_ids: message_ids.iter().map(|id| id.to_string()).collect(),
+            ..Default::default()
+        }),
+        EventType::EventReadReceipt,
+    )
+}
+
+/// Every event a user sends, each well formed and acceptable from a member.
+fn member_events() -> Vec<Event> {
+    vec![
+        reaction("m-alice"),
+        event(
+            Payload::Pin(PinEvent {
+                server_msg_id: "m-alice".into(),
+                ..Default::default()
+            }),
+            EventType::EventPin,
+        ),
+        event(
+            Payload::Unpin(UnpinEvent {
+                server_msg_id: "m-alice".into(),
+                ..Default::default()
+            }),
+            EventType::EventUnpin,
+        ),
+        event(
+            Payload::Mark(MarkEvent {
+                server_msg_id: "m-alice".into(),
+                ..Default::default()
+            }),
+            EventType::EventMark,
+        ),
+        event(
+            Payload::Unmark(UnmarkEvent {
+                server_msg_id: "m-alice".into(),
+                ..Default::default()
+            }),
+            EventType::EventUnmark,
+        ),
+        receipt(&[]),
+        receipt(&["m-alice"]),
+        event(
+            Payload::Custom(CustomEvent {
+                namespace: "biz".into(),
+                name: "ping".into(),
+                ..Default::default()
+            }),
+            EventType::EventCustom,
+        ),
+        delete(
+            "m-alice",
+            DeleteType::Soft,
+            Some(DeleteScope::UserPrivate),
+            None,
+        ),
+        recall("m-alice", ""),
+        edit("m-alice", text("fixed")),
+    ]
+}
+
+/// A user outside the conversation is refused every event before any message is read, by a
+/// lookup of that one user; the same events from the member sender pass; a trusted service is not
+/// looked up at all.
+#[tokio::test]
+async fn only_members_operate_and_only_the_operator_is_looked_up() {
+    let f = fixture();
+    // Eve is a member elsewhere, not here.
+    f.members.seat(OTHER_GROUP, "eve");
+    for forged in member_events() {
+        let event_type = forged.r#type;
+        let error = refused(&f.policy, &user("eve"), forged).await;
+        assert_eq!(
+            error.code(),
+            Some(ErrorCode::PermissionDenied),
+            "{event_type}"
+        );
+        assert_eq!(reason_of(&error), reason::NOT_MEMBER, "{event_type}");
+    }
+    assert_eq!(f.messages.reads(), 0, "a non-member costs no message read");
+    assert!(f.messages.batches().is_empty(), "nor a batch lookup");
+    let asked = f.members.asked();
+    assert_eq!(asked.len(), member_events().len());
+    assert!(
+        asked
+            .iter()
+            .all(|key| *key == ("tenant-a".into(), GROUP.into(), "eve".into()))
+    );
+    // A signed user context outside the conversation is refused the same way.
+    let error = refused(
+        &f.policy,
+        &signed_as(SignedActorType::User, "eve"),
+        reaction("m-alice"),
+    )
+    .await;
+    assert_eq!(reason_of(&error), reason::NOT_MEMBER);
+
+    for accepted in member_events() {
+        let event_type = accepted.r#type;
+        f.policy
+            .authorize(&user("alice"), "tenant-a", accepted)
+            .await
+            .unwrap_or_else(|e| panic!("{event_type}: {e}"));
+    }
+
+    let before = f.members.asked().len();
+    for ctx in [
+        signed_as(SignedActorType::System, "flare-scheduler"),
+        signed_as(SignedActorType::Service, "flare-social-bridge"),
+    ] {
+        f.policy
+            .authorize(&ctx, "tenant-a", recall("m-alice", "moderation"))
+            .await
+            .expect("trusted recall");
+    }
+    assert_eq!(
+        f.members.asked().len(),
+        before,
+        "trusted services are not members"
+    );
+}
+
+/// Read receipts and reactions may take a recent membership answer; every other event (edit,
+/// recall, delete, pin, unpin, mark, unmark, custom, and kinds this code does not know) is checked
+/// against the conversation service now, so a member just removed can do none of them.
+#[tokio::test]
+async fn only_receipts_and_reactions_take_a_recent_membership_answer() {
+    let f = fixture();
+    for accepted in member_events() {
+        let event_type = accepted.r#type;
+        let expected = if matches!(
+            accepted.payload,
+            Some(Payload::Read(_) | Payload::Reaction(_))
+        ) {
+            MembershipRead::Recent
+        } else {
+            MembershipRead::Current
+        };
+        f.policy
+            .authorize(&user("alice"), "tenant-a", accepted)
+            .await
+            .unwrap_or_else(|e| panic!("{event_type}: {e}"));
+        assert_eq!(f.members.reads().last(), Some(&expected), "{event_type}");
+    }
+    let reads = f.members.reads();
+    assert_eq!(
+        reads
+            .iter()
+            .filter(|read| **read == MembershipRead::Recent)
+            .count(),
+        3,
+        "one reaction and two receipts"
+    );
+    assert_eq!(membership_read(None), MembershipRead::Current);
+}
+
+/// Membership that cannot be read refuses retryably and lets nothing through.
+#[tokio::test]
+async fn an_unreadable_membership_is_retryable_never_allowed() {
+    let f = fixture();
+    *f.members.down.lock().unwrap() = true;
+    let error = refused(&f.policy, &user("alice"), reaction("m-alice")).await;
+    assert_eq!(error.code(), Some(ErrorCode::ServiceUnavailable));
+    let unwired = MessageOperationPolicy::new(Some(f.messages.clone())).with_clock(|| NOW);
+    let error = refused(&unwired, &user("alice"), reaction("m-alice")).await;
+    assert_eq!(error.code(), Some(ErrorCode::ServiceUnavailable));
+    // Events no user may send are refused as before, without a lookup.
+    let asked = f.members.asked().len();
+    let error = refused(
+        &f.policy,
+        &user("alice"),
+        event(
+            Payload::Message(stored("m-x", "alice", GROUP, 0, text("bypass"))),
+            EventType::EventMessage,
+        ),
+    )
+    .await;
+    assert_eq!(reason_of(&error), reason::FORBIDDEN);
+    assert_eq!(f.members.asked().len(), asked);
+}
+
+/// Every message a read receipt names must be a stored message of the event's conversation,
+/// whoever sends it; all of them in one batch lookup (each distinct id once), never one read per
+/// message.
+#[tokio::test]
+async fn a_receipts_messages_must_belong_to_its_conversation() {
+    let f = fixture();
+    let alice = user("alice");
+    f.policy
+        .authorize(
+            &alice,
+            "tenant-a",
+            receipt(&["m-alice", "m-card", "m-alice"]),
+        )
+        .await
+        .expect("this conversation's messages");
+    assert_eq!(f.messages.reads(), 0, "no single-message reads");
+    assert_eq!(
+        f.messages.batches(),
+        [vec!["m-alice".to_string(), "m-card".to_string()]],
+        "one lookup, duplicates once"
+    );
+
+    // A full page is still one lookup.
+    let page: Vec<String> = (0..MAX_RECEIPT_MESSAGE_IDS)
+        .map(|i| format!("m-page-{i}"))
+        .collect();
+    for id in &page {
+        f.messages.put(stored(id, "bob", GROUP, NOW, text("hi")));
+    }
+    let page_ids: Vec<&str> = page.iter().map(String::as_str).collect();
+    f.policy
+        .authorize(&alice, "tenant-a", receipt(&page_ids))
+        .await
+        .expect("a full page");
+    assert_eq!(f.messages.batches().len(), 2);
+    assert_eq!(f.messages.batches()[1].len(), MAX_RECEIPT_MESSAGE_IDS);
+    assert_eq!(f.messages.reads(), 0);
+
+    let error = refused(&f.policy, &alice, receipt(&["m-alice", "m-elsewhere"])).await;
+    assert_eq!(reason_of(&error), reason::CONVERSATION_MISMATCH);
+    let trusted = signed_as(SignedActorType::Service, "flare-social-bridge");
+    let mut for_alice = receipt(&["m-elsewhere"]);
+    if let Some(Payload::Read(read)) = for_alice.payload.as_mut() {
+        read.user_id = "alice".into();
+    }
+    let error = refused(&f.policy, &trusted, for_alice).await;
+    assert_eq!(reason_of(&error), reason::CONVERSATION_MISMATCH);
+
+    // Not stored yet: retryable, not allowed.
+    let error = refused(&f.policy, &alice, receipt(&["m-not-yet"])).await;
+    assert_eq!(error.code(), Some(ErrorCode::ServiceUnavailable));
+
+    let too_many: Vec<String> = (0..=MAX_RECEIPT_MESSAGE_IDS)
+        .map(|i| format!("m-{i}"))
+        .collect();
+    let too_many: Vec<&str> = too_many.iter().map(String::as_str).collect();
+    let batches = f.messages.batches().len();
+    let error = refused(&f.policy, &alice, receipt(&too_many)).await;
+    assert_eq!(error.code(), Some(ErrorCode::InvalidParameter));
+    assert_eq!(
+        f.messages.batches().len(),
+        batches,
+        "an oversized receipt reads nothing"
+    );
+    assert_eq!(f.messages.reads(), 0);
 }

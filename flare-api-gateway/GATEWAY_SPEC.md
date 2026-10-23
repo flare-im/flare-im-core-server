@@ -38,8 +38,10 @@
 |------|------|------|------|
 | `/api/v1/messages/send` | POST | HTTP 发消息，内部转 `SendMessage` | 必须 |
 | `/api/v1/messages/recall` | POST | 撤回消息 | 必须 |
+| `/api/v1/messages/read-summaries` | POST | 群聊里自己发送的一批消息（≤50）的已读摘要，转会话服务 `MessageReadReceiptService` | 必须 |
+| `/api/v1/messages/readers` | GET | 群聊里自己发送的一条消息的已读 / 未读成员，按 cursor 分页；不是自己发的消息与不存在的消息同样回 404 | 必须 |
 | `/api/v1/conversations` | GET | 会话列表/摘要 | 必须 |
-| `/api/v1/conversations/participants` | GET | 分页读取会话参与者 | 必须 |
+| `/api/v1/conversations/participants` | GET | 分页读取会话成员；`muted`、`pinned`、`mention_only` 只在调用者本人那一行有值，其余成员恒为 false | 必须 |
 | `/api/v1/conversations/participants/manage` | POST | 管理会话参与者，供后台/业务 bridge 使用 | 管理权限 |
 | `/api/v1/medias/*` | GET/POST/DELETE | 媒体能力 | 除公开下载外必须 |
 | `/api/v1/devices/{device_id}/push-token` | PUT/DELETE | 登记/注销本用户设备的推送令牌，转 Push Proxy | 必须（租户绑定的终端用户令牌） |

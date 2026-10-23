@@ -527,6 +527,39 @@ mod read_ack_admission_tests {
         ) -> Result<Option<Message>> {
             Ok(self.0.get(server_msg_id).cloned())
         }
+
+        async fn conversations_of(
+            &self,
+            _ctx: &Ctx,
+            _tenant_id: &str,
+            server_msg_ids: &[String],
+        ) -> Result<HashMap<String, String>> {
+            Ok(server_msg_ids
+                .iter()
+                .filter_map(|id| {
+                    self.0
+                        .get(id)
+                        .map(|message| (id.clone(), message.conversation_id.clone()))
+                })
+                .collect())
+        }
+    }
+
+    /// `reader` and `peer` are members of every conversation of these tests.
+    struct TwoSeats;
+
+    #[async_trait::async_trait]
+    impl crate::domain::repository::ConversationMembershipRepository for TwoSeats {
+        async fn is_member(
+            &self,
+            _ctx: &Ctx,
+            _tenant_id: &str,
+            _conversation_id: &str,
+            user_id: &str,
+            _read: crate::domain::repository::MembershipRead,
+        ) -> Result<bool> {
+            Ok(matches!(user_id, "reader" | "peer"))
+        }
     }
 
     impl Harness {
@@ -535,6 +568,13 @@ mod read_ack_admission_tests {
         }
 
         fn with_messages(messages: Vec<Message>) -> Self {
+            Self::with_messages_and_members(messages, Arc::new(TwoSeats))
+        }
+
+        fn with_messages_and_members(
+            messages: Vec<Message>,
+            members: Arc<dyn crate::domain::repository::ConversationMembershipRepository>,
+        ) -> Self {
             let push = Arc::new(RecordingPushRepository::default());
             let seq = Arc::new(CountingSequenceAllocator::default());
             let watermark = Arc::new(InMemoryReadWatermark::default());
@@ -547,7 +587,8 @@ mod read_ack_admission_tests {
             let service =
                 EventDomainService::new(push.clone(), Arc::new(TwoMembers), seq.clone(), None)
                     .with_read_watermark(watermark.clone())
-                    .with_message_targets(Arc::new(targets));
+                    .with_message_targets(Arc::new(targets))
+                    .with_conversation_members(members);
             Self {
                 handler: EventHandler::new(Arc::new(service)),
                 push,
@@ -768,7 +809,12 @@ mod read_ack_admission_tests {
 
     #[tokio::test]
     async fn receipts_naming_messages_and_other_events_are_not_gated() {
-        let h = Harness::new();
+        let h = Harness::with_messages(vec![Message {
+            server_id: "m-1".into(),
+            conversation_id: SINGLE_CHAT.into(),
+            sender_id: "peer".into(),
+            ..Default::default()
+        }]);
 
         let mut per_message = read_ack_event("reader", 3420);
         if let Some(Payload::Read(read)) = per_message.payload.as_mut() {
@@ -872,6 +918,141 @@ mod read_ack_admission_tests {
             panic!("recall published");
         };
         assert_eq!(sent.time_limit_seconds, None, "client grants are cleared");
+    }
+
+    /// At the single event entry, someone outside the conversation reacting, pinning or sending a
+    /// receipt is refused before the event costs a seq; a receipt naming another conversation's
+    /// message is refused the same way.
+    #[tokio::test]
+    async fn outsiders_and_foreign_receipt_messages_never_get_a_seq() {
+        let here = Message {
+            server_id: "m-here".into(),
+            conversation_id: SINGLE_CHAT.into(),
+            sender_id: "peer".into(),
+            ..Default::default()
+        };
+        let there = Message {
+            server_id: "m-there".into(),
+            conversation_id: "2AW1QQ2SKVWFEPJRXN".into(),
+            sender_id: "peer".into(),
+            ..Default::default()
+        };
+        let h = Harness::with_messages(vec![here, there]);
+        let reaction = Event {
+            conversation_id: SINGLE_CHAT.to_string(),
+            r#type: EventType::EventReaction as i32,
+            event_id: uuid::Uuid::new_v4().to_string(),
+            payload: Some(Payload::Reaction(flare_proto::common::ReactionEvent {
+                server_msg_id: "m-here".into(),
+                emoji: "+1".into(),
+                ..Default::default()
+            })),
+            ..Default::default()
+        };
+        let pin = Event {
+            r#type: EventType::EventPin as i32,
+            event_id: uuid::Uuid::new_v4().to_string(),
+            payload: Some(Payload::Pin(flare_proto::common::PinEvent {
+                server_msg_id: "m-here".into(),
+                ..Default::default()
+            })),
+            ..reaction.clone()
+        };
+        for forged in [reaction.clone(), pin, read_ack_event("", 3420)] {
+            let error = h
+                .handler
+                .handle_event(&ctx_as("outsider", "mallory"), forged)
+                .await
+                .expect_err("an outsider's event");
+            assert_eq!(error.reason(), "MESSAGE_OPERATION_NOT_MEMBER");
+        }
+        let mut foreign = read_ack_event("reader", 3420);
+        if let Some(Payload::Read(read)) = foreign.payload.as_mut() {
+            read.message_ids = vec!["m-here".into(), "m-there".into()];
+        }
+        let error = h
+            .handler
+            .handle_event(&ctx("foreign"), foreign)
+            .await
+            .expect_err("another conversation's message in a receipt");
+        assert_eq!(error.reason(), "MESSAGE_OPERATION_CONVERSATION_MISMATCH");
+        assert_eq!(h.allocated_seqs(), 0);
+        assert!(h.published().is_empty());
+
+        h.handler
+            .handle_event(&ctx("member"), reaction)
+            .await
+            .expect("a member's reaction");
+        assert_eq!(h.allocated_seqs(), 1);
+    }
+
+    /// Participant rows as the conversation service keeps them: `hidden` removed the conversation
+    /// from their list, `left` quit it. A member is whoever has not left (the conversation
+    /// service's `member_ids` lookup).
+    struct Rows(Vec<(&'static str, bool, bool)>);
+
+    #[async_trait::async_trait]
+    impl crate::domain::repository::ConversationMembershipRepository for Rows {
+        async fn is_member(
+            &self,
+            _ctx: &Ctx,
+            _tenant_id: &str,
+            _conversation_id: &str,
+            user_id: &str,
+            _read: crate::domain::repository::MembershipRead,
+        ) -> Result<bool> {
+            Ok(self
+                .0
+                .iter()
+                .any(|(user, _hidden, left)| *user == user_id && !left))
+        }
+    }
+
+    /// Hiding a conversation is how the list shows it: the member's read receipts and reactions
+    /// still get a seq (their unread clears). Leaving it ends both.
+    #[tokio::test]
+    async fn a_hidden_conversation_still_takes_receipts_and_reactions_a_left_one_does_not() {
+        let here = Message {
+            server_id: "m-here".into(),
+            conversation_id: SINGLE_CHAT.into(),
+            sender_id: "peer".into(),
+            ..Default::default()
+        };
+        let h = Harness::with_messages_and_members(
+            vec![here],
+            Arc::new(Rows(vec![
+                ("peer", false, false),
+                ("hider", true, false),
+                ("leaver", false, true),
+            ])),
+        );
+        let reaction = || Event {
+            conversation_id: SINGLE_CHAT.to_string(),
+            r#type: EventType::EventReaction as i32,
+            event_id: uuid::Uuid::new_v4().to_string(),
+            payload: Some(Payload::Reaction(flare_proto::common::ReactionEvent {
+                server_msg_id: "m-here".into(),
+                emoji: "+1".into(),
+                ..Default::default()
+            })),
+            ..Default::default()
+        };
+        for event in [read_ack_event("hider", 3420), reaction()] {
+            h.handler
+                .handle_event(&ctx_as("hider", "hider"), event)
+                .await
+                .expect("a member who hid the conversation");
+        }
+        assert_eq!(h.allocated_seqs(), 2);
+        for event in [read_ack_event("leaver", 3420), reaction()] {
+            let error = h
+                .handler
+                .handle_event(&ctx_as("leaver", "leaver"), event)
+                .await
+                .expect_err("a member who left");
+            assert_eq!(error.reason(), "MESSAGE_OPERATION_NOT_MEMBER");
+        }
+        assert_eq!(h.allocated_seqs(), 2);
     }
 
     fn plugin_state_event(conversation_id: &str, version: u64) -> Event {

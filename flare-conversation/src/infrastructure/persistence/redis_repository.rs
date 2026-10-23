@@ -285,17 +285,45 @@ impl ConversationRepository for RedisConversationRepository {
         _limit: i32,
         _include_removed: bool,
         _skip_metadata: bool,
+        _scope: crate::domain::model::ParticipantScope,
     ) -> Result<ConversationParticipantsPage> {
         Err(redis_not_supported("list_conversation_participants"))
     }
 
-    async fn find_conversation_participants(
+    async fn find_conversation_members(
         &self,
         _ctx: &flare_server_core::context::Context,
         _conversation_id: &str,
         _user_ids: &[String],
     ) -> Result<Vec<ConversationParticipant>> {
-        Err(redis_not_supported("find_conversation_participants"))
+        Err(redis_not_supported("find_conversation_members"))
+    }
+
+    async fn retract_message_unread(
+        &self,
+        _ctx: &flare_server_core::context::Context,
+        _conversation_id: &str,
+        _server_msg_id: &str,
+    ) -> Result<()> {
+        Err(redis_not_supported("retract_message_unread"))
+    }
+
+    async fn list_member_read_positions(
+        &self,
+        _ctx: &flare_server_core::context::Context,
+        _conversation_id: &str,
+        _limit: usize,
+    ) -> Result<Vec<crate::domain::model::MemberReadPosition>> {
+        Err(redis_not_supported("list_member_read_positions"))
+    }
+
+    async fn find_receipt_messages(
+        &self,
+        _ctx: &flare_server_core::context::Context,
+        _conversation_id: &str,
+        _server_msg_ids: &[String],
+    ) -> Result<Vec<crate::domain::model::ReceiptMessage>> {
+        Err(redis_not_supported("find_receipt_messages"))
     }
 
     async fn search_conversations(

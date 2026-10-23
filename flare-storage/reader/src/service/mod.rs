@@ -73,12 +73,15 @@ impl ApplicationBootstrap {
                 },
             )
             .add_spawn_with_shutdown("storage-reader-grpc", move |shutdown_rx| async move {
+                let message_lookup_service =
+                    crate::interface::grpc::message_lookup_service(handler.clone());
                 let storage_reader_service =
                     crate::interface::grpc::signed_read_service(handler, &read_layer);
 
                 Server::builder()
                     .layer(grpc_metrics)
                     .add_service(storage_reader_service)
+                    .add_service(message_lookup_service)
                     .serve_with_shutdown(address_clone, async {
                         let _ = shutdown_rx.await;
                     })

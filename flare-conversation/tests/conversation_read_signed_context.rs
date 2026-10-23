@@ -1,6 +1,7 @@
 //! 会话读接口的身份边界（W10-D）：经 `signed_read_service` 起一个真的 gRPC 服务，带签名的
 //! `x-flare-ctx` 决定租户与身份，与签名不一致的裸 `x-tenant-id`、`x-user-id` 被拒；打开
 //! `FLARE_REQUIRE_SIGNED_READ_CTX`（边界要求签名）时未签名调用被拒，关掉时旧调用方照旧可用。
+//! 已读回执读接口不跟这个开关，一律要求签名。
 //!
 //! 以前读接口只看调用方自报的元数据：内网里任何能连到端口的进程带上别人的 `x-user-id` 就能读。
 //!
@@ -22,7 +23,9 @@ use flare_conversation::domain::model::{
 use flare_conversation::domain::service::DefaultConversationDomainService;
 use flare_conversation::infrastructure::persistence::PostgresConversationRepository;
 use flare_conversation::infrastructure::persistence::redis_presence::RedisPresenceRepository;
-use flare_conversation::interface::grpc::{ConversationGrpcHandler, signed_read_service};
+use flare_conversation::interface::grpc::{
+    ConversationGrpcHandler, signed_read_receipt_service, signed_read_service,
+};
 use flare_grpc_proto::conversation::GetConversationDetailRequest;
 use flare_grpc_proto::conversation::conversation_read_service_client::ConversationReadServiceClient;
 use flare_server_core::{
@@ -240,4 +243,98 @@ async fn unsigned_reads_still_work_while_the_switch_is_off() {
         status.message().contains("conversation_id is required"),
         "{status:?}"
     );
+}
+
+type ReceiptClient = flare_grpc_proto::conversation::message_read_receipt_service_client::MessageReadReceiptServiceClient<tonic::transport::Channel>;
+
+/// 起一个只挂已读回执读接口的服务（与 `service/mod.rs` 同一个装配函数）。
+async fn serve_read_receipts(layer: SignedFirstContextLayer) -> ReceiptClient {
+    let incoming = TcpIncoming::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+    let port = incoming.local_addr().unwrap().port();
+    tokio::spawn(
+        tonic::transport::Server::builder()
+            .add_service(signed_read_receipt_service(handler(), &layer))
+            .serve_with_incoming(incoming),
+    );
+    ReceiptClient::connect(format!("http://127.0.0.1:{port}"))
+        .await
+        .unwrap()
+}
+
+async fn ask_read_summaries(
+    client: &mut ReceiptClient,
+    conversation_id: &str,
+    metadata: &[(&'static str, &str)],
+) -> tonic::Status {
+    use flare_grpc_proto::conversation::GetMessageReadSummariesRequest;
+    let mut request = tonic::Request::new(GetMessageReadSummariesRequest {
+        conversation_id: conversation_id.into(),
+        server_msg_ids: vec!["m1".into()],
+    });
+    for (key, value) in metadata {
+        request.metadata_mut().append(*key, value.parse().unwrap());
+    }
+    client
+        .get_message_read_summaries(request)
+        .await
+        .expect_err("never answered from a database here")
+}
+
+/// 群聊已读回执读接口用同一个验签器，但一律要求签名：读接口的开关开着、关着，只带元数据（冒充
+/// alice）的调用都被拒，没有配置公钥时一律不可用；冒名被拒；用户签名到达处理器（停在参数校验）；
+/// 服务签名没有用户，到不了按调用者核对成员的那一步（只有发送者本人能查自己消息的已读）。
+#[tokio::test]
+async fn read_receipts_always_require_a_signed_user() {
+    let (signer, verifier) = keys(81);
+    for require in [true, false] {
+        let mut client = serve_read_receipts(
+            SignedFirstContextLayer::new(Some(verifier.clone())).require_signed(require),
+        )
+        .await;
+
+        let status = ask_read_summaries(&mut client, "2AGROUP", &UNSIGNED_VICTIM).await;
+        assert_eq!(
+            status.code(),
+            Code::Unauthenticated,
+            "require={require}: {status:?}"
+        );
+        assert_eq!(status.message(), "signed context required");
+
+        let mallory = sign(&signer, SignedActorType::User, "mallory");
+        let status = ask_read_summaries(
+            &mut client,
+            "2AGROUP",
+            &[("x-flare-ctx", &mallory), ("x-user-id", "alice")],
+        )
+        .await;
+        assert_eq!(
+            status.code(),
+            Code::PermissionDenied,
+            "require={require}: {status:?}"
+        );
+
+        let alice = sign(&signer, SignedActorType::User, "alice");
+        let status = ask_read_summaries(&mut client, "", &[("x-flare-ctx", &alice)]).await;
+        assert_eq!(
+            status.code(),
+            Code::InvalidArgument,
+            "require={require}: {status:?}"
+        );
+
+        let service = sign(&signer, SignedActorType::Service, "flare-orchestrator");
+        let status = ask_read_summaries(&mut client, "2AGROUP", &[("x-flare-ctx", &service)]).await;
+        assert_eq!(
+            status.message(),
+            "user_id is required",
+            "require={require}: {status:?}"
+        );
+    }
+
+    // 没有公钥：读接口在开关关着时按元数据取身份，已读回执接口照样不认未签名调用。
+    let mut client = serve_read_receipts(SignedFirstContextLayer::new(None)).await;
+    let status = ask_read_summaries(&mut client, "2AGROUP", &UNSIGNED_VICTIM).await;
+    assert_eq!(status.code(), Code::Unavailable, "{status:?}");
+    let mut reads = serve(SignedFirstContextLayer::new(None)).await;
+    let status = detail(&mut reads, &UNSIGNED_VICTIM).await;
+    assert_eq!(status.code(), Code::InvalidArgument, "{status:?}");
 }

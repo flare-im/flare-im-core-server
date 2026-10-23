@@ -133,7 +133,7 @@ pub async fn initialize(
         })?;
     if read_signer.is_none() {
         tracing::warn!(
-            "FLARE_INTERNAL_CTX_PRIVATE_KEY is missing: recall, edit, delete, reaction, pin and mark events are refused (their message cannot be read)"
+            "FLARE_INTERNAL_CTX_PRIVATE_KEY is missing: user events are refused (neither their operator's membership nor their message can be read)"
         );
     }
     let message_targets: Arc<dyn crate::domain::repository::MessageTargetRepository> = Arc::new(
@@ -142,6 +142,17 @@ pub async fn initialize(
             read_signer.clone(),
         ),
     );
+    // User events are refused unless their operator is a member of the conversation (not left),
+    // looked up for that one user and cached (see MessageOperationPolicy).
+    let conversation_members: Arc<dyn crate::domain::repository::ConversationMembershipRepository> =
+        Arc::new(
+            crate::infrastructure::external::CachedConversationMembership::new(Arc::new(
+                crate::infrastructure::external::ConversationReadMembership::new(
+                    conversation_channel.clone(),
+                    read_signer.clone(),
+                ),
+            )),
+        );
     let conversation_repository = Arc::new(
         ConversationClient::new(conversation_channel)
             .with_service_read_signer(read_signer, flare_im_contracts::service_names::ORCHESTRATOR),
@@ -188,7 +199,8 @@ pub async fn initialize(
         .with_user_sync_index(user_sync_index_repository)
         .with_user_sync_compensation(user_sync_compensation_repository)
         .with_read_watermark(read_watermark_repository)
-        .with_message_targets(message_targets),
+        .with_message_targets(message_targets)
+        .with_conversation_members(conversation_members),
     );
 
     let event_handler = Arc::new(EventHandler::new(event_domain_service.clone()));

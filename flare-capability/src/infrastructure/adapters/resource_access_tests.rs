@@ -22,10 +22,14 @@ struct OwnerFixture {
     member: AtomicBool,
     mismatch: AtomicBool,
     social_hits: AtomicUsize,
-    /// The conversation's active participants, in Conversation's page order.
+    /// The conversation's members (not left), in Conversation's page order.
     roster: Vec<(String, String)>,
-    /// Conversation answers the `user_ids` lookup key; false is an older
-    /// Conversation that pages every participant whatever the key says.
+    /// Members who hid the conversation from their own list: Conversation leaves them
+    /// out of its in-seat pages (no `members` scope) and keeps them in its member answers
+    /// (the `members` scope, the `member_ids` lookup).
+    hidden: Vec<String>,
+    /// Conversation answers the lookup key; false is an older Conversation that pages
+    /// every participant whatever the key says.
     lookup: AtomicBool,
     participant_calls: Mutex<Vec<ListConversationParticipantsRequest>>,
 }
@@ -128,15 +132,18 @@ impl conversation_read_service_server::ConversationReadService for OwnerFixture 
             attributes: [("secret".into(), "hidden".into())].into(),
             ..Default::default()
         };
+        let in_scope = |members: bool| {
+            self.roster
+                .iter()
+                .filter(move |(id, _)| members || !self.hidden.contains(id))
+        };
         if self.lookup.load(Ordering::SeqCst)
-            && let Some(ids) = body.ext.get("user_ids")
+            && let Some(ids) = body.ext.get("member_ids")
         {
             let ids: Vec<&str> = ids.split(',').collect();
             return Ok(Response::new(ListConversationParticipantsResponse {
                 conversation_id: "conversation-1".into(),
-                participants: self
-                    .roster
-                    .iter()
+                participants: in_scope(true)
                     .filter(|(id, _)| ids.contains(&id.as_str()))
                     .map(view)
                     .collect(),
@@ -144,15 +151,17 @@ impl conversation_read_service_server::ConversationReadService for OwnerFixture 
             }));
         }
         // Conversation's paging: a number is an offset, `k:<n>` its own keyset cursor.
+        let paged: Vec<&(String, String)> =
+            in_scope(body.ext.get("members").map(String::as_str) == Some("1")).collect();
         let start: usize = match body.cursor.as_str() {
             "" => 0,
             cursor => cursor.strip_prefix("k:").unwrap_or(cursor).parse().unwrap(),
         };
-        let end = (start + body.limit as usize).min(self.roster.len());
-        let has_more = end < self.roster.len();
+        let end = (start + body.limit as usize).min(paged.len());
+        let has_more = end < paged.len();
         Ok(Response::new(ListConversationParticipantsResponse {
             conversation_id: "conversation-1".into(),
-            participants: self.roster[start..end].iter().map(view).collect(),
+            participants: paged[start..end].iter().copied().map(view).collect(),
             next_cursor: if has_more {
                 format!("k:{end}")
             } else {
@@ -231,6 +240,7 @@ async fn harness() -> Harness {
         mismatch: AtomicBool::new(false),
         social_hits: AtomicUsize::new(0),
         roster: roster(),
+        hidden: vec!["u3".to_string()],
         lookup: AtomicBool::new(true),
         participant_calls: Mutex::new(Vec::new()),
     });
@@ -353,7 +363,7 @@ async fn participant_pages_take_500_and_hand_out_offset_cursors() {
     assert_eq!(calls.len(), 1);
     assert_eq!(calls[0].cursor, "", "the first page sends no cursor");
     assert_eq!(calls[0].limit, 500);
-    assert!(!calls[0].ext.contains_key("user_ids"));
+    assert_eq!(calls[0].ext.get("members").map(String::as_str), Some("1"));
 
     let mut seen: Vec<String> = first
         .participants
@@ -448,7 +458,7 @@ async fn members_check_partitions_the_ids_with_one_lookup() {
     let calls = harness.participant_calls();
     assert_eq!(calls.len(), 1, "one lookup, no paging");
     assert_eq!(
-        calls[0].ext.get("user_ids").map(String::as_str),
+        calls[0].ext.get("member_ids").map(String::as_str),
         Some(format!("ghost,u2,{far},u1,left-user").as_str())
     );
     assert_eq!(calls[0].cursor, "");
@@ -495,6 +505,42 @@ async fn members_check_walks_pages_when_conversation_ignores_the_lookup() {
         harness.participant_calls().len(),
         1,
         "stops once every id is found"
+    );
+    harness.finish().await;
+}
+
+/// A member who hid the conversation from their own list (`u3`) is still a member: the
+/// members check a plugin runs before a member-only operation says so, and the
+/// participant pages list them. Someone who left (`left-user`) is in neither. Both reads
+/// ask Conversation for the member scope.
+#[tokio::test]
+async fn a_member_who_hid_the_conversation_is_still_a_member() {
+    let harness = harness().await;
+    let answer = check(&harness, &["u3", "left-user"]).await;
+    assert_eq!(answer.members, ["u3"]);
+    assert_eq!(answer.non_members, ["left-user"]);
+    let calls = harness.participant_calls();
+    assert_eq!(
+        calls[0].ext.get("member_ids").map(String::as_str),
+        Some("u3,left-user")
+    );
+
+    let first = page(&participants(&harness, "", 5).await.unwrap());
+    assert_eq!(
+        first
+            .participants
+            .iter()
+            .map(|p| p.user_id.as_str())
+            .take(3)
+            .collect::<Vec<_>>(),
+        ["u1", "u2", "u3"]
+    );
+    assert_eq!(
+        harness.participant_calls()[0]
+            .ext
+            .get("members")
+            .map(String::as_str),
+        Some("1")
     );
     harness.finish().await;
 }

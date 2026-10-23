@@ -19,6 +19,13 @@ use crate::domain::model::{
 use crate::domain::repository::ConversationRepository;
 use crate::infrastructure::persistence::message_cache::MessageCacheInvalidator;
 
+/// 不计入未读的消息状态：已撤回、已删除。取 proto `MessageStatus` 的枚举值绑定进 SQL，不在 SQL
+/// 里写数字：`messages.status` 存的就是 proto 编码（撤回 5、删除 6）。
+const UNREAD_EXCLUDED_STATUSES: [i32; 2] = [
+    flare_proto::common::MessageStatus::Recalled as i32,
+    flare_proto::common::MessageStatus::Deleted as i32,
+];
+
 /// 会话摘要读时补全:解码最后一条消息的 content(BYTEA proto `MessageContent`)→
 /// (预览文本, content_type 标签)。文本类取正文,媒体/卡片等取占位标签;解码失败或空 → (None, None)。
 /// 仅在读会话列表时按会话取最后一行解码,不新增落库列。
@@ -213,7 +220,6 @@ impl PostgresConversationRepository {
                 FROM conversation_participants cp
                 WHERE cp.tenant_id = $1
                   AND cp.conversation_id = c.conversation_id
-                  AND NOT COALESCE(cp.is_deleted, false)
                   AND cp.quit_at IS NULL
                 ORDER BY cp.joined_at ASC, cp.user_id ASC
                 LIMIT $3
@@ -233,14 +239,14 @@ impl PostgresConversationRepository {
             )
         })?;
 
-        // 真实成员数：按会话 COUNT 聚合（索引扫描，不把 O(成员) 行拉回应用层）。
+        // 真实成员数：按会话 COUNT 聚合（索引扫描，不把 O(成员) 行拉回应用层）。预览与人数都按
+        // 成员口径：隐藏了会话的人仍在群里，只是本人列表里看不到这个会话。
         let count_rows = sqlx::query(
             r#"
             SELECT cp.conversation_id::text AS conversation_id, COUNT(*)::bigint AS member_count
             FROM conversation_participants cp
             WHERE cp.tenant_id = $1
               AND cp.conversation_id = ANY($2)
-              AND NOT COALESCE(cp.is_deleted, false)
               AND cp.quit_at IS NULL
             GROUP BY cp.conversation_id
             "#,
@@ -347,7 +353,7 @@ fn is_internal_actor(ctx: &flare_server_core::context::Context) -> bool {
         .unwrap_or(false)
 }
 
-/// 成员读的列：`list_conversation_participants` 与 `find_conversation_participants` 共用，
+/// 成员读的列：`list_conversation_participants` 与 `find_conversation_members` 共用，
 /// 行由 [`participant_from_row`] 解出。
 const PARTICIPANT_COLUMNS: &str = r#"
                 user_id::text AS user_id,
@@ -393,7 +399,10 @@ fn participant_from_row(row: &sqlx::postgres::PgRow) -> ConversationParticipant 
 }
 
 impl PostgresConversationRepository {
-    /// 用户态成员读的前置条件：调用者自己是该会话的在席成员，否则按"会话不存在"拒绝。
+    /// 用户态成员读的前置条件：调用者自己是该会话的成员（未退出；隐藏了会话的也算），否则按
+    /// "会话不存在"拒绝。读哪些行（在席还是成员）由各读接口的口径决定，与调用者核对无关：隐藏
+    /// 了会话的人照样能发已读回执、点表情，这些事件的收件人读取会带着他的身份来，只是读出的
+    /// 收件人按在席口径不含隐藏者。
     async fn ensure_caller_participant(
         &self,
         ctx: &flare_server_core::context::Context,
@@ -408,7 +417,6 @@ impl PostgresConversationRepository {
             WHERE tenant_id = $1
               AND conversation_id = $2
               AND user_id = $3
-              AND NOT COALESCE(is_deleted, false)
               AND quit_at IS NULL
             LIMIT 1
             "#,
@@ -429,6 +437,77 @@ impl PostgresConversationRepository {
             .build_error());
         }
         Ok(())
+    }
+}
+
+impl PostgresConversationRepository {
+    /// `user_ids` 中仍是成员（未退出；隐藏了会话的也算）的参与者，主键上的 ANY 查找：O(ids)。
+    async fn members_among(
+        &self,
+        tenant_id: &str,
+        conversation_id: &str,
+        user_ids: &[String],
+    ) -> Result<Vec<ConversationParticipant>> {
+        let sql = format!(
+            r#"
+            SELECT {PARTICIPANT_COLUMNS}
+            FROM conversation_participants
+            WHERE tenant_id = $1
+              AND conversation_id = $2
+              AND user_id = ANY($3)
+              AND quit_at IS NULL
+            ORDER BY joined_at ASC, user_id ASC
+            "#
+        );
+        let rows = sqlx::query(&sql)
+            .bind(tenant_id)
+            .bind(conversation_id)
+            .bind(user_ids)
+            .fetch_all(&*self.pool)
+            .await
+            .map_err(|e| map_infra_error(e, ErrorCode::DatabaseError, "find members"))?;
+        Ok(rows.iter().map(participant_from_row).collect())
+    }
+
+    /// 会话成员是否超过精确未读阈值(`large_conversation_precise_unread_threshold`):有界计数,
+    /// 最多读「阈值+1」行即停(LIMIT)。不对全群 COUNT(*)(O(成员) 扫描,实测 10 万群病态计划
+    /// 钉核),也不依赖不可靠的 conversations.member_count(实测大群该列为 0)。超阈值的会话不物化
+    /// 每个成员的未读。阈值为 0 时不分大小群。
+    async fn above_precise_unread_threshold(
+        &self,
+        tenant_id: &str,
+        conversation_id: &str,
+    ) -> Result<bool> {
+        let precise_unread_threshold = self.config.large_conversation_precise_unread_threshold;
+        if precise_unread_threshold <= 0 {
+            return Ok(false);
+        }
+        let capped: i64 = sqlx::query_scalar(
+            r#"
+            SELECT COUNT(*)::BIGINT
+            FROM (
+                SELECT 1
+                FROM conversation_participants
+                WHERE tenant_id = $1
+                  AND conversation_id = $2
+                  AND NOT COALESCE(is_deleted, false)
+                LIMIT $3
+            ) capped
+            "#,
+        )
+        .bind(tenant_id)
+        .bind(conversation_id)
+        .bind(i64::from(precise_unread_threshold) + 1)
+        .fetch_one(&*self.pool)
+        .await
+        .map_err(|e| {
+            map_infra_error(
+                e,
+                ErrorCode::DatabaseError,
+                "Failed to probe conversation size",
+            )
+        })?;
+        Ok(capped > i64::from(precise_unread_threshold))
     }
 }
 
@@ -510,7 +589,9 @@ impl ConversationRepository for PostgresConversationRepository {
                     COALESCE(message_tail.max_seq, 0)
                 ) AS last_message_seq,
                 COALESCE(s.channel_id, '') as channel_id,
-                COALESCE(sp.last_read_seq, 0) as last_read_seq,
+                -- 本人列表的已读位置：真实已读与隐藏会话时清到的位置（last_sync_seq）取大者。
+                -- 只给本人看；别人看到的已读（peer_read_seq、群已读）只取 last_read_seq。
+                GREATEST(COALESCE(sp.last_read_seq, 0), COALESCE(sp.last_sync_seq, 0)) as last_read_seq,
                 GREATEST(
                     COALESCE(sp.unread_count, 0),
                     COALESCE(unread_tail.unread_count, 0)
@@ -545,12 +626,14 @@ impl ConversationRepository for PostgresConversationRepository {
             FROM conversations s
             INNER JOIN conversation_participants sp ON s.tenant_id = sp.tenant_id AND s.conversation_id = sp.conversation_id
             LEFT JOIN LATERAL (
+                -- 对端的真实已读位置：对端隐藏了会话也照算（隐藏只影响对端自己的列表），
+                -- 只排除已退出的。
                 SELECT MAX(COALESCE(sp2.last_read_seq, 0)) AS max_peer_read_seq
                 FROM conversation_participants sp2
                 WHERE sp2.tenant_id = s.tenant_id
                   AND sp2.conversation_id = s.conversation_id
                   AND sp2.user_id <> $2
-                  AND NOT COALESCE(sp2.is_deleted, false)
+                  AND sp2.quit_at IS NULL
             ) peer ON TRUE
             LEFT JOIN LATERAL (
                 -- 取会话最后一条消息行(seq 最大)。seq 单调即为最新,兼作 max_seq/last_message_at,
@@ -582,10 +665,15 @@ impl ConversationRepository for PostgresConversationRepository {
                     FROM messages m
                     WHERE m.tenant_id = s.tenant_id
                       AND m.conversation_id = s.conversation_id
-                      -- 看不到的消息不该计入未读，否则新成员一进群就顶着一堆读不到的红点。
-                      AND m.seq > GREATEST(COALESCE(sp.last_read_seq, 0), COALESCE(sp.visible_from_seq, 0))
+                      -- 看不到的消息不该计入未读，否则新成员一进群就顶着一堆读不到的红点；
+                      -- 隐藏会话时已清掉的那段（last_sync_seq 之前）也不再算。
+                      AND m.seq > GREATEST(
+                          COALESCE(sp.last_read_seq, 0),
+                          COALESCE(sp.visible_from_seq, 0),
+                          COALESCE(sp.last_sync_seq, 0)
+                      )
                       AND m.sender_id <> $2
-                      AND COALESCE(m.status, 1) NOT IN (6, 7, 8)
+                      AND NOT (COALESCE(m.status, 1) = ANY($5))
                     LIMIT $4
                 ) capped
             ) unread_tail ON TRUE
@@ -615,6 +703,7 @@ impl ConversationRepository for PostgresConversationRepository {
         .bind(&user_id)
         .bind(updated_after)
         .bind(MAX_RECOMPUTED_UNREAD)
+        .bind(UNREAD_EXCLUDED_STATUSES.as_slice())
         .fetch_all(&*self.pool)
         .await
         .map_err(|e| {
@@ -937,14 +1026,15 @@ impl ConversationRepository for PostgresConversationRepository {
             _ => crate::domain::model::ConversationLifecycleState::Unspecified,
         };
 
-        // 查询参与者
+        // 查询参与者：成员口径——未退出即成员，隐藏了会话的也在（详情的成员数与成员项、详情读的
+        // 调用者核对都按它）。
         let participant_rows = sqlx::query(
             r#"
             SELECT user_id, roles, muted, pinned, attributes,
                    COALESCE(visible_from_seq, 0) AS visible_from_seq,
                    COALESCE(mention_only, false) AS mention_only
             FROM conversation_participants
-            WHERE tenant_id = $1 AND conversation_id = $2
+            WHERE tenant_id = $1 AND conversation_id = $2 AND quit_at IS NULL
             "#,
         )
         .bind(tenant_id)
@@ -1086,6 +1176,11 @@ impl ConversationRepository for PostgresConversationRepository {
         } else {
             // 用户侧软删除：只隐藏当前用户的会话视图，并把消息同步游标推进到当前尾部。
             // 这保留全局会话与对端视图；同一用户重新加入/重建会话后不会重新拉回删除前历史。
+            //
+            // 本人列表的未读清零，清到的位置记在参与者行的 last_sync_seq（只有这里写它），
+            // 本人未读一律从它之后算。已读位置 last_read_seq 不动：它是别人看到的已读
+            // （单聊 peer_read_seq、群已读摘要与名单），隐藏不是读过。删好友、拉黑在实现上
+            // 就是隐藏主动方这一侧，推高它等于把「全部已读」和这个动作一起告诉对方。
             let user_id = require_user_id(ctx)?;
             let mut tx = self.pool.begin().await.map_err(|e| {
                 map_infra_error(
@@ -1098,9 +1193,17 @@ impl ConversationRepository for PostgresConversationRepository {
             sqlx::query(
                 r#"
                 WITH tail AS (
-                    SELECT COALESCE(last_message_seq, 0) AS max_seq
-                    FROM conversations
-                    WHERE tenant_id = $1 AND conversation_id = $2
+                    -- 与会话列表同一个尾部：会话行的 last_message_seq 由消费者异步推进，可能
+                    -- 落后于已落库的消息，取两者较大者（索引末端，不是全表扫）。
+                    SELECT GREATEST(
+                        COALESCE(c.last_message_seq, 0),
+                        COALESCE((
+                            SELECT MAX(m.seq) FROM messages m
+                            WHERE m.tenant_id = c.tenant_id AND m.conversation_id = c.conversation_id
+                        ), 0)
+                    ) AS max_seq
+                    FROM conversations c
+                    WHERE c.tenant_id = $1 AND c.conversation_id = $2
                 ),
                 participant AS (
                     UPDATE conversation_participants sp
@@ -1109,7 +1212,6 @@ impl ConversationRepository for PostgresConversationRepository {
                         is_archived = FALSE,
                         draft = NULL,
                         unread_count = 0,
-                        last_read_seq = GREATEST(COALESCE(sp.last_read_seq, 0), (SELECT max_seq FROM tail)),
                         last_sync_seq = GREATEST(COALESCE(sp.last_sync_seq, 0), (SELECT max_seq FROM tail)),
                         updated_at = CURRENT_TIMESTAMP
                     WHERE sp.tenant_id = $1
@@ -1298,7 +1400,7 @@ impl ConversationRepository for PostgresConversationRepository {
         if !purged_ids.is_empty() {
             // 物化的未读数只随新消息 +1、随已读 -N，从不因删消息而减少：不重算的话，
             // 旧关系里没读的消息删掉之后红点还一直挂着。按与会话列表读时重算相同的口径
-            // （已读/可见下限之后、非本人发送、非 6/7/8 状态）数剩下的消息；删消息只会让
+            // （已读/可见下限之后、非本人发送、未撤回未删除）数剩下的消息；删消息只会让
             // 未读变少，所以取与原值的较小者，并以原值为 LIMIT 封顶，不对长会话整段计数。
             sqlx::query(
                 r#"
@@ -1314,10 +1416,11 @@ impl ConversationRepository for PostgresConversationRepository {
                                   AND m.conversation_id = sp.conversation_id
                                   AND m.seq > GREATEST(
                                       COALESCE(sp.last_read_seq, 0),
-                                      COALESCE(sp.visible_from_seq, 0)
+                                      COALESCE(sp.visible_from_seq, 0),
+                                      COALESCE(sp.last_sync_seq, 0)
                                   )
                                   AND m.sender_id <> sp.user_id
-                                  AND COALESCE(m.status, 1) NOT IN (6, 7, 8)
+                                  AND NOT (COALESCE(m.status, 1) = ANY($3))
                                 LIMIT GREATEST(COALESCE(sp.unread_count, 0), 0)
                             ) remaining
                         )
@@ -1330,6 +1433,7 @@ impl ConversationRepository for PostgresConversationRepository {
             )
             .bind(tenant_id)
             .bind(conversation_id)
+            .bind(UNREAD_EXCLUDED_STATUSES.as_slice())
             .execute(&mut *tx)
             .await
             .map_err(|e| {
@@ -1553,7 +1657,9 @@ impl ConversationRepository for PostgresConversationRepository {
         limit: i32,
         include_removed: bool,
         skip_metadata: bool,
+        scope: crate::domain::model::ParticipantScope,
     ) -> Result<ConversationParticipantsPage> {
+        use crate::domain::model::ParticipantScope;
         let tenant_id = required_tenant(ctx)?;
         let is_internal = is_internal_actor(ctx);
         let conversation_id = conversation_id.trim();
@@ -1572,10 +1678,13 @@ impl ConversationRepository for PostgresConversationRepository {
                 .await?;
         }
 
-        let active_filter = if include_removed {
-            ""
-        } else {
-            "AND NOT COALESCE(is_deleted, false) AND quit_at IS NULL"
+        // 在席：未隐藏、未退出（投递读取）；成员：未退出，隐藏了会话的也算（名单读取）。
+        let active_filter = match (include_removed, scope) {
+            (true, _) => "",
+            (false, ParticipantScope::InSeat) => {
+                "AND NOT COALESCE(is_deleted, false) AND quit_at IS NULL"
+            }
+            (false, ParticipantScope::Members) => "AND quit_at IS NULL",
         };
         let count_sql = format!(
             r#"
@@ -1707,7 +1816,7 @@ impl ConversationRepository for PostgresConversationRepository {
         })
     }
 
-    async fn find_conversation_participants(
+    async fn find_conversation_members(
         &self,
         ctx: &flare_server_core::context::Context,
         conversation_id: &str,
@@ -1729,27 +1838,168 @@ impl ConversationRepository for PostgresConversationRepository {
         if user_ids.is_empty() {
             return Ok(Vec::new());
         }
-        // 主键 (tenant_id, conversation_id, user_id) 上的 ANY 查找：O(ids)，与群规模无关。
-        let sql = format!(
+        self.members_among(tenant_id, conversation_id, user_ids)
+            .await
+    }
+
+    async fn retract_message_unread(
+        &self,
+        ctx: &flare_server_core::context::Context,
+        conversation_id: &str,
+        server_msg_id: &str,
+    ) -> Result<()> {
+        let tenant_id = required_tenant(ctx)?;
+        if conversation_id.trim().is_empty() || server_msg_id.trim().is_empty() {
+            return Ok(());
+        }
+        // 大群不物化未读（见 apply_message_event），没有可减的。
+        if self
+            .above_precise_unread_threshold(tenant_id, conversation_id)
+            .await?
+        {
+            return Ok(());
+        }
+        // 只动「还有未读、没读到这条、不是发送者」的成员；重算口径同会话列表的读时重算，另把这条
+        // 消息本身排除在外——Writer 改状态与本消费者处理撤回事件谁先谁后不定。只写确实变少的
+        // 行：重复投递的撤回事件不改任何行，也不推进 updated_at。
+        sqlx::query(
             r#"
-            SELECT {PARTICIPANT_COLUMNS}
+            WITH target AS (
+                SELECT seq, sender_id
+                FROM messages
+                WHERE tenant_id = $1 AND conversation_id = $2 AND server_id = $3
+                LIMIT 1
+            ),
+            recount AS (
+                SELECT sp.user_id,
+                       LEAST(
+                           GREATEST(COALESCE(sp.unread_count, 0), 0),
+                           (
+                               SELECT COUNT(1)::INT
+                               FROM (
+                                   SELECT 1
+                                   FROM messages m
+                                   WHERE m.tenant_id = sp.tenant_id
+                                     AND m.conversation_id = sp.conversation_id
+                                     AND m.seq > GREATEST(
+                                         COALESCE(sp.last_read_seq, 0),
+                                         COALESCE(sp.visible_from_seq, 0),
+                                         COALESCE(sp.last_sync_seq, 0)
+                                     )
+                                     AND m.sender_id <> sp.user_id
+                                     AND m.server_id <> $3
+                                     AND NOT (COALESCE(m.status, 1) = ANY($4))
+                                   LIMIT GREATEST(COALESCE(sp.unread_count, 0), 0)
+                               ) remaining
+                           )
+                       ) AS next_unread
+                FROM conversation_participants sp, target
+                WHERE sp.tenant_id = $1
+                  AND sp.conversation_id = $2
+                  AND NOT COALESCE(sp.is_deleted, false)
+                  AND COALESCE(sp.unread_count, 0) > 0
+                  AND GREATEST(COALESCE(sp.last_read_seq, 0), COALESCE(sp.last_sync_seq, 0)) < target.seq
+                  AND sp.user_id <> target.sender_id
+            )
+            UPDATE conversation_participants sp
+            SET unread_count = recount.next_unread,
+                updated_at = CURRENT_TIMESTAMP
+            FROM recount
+            WHERE sp.tenant_id = $1
+              AND sp.conversation_id = $2
+              AND sp.user_id = recount.user_id
+              AND recount.next_unread < COALESCE(sp.unread_count, 0)
+            "#,
+        )
+        .bind(tenant_id)
+        .bind(conversation_id)
+        .bind(server_msg_id)
+        .bind(UNREAD_EXCLUDED_STATUSES.as_slice())
+        .execute(&*self.pool)
+        .await
+        .map_err(|e| {
+            map_infra_error(
+                e,
+                ErrorCode::DatabaseError,
+                "Failed to recompute unread after a retracted message",
+            )
+        })?;
+        Ok(())
+    }
+
+    async fn list_member_read_positions(
+        &self,
+        ctx: &flare_server_core::context::Context,
+        conversation_id: &str,
+        limit: usize,
+    ) -> Result<Vec<crate::domain::model::MemberReadPosition>> {
+        let tenant_id = required_tenant(ctx)?;
+        // 主键 (tenant_id, conversation_id, user_id) 顺序扫描，读到 limit 行即停：十万人群只读
+        // limit 行，不做 COUNT(*)。隐藏了会话的成员照样是成员，也照样能看到消息。
+        let rows = sqlx::query(
+            r#"
+            SELECT user_id::text AS user_id,
+                   COALESCE(last_read_seq, 0) AS last_read_seq,
+                   COALESCE(visible_from_seq, 0) AS visible_from_seq
             FROM conversation_participants
             WHERE tenant_id = $1
               AND conversation_id = $2
-              AND user_id = ANY($3)
-              AND NOT COALESCE(is_deleted, false)
               AND quit_at IS NULL
-            ORDER BY joined_at ASC, user_id ASC
-            "#
-        );
-        let rows = sqlx::query(&sql)
-            .bind(tenant_id)
-            .bind(conversation_id)
-            .bind(user_ids)
-            .fetch_all(&*self.pool)
-            .await
-            .map_err(|e| map_infra_error(e, ErrorCode::DatabaseError, "find participants"))?;
-        Ok(rows.iter().map(participant_from_row).collect())
+            ORDER BY user_id ASC
+            LIMIT $3
+            "#,
+        )
+        .bind(tenant_id)
+        .bind(conversation_id)
+        .bind(i64::try_from(limit).unwrap_or(i64::MAX))
+        .fetch_all(&*self.pool)
+        .await
+        .map_err(|e| map_infra_error(e, ErrorCode::DatabaseError, "list member read positions"))?;
+        Ok(rows
+            .iter()
+            .map(|row| crate::domain::model::MemberReadPosition {
+                user_id: row.get("user_id"),
+                last_read_seq: row.get("last_read_seq"),
+                visible_from_seq: row.get("visible_from_seq"),
+            })
+            .collect())
+    }
+
+    async fn find_receipt_messages(
+        &self,
+        ctx: &flare_server_core::context::Context,
+        conversation_id: &str,
+        server_msg_ids: &[String],
+    ) -> Result<Vec<crate::domain::model::ReceiptMessage>> {
+        let tenant_id = required_tenant(ctx)?;
+        if server_msg_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        // idx_messages_tenant_server_id 上的 ANY 查找：O(ids)。
+        let rows = sqlx::query(
+            r#"
+            SELECT server_id, seq, sender_id, status
+            FROM messages
+            WHERE tenant_id = $1
+              AND server_id = ANY($2)
+              AND conversation_id = $3
+            "#,
+        )
+        .bind(tenant_id)
+        .bind(server_msg_ids)
+        .bind(conversation_id)
+        .fetch_all(&*self.pool)
+        .await
+        .map_err(|e| map_infra_error(e, ErrorCode::DatabaseError, "find receipt messages"))?;
+        Ok(rows
+            .iter()
+            .map(|row| crate::domain::model::ReceiptMessage {
+                server_id: row.get("server_id"),
+                seq: row.get("seq"),
+                sender_id: row.get("sender_id"),
+                status: row.get("status"),
+            })
+            .collect())
     }
 
     async fn search_conversations(
@@ -1778,7 +2028,8 @@ impl ConversationRepository for PostgresConversationRepository {
                 COALESCE(s.channel_id, '') as channel_id,
                 COALESCE(s.last_message_seq, 0) as last_message_seq,
                 COALESCE(sp.unread_count, 0) as unread_count,
-                COALESCE(sp.last_read_seq, 0) as last_read_seq
+                -- 本人列表的已读位置（见 load_bootstrap）。
+                GREATEST(COALESCE(sp.last_read_seq, 0), COALESCE(sp.last_sync_seq, 0)) as last_read_seq
             FROM conversations s
             "#,
             )
@@ -2043,6 +2294,8 @@ impl ConversationRepository for PostgresConversationRepository {
             WITH conv_state AS (
                 SELECT
                     COALESCE(sp.last_read_seq, 0) AS prev_read_seq,
+                    -- 隐藏会话时清掉的那段不在未读里，扣减不能再扣它。
+                    COALESCE(sp.last_sync_seq, 0) AS list_floor_seq,
                     COALESCE(sp.unread_count, 0) AS prev_unread_count,
                     GREATEST(
                         COALESCE(c.last_message_seq, 0),
@@ -2068,6 +2321,7 @@ impl ConversationRepository for PostgresConversationRepository {
             target AS (
                 SELECT
                     prev_read_seq,
+                    list_floor_seq,
                     prev_unread_count,
                     max_seq,
                     LEAST(
@@ -2091,10 +2345,10 @@ impl ConversationRepository for PostgresConversationRepository {
                             FROM messages m
                             WHERE m.tenant_id = $2
                               AND m.conversation_id = $3
-                              AND m.seq > target.prev_read_seq
+                              AND m.seq > GREATEST(target.prev_read_seq, target.list_floor_seq)
                               AND m.seq <= target.next_read_seq
                               AND m.sender_id <> $4
-                              AND COALESCE(m.status, 1) NOT IN (6, 7, 8)
+                              AND NOT (COALESCE(m.status, 1) = ANY($5))
                         ), 0),
                         0
                     )
@@ -2116,6 +2370,7 @@ impl ConversationRepository for PostgresConversationRepository {
         .bind(tenant_id)
         .bind(conversation_id)
         .bind(&user_id)
+        .bind(UNREAD_EXCLUDED_STATUSES.as_slice())
         .fetch_optional(&*self.pool)
         .await
         .map_err(|e| map_infra_error(e, ErrorCode::DatabaseError, "Failed to mark as read"))?;
@@ -2242,7 +2497,6 @@ impl ConversationRepository for PostgresConversationRepository {
         status: i32,
     ) -> Result<()> {
         let tenant_id = required_tenant(ctx)?;
-        let precise_unread_threshold = self.config.large_conversation_precise_unread_threshold;
 
         // 步骤 1：推进会话 last_message_seq(PK 定位,O(1)),始终执行。
         // 未读是派生量,不与 seq 推进强绑事务;seq 推进是消息顺序的关键,单独保证。
@@ -2267,42 +2521,16 @@ impl ConversationRepository for PostgresConversationRepository {
             )
         })?;
 
-        // 步骤 2：大群短路判定——有界计数,最多读「阈值+1」行即停(LIMIT)。
-        // 不对全群 COUNT(*)(O(成员) 扫描,实测 10 万群病态计划钉核),也不依赖不可靠的
-        // conversations.member_count(实测大群该列为 0)。超阈值即大群:发送热路径不物化
+        // 步骤 2：大群短路判定(见 above_precise_unread_threshold):发送热路径不物化
         // per-member 未读,交由读时计算(见 get_unread_count / 客户端会话列表)。
-        if precise_unread_threshold > 0 {
-            let capped: i64 = sqlx::query_scalar(
-                r#"
-                SELECT COUNT(*)::BIGINT
-                FROM (
-                    SELECT 1
-                    FROM conversation_participants
-                    WHERE tenant_id = $1
-                      AND conversation_id = $2
-                      AND NOT COALESCE(is_deleted, false)
-                    LIMIT $3
-                ) capped
-                "#,
-            )
-            .bind(tenant_id)
-            .bind(conversation_id)
-            .bind(i64::from(precise_unread_threshold) + 1)
-            .fetch_one(&*self.pool)
-            .await
-            .map_err(|e| {
-                map_infra_error(
-                    e,
-                    ErrorCode::DatabaseError,
-                    "Failed to probe conversation size",
-                )
-            })?;
-            if capped > i64::from(precise_unread_threshold) {
-                return Ok(());
-            }
+        if self
+            .above_precise_unread_threshold(tenant_id, conversation_id)
+            .await?
+        {
+            return Ok(());
         }
 
-        // 步骤 3：小群/单聊——精确物化每个成员未读(排除发送者、mute 6/7/8、已读下限)。
+        // 步骤 3：小群/单聊——精确物化每个成员未读(排除发送者、已撤回或已删除的消息、已读下限)。
         // 成员数已 ≤ 阈值,这条 UPDATE 的行数有上界,不随大群规模膨胀。
         sqlx::query(
             r#"
@@ -2310,8 +2538,9 @@ impl ConversationRepository for PostgresConversationRepository {
             SET
                 unread_count = CASE
                     WHEN sp.user_id = $4 THEN COALESCE(sp.unread_count, 0)
-                    WHEN $5 IN (6, 7, 8) THEN COALESCE(sp.unread_count, 0)
-                    WHEN COALESCE(sp.last_read_seq, 0) >= $1 THEN COALESCE(sp.unread_count, 0)
+                    WHEN $5 = ANY($6) THEN COALESCE(sp.unread_count, 0)
+                    WHEN GREATEST(COALESCE(sp.last_read_seq, 0), COALESCE(sp.last_sync_seq, 0)) >= $1
+                        THEN COALESCE(sp.unread_count, 0)
                     ELSE COALESCE(sp.unread_count, 0) + 1
                 END,
                 updated_at = CURRENT_TIMESTAMP
@@ -2325,6 +2554,7 @@ impl ConversationRepository for PostgresConversationRepository {
         .bind(conversation_id)
         .bind(sender_id)
         .bind(status)
+        .bind(UNREAD_EXCLUDED_STATUSES.as_slice())
         .execute(&*self.pool)
         .await
         .map_err(|e| {

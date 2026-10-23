@@ -499,6 +499,28 @@ impl ConversationEventHandler {
                     "Unread increment applied from message event"
                 );
             }
+            // A message recalled or deleted for everyone stops counting as unread: the members
+            // who had not read it get their unread recomputed without it.
+            Some(Payload::Recall(_)) | Some(Payload::Delete(_)) => {
+                let Some(server_msg_id) = retracted_message(&event) else {
+                    return Ok(());
+                };
+                let conversation_id = event.conversation_id.as_str();
+                if conversation_id.is_empty() || server_msg_id.trim().is_empty() {
+                    debug!("Retraction without conversation or message id, skip");
+                    return Ok(());
+                }
+                let tenant_id = message_event_tenant(&envelope_headers, transport_tenant)?;
+                let ctx = Context::root().with_tenant_id(tenant_id);
+                self.domain_service
+                    .retract_message_unread(&ctx, conversation_id, server_msg_id)
+                    .await?;
+                debug!(
+                    conversation_id = %conversation_id,
+                    server_msg_id = %server_msg_id,
+                    "Unread recomputed after a retracted message"
+                );
+            }
             _ => {}
         }
         Ok(())
@@ -847,6 +869,26 @@ fn matches_supported_event(event: &Event) -> bool {
             event.payload,
             Some(Payload::Read(_)) | Some(Payload::Message(_))
         )
+        || retracted_message(event).is_some()
+}
+
+/// The message an event takes away from everyone: a recall, or a delete for the whole
+/// conversation (a hard delete without a scope is one). A delete for one user's own view changes
+/// nobody's unread and is not a retraction.
+fn retracted_message(event: &Event) -> Option<&str> {
+    use flare_proto::common::{DeleteScope, DeleteType};
+    match event.payload.as_ref()? {
+        Payload::Recall(recall) => Some(recall.server_msg_id.as_str()),
+        Payload::Delete(delete) => {
+            let hard = delete.delete_type == Some(DeleteType::Hard as i32);
+            let global = match delete.scope {
+                Some(scope) => scope == DeleteScope::ConversationGlobal as i32,
+                None => hard,
+            };
+            global.then_some(delete.server_msg_id.as_str())
+        }
+        _ => None,
+    }
 }
 
 // -----------------------------------------------------------------------------
@@ -1181,6 +1223,69 @@ mod tests {
         };
         assert_eq!(m.conversation_seq, 42);
         assert_eq!(m.sender_id, "u-1");
+    }
+
+    /// A recall and a delete for everyone reach the unread recompute; a delete for one user's own
+    /// view and an edit do not.
+    #[test]
+    fn recalls_and_deletes_for_everyone_are_decoded_as_retractions() {
+        use flare_proto::common::{
+            DeleteScope, DeleteType, MessageDeleteEvent, MessageEditEvent, MessageRecallEvent,
+        };
+        let retraction = |payload: event::Payload, event_type: EventType| {
+            let decoded = decode_message_event(&encode_event_envelope(Event {
+                conversation_id: "conv-1".into(),
+                r#type: event_type as i32,
+                event_id: "e-1".into(),
+                payload: Some(payload),
+                ..Default::default()
+            }))
+            .expect("decode");
+            decoded.and_then(|d| super::retracted_message(&d.event).map(str::to_owned))
+        };
+        let delete = |delete_type: DeleteType, scope: Option<DeleteScope>| {
+            event::Payload::Delete(MessageDeleteEvent {
+                server_msg_id: "m-1".into(),
+                delete_type: Some(delete_type as i32),
+                scope: scope.map(|scope| scope as i32),
+                ..Default::default()
+            })
+        };
+        assert_eq!(
+            retraction(
+                event::Payload::Recall(MessageRecallEvent {
+                    server_msg_id: "m-1".into(),
+                    ..Default::default()
+                }),
+                EventType::EventMessageRecall
+            )
+            .as_deref(),
+            Some("m-1")
+        );
+        for global in [
+            delete(DeleteType::Soft, Some(DeleteScope::ConversationGlobal)),
+            delete(DeleteType::Hard, None),
+        ] {
+            assert_eq!(
+                retraction(global, EventType::EventMessageDelete).as_deref(),
+                Some("m-1")
+            );
+        }
+        for kept in [
+            (
+                delete(DeleteType::Soft, Some(DeleteScope::UserPrivate)),
+                EventType::EventMessageDelete,
+            ),
+            (
+                event::Payload::Edit(MessageEditEvent {
+                    server_msg_id: "m-1".into(),
+                    ..Default::default()
+                }),
+                EventType::EventMessageEdit,
+            ),
+        ] {
+            assert_eq!(retraction(kept.0, kept.1), None);
+        }
     }
 
     #[test]

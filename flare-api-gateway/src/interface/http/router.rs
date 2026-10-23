@@ -15,6 +15,7 @@ use super::media_handler;
 use super::message_handler;
 use super::presence_handler;
 use super::push_token_handler;
+use super::read_receipt_handler;
 use flare_im_service_kit::clients::GrpcClients;
 use flare_server_core::http::HttpApiError;
 
@@ -47,6 +48,8 @@ use flare_server_core::http::HttpApiError;
         message_handler::send_message,
         message_handler::execute_custom_event,
         message_handler::recall_message,
+        read_receipt_handler::get_message_read_summaries,
+        read_receipt_handler::list_message_readers,
         conversation_handler::list_conversations,
         conversation_handler::list_conversation_participants,
         conversation_handler::manage_participants,
@@ -109,6 +112,10 @@ use flare_server_core::http::HttpApiError;
             crate::application::dto::ExecuteCustomEventHttpResponse,
             crate::application::dto::RecallMessageHttpRequest,
             crate::application::dto::RecallMessageHttpResponse,
+            super::read_receipt_handler::MessageReadSummariesHttpRequest,
+            super::read_receipt_handler::MessageReadSummaryHttp,
+            super::read_receipt_handler::MessageReadSummariesHttpResponse,
+            super::read_receipt_handler::ListMessageReadersHttpResponse,
             super::conversation_handler::ListConversationsHttpRequest,
             super::conversation_handler::ConversationHttpResponse,
             super::conversation_handler::ListConversationsHttpResponse,
@@ -296,6 +303,11 @@ pub fn create_public_router(clients: Arc<GrpcClients>) -> Router {
             post(message_handler::execute_custom_event),
         )
         .route("/recall", post(message_handler::recall_message))
+        .route(
+            "/read-summaries",
+            post(read_receipt_handler::get_message_read_summaries),
+        )
+        .route("/readers", get(read_receipt_handler::list_message_readers))
         .layer(axum::Extension(clients.clone()))
         .route_layer(middleware::from_fn(gateway_auth_middleware));
 
@@ -416,6 +428,10 @@ mod conversation_read_tests;
 #[cfg(test)]
 #[path = "router_downstream_timeout_tests.rs"]
 mod downstream_timeout_tests;
+
+#[cfg(test)]
+#[path = "router_read_receipt_tests.rs"]
+mod read_receipt_tests;
 
 #[cfg(test)]
 mod api_docs_tests {

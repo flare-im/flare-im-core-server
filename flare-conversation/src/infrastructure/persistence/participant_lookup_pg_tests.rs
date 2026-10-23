@@ -1,5 +1,5 @@
-//! 按 id 查成员的真库校验：仓储 `find_conversation_participants` 与读接口
-//! `ext["user_ids"]`（插件资源桥的成员核对走这条路）。
+//! 按 id 查成员的真库校验：仓储 `find_conversation_members` 与读接口 `ext["member_ids"]`
+//! （上行事件的操作者核对、插件资源桥的成员核对走这条路）。
 //!
 //! 需要 `FLARE_CONVERSATION_TEST_DATABASE_URL`（任意可建 schema 的 PostgreSQL）。用例标了
 //! `#[ignore]`：默认的 `cargo test` 只记为 ignored，`-- --ignored` 显式运行时变量必须已设置。
@@ -200,7 +200,7 @@ async fn lookup(
         cursor: "1".into(),
         limit: 1,
         include_removed: true,
-        ext: [("user_ids".to_string(), user_ids.to_string())].into(),
+        ext: [("member_ids".to_string(), user_ids.to_string())].into(),
     });
     flare_server_core::client::set_context_metadata(&mut request, ctx);
     handler
@@ -231,7 +231,7 @@ async fn lookup_returns_the_active_members_among_the_ids() {
 
     let alice = user("tenant-a", "alice");
     let found = repo
-        .find_conversation_participants(
+        .find_conversation_members(
             &alice,
             "g1",
             &ids(&["carol", "ghost", "dave", "alice", "erin", "bob"]),
@@ -241,7 +241,7 @@ async fn lookup_returns_the_active_members_among_the_ids() {
     assert_eq!(
         found.iter().map(|p| p.user_id.as_str()).collect::<Vec<_>>(),
         ["alice", "bob", "carol"],
-        "active members only, in joined order; removed, absent and other-tenant ids are left out"
+        "members only, in joined order; who left, absent and other-tenant ids are left out"
     );
     assert_eq!(found[0].roles, ["member"]);
     assert_eq!(
@@ -249,7 +249,7 @@ async fn lookup_returns_the_active_members_among_the_ids() {
         Some("nick-alice")
     );
     assert!(
-        repo.find_conversation_participants(&alice, "g1", &[])
+        repo.find_conversation_members(&alice, "g1", &[])
             .await
             .unwrap()
             .is_empty()
@@ -257,7 +257,7 @@ async fn lookup_returns_the_active_members_among_the_ids() {
 
     // A removed caller reads nothing; a trusted internal caller needs no membership.
     let error = repo
-        .find_conversation_participants(&user("tenant-a", "dave"), "g1", &ids(&["alice"]))
+        .find_conversation_members(&user("tenant-a", "dave"), "g1", &ids(&["alice"]))
         .await
         .unwrap_err();
     assert_eq!(error.code(), Some(ErrorCode::MessageNotFound));
@@ -265,7 +265,7 @@ async fn lookup_returns_the_active_members_among_the_ids() {
         .with_tenant_id("tenant-a")
         .with_actor(ActorContext::new("svc-capability").with_type(ActorType::Service));
     assert_eq!(
-        repo.find_conversation_participants(&service, "g1", &ids(&["bob", "dave"]))
+        repo.find_conversation_members(&service, "g1", &ids(&["bob", "dave"]))
             .await
             .unwrap()
             .len(),
@@ -277,7 +277,15 @@ async fn lookup_returns_the_active_members_among_the_ids() {
     let mut cursor: Option<String> = None;
     loop {
         let page = repo
-            .list_conversation_participants(&alice, "g1", cursor.as_deref(), 1, false, true)
+            .list_conversation_participants(
+                &alice,
+                "g1",
+                cursor.as_deref(),
+                1,
+                false,
+                true,
+                Default::default(),
+            )
             .await
             .unwrap();
         seen.extend(page.participants.into_iter().map(|p| p.user_id));
@@ -288,12 +296,20 @@ async fn lookup_returns_the_active_members_among_the_ids() {
     }
     assert_eq!(seen, ["alice", "bob", "carol"]);
     assert!(
-        repo.list_conversation_participants(&user("tenant-a", "dave"), "g1", None, 10, false, true)
-            .await
-            .is_err()
+        repo.list_conversation_participants(
+            &user("tenant-a", "dave"),
+            "g1",
+            None,
+            10,
+            false,
+            true,
+            Default::default(),
+        )
+        .await
+        .is_err()
     );
 
-    // The read interface answers `ext["user_ids"]` with one unpaged lookup.
+    // The read interface answers `ext["member_ids"]` with one unpaged lookup.
     let handler = handler(repo);
     let response = lookup(&handler, &alice, "carol,ghost,alice,dave")
         .await

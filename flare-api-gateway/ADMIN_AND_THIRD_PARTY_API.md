@@ -158,8 +158,10 @@ Gateway 访问下游 gRPC 时必须透传：
 |------|-----|------|------|
 | Message | `POST /api/v1/messages/send` | 服务端/机器人发消息 | 已接入 typed gRPC |
 | Message | `POST /api/v1/messages/recall` | 撤回消息 | 已接入 typed gRPC |
+| Message | `POST /api/v1/messages/read-summaries` | 群聊己方消息的已读摘要（发送者本人，≤500 人的群） | 已接入 typed gRPC |
+| Message | `GET /api/v1/messages/readers` | 群聊己方消息的已读 / 未读成员分页（别人的消息按不存在回 404） | 已接入 typed gRPC |
 | Conversation | `GET /api/v1/conversations` | 会话列表 | 已接入 typed gRPC |
-| Conversation | `GET /api/v1/conversations/participants` | 参与者分页 | 已接入 typed gRPC |
+| Conversation | `GET /api/v1/conversations/participants` | 参与者分页（个人设置只在本人那一行） | 已接入 typed gRPC |
 | Conversation | `POST /api/v1/conversations/participants/manage` | 参与者管理 | 已接入 typed gRPC，需 Admin/强权限 |
 | Media | `/api/v1/medias/*` | 上传、预签名、引用、处理、对象管理 | 已接入 |
 | Presence | `/api/v1/presence/*` | 在线状态查询、登出 | 已接入 |

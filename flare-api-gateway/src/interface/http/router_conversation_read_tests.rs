@@ -116,6 +116,11 @@ impl ConversationReadService for FakeConversations {
         request: tonic::Request<ListConversationParticipantsRequest>,
     ) -> Result<tonic::Response<ListConversationParticipantsResponse>, tonic::Status> {
         self.record("ListConversationParticipants", &request);
+        // The member list asks for the member scope: who hid the conversation is still listed.
+        assert_eq!(
+            request.get_ref().ext.get("members").map(String::as_str),
+            Some("1")
+        );
         Ok(tonic::Response::new(ListConversationParticipantsResponse {
             conversation_id: request.into_inner().conversation_id,
             participants: vec![ConversationParticipant {

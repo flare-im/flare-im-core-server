@@ -9,3 +9,5 @@ pub use postgres_repository::PostgresConversationRepository;
 
 #[cfg(test)]
 mod participant_lookup_pg_tests;
+#[cfg(test)]
+mod read_receipt_pg_tests;

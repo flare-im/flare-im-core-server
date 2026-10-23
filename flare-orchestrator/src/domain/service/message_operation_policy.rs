@@ -28,7 +28,18 @@
 //! - Reaction, pin, unpin, mark, unmark, read receipt: the user the payload names must be the
 //!   operator (an empty one is filled with the operator). A trusted service may act for a user.
 //! - Message-targeted events (recall, edit, delete, reaction, pin, unpin, mark, unmark) are checked
-//!   against the stored message: it must belong to the event's conversation.
+//!   against the stored message: it must belong to the event's conversation. So is every message
+//!   a read receipt names in `message_ids` (at most [`MAX_RECEIPT_MESSAGE_IDS`]), all of them in
+//!   one batch lookup of their conversations.
+//! - A user operates only in a conversation they are a member of (have not left; hiding the
+//!   conversation does not matter), whatever the event (refused `MESSAGE_OPERATION_NOT_MEMBER`).
+//!   The check looks up the operator alone, never the member list, so a read receipt in a
+//!   100,000-member group costs what one in a chat does. Read receipts and reactions, frequent and
+//!   of small effect, may take a recent answer (cached for seconds, see
+//!   `CachedConversationMembership`); every other event (edit, recall, delete, pin, mark, custom,
+//!   and event types added later) is checked against the conversation service now, so a member
+//!   removed from the group can do none of them afterwards ([`membership_read`]). Trusted services
+//!   are not members and need not be.
 //! - Conversation update and delete, retention transitions and message events through this entry
 //!   are trusted services only. Custom events: attributes naming a user must name the operator.
 //!
@@ -54,7 +65,9 @@ use flare_server_core::auth::SignedActorType;
 use flare_server_core::context::ActorType;
 use flare_server_core::error::{ErrorBuilder, ErrorCode, FlareError, Result};
 
-use crate::domain::repository::MessageTargetRepository;
+use crate::domain::repository::{
+    ConversationMembershipRepository, MembershipRead, MessageTargetRepository,
+};
 
 /// How long after sending the sender may recall a message: 24 hours.
 pub const RECALL_WINDOW_MS: i64 = 24 * 3600 * 1000;
@@ -63,6 +76,9 @@ pub const EDIT_WINDOW_MS: i64 = 24 * 3600 * 1000;
 /// Service identities (signed `Service` actors) trusted to operate on any message of their tenant:
 /// the Social IM bridge, through which Social's group administration and moderation act.
 pub const TRUSTED_OPERATION_SERVICES: &[&str] = &["flare-social-bridge"];
+/// The most messages one read receipt may name in `message_ids` (a visible page); all of them are
+/// checked against their stored messages in one batch lookup.
+pub const MAX_RECEIPT_MESSAGE_IDS: usize = 50;
 
 /// A refusal reason (the `ErrorDetail.reason` the sender sees).
 pub mod reason {
@@ -74,6 +90,7 @@ pub mod reason {
     pub const IDENTITY_MISMATCH: &str = "MESSAGE_OPERATION_IDENTITY_MISMATCH";
     pub const FORBIDDEN: &str = "MESSAGE_OPERATION_FORBIDDEN";
     pub const REASON_REQUIRED: &str = "MESSAGE_OPERATION_REASON_REQUIRED";
+    pub const NOT_MEMBER: &str = "MESSAGE_OPERATION_NOT_MEMBER";
 }
 
 /// Who asks for an operation.
@@ -164,6 +181,16 @@ fn editable(content: Option<&MessageContent>) -> bool {
     }
 }
 
+/// How recent the operator's membership answer must be for `payload`: read receipts and reactions
+/// may take a recent one; everything else, including payloads this code does not know yet, is
+/// checked now.
+pub fn membership_read(payload: Option<&Payload>) -> MembershipRead {
+    match payload {
+        Some(Payload::Read(_) | Payload::Reaction(_)) => MembershipRead::Recent,
+        _ => MembershipRead::Current,
+    }
+}
+
 /// The user field a payload names must be the operator; an empty one becomes the operator.
 fn bind_user(field: &mut String, operator: &Operator) -> Result<()> {
     match operator {
@@ -187,6 +214,7 @@ fn bind_user(field: &mut String, operator: &Operator) -> Result<()> {
 
 pub struct MessageOperationPolicy {
     targets: Option<Arc<dyn MessageTargetRepository>>,
+    members: Option<Arc<dyn ConversationMembershipRepository>>,
     now_ms: fn() -> i64,
 }
 
@@ -202,8 +230,19 @@ impl MessageOperationPolicy {
     pub fn new(targets: Option<Arc<dyn MessageTargetRepository>>) -> Self {
         Self {
             targets,
+            members: None,
             now_ms: || chrono::Utc::now().timestamp_millis(),
         }
+    }
+
+    /// The conversation membership users are checked against. Without it, every user event is
+    /// refused (retryable), never let through unchecked.
+    pub fn with_members(
+        mut self,
+        members: Option<Arc<dyn ConversationMembershipRepository>>,
+    ) -> Self {
+        self.members = members;
+        self
     }
 
     /// The same policy with a fixed clock (tests).
@@ -254,6 +293,90 @@ impl MessageOperationPolicy {
         Ok(message)
     }
 
+    /// `user` must be a member of `conversation_id`, by an answer as recent as `read`.
+    async fn require_member(
+        &self,
+        ctx: &Ctx,
+        tenant_id: &str,
+        conversation_id: &str,
+        user: &str,
+        read: MembershipRead,
+    ) -> Result<()> {
+        let members = self.members.as_ref().ok_or_else(|| {
+            ErrorBuilder::new(
+                ErrorCode::ServiceUnavailable,
+                "conversation membership unavailable",
+            )
+            .build_error()
+        })?;
+        if members
+            .is_member(ctx, tenant_id, conversation_id, user, read)
+            .await?
+        {
+            return Ok(());
+        }
+        Err(denied(
+            reason::NOT_MEMBER,
+            "the operator is not a member of this conversation",
+        ))
+    }
+
+    /// Every message a read receipt names must be a stored message of the event's conversation:
+    /// one lookup of all their conversations, however many the receipt names. One in another
+    /// conversation refuses the receipt; one not stored yet is retried.
+    async fn receipt_targets(
+        &self,
+        ctx: &Ctx,
+        tenant_id: &str,
+        conversation_id: &str,
+        message_ids: &[String],
+    ) -> Result<()> {
+        if message_ids.len() > MAX_RECEIPT_MESSAGE_IDS {
+            return Err(invalid(&format!(
+                "a read receipt names at most {MAX_RECEIPT_MESSAGE_IDS} messages"
+            )));
+        }
+        let mut distinct: Vec<String> = message_ids.to_vec();
+        distinct.sort_unstable();
+        distinct.dedup();
+        if distinct.is_empty() {
+            return Ok(());
+        }
+        if distinct.iter().any(|id| id.trim().is_empty()) {
+            return Err(invalid("a read receipt names an empty message id"));
+        }
+        let targets = self.targets.as_ref().ok_or_else(|| {
+            ErrorBuilder::new(
+                ErrorCode::ServiceUnavailable,
+                "message operation authorization unavailable",
+            )
+            .build_error()
+        })?;
+        let located = targets.conversations_of(ctx, tenant_id, &distinct).await?;
+        let conversations: Vec<Option<&str>> = distinct
+            .iter()
+            .map(|id| located.get(id).map(String::as_str))
+            .collect();
+        if conversations
+            .iter()
+            .any(|found| found.is_some_and(|found| found != conversation_id))
+        {
+            return Err(denied(
+                reason::CONVERSATION_MISMATCH,
+                "the receipt names a message of another conversation",
+            ));
+        }
+        if conversations.contains(&None) {
+            // Delivered before it is stored: a receipt right after a message arrives is retried.
+            return Err(
+                ErrorBuilder::new(ErrorCode::ServiceUnavailable, "message not stored yet")
+                    .details("retry the receipt shortly")
+                    .build_error(),
+            );
+        }
+        Ok(())
+    }
+
     /// The sender of `message` acting within `window_ms` of sending it, or a trusted service.
     fn sender_within(&self, operator: &Operator, message: &Message, window_ms: i64) -> Result<()> {
         match operator {
@@ -297,6 +420,26 @@ impl MessageOperationPolicy {
         }
         let trusted = matches!(operator, Operator::Trusted(_));
         let conversation_id = event.conversation_id.clone();
+        // A user operates only where they are a member. Events no user may send are refused below
+        // without a lookup.
+        if let Operator::User(user) = &operator
+            && !matches!(
+                event.payload,
+                None | Some(
+                    Payload::Message(_)
+                        | Payload::Conversation(_)
+                        | Payload::ConversationDelete(_)
+                        | Payload::RetentionScheduled(_)
+                        | Payload::RetentionExpired(_)
+                        | Payload::RetentionPurged(_)
+                        | Payload::PluginState(_)
+                )
+            )
+        {
+            let read = membership_read(event.payload.as_ref());
+            self.require_member(ctx, tenant_id, &conversation_id, user, read)
+                .await?;
+        }
         match event.payload.as_mut() {
             Some(Payload::Recall(recall)) => {
                 let message = self
@@ -403,6 +546,8 @@ impl MessageOperationPolicy {
                         "the receipt names another conversation",
                     ));
                 }
+                self.receipt_targets(ctx, tenant_id, &conversation_id, &read.message_ids)
+                    .await?;
             }
             Some(Payload::Custom(custom)) => {
                 if let Operator::User(user) = &operator {

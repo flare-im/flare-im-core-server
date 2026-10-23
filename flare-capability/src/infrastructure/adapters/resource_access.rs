@@ -24,10 +24,16 @@ mod tests;
 /// views drop, so a page of [`MAX_PARTICIPANTS_PAGE`] needs more than the
 /// plugin-facing [`MAX_RESOURCE_BYTES`].
 const IM_RESPONSE_BYTES: usize = 8 * MAX_RESOURCE_BYTES;
-/// `ListConversationParticipantsRequest.ext` key of Conversation's lookup by id
-/// (`flare-conversation` `PARTICIPANT_LOOKUP_EXT_KEY`): comma-separated user ids,
-/// answered with the active members among them in one page.
-const PARTICIPANT_LOOKUP_EXT_KEY: &str = "user_ids";
+/// `ListConversationParticipantsRequest.ext` key of Conversation's member lookup by id
+/// (`flare-conversation` `PARTICIPANT_MEMBERSHIP_EXT_KEY`): comma-separated user ids,
+/// answered with the members among them in one page. A member is a participant who has
+/// not left; one who hid the conversation from their own list still is, so an operation a
+/// plugin gates on membership does not turn them away.
+const PARTICIPANT_MEMBERSHIP_EXT_KEY: &str = "member_ids";
+/// `ListConversationParticipantsRequest.ext` key asking Conversation's participant pages
+/// for the same member scope (`flare-conversation` `PARTICIPANT_MEMBERS_SCOPE_EXT_KEY`);
+/// without it Conversation pages only members who have not hidden the conversation.
+const PARTICIPANT_MEMBERS_SCOPE_EXT_KEY: &str = "members";
 /// Pages a members check may walk when Conversation ignores the lookup key and
 /// pages every participant instead (an older Conversation during a rollout):
 /// 200 000 members at [`MAX_PARTICIPANTS_PAGE`]. Past it the check is denied
@@ -67,7 +73,8 @@ fn participant_offset(cursor: &str) -> Result<u64> {
     cursor.parse::<u64>().map_err(denied)
 }
 impl GrpcResourceAccess {
-    /// Which of `user_ids` are active members of the ticket's conversation.
+    /// Which of `user_ids` are members of the ticket's conversation (not left; hiding the
+    /// conversation does not matter).
     /// Conversation answers the lookup key in one page; an older Conversation
     /// pages every participant, which is walked until each id is found or the
     /// list ends, so the answer is the same either way.
@@ -93,7 +100,14 @@ impl GrpcResourceAccess {
                             include_removed: false,
                             ext: [
                                 ("skip_meta".to_string(), "1".to_string()),
-                                (PARTICIPANT_LOOKUP_EXT_KEY.to_string(), user_ids.join(",")),
+                                (
+                                    PARTICIPANT_MEMBERS_SCOPE_EXT_KEY.to_string(),
+                                    "1".to_string(),
+                                ),
+                                (
+                                    PARTICIPANT_MEMBERSHIP_EXT_KEY.to_string(),
+                                    user_ids.join(","),
+                                ),
                             ]
                             .into(),
                         },
@@ -163,20 +177,29 @@ impl ResourceAccessBackend for GrpcResourceAccess {
                 // own keyset cursor never reaches the plugin.
                 let offset = participant_offset(cursor)?;
                 let page = im
-                    .list_conversation_participants(self.request(
-                        actor,
-                        ListConversationParticipantsRequest {
-                            conversation_id: actor.conversation_id.clone(),
-                            cursor: if offset == 0 {
-                                String::new()
-                            } else {
-                                offset.to_string()
+                    .list_conversation_participants(
+                        self.request(
+                            actor,
+                            ListConversationParticipantsRequest {
+                                conversation_id: actor.conversation_id.clone(),
+                                cursor: if offset == 0 {
+                                    String::new()
+                                } else {
+                                    offset.to_string()
+                                },
+                                limit: *limit as i32,
+                                include_removed: false,
+                                ext: [
+                                    ("skip_meta".to_string(), "1".to_string()),
+                                    (
+                                        PARTICIPANT_MEMBERS_SCOPE_EXT_KEY.to_string(),
+                                        "1".to_string(),
+                                    ),
+                                ]
+                                .into(),
                             },
-                            limit: *limit as i32,
-                            include_removed: false,
-                            ext: [("skip_meta".to_string(), "1".to_string())].into(),
-                        },
-                    )?)
+                        )?,
+                    )
                     .await
                     .map_err(denied)?
                     .into_inner();

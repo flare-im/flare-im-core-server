@@ -207,7 +207,7 @@ async fn isolated_schema(url: &str) -> (PgPool, PgPool, String) {
         );
         CREATE TABLE conversation_participants (
             tenant_id TEXT NOT NULL, conversation_id TEXT NOT NULL, user_id TEXT NOT NULL,
-            last_read_seq BIGINT DEFAULT 0, unread_count INT DEFAULT 0,
+            last_read_seq BIGINT DEFAULT 0, last_sync_seq BIGINT DEFAULT 0, unread_count INT DEFAULT 0,
             is_deleted BOOLEAN DEFAULT FALSE, visible_from_seq BIGINT NOT NULL DEFAULT 0,
             updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
             PRIMARY KEY (tenant_id, conversation_id, user_id)
@@ -469,13 +469,15 @@ async fn purge_recomputes_unread_and_invalidates_reader_cache() {
     const BOUNDARY: i64 = 1_790_000_000_000;
     let tenant = "tenant-a";
     let (conversation, other_conversation) = ("single-ab", "single-ac");
-    // 旧关系：alice 两条、bob 一条；新关系：alice 三条，其中一条已撤回（状态 6）。
+    // 旧关系：alice 两条、bob 一条；新关系：alice 三条，其中一条已撤回（proto
+    // MessageStatus::Recalled，库里存 5）。
+    let recalled = flare_proto::common::MessageStatus::Recalled as i32;
     for (id, seq, offset_ms, sender, status) in [
         ("old-1", 1, -9_000, "alice", 1),
         ("old-2", 2, -8_000, "alice", 1),
         ("old-3", 3, -7_000, "bob", 1),
         ("new-4", 4, 10, "alice", 1),
-        ("new-5", 5, 20, "alice", 6),
+        ("new-5", 5, 20, "alice", recalled),
         ("new-6", 6, 30, "alice", 1),
     ] {
         let ms = BOUNDARY + offset_ms;

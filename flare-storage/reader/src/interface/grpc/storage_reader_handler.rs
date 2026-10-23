@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use chrono::{TimeZone, Utc};
+use flare_grpc_proto::storage::storage_message_lookup_service_server::StorageMessageLookupService;
 use flare_grpc_proto::storage::storage_reader_service_server::StorageReaderService;
 use flare_grpc_proto::storage::*;
 use sha2::{Digest, Sha256};
@@ -1147,6 +1148,69 @@ where
     }
 }
 
+/// The most ids one `LocateMessages` call may name: a read receipt's visible page.
+pub const MAX_LOCATED_MESSAGES: usize = 50;
+/// The longest server message id a lookup accepts.
+const MAX_LOCATED_MESSAGE_ID_BYTES: usize = 128;
+
+/// 1..=[`MAX_LOCATED_MESSAGES`] distinct, non-blank ids of at most
+/// [`MAX_LOCATED_MESSAGE_ID_BYTES`].
+fn valid_located_ids(ids: &[String]) -> bool {
+    let mut distinct = std::collections::HashSet::with_capacity(ids.len());
+    !ids.is_empty()
+        && ids.len() <= MAX_LOCATED_MESSAGES
+        && ids.iter().all(|id| {
+            !id.trim().is_empty()
+                && id.len() <= MAX_LOCATED_MESSAGE_ID_BYTES
+                && distinct.insert(id.as_str())
+        })
+}
+
+#[tonic::async_trait]
+impl<M> StorageMessageLookupService for StorageReaderGrpcHandler<M>
+where
+    M: MessageStorage + Send + Sync + Clone + 'static,
+{
+    /// Where a batch of messages is, for an operation check made as the Orchestrator itself (the
+    /// same identity `GetMessage` admits for one, see [`MESSAGE_OPERATION_READERS`]): one index
+    /// lookup for the whole batch, no content. Every other caller is refused.
+    async fn locate_messages(
+        &self,
+        request: Request<LocateMessagesRequest>,
+    ) -> Result<Response<LocateMessagesResponse>, Status> {
+        let ctx = self.message_operation_ctx(&request)?.ok_or_else(|| {
+            Status::permission_denied("message lookups are for message operation checks only")
+        })?;
+        let ids = request.into_inner().server_msg_ids;
+        if !valid_located_ids(&ids) {
+            return Err(Status::invalid_argument(format!(
+                "1..={MAX_LOCATED_MESSAGES} distinct server_msg_ids are required"
+            )));
+        }
+        match self
+            .query_handler
+            .storage()
+            .locate_messages(&ctx, &ids)
+            .await
+        {
+            Ok(located) => Ok(Response::new(LocateMessagesResponse {
+                messages: located
+                    .into_iter()
+                    .map(|(server_msg_id, conversation_id)| LocatedMessage {
+                        server_msg_id,
+                        conversation_id,
+                    })
+                    .collect(),
+            })),
+            Err(err) => {
+                error!(error = ?err, ids = ids.len(), "locate_messages failed");
+                // No "not found" here: ids not stored are simply absent.
+                Err(storage_failure(&err, StorageRead::Listing))
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1487,6 +1551,94 @@ mod tests {
             service(SignedActorType::System, "flare-orchestrator"),
         ] {
             let code = get(token).await;
+            assert!(
+                matches!(
+                    code,
+                    tonic::Code::Unauthenticated | tonic::Code::PermissionDenied
+                ),
+                "{code:?}"
+            );
+        }
+    }
+
+    /// 批量定位只给 Orchestrator 做消息操作核对：它自己签的 Service 上下文通过（再过请求校验，
+    /// 合法的一批走到存储，库不可达回 UNAVAILABLE）；别的 Service、用户、系统身份与无签名调用都
+    /// 被拒，到不了存储。
+    #[tokio::test]
+    async fn only_the_orchestrator_locates_messages_and_only_a_bounded_batch() {
+        let handler = unreachable_store_handler(Some(staff_verifier()));
+        let token = |actor_type, actor: &str| {
+            SignedContextSigner::from_private_key(&pem(HOOK_KEY).0)
+                .unwrap()
+                .with_kid(kid::HOOK)
+                .unwrap()
+                .sign(&SignedContextIdentity::new(
+                    actor_type,
+                    actor,
+                    "tenant-a",
+                    "req-locate",
+                ))
+                .unwrap()
+        };
+        let locate = |ids: Vec<String>, metadata: Vec<(&'static str, String)>| {
+            let handler = &handler;
+            async move {
+                let entries: Vec<(&'static str, &str)> =
+                    metadata.iter().map(|(k, v)| (*k, v.as_str())).collect();
+                handler
+                    .locate_messages(with_metadata(
+                        LocateMessagesRequest {
+                            server_msg_ids: ids,
+                        },
+                        &entries,
+                    ))
+                    .await
+                    .unwrap_err()
+                    .code()
+            }
+        };
+        let ids = |n: usize| (0..n).map(|i| format!("m{i}")).collect::<Vec<_>>();
+        let orchestrator = token(SignedActorType::Service, "flare-orchestrator");
+        assert_eq!(
+            locate(
+                ids(MAX_LOCATED_MESSAGES),
+                vec![("x-flare-ctx", orchestrator.clone())]
+            )
+            .await,
+            tonic::Code::Unavailable
+        );
+        for bad in [
+            Vec::new(),
+            ids(MAX_LOCATED_MESSAGES + 1),
+            vec!["m1".to_string(), "m1".to_string()],
+            vec![" ".to_string()],
+            vec!["m".repeat(MAX_LOCATED_MESSAGE_ID_BYTES + 1)],
+        ] {
+            assert_eq!(
+                locate(bad, vec![("x-flare-ctx", orchestrator.clone())]).await,
+                tonic::Code::InvalidArgument
+            );
+        }
+        for metadata in [
+            vec![(
+                "x-flare-ctx",
+                token(SignedActorType::Service, "flare-media"),
+            )],
+            vec![(
+                "x-flare-ctx",
+                token(SignedActorType::User, "flare-orchestrator"),
+            )],
+            vec![(
+                "x-flare-ctx",
+                token(SignedActorType::System, "flare-orchestrator"),
+            )],
+            vec![
+                ("x-tenant-id", "tenant-a".to_string()),
+                ("x-actor-type", "2".to_string()),
+            ],
+            Vec::new(),
+        ] {
+            let code = locate(ids(1), metadata).await;
             assert!(
                 matches!(
                     code,

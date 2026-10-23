@@ -1003,6 +1003,29 @@ impl MessageStorage for OptimizedPostgresMessageStorageImpl {
         .await;
     }
 
+    #[instrument(skip(self, server_msg_ids), fields(ids = server_msg_ids.len()))]
+    async fn locate_messages(
+        &self,
+        ctx: &Ctx,
+        server_msg_ids: &[String],
+    ) -> Result<Vec<(String, String)>> {
+        let tenant_id = tenant_id_from_ctx(ctx)?;
+        if server_msg_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        // idx_messages_tenant_server_id 上的一次 ANY 查找：O(ids)，只取两列。
+        let rows: Vec<(String, String)> = sqlx::query_as(
+            "SELECT server_id, conversation_id FROM messages \
+             WHERE tenant_id = $1 AND server_id = ANY($2)",
+        )
+        .bind(tenant_id)
+        .bind(server_msg_ids)
+        .fetch_all(&self.base.pool)
+        .await
+        .db_context("Failed to locate messages")?;
+        Ok(rows)
+    }
+
     #[instrument(skip(self), fields(message_id))]
     async fn get_message(&self, ctx: &Ctx, message_id: &str) -> Result<Option<Message>> {
         let tenant_id = tenant_id_from_ctx(ctx)?.to_string();

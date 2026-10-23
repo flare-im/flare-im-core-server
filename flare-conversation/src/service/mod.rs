@@ -70,6 +70,10 @@ impl ApplicationBootstrap {
 
                 let read_svc =
                     crate::interface::grpc::signed_read_service(handler.clone(), &read_layer);
+                let read_receipt_svc = crate::interface::grpc::signed_read_receipt_service(
+                    handler.clone(),
+                    &read_layer,
+                );
                 // 会话管理仍按调用方元数据（PurgeConversationHistory 除外，逐 RPC 验签）：Social
                 // Bridge 以服务签名代成员调用，「服务代用户」的表达定下之前不能套用读接口的冲突规则。
                 let manage_svc = ContextLayer::new()
@@ -83,6 +87,7 @@ impl ApplicationBootstrap {
                 Server::builder()
                     .layer(grpc_metrics)
                     .add_service(read_svc)
+                    .add_service(read_receipt_svc)
                     .add_service(manage_svc)
                     .add_service(admin_svc)
                     .serve_with_shutdown(address_clone, async {

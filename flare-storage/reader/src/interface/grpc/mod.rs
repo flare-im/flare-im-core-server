@@ -4,6 +4,7 @@ mod storage_reader_handler;
 
 pub use storage_reader_handler::StorageReaderGrpcHandler;
 
+use flare_grpc_proto::storage::storage_message_lookup_service_server::StorageMessageLookupServiceServer;
 use flare_grpc_proto::storage::storage_reader_service_server::StorageReaderServiceServer;
 use flare_server_core::{SignedFirstContextLayer, SignedFirstContextService};
 use tonic::server::NamedService;
@@ -40,4 +41,15 @@ where
             layer.exempt_method(format!("/{service}/{method}"))
         })
         .layer(StorageReaderServiceServer::new(handler))
+}
+
+/// `StorageMessageLookupService`：按 ID 批量定位消息，只认 Orchestrator 自己签的 Service 上下文
+/// （与 `GetMessage` 的消息操作读同一个身份，处理器里验），不经读接口身份边界，其他调用一律拒绝。
+pub fn message_lookup_service<M>(
+    handler: StorageReaderGrpcHandler<M>,
+) -> StorageMessageLookupServiceServer<StorageReaderGrpcHandler<M>>
+where
+    M: MessageStorage + Send + Sync + Clone + 'static,
+{
+    StorageMessageLookupServiceServer::new(handler)
 }

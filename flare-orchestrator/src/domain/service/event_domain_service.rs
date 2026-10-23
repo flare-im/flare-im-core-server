@@ -29,8 +29,9 @@ use tracing::instrument;
 
 use crate::domain::PersistenceMode;
 use crate::domain::repository::{
-    MessageTargetRepository, ReadWatermarkAdvance, ReadWatermarkRepository, RecipientRepository,
-    UserSyncCompensationRepository, UserSyncCompensationTask, UserSyncIndexRepository,
+    ConversationMembershipRepository, MessageTargetRepository, ReadWatermarkAdvance,
+    ReadWatermarkRepository, RecipientRepository, UserSyncCompensationRepository,
+    UserSyncCompensationTask, UserSyncIndexRepository,
 };
 use crate::domain::service::message_operation_policy::MessageOperationPolicy;
 use flare_im_message_pipeline::{
@@ -90,6 +91,9 @@ where
     read_watermark: Option<Arc<dyn ReadWatermarkRepository>>,
     /// Who may do what to which message (see [`MessageOperationPolicy`]).
     operation_policy: Arc<MessageOperationPolicy>,
+    /// What the operation policy is built from.
+    message_targets: Option<Arc<dyn MessageTargetRepository>>,
+    conversation_members: Option<Arc<dyn ConversationMembershipRepository>>,
 }
 
 impl<PR, SA> EventDomainService<PR, SA>
@@ -113,14 +117,34 @@ where
             user_sync_compensation: None,
             read_watermark: None,
             operation_policy: Arc::new(MessageOperationPolicy::default()),
+            message_targets: None,
+            conversation_members: None,
         }
+    }
+
+    fn rebuild_operation_policy(mut self) -> Self {
+        self.operation_policy = Arc::new(
+            MessageOperationPolicy::new(self.message_targets.clone())
+                .with_members(self.conversation_members.clone()),
+        );
+        self
     }
 
     /// The stored messages operations are checked against. Without them, operations that name a
     /// message are refused (retryable).
     pub fn with_message_targets(mut self, targets: Arc<dyn MessageTargetRepository>) -> Self {
-        self.operation_policy = Arc::new(MessageOperationPolicy::new(Some(targets)));
-        self
+        self.message_targets = Some(targets);
+        self.rebuild_operation_policy()
+    }
+
+    /// The conversation membership user events are checked against. Without it, every user event
+    /// is refused (retryable).
+    pub fn with_conversation_members(
+        mut self,
+        members: Arc<dyn ConversationMembershipRepository>,
+    ) -> Self {
+        self.conversation_members = Some(members);
+        self.rebuild_operation_policy()
     }
 
     /// Replace the operation policy (tests: a fixed clock).

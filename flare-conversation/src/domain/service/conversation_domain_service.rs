@@ -30,6 +30,30 @@ use crate::domain::repository::{
 /// 纪元属性名（消息 attributes 的键）的长度上限，字节。
 const MAX_EPOCH_ATTRIBUTE_LEN: usize = 128;
 
+/// 面向成员读取里的「本人」：用户态调用者本人；服务与系统调用（扇出、插件资源桥、开放平台）
+/// 没有本人，读到的成员行一律不带个人设置。
+fn member_read_viewer(ctx: &Context) -> Option<&str> {
+    let internal = ctx.actor().is_some_and(|actor| {
+        matches!(
+            actor.actor_type,
+            flare_server_core::context::ActorType::Service
+                | flare_server_core::context::ActorType::System
+        )
+    });
+    if internal {
+        return None;
+    }
+    ctx.user_id().filter(|user_id| !user_id.trim().is_empty())
+}
+
+/// 会话摘要的成员预览也是给本人看的成员行：别人的个人设置不带出去。
+fn keep_viewer_settings_in_previews(ctx: &Context, summaries: &mut [ConversationSummary]) {
+    let viewer = member_read_viewer(ctx);
+    for summary in summaries {
+        crate::domain::model::keep_personal_settings_of(&mut summary.member_preview, viewer);
+    }
+}
+
 /// 会话领域服务 - 包含所有业务逻辑
 ///
 /// 使用泛型参数以获得更好的性能（静态分发）
@@ -228,6 +252,7 @@ impl<CR: ConversationRepository, PR: PresenceRepository, MP: MessageProvider>
             .list_devices(ctx, &user_id)
             .await
             .unwrap_or_default();
+        keep_viewer_settings_in_previews(ctx, &mut summaries);
 
         Ok(ConversationBootstrapOutput {
             summaries,
@@ -279,6 +304,7 @@ impl<CR: ConversationRepository, PR: PresenceRepository, MP: MessageProvider>
                 .server_cursor_ts
                 .map(|ts| format!("{}:{}", ts, summary.conversation_id))
         });
+        keep_viewer_settings_in_previews(ctx, &mut summaries);
 
         Ok((summaries, next_cursor, has_more))
     }
@@ -797,10 +823,11 @@ impl<CR: ConversationRepository, PR: PresenceRepository, MP: MessageProvider>
         to_remove: Vec<String>,
         role_updates: Vec<(String, Vec<String>)>,
     ) -> Result<Vec<ConversationParticipant>> {
-        let participants = self
+        let mut participants = self
             .conversation_repo
             .manage_participants(ctx, conversation_id, &to_add, &to_remove, &role_updates)
             .await?;
+        crate::domain::model::keep_personal_settings_of(&mut participants, member_read_viewer(ctx));
         debug!(
             conversation_id = %conversation_id,
             added = to_add.len(),
@@ -811,6 +838,7 @@ impl<CR: ConversationRepository, PR: PresenceRepository, MP: MessageProvider>
         Ok(participants)
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn list_conversation_participants(
         &self,
         ctx: &Context,
@@ -819,8 +847,10 @@ impl<CR: ConversationRepository, PR: PresenceRepository, MP: MessageProvider>
         limit: i32,
         include_removed: bool,
         skip_metadata: bool,
+        scope: crate::domain::model::ParticipantScope,
     ) -> Result<crate::domain::model::ConversationParticipantsPage> {
-        self.conversation_repo
+        let mut page = self
+            .conversation_repo
             .list_conversation_participants(
                 ctx,
                 conversation_id,
@@ -828,20 +858,173 @@ impl<CR: ConversationRepository, PR: PresenceRepository, MP: MessageProvider>
                 limit,
                 include_removed,
                 skip_metadata,
+                scope,
             )
-            .await
+            .await?;
+        // 成员名单是给成员看的：别人的免打扰、置顶不在里面。在席口径是投递读取（离线推送要按
+        // 每个人的免打扰判定），保持原样，只有内部服务这样读。
+        if scope == crate::domain::model::ParticipantScope::Members {
+            crate::domain::model::keep_personal_settings_of(
+                &mut page.participants,
+                member_read_viewer(ctx),
+            );
+        }
+        Ok(page)
     }
 
-    /// 会话里 `user_ids` 中在席的成员（一次主键查找，不分页）。
-    pub async fn find_conversation_participants(
+    /// 会话里 `user_ids` 中的成员（未退出；隐藏了会话的也算，一次主键查找）。
+    pub async fn find_conversation_members(
         &self,
         ctx: &Context,
         conversation_id: &str,
         user_ids: &[String],
     ) -> Result<Vec<ConversationParticipant>> {
+        let mut members = self
+            .conversation_repo
+            .find_conversation_members(ctx, conversation_id, user_ids)
+            .await?;
+        crate::domain::model::keep_personal_settings_of(&mut members, member_read_viewer(ctx));
+        Ok(members)
+    }
+
+    /// 消息被撤回或对全会话删除后，重算还没读到它的成员的未读（只会变少，可重复）。
+    pub async fn retract_message_unread(
+        &self,
+        ctx: &Context,
+        conversation_id: &str,
+        server_msg_id: &str,
+    ) -> Result<()> {
         self.conversation_repo
-            .find_conversation_participants(ctx, conversation_id, user_ids)
+            .retract_message_unread(ctx, conversation_id, server_msg_id)
             .await
+    }
+
+    /// The caller (the context's user) must be a member of `conversation_id` (not left; hiding the
+    /// conversation does not matter); otherwise the conversation is answered as not found, the
+    /// same as one that does not exist.
+    async fn require_member_caller(&self, ctx: &Context, conversation_id: &str) -> Result<String> {
+        let caller = require_user_id(ctx)?;
+        let seated = self
+            .conversation_repo
+            .find_conversation_members(ctx, conversation_id, std::slice::from_ref(&caller))
+            .await?;
+        if !seated.iter().any(|member| member.user_id == caller) {
+            return Err(
+                ErrorBuilder::new(ErrorCode::MessageNotFound, "conversation not found")
+                    .build_error(),
+            );
+        }
+        Ok(caller)
+    }
+
+    /// The read watermarks of a group's members other than `caller`, or `None` when receipts are
+    /// unavailable: not a group, or more than [`READ_RECEIPT_MEMBER_LIMIT`] members (found
+    /// by reading at most one row past the limit).
+    ///
+    /// [`READ_RECEIPT_MEMBER_LIMIT`]: crate::domain::model::read_receipt::READ_RECEIPT_MEMBER_LIMIT
+    async fn group_read_watermarks(
+        &self,
+        ctx: &Context,
+        conversation_id: &str,
+        caller: &str,
+    ) -> Result<Option<crate::domain::model::read_receipt::ReadWatermarks>> {
+        use crate::domain::model::read_receipt::{READ_RECEIPT_MEMBER_LIMIT, ReadWatermarks};
+        if !flare_core::common::conversation::is_group_chat_conversation(conversation_id) {
+            return Ok(None);
+        }
+        let members = self
+            .conversation_repo
+            .list_member_read_positions(ctx, conversation_id, READ_RECEIPT_MEMBER_LIMIT + 1)
+            .await?;
+        if members.len() > READ_RECEIPT_MEMBER_LIMIT {
+            return Ok(None);
+        }
+        Ok(Some(ReadWatermarks::without_sender(members, caller)))
+    }
+
+    /// Read summaries of the caller's own messages among `server_msg_ids` in a group (see
+    /// [`crate::domain::model::read_receipt`]). Messages the caller did not send, recalled or
+    /// deleted ones and ids of other conversations are left out: a page mixes senders, and only a
+    /// message's sender sees who read it.
+    pub async fn message_read_summaries(
+        &self,
+        ctx: &Context,
+        conversation_id: &str,
+        server_msg_ids: &[String],
+    ) -> Result<crate::domain::model::MessageReadSummaries> {
+        use crate::domain::model::{MessageReadSummaries, MessageReadSummary};
+        let caller = self.require_member_caller(ctx, conversation_id).await?;
+        let Some(watermarks) = self
+            .group_read_watermarks(ctx, conversation_id, &caller)
+            .await?
+        else {
+            return Ok(MessageReadSummaries::default());
+        };
+        let messages = self
+            .conversation_repo
+            .find_receipt_messages(ctx, conversation_id, server_msg_ids)
+            .await?;
+        let mut summaries: Vec<MessageReadSummary> = messages
+            .iter()
+            .filter(|message| message.has_receipts_for(&caller))
+            .map(|message| MessageReadSummary {
+                server_msg_id: message.server_id.clone(),
+                counts: watermarks.counts(message.seq),
+            })
+            .collect();
+        // Request order, so a client can zip the answer with its page.
+        summaries.sort_by_key(|summary| {
+            server_msg_ids
+                .iter()
+                .position(|id| *id == summary.server_msg_id)
+        });
+        summaries.dedup_by(|a, b| a.server_msg_id == b.server_msg_id);
+        Ok(MessageReadSummaries {
+            available: true,
+            summaries,
+        })
+    }
+
+    /// One page of the members who have (`Read`) or have not (`Unread`) read the caller's message
+    /// `server_msg_id` in a group. Only the message's sender may ask. Another sender's message is
+    /// answered exactly as one that is not in the conversation, recalled or deleted: not found.
+    /// A refusal of its own would tell a member who joined later, and cannot see the history,
+    /// that an id names a message from before they joined.
+    pub async fn message_readers(
+        &self,
+        ctx: &Context,
+        conversation_id: &str,
+        server_msg_id: &str,
+        state: crate::domain::model::ReaderState,
+        cursor: &str,
+        limit: usize,
+    ) -> Result<crate::domain::model::MessageReaderPage> {
+        use crate::domain::model::MessageReaderPage;
+        let caller = self.require_member_caller(ctx, conversation_id).await?;
+        let message = self
+            .conversation_repo
+            .find_receipt_messages(ctx, conversation_id, &[server_msg_id.to_string()])
+            .await?
+            .into_iter()
+            .find(|message| message.server_id == server_msg_id)
+            .filter(|message| message.has_receipts_for(&caller))
+            .ok_or_else(|| {
+                ErrorBuilder::new(ErrorCode::MessageNotFound, "message not found").build_error()
+            })?;
+        let Some(watermarks) = self
+            .group_read_watermarks(ctx, conversation_id, &caller)
+            .await?
+        else {
+            return Ok(MessageReaderPage::default());
+        };
+        let (user_ids, next_cursor, has_more) = watermarks.page(message.seq, state, cursor, limit);
+        Ok(MessageReaderPage {
+            available: true,
+            counts: Some(watermarks.counts(message.seq)),
+            user_ids,
+            next_cursor,
+            has_more,
+        })
     }
 
     /// 标记会话为已读（业务逻辑）
@@ -920,6 +1103,7 @@ impl<CR: ConversationRepository, PR: PresenceRepository, MP: MessageProvider>
                 "Dropped invalid conversation summaries during search"
             );
         }
+        keep_viewer_settings_in_previews(ctx, &mut summaries);
         Ok((summaries, total))
     }
 }

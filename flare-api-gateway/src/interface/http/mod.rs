@@ -9,6 +9,7 @@ pub(crate) mod platform;
 mod presence_handler;
 mod push_token_handler;
 mod rate_limit;
+mod read_receipt_handler;
 mod router;
 
 pub(crate) use message_handler::MessageContextSigner;

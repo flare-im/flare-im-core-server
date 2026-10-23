@@ -24,7 +24,7 @@ use flare_server_core::{
 /// 都只取自令牌验出的用户与规范化的租户，请求头里的其他身份字段（如 `x-actor-*`）不带下去；
 /// 只沿用请求号与追踪号。会话服务以签名为准，元数据与签名同一身份。网关没配签名私钥时只带
 /// 元数据，由会话服务的 `FLARE_REQUIRE_SIGNED_READ_CTX` 决定收不收。
-fn conversation_reader(
+pub(super) fn conversation_reader(
     headers: &HeaderMap,
     principal: &AuthenticatedPrincipal,
     signer: &MessageContextSigner,
@@ -136,6 +136,8 @@ pub struct ListConversationsHttpResponse {
     pub has_more: bool,
 }
 
+/// 会话成员。`muted`、`pinned`、`mention_only` 是成员本人的列表设置：读出的成员行里只有调用者
+/// 本人那一行带真实值，其余成员恒为 false。
 #[derive(Debug, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct ConversationParticipantHttp {
     pub user_id: String,
@@ -309,12 +311,14 @@ pub async fn list_conversation_participants(
     axum::extract::Query(req): axum::extract::Query<ListConversationParticipantsHttpRequest>,
 ) -> Result<Json<ApiResponse<ListConversationParticipantsHttpResponse>>> {
     let (ctx, token) = conversation_reader(&headers, &principal, &signer)?;
+    // 成员名单按成员口径（会话服务 `PARTICIPANT_MEMBERS_SCOPE_EXT_KEY`）：隐藏了会话的成员照样
+    // 在名单里，调用者隐藏了会话也照样能看。
     let grpc_req = ListConversationParticipantsRequest {
         conversation_id: req.conversation_id,
         cursor: req.cursor,
         limit: req.limit,
         include_removed: req.include_removed,
-        ..Default::default()
+        ext: [("members".to_string(), "1".to_string())].into(),
     };
     let grpc_res = clients
         .bounded(async {

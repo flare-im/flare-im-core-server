@@ -106,6 +106,17 @@ pub trait MessageStorage: Send + Sync {
 
     async fn get_message(&self, ctx: &Ctx, message_id: &str) -> Result<Option<Message>>;
 
+    /// 一批服务端消息 ID 里已落库的那些各在哪个会话：`(server_id, conversation_id)`，只按
+    /// `server_id` 匹配，没落库的不出现，顺序不保证。一次索引查找，不读消息内容，供写路径
+    /// 授权一次核对一批 ID。没有实现的后端报「不支持」。
+    async fn locate_messages(
+        &self,
+        _ctx: &Ctx,
+        _server_msg_ids: &[String],
+    ) -> Result<Vec<(String, String)>> {
+        Err(unsupported_by_backend("message location lookup"))
+    }
+
     /// Mark the plugin card copies among `messages`, one page at a time (see
     /// [`crate::domain::model::plugin_card`]): every message-returning read calls it before
     /// answering. Never fails the read. The default marks nothing (a backend without plugin

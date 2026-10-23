@@ -84,6 +84,9 @@ pub trait ConversationRepository: Send + Sync {
         role_updates: &[(String, Vec<String>)],
     ) -> Result<Vec<ConversationParticipant>>;
 
+    /// 分页读成员。`scope` 决定读哪些行（见 [`crate::domain::model::ParticipantScope`]）；
+    /// `include_removed` 时不按口径过滤。用户态调用者自己须是成员（未退出；隐藏了会话的也算）。
+    #[allow(clippy::too_many_arguments)]
     async fn list_conversation_participants(
         &self,
         ctx: &flare_server_core::context::Context,
@@ -92,17 +95,48 @@ pub trait ConversationRepository: Send + Sync {
         limit: i32,
         include_removed: bool,
         skip_metadata: bool,
+        scope: crate::domain::model::ParticipantScope,
     ) -> Result<ConversationParticipantsPage>;
 
-    /// 会话里 `user_ids` 中仍在席的成员（未删除、未退出），一次查询、不分页，
-    /// 按 `(joined_at, user_id)` 排序；不在席的 id 不出现。调用方规则同
-    /// [`Self::list_conversation_participants`]：用户态调用者自己须是在席成员。
-    async fn find_conversation_participants(
+    /// 会话里 `user_ids` 中的成员：有参与者行且未退出。隐藏了会话（从列表删除）的成员也算：
+    /// 隐藏只是列表展示，不改变成员关系。主键上的一次查找，不分页，与群规模无关。用户态调用者
+    /// 自己须是这个口径下的成员，否则按会话不存在拒绝；受信内部调用不要求。按
+    /// `(joined_at, user_id)` 排序，不是成员的 id 不出现。
+    async fn find_conversation_members(
         &self,
         ctx: &flare_server_core::context::Context,
         conversation_id: &str,
         user_ids: &[String],
     ) -> Result<Vec<ConversationParticipant>>;
+
+    /// 一条消息被撤回或对全会话删除后，重算还没读到它的成员的物化未读：按剩余的、未撤回未删除的
+    /// 他人消息计数，只会变少，重复调用结果相同。超过精确未读阈值的会话本来就不物化未读，跳过。
+    async fn retract_message_unread(
+        &self,
+        ctx: &flare_server_core::context::Context,
+        conversation_id: &str,
+        server_msg_id: &str,
+    ) -> Result<()>;
+
+    /// 会话成员（未退出；隐藏了会话的也算）的已读水位与历史下限，按 `user_id` 升序，至多
+    /// `limit` 行：按主键顺序读到 `limit` 行即停，与群规模无关。调用方传「上限 + 1」判断是否超限。
+    /// 不做调用者鉴权，调用方先核对调用者是成员。
+    async fn list_member_read_positions(
+        &self,
+        ctx: &flare_server_core::context::Context,
+        conversation_id: &str,
+        limit: usize,
+    ) -> Result<Vec<crate::domain::model::MemberReadPosition>>;
+
+    /// 会话里 `server_msg_ids` 中存在的消息的 seq、发送者与状态（按服务端 ID 的索引查找，
+    /// O(ids)）；不属于该会话的 ID 不出现。不做调用者鉴权。
+    async fn find_receipt_messages(
+        &self,
+        ctx: &flare_server_core::context::Context,
+        conversation_id: &str,
+        server_msg_ids: &[String],
+    ) -> Result<Vec<crate::domain::model::ReceiptMessage>>;
+
     async fn search_conversations(
         &self,
         ctx: &flare_server_core::context::Context,

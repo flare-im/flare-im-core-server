@@ -11,16 +11,23 @@ use flare_server_core::utils::require_ctx_from_request;
 use tonic::{Request, Response, Status};
 
 use crate::application::queries::{
-    ConversationBootstrapQuery, FindConversationParticipantsQuery, GetConversationDetailQuery,
+    ConversationBootstrapQuery, FindConversationMembersQuery, GetConversationDetailQuery,
     ListConversationParticipantsQuery, ListConversationsQuery,
 };
-use crate::domain::model::ConversationParticipant;
+use crate::domain::model::{ConversationParticipant, ParticipantScope};
 
 /// `ListConversationParticipantsRequest.ext` 的按 id 查成员键：逗号分隔的 user id（至多 500 个）。
-/// 带上它时这次读只返回其中在席的成员——一次主键查找，与群规模无关；游标、`limit`、
-/// `include_removed` 不参与，`has_more` 恒为 false，`member_count`/`participant_version` 为 0。
-/// 不认这个键的旧服务照常分页返回全部成员，调用方翻页核对仍得到同样的结果。
-pub const PARTICIPANT_LOOKUP_EXT_KEY: &str = "user_ids";
+/// 带上它时这次读只返回其中的成员——有参与者行且未退出，隐藏了会话（从本人列表删除）的也算。
+/// 一次主键查找，与群规模无关；游标、`limit`、`include_removed` 不参与，`has_more` 恒为 false，
+/// `member_count`/`participant_version` 为 0。Orchestrator 核对上行事件的操作者、插件资源桥的
+/// 成员核对都走这个键。
+pub const PARTICIPANT_MEMBERSHIP_EXT_KEY: &str = "member_ids";
+
+/// `ListConversationParticipantsRequest.ext` 的分页口径键：值为 `"1"` 或 `"true"` 时按**成员**
+/// 口径分页（未退出即成员，隐藏了会话的也返回），用户态调用者自己也按这个口径核对；不带时按
+/// 在席口径（未隐藏、未退出），扇出、订阅引导、离线推送这些投递读取用它。成员名单（SDK 成员
+/// 同步、HTTP 成员接口、开放平台、插件资源桥）带上这个键。
+pub const PARTICIPANT_MEMBERS_SCOPE_EXT_KEY: &str = "members";
 
 fn participant_to_proto(
     p: ConversationParticipant,
@@ -146,16 +153,14 @@ impl ConversationReadService for ConversationGrpcHandler {
     ) -> Result<Response<ListConversationParticipantsResponse>, Status> {
         let ctx = require_ctx_from_request(&request)?;
         let req = request.into_inner();
-        if let Some(ids) = req.ext.get(PARTICIPANT_LOOKUP_EXT_KEY) {
+        if let Some(ids) = req.ext.get(PARTICIPANT_MEMBERSHIP_EXT_KEY) {
+            let query = FindConversationMembersQuery {
+                conversation_id: req.conversation_id.clone(),
+                user_ids: ids.split(',').map(|id| id.trim().to_string()).collect(),
+            };
             let participants = self
                 .query_handler
-                .handle_find_conversation_participants(
-                    &ctx,
-                    FindConversationParticipantsQuery {
-                        conversation_id: req.conversation_id.clone(),
-                        user_ids: ids.split(',').map(|id| id.trim().to_string()).collect(),
-                    },
-                )
+                .handle_find_conversation_members(&ctx, query)
                 .await
                 .into_grpc()?;
             return Ok(Response::new(ListConversationParticipantsResponse {
@@ -183,6 +188,15 @@ impl ConversationReadService for ConversationGrpcHandler {
                         .get("skip_meta")
                         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
                         .unwrap_or(false),
+                    scope: if req
+                        .ext
+                        .get(PARTICIPANT_MEMBERS_SCOPE_EXT_KEY)
+                        .is_some_and(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                    {
+                        ParticipantScope::Members
+                    } else {
+                        ParticipantScope::InSeat
+                    },
                 },
             )
             .await

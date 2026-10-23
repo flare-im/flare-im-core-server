@@ -6,15 +6,18 @@ use crate::staff_context::staff_context_request;
 use flare_grpc_proto::conversation::conversation_admin_service_client::ConversationAdminServiceClient;
 use flare_grpc_proto::conversation::conversation_manage_service_client::ConversationManageServiceClient;
 use flare_grpc_proto::conversation::conversation_read_service_client::ConversationReadServiceClient;
+use flare_grpc_proto::conversation::message_read_receipt_service_client::MessageReadReceiptServiceClient;
 use flare_grpc_proto::conversation::*;
 
 /// 会话读客户端。用户态方法带调用者上下文与签名身份（`x-flare-ctx`）；管理员方法
 /// （`admin_*`）走同一通道上的 `ConversationAdminService`，只带 admin-gateway 验过后原样转发的
-/// Staff `x-flare-ctx`（`staff_token`）。
+/// Staff `x-flare-ctx`（`staff_token`）。群聊已读回执（`*_message_read*`）走同一通道上的
+/// `MessageReadReceiptService`，身份同用户态方法。
 #[derive(Clone)]
 pub struct ConversationReadServiceClientWrapper {
     client: ConversationReadServiceClient<Channel>,
     admin: ConversationAdminServiceClient<Channel>,
+    read_receipts: MessageReadReceiptServiceClient<Channel>,
 }
 
 impl ConversationReadServiceClientWrapper {
@@ -38,7 +41,8 @@ impl ConversationReadServiceClientWrapper {
     pub fn from_channel(channel: Channel) -> Self {
         Self {
             client: ConversationReadServiceClient::new(channel.clone()),
-            admin: ConversationAdminServiceClient::new(channel),
+            admin: ConversationAdminServiceClient::new(channel.clone()),
+            read_receipts: MessageReadReceiptServiceClient::new(channel),
         }
     }
 
@@ -113,6 +117,32 @@ impl ConversationReadServiceClientWrapper {
         let response = self
             .client
             .list_conversation_participants(Self::request_with_ctx(ctx, signed, request)?)
+            .await?;
+        Ok(response.into_inner())
+    }
+
+    pub async fn get_message_read_summaries_with_ctx(
+        &mut self,
+        ctx: &Ctx,
+        signed: Option<&str>,
+        request: GetMessageReadSummariesRequest,
+    ) -> Result<GetMessageReadSummariesResponse> {
+        let response = self
+            .read_receipts
+            .get_message_read_summaries(Self::request_with_ctx(ctx, signed, request)?)
+            .await?;
+        Ok(response.into_inner())
+    }
+
+    pub async fn list_message_readers_with_ctx(
+        &mut self,
+        ctx: &Ctx,
+        signed: Option<&str>,
+        request: ListMessageReadersRequest,
+    ) -> Result<ListMessageReadersResponse> {
+        let response = self
+            .read_receipts
+            .list_message_readers(Self::request_with_ctx(ctx, signed, request)?)
             .await?;
         Ok(response.into_inner())
     }

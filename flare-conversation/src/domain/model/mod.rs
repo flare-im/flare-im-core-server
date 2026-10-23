@@ -3,6 +3,11 @@ use std::collections::HashMap;
 
 mod admin;
 pub use admin::{AdminConversation, AdminConversationPage};
+pub mod read_receipt;
+pub use read_receipt::{
+    MemberReadPosition, MessageReadSummaries, MessageReadSummary, MessageReaderPage, ReadCounts,
+    ReaderState, ReceiptMessage,
+};
 
 use flare_proto::common::Message;
 use flare_proto::common::{
@@ -232,6 +237,19 @@ pub struct ConversationBootstrapResult {
     pub policy: ConversationPolicy,
 }
 
+/// 成员读按哪种口径回答。
+///
+/// - `InSeat`：在席——未隐藏会话、未退出。投递类读取（消息与事件扇出、实时订阅引导、离线推送）
+///   用它：隐藏了会话的人不再收到推送，这是隐藏的列表语义。
+/// - `Members`：成员——未退出即成员，隐藏了会话（从本人列表删除）的也算。成员名单、成员数、
+///   成员核对（上行事件的操作者、插件资源桥）用它：隐藏只影响本人的列表展示，不改变成员关系。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum ParticipantScope {
+    #[default]
+    InSeat,
+    Members,
+}
+
 #[derive(Clone, Debug)]
 pub struct ConversationParticipantsPage {
     pub conversation_id: String,
@@ -350,6 +368,30 @@ pub struct ConversationParticipant {
     pub visible_from_seq: i64,
     /// 只接收提到我的消息：其余消息照常投递，但不产生离线推送。与 `muted` 正交。
     pub mention_only: bool,
+}
+
+impl ConversationParticipant {
+    /// 本人的列表设置（免打扰 `muted`、置顶 `pinned`、只接收提到我 `mention_only`）不是成员
+    /// 身份，给别人看的成员行不带它们。
+    fn clear_personal_settings(&mut self) {
+        self.muted = false;
+        self.pinned = false;
+        self.mention_only = false;
+    }
+}
+
+/// 面向成员的读取（成员名单、按 id 查成员、成员管理的应答、会话摘要的成员预览）只在 `viewer`
+/// 本人那一行保留个人设置，其余行一律清空；`viewer` 为 `None`（服务读名单）时一行都不留。
+/// 投递读取（在席口径的扇出、离线推送）是内部读取，要按每个人的免打扰判定推送，不经这里。
+pub fn keep_personal_settings_of(
+    participants: &mut [ConversationParticipant],
+    viewer: Option<&str>,
+) {
+    for participant in participants {
+        if viewer != Some(participant.user_id.as_str()) {
+            participant.clear_personal_settings();
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -517,7 +559,39 @@ impl Default for ConversationDomainConfig {
 
 #[cfg(test)]
 mod tests {
-    use super::ConversationType;
+    use super::{ConversationParticipant, ConversationType, keep_personal_settings_of};
+
+    fn participant(user_id: &str) -> ConversationParticipant {
+        ConversationParticipant {
+            user_id: user_id.into(),
+            roles: vec!["member".into()],
+            muted: true,
+            pinned: true,
+            attributes: [("nickname".to_string(), user_id.to_string())].into(),
+            visible_from_seq: 7,
+            mention_only: true,
+        }
+    }
+
+    /// Only the viewer's own row keeps the list settings; identity and public fields stay on every
+    /// row, and a service viewer keeps none.
+    #[test]
+    fn personal_settings_stay_on_the_viewers_own_row_only() {
+        let mut rows = vec![participant("alice"), participant("bob")];
+        keep_personal_settings_of(&mut rows, Some("alice"));
+        let settings = |p: &ConversationParticipant| (p.muted, p.pinned, p.mention_only);
+        assert_eq!(settings(&rows[0]), (true, true, true));
+        assert_eq!(settings(&rows[1]), (false, false, false));
+        for row in &rows {
+            assert_eq!(row.roles, ["member"]);
+            assert_eq!(row.visible_from_seq, 7);
+            assert_eq!(row.attributes["nickname"], row.user_id);
+        }
+
+        let mut rows = vec![participant("alice"), participant("bob")];
+        keep_personal_settings_of(&mut rows, None);
+        assert!(rows.iter().all(|p| settings(p) == (false, false, false)));
+    }
 
     #[test]
     fn conversation_type_db_string_accepts_only_canonical_names() {

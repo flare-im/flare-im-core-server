@@ -289,7 +289,7 @@ async fn isolated_schema(url: &str) -> (PgPool, PgPool, String) {
         r#"
         CREATE TABLE conversation_participants (
             tenant_id TEXT NOT NULL, conversation_id TEXT NOT NULL, user_id TEXT NOT NULL,
-            last_read_seq BIGINT DEFAULT 0, unread_count INT DEFAULT 0,
+            last_read_seq BIGINT DEFAULT 0, last_sync_seq BIGINT DEFAULT 0, unread_count INT DEFAULT 0,
             is_deleted BOOLEAN DEFAULT FALSE, visible_from_seq BIGINT NOT NULL DEFAULT 0,
             updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
             PRIMARY KEY (tenant_id, conversation_id, user_id)
