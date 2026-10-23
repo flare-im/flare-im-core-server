@@ -70,7 +70,10 @@ inherit_env_prefixes = ["CAPABILITY_", "FLARE_CAPABILITY_", "PLUGIN_"]
 # FLARE_CAPABILITY_CTX_PRIVATE_KEY (kid=capability, via the FLARE_CAPABILITY_ prefix) signs the
 # plugin card posts sent to FLARE_PLUGIN_CARD_INGEST_URL and the shared state events sent to
 # FLARE_PLUGIN_STATE_EVENT_URL; the FLARE_PLUGIN_CALL_* and runtime keys sign and verify the
-# calls to plugin hosts.
+# calls to plugin hosts. The Cell private key signs the reads Capability makes as this Cell: the
+# card's route before a card post, and the plugin resource bridge's conversation and group reads
+# for the invoking user (with FLARE_PLUGIN_RESOURCE_CONVERSATION_URL set, Capability does not
+# start without it).
 inherit_env = [
   "FLARE_INTERNAL_CTX_PUBLIC_KEY", "FLARE_INTERNAL_CTX_PUBLIC_KEYS", "FLARE_PLATFORM_PUBLIC_KEY",
   "CONFIG_CENTER_ENDPOINT", "TENANT_ID",
@@ -78,6 +81,7 @@ inherit_env = [
   "FLARE_PLUGIN_RESOURCE_CONVERSATION_URL", "FLARE_PLUGIN_RESOURCE_SOCIAL_GROUP_URL",
   "FLARE_PLUGIN_CALL_KEY_ID", "FLARE_PLUGIN_CALL_SIGNING_KEY", "FLARE_PLUGIN_CALL_PUBLIC_KEYS",
   "FLARE_PLUGIN_RUNTIME_PUBLIC_KEYS",
+  "FLARE_INTERNAL_CTX_PRIVATE_KEY",
 ]
 required_env = ["FLARE_INTERNAL_CTX_PUBLIC_KEY"]
 tcp_health = "127.0.0.1:50110"

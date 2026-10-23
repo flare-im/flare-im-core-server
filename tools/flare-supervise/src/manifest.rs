@@ -859,8 +859,9 @@ required_env_unless = [
     }
 
     /// The platform plugin card path: Capability holds its own context key, the endpoints and the
-    /// plugin call keys; Ingest (card posts) and the Orchestrator (shared state events) hold the
-    /// key set that resolves `kid=capability`.
+    /// plugin call keys, and the Cell key its route and resource reads are signed with; Ingest
+    /// (card posts) and the Orchestrator (shared state events) hold the key set that resolves
+    /// `kid=capability`.
     #[test]
     fn core_manifest_gives_the_plugin_card_path_its_keys_and_endpoints() {
         let manifest: Manifest =
@@ -887,6 +888,7 @@ required_env_unless = [
         ] {
             assert_eq!(holders(variable), ["capability"], "{variable}");
         }
+        assert!(holders("FLARE_INTERNAL_CTX_PRIVATE_KEY").contains(&"capability"));
         for receiver in ["message-ingest", "orchestrator"] {
             for variable in [
                 "FLARE_INTERNAL_CTX_PUBLIC_KEY",
@@ -931,10 +933,12 @@ required_env_unless = [
         // Push Server/Worker attest broker records (broker-isolated); Push Proxy only verifies.
         // Admin Gateway signs the Control-verified tenant admin for Media. The orchestrator
         // signs its own Service identity for conversation member reads, message ingest for
-        // its seq floor reads of Storage Reader.
+        // its seq floor reads of Storage Reader, Capability for a card's route and the plugin
+        // resource bridge's reads.
         assert_eq!(
             signer_users,
             [
+                "capability",
                 "message-ingest",
                 "orchestrator",
                 "push-server",
