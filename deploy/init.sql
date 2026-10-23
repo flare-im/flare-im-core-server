@@ -120,6 +120,35 @@ COMMENT ON COLUMN alert_history.triggered_at IS '触发时间';
 COMMENT ON COLUMN alert_history.resolved_at IS '恢复时间';
 CREATE INDEX IF NOT EXISTS idx_alert_history_triggered_at ON alert_history(triggered_at);
 
+-- Durable audit effects outbox (migration 0012): staff audit and hook management evidence.
+DROP TABLE IF EXISTS core_audit_outbox CASCADE;
+CREATE TABLE core_audit_outbox (
+    event_id UUID PRIMARY KEY,
+    app_id TEXT NOT NULL CHECK (app_id <> '' AND app_id <> '*'),
+    payload JSONB NOT NULL CHECK (jsonb_typeof(payload) = 'object'),
+    attempts INTEGER NOT NULL DEFAULT 0 CHECK (attempts >= 0),
+    next_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    delivered_at TIMESTAMPTZ
+);
+CREATE INDEX core_audit_outbox_pending ON core_audit_outbox(next_at,event_id) WHERE delivered_at IS NULL;
+CREATE INDEX core_audit_outbox_delivered ON core_audit_outbox(delivered_at) WHERE delivered_at IS NOT NULL;
+
+-- Durable physical-target kick command journal (migration 0014). Redis session indexes remain projections.
+DROP TABLE IF EXISTS online_kick_commands CASCADE;
+CREATE TABLE online_kick_commands (
+ id UUID PRIMARY KEY,
+ app_id TEXT NOT NULL,
+ request_id TEXT NOT NULL,
+ physical_id TEXT NOT NULL,
+ target JSONB NOT NULL,
+ evidence JSONB NOT NULL,
+ next_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+ attempts INTEGER NOT NULL DEFAULT 0,
+ completed_at TIMESTAMPTZ,
+ UNIQUE(app_id,request_id,physical_id)
+);
+CREATE INDEX online_kick_due ON online_kick_commands(next_at) WHERE completed_at IS NULL;
+
 -- ============================================================================
 -- 2. Message 聚合根（common/message.proto Message）
 -- ============================================================================
@@ -443,6 +472,48 @@ CREATE TABLE message_plugin_states (
 COMMENT ON TABLE plugin_entity_bindings IS '插件实体绑定（与 migrations/0016 同一结构）：插件卡片落库时由 Storage Writer 按目录投影的 entityPath 登记；Capability 只给已绑定的实体发布共享状态，published_version 以比较并设置单调抬高';
 COMMENT ON TABLE message_plugin_states IS '插件卡片最新共享状态（EVENT_MESSAGE_PLUGIN_STATE，与 migrations/0016 同一结构）：每条消息一行，按版本单调覆盖；读侧挂到 extra.pluginSharedStateJson / pluginSharedStateVersion';
 
+-- 插件实体生命周期 outbox（migrations/0018）：卡片撤回、平台代发最终失败时通知插件 entityLifecycle.unbound。
+DROP TABLE IF EXISTS plugin_entity_lifecycle_outbox CASCADE;
+CREATE TABLE plugin_entity_lifecycle_outbox (
+    id BIGSERIAL PRIMARY KEY,
+    tenant_id TEXT NOT NULL,
+    plugin_id TEXT NOT NULL,
+    contribution_id TEXT NOT NULL,
+    entity TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    server_msg_id TEXT,
+    status TEXT NOT NULL DEFAULT 'pending',
+    attempts INTEGER NOT NULL DEFAULT 0,
+    next_attempt_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    last_error TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    -- post_failed added while the post's outcome was unknown (Ingest unavailable or a first send
+    -- still in flight): due after a verification delay, delivered only if the entity still has no
+    -- binding, and not counted as given up until the worker ends it.
+    unconfirmed BOOLEAN NOT NULL DEFAULT FALSE
+        CONSTRAINT plugin_entity_lifecycle_outbox_unconfirmed_check
+        CHECK (NOT unconfirmed OR reason = 'post_failed'),
+    CONSTRAINT plugin_entity_lifecycle_outbox_entity_key UNIQUE (tenant_id, plugin_id, entity, reason),
+    CONSTRAINT plugin_entity_lifecycle_outbox_tenant_check
+        CHECK (char_length(tenant_id) BETWEEN 1 AND 256 AND tenant_id <> '*'),
+    CONSTRAINT plugin_entity_lifecycle_outbox_plugin_check
+        CHECK (char_length(plugin_id) BETWEEN 1 AND 128 AND char_length(contribution_id) BETWEEN 1 AND 160),
+    CONSTRAINT plugin_entity_lifecycle_outbox_entity_check
+        CHECK (entity ~ '^[A-Za-z0-9._:-]{1,128}$'),
+    CONSTRAINT plugin_entity_lifecycle_outbox_reason_check
+        CHECK (reason IN ('recalled', 'post_failed')),
+    CONSTRAINT plugin_entity_lifecycle_outbox_message_check
+        CHECK (server_msg_id IS NULL OR char_length(server_msg_id) BETWEEN 1 AND 256),
+    CONSTRAINT plugin_entity_lifecycle_outbox_status_check
+        CHECK (status IN ('pending', 'delivered', 'skipped', 'abandoned')),
+    CONSTRAINT plugin_entity_lifecycle_outbox_error_check
+        CHECK (last_error IS NULL OR char_length(last_error) <= 512)
+);
+CREATE INDEX idx_plugin_entity_lifecycle_outbox_due
+    ON plugin_entity_lifecycle_outbox(next_attempt_at) WHERE status = 'pending';
+COMMENT ON TABLE plugin_entity_lifecycle_outbox IS '插件实体生命周期通知（与 migrations/0018 同一结构）：Storage Writer 撤回绑定卡片时同语句写 recalled，Capability 代发最终失败时写 post_failed；Capability 后台以平台系统票据至少一次调用插件声明的 entityLifecycle.unbound';
+
 DROP TABLE IF EXISTS pinned_messages CASCADE;
 CREATE TABLE pinned_messages (
     id BIGSERIAL PRIMARY KEY,
@@ -739,6 +810,7 @@ CREATE INDEX IF NOT EXISTS idx_user_sync_cursor_tenant_user ON user_sync_cursor(
 -- 8. 媒体资产（common/metadata.proto MediaAttachment 等）
 -- ============================================================================
 
+DROP TABLE IF EXISTS media_read_grants CASCADE;
 DROP TABLE IF EXISTS media_references CASCADE;
 DROP TABLE IF EXISTS media_assets CASCADE;
 
@@ -827,6 +899,15 @@ COMMENT ON COLUMN media_references.expires_at IS '过期时间';
 CREATE INDEX IF NOT EXISTS idx_media_references_tenant_file ON media_references(tenant_id, file_id);
 CREATE INDEX IF NOT EXISTS idx_media_references_tenant_scope_lookup
     ON media_references(tenant_id, file_id, namespace, owner_id, business_tag);
+
+-- Application read grants (migration 0013), never bucket/IAM ACLs.
+CREATE TABLE media_read_grants (
+    tenant_id TEXT NOT NULL,
+    file_id TEXT NOT NULL,
+    user_id TEXT NOT NULL CHECK (length(user_id) BETWEEN 1 AND 256),
+    PRIMARY KEY (tenant_id,file_id,user_id),
+    FOREIGN KEY (tenant_id,file_id) REFERENCES media_assets(tenant_id,file_id) ON DELETE CASCADE
+);
 
 -- ============================================================================
 -- 9. ACK 审计归档
