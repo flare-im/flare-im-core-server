@@ -172,9 +172,10 @@ fn staff_claims(f: &Fixture, operation: &str) -> PluginStaffCallClaims {
         configuration_digest,
         staff_id: "staff-7".into(),
         org_id: None,
-        permission: "plugin:example.poll:admin".into(),
+        permission: "plugin:example.poll:manage".into(),
         operation: operation.into(),
         request_id: "req-1".into(),
+        reason: Some("ticket-42".into()),
         issued_at_ms: now(),
         expires_at_ms: now() + 10_000,
     }
@@ -282,7 +283,7 @@ async fn staff_and_runtime_credentials_write_tenant_wide_for_their_plugin_only()
     let f = fixture();
     let staff = f
         .call_signer
-        .sign_staff(&staff_claims(&f, "example.poll.close"), now())
+        .sign_staff(&staff_claims(&f, "example.poll.end"), now())
         .unwrap();
     let view = f
         .bridge
@@ -294,7 +295,7 @@ async fn staff_and_runtime_credentials_write_tenant_wide_for_their_plugin_only()
     for _ in 0..8 {
         tokio::task::yield_now().await;
     }
-    // A staff ticket of an operation outside the admin pages, or without the capability.
+    // A staff ticket of an operation outside the admin section, or without the capability.
     for operation in ["example.poll.vote", "example.poll.list"] {
         let token = f
             .call_signer
@@ -391,7 +392,7 @@ async fn the_request_limit_is_twelve_kib_and_recalled_cards_take_no_writes() {
     let f = fixture();
     let staff = f
         .call_signer
-        .sign_staff(&staff_claims(&f, "example.poll.close"), now())
+        .sign_staff(&staff_claims(&f, "example.poll.end"), now())
         .unwrap();
     let mut huge = serde_json::to_vec(&json!({
         "capability": OPERATION, "entity": "poll-1", "version": 1,

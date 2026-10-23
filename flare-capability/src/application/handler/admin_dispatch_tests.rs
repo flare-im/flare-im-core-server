@@ -9,6 +9,7 @@ use ed25519_dalek::{
     SigningKey,
     pkcs8::{EncodePrivateKey, EncodePublicKey},
 };
+use flare_im_capability_core::plugin::PluginManifest;
 use flare_im_capability_core::plugin::invocation::{PluginCallSigner, PluginCallVerifier};
 use flare_im_capability_core::plugin::runtime::PluginRuntimeSnapshot;
 use flare_server_core::{
@@ -21,7 +22,13 @@ use std::sync::Mutex;
 struct AllowEvidence;
 #[async_trait::async_trait]
 impl AdminEvidence for AllowEvidence {
-    async fn intent(&self, _: &str, _: &str, _: AdminCall) -> std::result::Result<(), String> {
+    async fn intent(
+        &self,
+        _: &str,
+        _: &str,
+        _: AdminCall,
+        _: AdminIntent<'_>,
+    ) -> std::result::Result<(), String> {
         Ok(())
     }
     async fn outcome(
@@ -36,10 +43,12 @@ impl AdminEvidence for AllowEvidence {
 }
 static ALLOW_EVIDENCE: AllowEvidence = AllowEvidence;
 
-/// Evidence rows in order (`tenant`, `aggregate id`, action); `fail_intent` refuses the intent.
+/// Evidence rows in order (`tenant`, `aggregate id`, action); the intents' reason and audited
+/// target; `fail_intent` refuses the intent.
 #[derive(Default)]
 struct RecordingEvidence {
     rows: Mutex<Vec<(String, String, &'static str)>>,
+    intents: Mutex<Vec<(Option<String>, Option<String>)>>,
     fail_intent: bool,
 }
 #[async_trait::async_trait]
@@ -49,6 +58,7 @@ impl AdminEvidence for RecordingEvidence {
         tenant_id: &str,
         aggregate_id: &str,
         call: AdminCall,
+        intent: AdminIntent<'_>,
     ) -> std::result::Result<(), String> {
         if self.fail_intent {
             return Err("audit store down".into());
@@ -57,6 +67,10 @@ impl AdminEvidence for RecordingEvidence {
             tenant_id.into(),
             aggregate_id.into(),
             admin_evidence_action(call, None),
+        ));
+        self.intents.lock().unwrap().push((
+            intent.reason.map(str::to_owned),
+            intent.audit_target.map(str::to_owned),
         ));
         Ok(())
     }
@@ -92,8 +106,24 @@ impl PluginAuthorizationReader for Projection {
     }
 }
 
-/// A gateway-signed Staff context for `app-a` with `permission`, verified as the admin RPCs do.
+/// A gateway-signed Staff context for `app-a` with `permission` and the operator's reason,
+/// verified as the admin RPCs do.
 pub(crate) fn staff(permission: &str) -> VerifiedStaff {
+    staff_stating(permission, Some("ticket-42 spam cleanup"))
+}
+
+/// [`staff`] with the stated reason, or none.
+pub(crate) fn staff_stating(permission: &str, reason: Option<&str>) -> VerifiedStaff {
+    staff_attempt("staff-7", permission, reason, "admin-req-1")
+}
+
+/// One attempt of staff member `staff_id`: a Staff context with its own request id.
+fn staff_attempt(
+    staff_id: &str,
+    permission: &str,
+    reason: Option<&str>,
+    request_id: &str,
+) -> VerifiedStaff {
     let key = SigningKey::from_bytes(&[61; 32]);
     let signer = SignedContextSigner::from_private_key(
         key.to_pkcs8_pem(Default::default()).unwrap().as_str(),
@@ -108,12 +138,13 @@ pub(crate) fn staff(permission: &str) -> VerifiedStaff {
     )
     .unwrap()
     .require_staff_kid(["gateway"]);
-    let token = signer
-        .sign(
-            &SignedContextIdentity::new(SignedActorType::Staff, "staff-7", "app-a", "admin-req-1")
-                .with_staff_grant(Some("org-1".into()), Some(permission.into()), 1),
-        )
-        .unwrap();
+    let mut identity =
+        SignedContextIdentity::new(SignedActorType::Staff, staff_id, "app-a", request_id)
+            .with_staff_grant(Some("org-1".into()), Some(permission.into()), 1);
+    if let Some(reason) = reason {
+        identity = identity.with_reason(reason);
+    }
+    let token = signer.sign(&identity).unwrap();
     let mut metadata = tonic::metadata::MetadataMap::new();
     metadata.insert("x-flare-ctx", token.parse().unwrap());
     flare_im_service_kit::staff_context::verify_staff_metadata(&metadata, &verifier, permission)
@@ -132,7 +163,7 @@ struct Harness {
 async fn harness() -> Harness {
     let plugin = PluginServer::start(Arc::new(|operation, _payload| match operation {
         "example.poll.list" => Ok(json!({"items": [{"pollId": "poll-1", "question": "Lunch?"}]})),
-        "example.poll.close" => Ok(json!({
+        "example.poll.end" => Ok(json!({
             "closed": true,
             "sharedState": {"entity": "poll-1", "version": 9, "values": {"closed": true}}
         })),
@@ -169,17 +200,21 @@ fn request(operation: &str, input: Value) -> AdminPluginRequest {
         plugin_id: "example.poll".into(),
         operation: operation.into(),
         input,
+        idempotency_key: None,
     }
 }
 
-const ADMIN: &str = "plugin:example.poll:admin";
+/// The fixture's staff permissions: `list` and `inspect` need `read`; `end` and `remove`
+/// need `manage` and a stated reason, with the poll id as their audited target.
+const READ: &str = "plugin:example.poll:read";
+const MANAGE: &str = "plugin:example.poll:manage";
 
 #[tokio::test]
 async fn staff_reads_and_acts_through_a_staff_ticket_without_a_conversation() {
     let h = harness().await;
-    let staff = staff(ADMIN);
+    let reader = staff(READ);
     let listed = dispatch_admin(
-        &staff,
+        &reader,
         &h.routes,
         AdminCall::Query,
         request("example.poll.list", json!({"status": "open", "cursor": ""})),
@@ -217,17 +252,18 @@ async fn staff_reads_and_acts_through_a_staff_ticket_without_a_conversation() {
             "app-a",
             "staff-7",
             Some("org-1"),
-            ADMIN,
+            READ,
             "example.poll.list",
             "admin-req-1",
             "poll-1",
             4
         )
     );
+    assert_eq!(claims.reason.as_deref(), Some("ticket-42 spam cleanup"));
 
     // A plugin rejection is a result, not an error.
     let removed = dispatch_admin(
-        &staff,
+        &staff(MANAGE),
         &h.routes,
         AdminCall::Dispatch,
         request("example.poll.remove", json!({"pollId": "poll-1"})),
@@ -246,10 +282,10 @@ async fn an_admin_action_result_publishes_its_shared_state_tenant_wide() {
     h.bindings
         .bind("app-a", "example.poll", "poll-1", "2-group", "m-1");
     let closed = dispatch_admin(
-        &staff(ADMIN),
+        &staff(MANAGE),
         &h.routes,
         AdminCall::Dispatch,
-        request("example.poll.close", json!({"pollId": "poll-1"})),
+        request("example.poll.end", json!({"pollId": "poll-1"})),
         Duration::from_secs(2),
         &ALLOW_EVIDENCE,
     )
@@ -289,7 +325,7 @@ async fn permission_operation_kind_and_grant_are_enforced() {
         }
     };
     // Another plugin's code, or a Core code.
-    for permission in ["plugin:example.other:admin", "core:plugins:write"] {
+    for permission in ["plugin:example.other:read", "core:plugins:write"] {
         let mut other = request("example.poll.list", json!({}));
         if permission.contains("other") {
             other.plugin_id = "example.other".into();
@@ -308,28 +344,49 @@ async fn permission_operation_kind_and_grant_are_enforced() {
             Err(CapabilityError::PolicyDenied(_))
         ));
     }
-    // Not an admin-page operation (a card action), or the wrong kind of call.
-    for (kind, operation) in [
-        (AdminCall::Dispatch, "example.poll.vote"),
-        (AdminCall::Query, "example.poll.vote"),
-        (AdminCall::Dispatch, "example.poll.list"),
-        (AdminCall::Query, "example.poll.close"),
-        (AdminCall::Query, "example.poll.missing"),
+    // Not an admin operation (a card action), or the wrong kind of call.
+    for (kind, operation, permission) in [
+        (AdminCall::Dispatch, "example.poll.vote", MANAGE),
+        (AdminCall::Query, "example.poll.vote", READ),
+        (AdminCall::Query, "example.poll.details", READ),
+        (AdminCall::Dispatch, "example.poll.close", MANAGE),
+        (AdminCall::Dispatch, "example.poll.list", MANAGE),
+        (AdminCall::Query, "example.poll.end", MANAGE),
+        (AdminCall::Query, "example.poll.missing", READ),
     ] {
         assert!(
             matches!(
-                call(staff(ADMIN), kind, request(operation, json!({}))).await,
+                call(staff(permission), kind, request(operation, json!({}))).await,
                 Err(CapabilityError::PolicyDenied(_))
             ),
             "{kind:?} {operation}"
         );
     }
+    // Each operation needs exactly the permission it declares: `read` reaches no change and
+    // `manage` no read.
+    for (kind, operation, permission) in [
+        (AdminCall::Dispatch, "example.poll.remove", READ),
+        (AdminCall::Query, "example.poll.list", MANAGE),
+        (
+            AdminCall::Query,
+            "example.poll.list",
+            "plugin:example.poll:admin",
+        ),
+    ] {
+        assert!(
+            matches!(
+                call(staff(permission), kind, request(operation, json!({}))).await,
+                Err(CapabilityError::PolicyDenied(_))
+            ),
+            "{operation} {permission}"
+        );
+    }
     // The detail operation is a read.
     assert!(
         call(
-            staff(ADMIN),
+            staff(READ),
             AdminCall::Query,
-            request("example.poll.details", json!({"pollId": "poll-1"}))
+            request("example.poll.inspect", json!({"pollId": "poll-1"}))
         )
         .await
         .unwrap()
@@ -341,7 +398,7 @@ async fn permission_operation_kind_and_grant_are_enforced() {
     *h.reader.0.lock().unwrap() = Some(snapshot);
     assert!(matches!(
         call(
-            staff(ADMIN),
+            staff(READ),
             AdminCall::Query,
             request("example.poll.list", json!({}))
         )
@@ -355,68 +412,48 @@ async fn permission_operation_kind_and_grant_are_enforced() {
     );
 }
 
-/// The example poll with an `admin` section: `remove` is a command needing `manage`, with the
-/// poll id as its audited target.
-fn snapshot_with_admin_section(authority: String) -> PluginRuntimeSnapshot {
-    use flare_im_capability_core::plugin::runtime::digest_bytes;
-    let mut raw: Value = serde_json::from_str(POLL_MANIFEST).unwrap();
-    raw["admin"] = json!({
-        "contractVersion": 1,
-        "permissions": [{"id": "manage", "label": {"en-US": "Manage polls"}, "risk": "high"}],
-        "operations": [{"id": "example.poll.remove", "mode": "command", "permission": "manage",
-                        "requiresReason": true, "auditTarget": "/pollId"}]
-    });
-    let raw = serde_json::to_string(&raw).unwrap();
-    PluginManifest::from_json(raw.as_bytes()).expect("a valid admin section");
-    let digest = digest_bytes(raw.as_bytes());
-    let mut snapshot = poll_snapshot(authority);
-    let projected = &mut snapshot.plugins[0];
-    projected.manifest_json = raw;
-    projected.grant.manifest_digest = digest.clone();
-    projected.deployment.manifest_digest = digest;
-    snapshot
-}
-
 #[tokio::test]
-async fn an_admin_section_operation_needs_its_own_permission_and_mode() {
+async fn a_change_that_requires_a_reason_needs_the_stated_one() {
     let h = harness().await;
-    *h.reader.0.lock().unwrap() = Some(snapshot_with_admin_section(h.plugin.authority.clone()));
     let remove = || request("example.poll.remove", json!({"pollId": "poll-1"}));
-    // The plugin-wide admin code no longer covers an operation that declares its permission.
+    let evidence = RecordingEvidence::default();
+    // No stated reason: refused before any evidence or call.
     assert!(matches!(
         dispatch_admin(
-            &staff(ADMIN),
+            &staff_stating(MANAGE, None),
             &h.routes,
             AdminCall::Dispatch,
             remove(),
             Duration::from_secs(2),
-            &ALLOW_EVIDENCE
-        )
-        .await,
-        Err(CapabilityError::PolicyDenied(_))
-    ));
-    // A command is no read.
-    let manage = "plugin:example.poll:manage";
-    assert!(matches!(
-        dispatch_admin(
-            &staff(manage),
-            &h.routes,
-            AdminCall::Query,
-            remove(),
-            Duration::from_secs(2),
-            &ALLOW_EVIDENCE
+            &evidence
         )
         .await,
         Err(CapabilityError::PolicyDenied(_))
     ));
     assert!(h.plugin.calls().is_empty());
+    assert!(evidence.rows.lock().unwrap().is_empty());
+    // A read asks for none.
+    assert!(
+        dispatch_admin(
+            &staff_stating(READ, None),
+            &h.routes,
+            AdminCall::Query,
+            request("example.poll.list", json!({})),
+            Duration::from_secs(2),
+            &evidence
+        )
+        .await
+        .unwrap()
+        .success
+    );
+    // With the reason: the intent records it and the target, the ticket carries it.
     let removed = dispatch_admin(
-        &staff(manage),
+        &staff_stating(MANAGE, Some("清理违规投票")),
         &h.routes,
         AdminCall::Dispatch,
         remove(),
         Duration::from_secs(2),
-        &ALLOW_EVIDENCE,
+        &evidence,
     )
     .await
     .unwrap();
@@ -428,48 +465,66 @@ async fn an_admin_section_operation_needs_its_own_permission_and_mode() {
             .is_none(),
         "the audited target is for Core's audit only"
     );
+    assert_eq!(
+        evidence.intents.lock().unwrap().clone(),
+        vec![
+            (None, None),
+            (Some("清理违规投票".into()), Some("poll-1".into()))
+        ]
+    );
     let now = chrono::Utc::now().timestamp_millis();
     let claims = h
         .verifier
-        .verify_staff(&h.plugin.calls()[0].ticket, now)
+        .verify_staff(&h.plugin.calls()[1].ticket, now)
         .unwrap();
     assert_eq!(
-        claims.permission, manage,
-        "the ticket carries the operation's code"
+        (claims.permission.as_str(), claims.reason.as_deref()),
+        (MANAGE, Some("清理违规投票")),
+        "the ticket carries the operation's code and the reason"
     );
-    // Admin-page operations keep the plugin-wide code.
+}
+
+/// A plugin host whose projection has not caught up answers `Unavailable`: the call did not run,
+/// so it is an open outcome to retry, never a plugin rejection.
+#[tokio::test]
+async fn a_host_that_is_not_current_yet_leaves_the_outcome_open() {
+    let plugin = PluginServer::start(Arc::new(|_, _| Err("grpc:unavailable".into()))).await;
+    let h = harness().await;
+    *h.reader.0.lock().unwrap() = Some(poll_snapshot(plugin.authority.clone()));
+    let evidence = RecordingEvidence::default();
+    let outcome = dispatch_admin(
+        &staff(MANAGE),
+        &h.routes,
+        AdminCall::Dispatch,
+        request("example.poll.remove", json!({"pollId": "poll-1"})),
+        Duration::from_secs(2),
+        &evidence,
+    )
+    .await;
     assert!(
-        dispatch_admin(
-            &staff(ADMIN),
-            &h.routes,
-            AdminCall::Query,
-            request("example.poll.list", json!({})),
-            Duration::from_secs(2),
-            &ALLOW_EVIDENCE
-        )
-        .await
-        .unwrap()
-        .success
+        matches!(outcome, Err(CapabilityError::Timeout(_))),
+        "{outcome:?}"
+    );
+    assert_eq!(
+        evidence.rows.lock().unwrap().last().unwrap().2,
+        "dispatch_unknown"
     );
 }
 
 #[test]
-fn admin_sets_split_reads_from_actions() {
+fn admin_operations_are_the_admin_section_only() {
     let manifest = PluginManifest::from_json(POLL_MANIFEST.as_bytes()).unwrap();
     assert_eq!(
-        admin_sources(&manifest),
-        ["example.poll.details", "example.poll.list"]
-            .map(String::from)
-            .into()
+        manifest.admin_operations(),
+        [
+            "example.poll.end",
+            "example.poll.inspect",
+            "example.poll.list",
+            "example.poll.remove"
+        ]
+        .map(String::from)
+        .into()
     );
-    assert_eq!(
-        admin_actions(&manifest),
-        ["example.poll.close", "example.poll.remove"]
-            .map(String::from)
-            .into()
-    );
-    assert!(admin_sources(&manifest).is_subset(&manifest.admin_operations()));
-    assert!(admin_actions(&manifest).is_subset(&manifest.admin_operations()));
 }
 
 #[test]
@@ -478,10 +533,10 @@ fn admin_requests_are_bounded_objects_of_one_plugin() {
         br#"{"pluginId":"example.poll","operation":"example.poll.list","input":{"cursor":""}}"#,
     )
     .unwrap();
-    assert!(parsed.is_plugin_permission(ADMIN));
-    assert!(parsed.is_plugin_permission("plugin:example.poll:manage"));
+    assert!(parsed.is_plugin_permission(READ));
+    assert!(parsed.is_plugin_permission(MANAGE));
     for other in [
-        "plugin:example.other:admin",
+        "plugin:example.other:read",
         "core:plugins:write",
         "plugin:example.poll",
     ] {
@@ -503,7 +558,7 @@ fn admin_requests_are_bounded_objects_of_one_plugin() {
     ] {
         assert!(AdminPluginRequest::parse(bad).is_err());
     }
-    let long = format!(r#"{{"pluginId":"{}","operation":"x"}}"#, "p".repeat(116));
+    let long = format!(r#"{{"pluginId":"{}","operation":"x"}}"#, "p".repeat(120));
     assert!(
         AdminPluginRequest::parse(long.as_bytes()).is_err(),
         "permission code over 128 bytes"
@@ -520,10 +575,10 @@ fn admin_requests_are_bounded_objects_of_one_plugin() {
 #[tokio::test]
 async fn admin_calls_record_intent_before_the_plugin_and_their_outcome_after() {
     let h = harness().await;
-    let staff = staff(ADMIN);
+    let manager = staff(MANAGE);
     let evidence = RecordingEvidence::default();
     let listed = dispatch_admin(
-        &staff,
+        &staff(READ),
         &h.routes,
         AdminCall::Query,
         request("example.poll.list", json!({"status": "open", "cursor": ""})),
@@ -534,7 +589,7 @@ async fn admin_calls_record_intent_before_the_plugin_and_their_outcome_after() {
     .unwrap();
     assert!(listed.success);
     let removed = dispatch_admin(
-        &staff,
+        &manager,
         &h.routes,
         AdminCall::Dispatch,
         request("example.poll.remove", json!({"pollId": "poll-1"})),
@@ -562,7 +617,7 @@ async fn admin_calls_record_intent_before_the_plugin_and_their_outcome_after() {
         ..Default::default()
     };
     let refused = dispatch_admin(
-        &staff,
+        &manager,
         &h.routes,
         AdminCall::Dispatch,
         request("example.poll.remove", json!({"pollId": "poll-1"})),
@@ -576,7 +631,7 @@ async fn admin_calls_record_intent_before_the_plugin_and_their_outcome_after() {
 
     // An unauthorized call writes no intent at all.
     let read_only = dispatch_admin(
-        &staff,
+        &manager,
         &h.routes,
         AdminCall::Query,
         request("example.poll.remove", json!({"pollId": "poll-1"})),
@@ -586,4 +641,115 @@ async fn admin_calls_record_intent_before_the_plugin_and_their_outcome_after() {
     .await;
     assert!(read_only.is_err());
     assert_eq!(evidence.rows.lock().unwrap().len(), 4);
+}
+
+/// A console action sent again under its `Idempotency-Key` after an unknown outcome is a new
+/// request (a new request id) carrying the same command id, which the plugin keys staff commands
+/// by: the command runs once. Another staff member's key, or a read, carries none of it.
+#[tokio::test]
+async fn retries_of_one_staff_intent_carry_one_command_id_and_run_once() {
+    let executed = Arc::new(Mutex::new(std::collections::BTreeMap::<String, u32>::new()));
+    let ledger = executed.clone();
+    // The plugin runs a staff command once per command id and replays it afterwards.
+    let plugin = PluginServer::start(Arc::new(move |operation, payload| {
+        let command = payload["commandId"].as_str().unwrap_or_default().to_owned();
+        let mut ledger = ledger.lock().unwrap();
+        let runs = ledger.entry(format!("{operation}/{command}")).or_default();
+        *runs += 1;
+        Ok(json!({"closed": true, "replayed": *runs > 1}))
+    }))
+    .await;
+    let signer = Arc::new(PluginCallSigner::new("call".into(), [33; 32]).unwrap());
+    let reader = Arc::new(Projection(Mutex::new(Some(poll_snapshot(
+        plugin.authority.clone(),
+    )))));
+    let routes = Arc::new(PluginRouteBook::new().with_runtime_authorization(reader, Some(signer)));
+    let attempt = |staff_id: &'static str, request_id: &'static str, key: Option<&'static str>| {
+        let routes = routes.clone();
+        async move {
+            let mut close = request("example.poll.end", json!({"pollId": "poll-1"}));
+            close.idempotency_key = key.map(str::to_owned);
+            dispatch_admin(
+                &staff_attempt(staff_id, MANAGE, Some("spam"), request_id),
+                &routes,
+                AdminCall::Dispatch,
+                close,
+                Duration::from_secs(2),
+                &ALLOW_EVIDENCE,
+            )
+            .await
+            .unwrap()
+        }
+    };
+    let first = attempt("staff-7", "attempt-1", Some("close-7")).await;
+    let retry = attempt("staff-7", "attempt-2", Some("close-7")).await;
+    assert_eq!(first.request_id, "attempt-1");
+    assert_eq!(retry.request_id, "attempt-2");
+    assert_eq!(retry.data["replayed"], true);
+    let calls = plugin.calls();
+    let command_id = staff_command_id("staff-7", "close-7");
+    assert!(command_id.len() <= 128 && command_id.starts_with("intent-"));
+    for call in &calls {
+        assert_eq!(call.payload["commandId"], command_id.as_str());
+        assert_eq!(call.payload["pollId"], "poll-1");
+    }
+    // A client-chosen command id does not override the key's.
+    let mut forged = request(
+        "example.poll.end",
+        json!({"pollId": "poll-1", "commandId": "mine"}),
+    );
+    forged.idempotency_key = Some("close-7".into());
+    dispatch_admin(
+        &staff_attempt("staff-7", MANAGE, Some("spam"), "attempt-3"),
+        &routes,
+        AdminCall::Dispatch,
+        forged,
+        Duration::from_secs(2),
+        &ALLOW_EVIDENCE,
+    )
+    .await
+    .unwrap();
+    assert_eq!(plugin.calls()[2].payload["commandId"], command_id.as_str());
+    assert_eq!(
+        executed.lock().unwrap()[&format!("example.poll.end/{command_id}")],
+        3,
+        "three attempts, one command"
+    );
+    // Another staff member's key, or another key, is another command.
+    attempt("staff-8", "attempt-4", Some("close-7")).await;
+    attempt("staff-7", "attempt-5", Some("close-8")).await;
+    let ids: std::collections::BTreeSet<String> = plugin
+        .calls()
+        .iter()
+        .map(|call| call.payload["commandId"].as_str().unwrap().to_owned())
+        .collect();
+    assert_eq!(ids.len(), 3);
+    assert_ne!(
+        staff_command_id("staff-7", "close-7"),
+        staff_command_id("staff-8", "close-7")
+    );
+    // Without a key the input goes as it is.
+    attempt("staff-7", "attempt-6", None).await;
+    assert!(plugin.calls()[5].payload.get("commandId").is_none());
+}
+
+#[test]
+fn an_idempotency_key_is_bounded_ascii_without_control_characters() {
+    let body = |key: &str| {
+        serde_json::to_vec(&json!({
+            "pluginId": "example.poll", "operation": "example.poll.end",
+            "input": {"pollId": "p"}, "idempotencyKey": key
+        }))
+        .unwrap()
+    };
+    assert_eq!(
+        AdminPluginRequest::parse(&body("close-7"))
+            .unwrap()
+            .idempotency_key
+            .as_deref(),
+        Some("close-7")
+    );
+    for bad in ["", "a\tb", "清理", &"k".repeat(129)] {
+        assert!(AdminPluginRequest::parse(&body(bad)).is_err(), "{bad:?}");
+    }
 }

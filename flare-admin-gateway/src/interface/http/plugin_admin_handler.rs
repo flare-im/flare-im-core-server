@@ -1,12 +1,18 @@
-//! Plugin admin pages (`/plugin-admin/{plugin_id}/query|dispatch`): the console renders a plugin's
-//! admin-page contribution and invokes its operations through Capability `dispatch_admin`
-//! (`CapabilityService.Administer`, `flare.plugin.v1.admin.query` / `.dispatch`).
+//! Plugin admin operations (`/plugin-admin/{plugin_id}/{permission}/query|dispatch`): the console
+//! renders the pages of a plugin's manifest `admin` section and invokes its admin operations
+//! through Capability `dispatch_admin` (`CapabilityService.Administer`,
+//! `flare.plugin.v1.admin.query` / `.dispatch`).
 //!
-//! The admin partition signs `plugin:<plugin_id>:admin` for these routes (the shared route table's
-//! per-plugin code, `core_admin::route_permission`) and the middleware has checked it. Capability
-//! checks it again, keeps reads to the admin pages' rows sources and detail operations and actions to
-//! their action targets, signs a staff ticket and calls the plugin. A plugin rejection is a 200
-//! with `success: false` and its `error_code`.
+//! The admin partition signs `plugin:<plugin_id>:<permission>` for these routes (the shared route
+//! table's per-plugin code, `core_admin::route_permission`) and the middleware has checked it,
+//! with the operator's stated reason in the same signed context. Capability checks that the
+//! operation is an admin operation of that mode declaring exactly this permission, that an
+//! operation declaring `requiresReason` comes with the reason, signs a staff ticket and calls the
+//! plugin. A plugin rejection is a 200 with `success: false` and its `error_code`.
+//!
+//! A dispatch passes the console's `idempotency-key` on to Capability, which derives the command
+//! id of the staff member's intent from it: a retry of one action after an unknown outcome is a
+//! new request carrying the same command id, and the plugin runs the command once.
 use axum::{Json, extract::Extension, http::HeaderMap};
 use flare_im_service_kit::clients::AdminGrpcClients;
 use flare_server_core::{
@@ -73,12 +79,17 @@ fn bad_request(reason: &'static str, message: &str) -> HttpApiError {
     HttpApiError::bad_request(reason, message.to_string())
 }
 
-/// The Capability request body: `{"pluginId","operation","input"}`.
-fn capability_body(plugin_id: &str, request: AdminPluginCallHttpRequest) -> Result<Vec<u8>> {
-    if flare_plugin_protocol::invocation::plugin_admin_permission(plugin_id).is_none() {
+/// The Capability request body: `{"pluginId","operation","input","idempotencyKey"?}`.
+fn capability_body(
+    plugin_id: &str,
+    permission: &str,
+    request: AdminPluginCallHttpRequest,
+    idempotency_key: Option<&str>,
+) -> Result<Vec<u8>> {
+    if flare_plugin_protocol::invocation::plugin_permission(plugin_id, permission).is_none() {
         return Err(bad_request(
             "ADMIN_PLUGIN_FIELD_INVALID",
-            "plugin_id cannot carry an admin permission code",
+            "plugin_id and permission cannot carry a permission code",
         ));
     }
     let operation = request.operation.trim();
@@ -97,12 +108,16 @@ fn capability_body(plugin_id: &str, request: AdminPluginCallHttpRequest) -> Resu
             "input must be an object",
         ));
     }
-    let body = serde_json::to_vec(&serde_json::json!({
+    let mut body = serde_json::json!({
         "pluginId": plugin_id,
         "operation": operation,
         "input": input,
-    }))
-    .map_err(|_| bad_request("ADMIN_PLUGIN_FIELD_INVALID", "input does not encode"))?;
+    });
+    if let Some(key) = idempotency_key {
+        body["idempotencyKey"] = Value::String(key.to_owned());
+    }
+    let body = serde_json::to_vec(&body)
+        .map_err(|_| bad_request("ADMIN_PLUGIN_FIELD_INVALID", "input does not encode"))?;
     if body.len() > MAX_INPUT_BYTES {
         return Err(bad_request(
             "ADMIN_PLUGIN_INPUT_TOO_LARGE",
@@ -118,12 +133,13 @@ async fn call(
     capability: &AdminCapability,
     staff: &VerifiedStaffContext,
     tenant_id: String,
-    plugin_id: String,
+    (plugin_id, permission): (String, String),
     operation: &'static str,
     request: AdminPluginCallHttpRequest,
+    idempotency_key: Option<&str>,
     failure_reason: &'static str,
 ) -> Result<AdminPluginCallHttp> {
-    let body = capability_body(&plugin_id, request)?;
+    let body = capability_body(&plugin_id, &permission, request, idempotency_key)?;
     let mut client = capability.client().await?;
     let response = clients
         .bounded(client.administer_json(staff.token(), operation, body, staff.request_id()))
@@ -152,17 +168,18 @@ async fn call(
 
 #[utoipa::path(
     post,
-    path = "/api/v1/admin/plugin-admin/{plugin_id}/query",
+    path = "/api/v1/admin/plugin-admin/{plugin_id}/{permission}/query",
     tag = "Admin",
     request_body = AdminPluginCallHttpRequest,
     params(
-        ("plugin_id" = String, Path, description = "Plugin id; the signed permission must be plugin:<plugin_id>:admin"),
+        ("plugin_id" = String, Path, description = "Plugin id"),
+        ("permission" = String, Path, description = "The staff permission the operation declares (admin.permissions id); the signed permission must be plugin:<plugin_id>:<permission>"),
     ),
     responses(
-        (status = 200, description = "The plugin answered a read of its admin page (a rows source or a detail operation); `success=false` with `error_code` when the plugin rejected it", body = ApiResponse<AdminPluginCallHttp>),
-        (status = 400, description = "plugin_id too long for its permission code, operation blank or over 128 bytes, input not an object (ADMIN_PLUGIN_FIELD_INVALID), input over 16 KiB (ADMIN_PLUGIN_INPUT_TOO_LARGE), or Capability refused an argument (BAD_REQUEST)"),
+        (status = 200, description = "The plugin answered one of its admin query operations; `success=false` with `error_code` when the plugin rejected it", body = ApiResponse<AdminPluginCallHttp>),
+        (status = 400, description = "plugin_id and permission too long for their permission code, operation blank or over 128 bytes, input not an object (ADMIN_PLUGIN_FIELD_INVALID), input over 16 KiB (ADMIN_PLUGIN_INPUT_TOO_LARGE), or Capability refused an argument (BAD_REQUEST)"),
         (status = 401, description = "Staff context is missing or invalid"),
-        (status = 403, description = "Signed permission is not plugin:<plugin_id>:admin (ADMIN_PERMISSION_DENIED), or Capability refused: the plugin is not enabled for the application, or the operation is not a read of its admin pages (FORBIDDEN)"),
+        (status = 403, description = "Signed permission is not plugin:<plugin_id>:<permission> (ADMIN_PERMISSION_DENIED), or Capability refused: the plugin is not enabled for the application, or the operation is not an admin query declaring this permission (FORBIDDEN)"),
         (status = 500, description = "Capability downstream failed (ADMIN_PLUGIN_QUERY_FAILED); its error text is not returned"),
         (status = 502, description = "Capability downstream refused the forwarded staff context as unauthenticated, a deployment error (ADMIN_UPSTREAM_REJECTED_ASSERTION)"),
         (status = 503, description = "Capability downstream is disabled (ADMIN_CAPABILITY_DISABLED) or unavailable (ADMIN_UPSTREAM_UNAVAILABLE)"),
@@ -174,7 +191,7 @@ pub async fn query_plugin_admin(
     Extension(capability): Extension<AdminCapability>,
     Extension(staff): Extension<VerifiedStaffContext>,
     Extension(principal): Extension<AuthenticatedPrincipal>,
-    AdminPath(plugin_id): AdminPath<String>,
+    AdminPath(path): AdminPath<(String, String)>,
     AdminJson(request): AdminJson<AdminPluginCallHttpRequest>,
 ) -> Result<Json<ApiResponse<AdminPluginCallHttp>>> {
     let tenant_id = verified_tenant(&principal)?;
@@ -183,9 +200,10 @@ pub async fn query_plugin_admin(
         &capability,
         &staff,
         tenant_id,
-        plugin_id,
+        path,
         QUERY_OPERATION,
         request,
+        None,
         "ADMIN_PLUGIN_QUERY_FAILED",
     )
     .await?;
@@ -194,20 +212,21 @@ pub async fn query_plugin_admin(
 
 #[utoipa::path(
     post,
-    path = "/api/v1/admin/plugin-admin/{plugin_id}/dispatch",
+    path = "/api/v1/admin/plugin-admin/{plugin_id}/{permission}/dispatch",
     tag = "Admin",
     request_body = AdminPluginCallHttpRequest,
     params(
-        ("plugin_id" = String, Path, description = "Plugin id; the signed permission must be plugin:<plugin_id>:admin"),
-        ("x-audit-reason" = String, Header, description = "Operator reason as percent-encoded UTF-8 (encodeURIComponent; plain ASCII may be sent as is), at most 512 bytes decoded and 1536 bytes as sent; recorded decoded in the audit log"),
-        ("idempotency-key" = Option<String>, Header, description = "Required unless x-request-id is present; correlation only, not deduplicated"),
+        ("plugin_id" = String, Path, description = "Plugin id"),
+        ("permission" = String, Path, description = "The staff permission the operation declares (admin.permissions id); the signed permission must be plugin:<plugin_id>:<permission>"),
+        ("x-audit-reason" = String, Header, description = "Operator reason as percent-encoded UTF-8 (encodeURIComponent; plain ASCII may be sent as is), at most 512 bytes decoded and 1536 bytes as sent; recorded decoded in the audit log; the plugin receives the one the admin partition signed into the staff context"),
+        ("idempotency-key" = Option<String>, Header, description = "Required unless x-request-id is present; the command id of the staff member's intent is derived from it, so a retry under the same key runs the plugin command once"),
         ("x-request-id" = Option<String>, Header, description = "Required unless idempotency-key is present"),
     ),
     responses(
-        (status = 200, description = "The plugin ran an action of its admin page; `success=false` with `error_code` when the plugin rejected it", body = ApiResponse<AdminPluginCallHttp>),
-        (status = 400, description = "plugin_id too long for its permission code, operation blank or over 128 bytes, input not an object (ADMIN_PLUGIN_FIELD_INVALID), input over 16 KiB (ADMIN_PLUGIN_INPUT_TOO_LARGE), or Capability refused an argument (BAD_REQUEST)"),
+        (status = 200, description = "The plugin ran one of its admin command operations; `success=false` with `error_code` when the plugin rejected it", body = ApiResponse<AdminPluginCallHttp>),
+        (status = 400, description = "plugin_id and permission too long for their permission code, operation blank or over 128 bytes, input not an object (ADMIN_PLUGIN_FIELD_INVALID), input over 16 KiB (ADMIN_PLUGIN_INPUT_TOO_LARGE), or Capability refused an argument (BAD_REQUEST)"),
         (status = 401, description = "Staff context is missing or invalid"),
-        (status = 403, description = "Signed permission is not plugin:<plugin_id>:admin (ADMIN_PERMISSION_DENIED), audit reason / idempotency header missing (FORBIDDEN), or Capability refused: the plugin is not enabled for the application, or the operation is not an action of its admin pages (FORBIDDEN)"),
+        (status = 403, description = "Signed permission is not plugin:<plugin_id>:<permission> (ADMIN_PERMISSION_DENIED), audit reason / idempotency header missing (FORBIDDEN), or Capability refused: the plugin is not enabled for the application, the operation is not an admin command declaring this permission, or it requires a reason the staff context does not carry (FORBIDDEN)"),
         (status = 500, description = "Capability downstream failed (ADMIN_PLUGIN_DISPATCH_FAILED); its error text is not returned"),
         (status = 502, description = "Capability downstream refused the forwarded staff context as unauthenticated, a deployment error (ADMIN_UPSTREAM_REJECTED_ASSERTION)"),
         (status = 503, description = "Capability downstream is disabled (ADMIN_CAPABILITY_DISABLED) or unavailable (ADMIN_UPSTREAM_UNAVAILABLE)"),
@@ -222,7 +241,7 @@ pub async fn dispatch_plugin_admin(
     Extension(capability): Extension<AdminCapability>,
     Extension(staff): Extension<VerifiedStaffContext>,
     Extension(principal): Extension<AuthenticatedPrincipal>,
-    AdminPath(plugin_id): AdminPath<String>,
+    AdminPath(path): AdminPath<(String, String)>,
     AdminJson(request): AdminJson<AdminPluginCallHttpRequest>,
 ) -> Result<Json<ApiResponse<AdminPluginCallHttp>>> {
     let tenant_id = verified_tenant(&principal)?;
@@ -230,20 +249,29 @@ pub async fn dispatch_plugin_admin(
         "plugins.admin.dispatch",
         &principal,
         &headers,
-        &AuditTarget::id(&plugin_id),
+        &AuditTarget::id(&path.0),
     );
     let answer = call(
         &clients,
         &capability,
         &staff,
         tenant_id,
-        plugin_id,
+        path,
         DISPATCH_OPERATION,
         request,
+        idempotency_key(&headers),
         "ADMIN_PLUGIN_DISPATCH_FAILED",
     )
     .await?;
     Ok(Json(ApiResponse::success(answer)))
+}
+
+/// The console's key of a dispatch (the admin middleware bounded it to 128 bytes).
+fn idempotency_key(headers: &HeaderMap) -> Option<&str> {
+    headers
+        .get(super::admin_contract::IDEMPOTENCY_KEY_HEADER)
+        .and_then(|value| value.to_str().ok())
+        .filter(|key| !key.is_empty())
 }
 
 #[cfg(test)]
@@ -259,24 +287,53 @@ mod tests {
 
     #[test]
     fn the_capability_body_names_the_path_plugin_and_an_object_input() {
-        let body = capability_body("flare.poll", request(" flare.poll.list ", None)).unwrap();
+        let body = capability_body(
+            "flare.poll",
+            "read",
+            request(" flare.poll.list ", None),
+            None,
+        )
+        .unwrap();
         assert_eq!(
             serde_json::from_slice::<Value>(&body).unwrap(),
             serde_json::json!({"pluginId": "flare.poll", "operation": "flare.poll.list", "input": {}})
         );
         for bad in [
-            capability_body("flare.poll", request("", None)),
-            capability_body("flare.poll", request("x", Some(serde_json::json!([1])))),
-            capability_body(&"p".repeat(116), request("x", None)),
+            capability_body("flare.poll", "read", request("", None), None),
             capability_body(
                 "flare.poll",
+                "read",
+                request("x", Some(serde_json::json!([1]))),
+                None,
+            ),
+            capability_body(&"p".repeat(117), "read", request("x", None), None),
+            capability_body("flare.poll", "a:b", request("x", None), None),
+            capability_body(
+                "flare.poll",
+                "read",
                 request(
                     "x",
                     Some(serde_json::json!({"q": "x".repeat(MAX_INPUT_BYTES)})),
                 ),
+                None,
             ),
         ] {
             assert!(bad.is_err());
         }
+        // A dispatch's key goes on for Capability to derive the command id from.
+        let body = capability_body(
+            "flare.poll",
+            "manage",
+            request(
+                "flare.poll.admin.close",
+                Some(serde_json::json!({"pollId": "p"})),
+            ),
+            Some("close-7"),
+        )
+        .unwrap();
+        assert_eq!(
+            serde_json::from_slice::<Value>(&body).unwrap()["idempotencyKey"],
+            "close-7"
+        );
     }
 }

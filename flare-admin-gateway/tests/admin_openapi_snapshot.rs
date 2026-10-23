@@ -227,7 +227,7 @@ async fn contract_inventory_and_openapi_list_the_same_operations() {
             endpoint.path.as_str(),
             "/api/v1/admin/messages/query"
                 | "/api/v1/admin/messages/write-ledger/query"
-                | "/api/v1/admin/plugin-admin/{plugin_id}/query"
+                | "/api/v1/admin/plugin-admin/{plugin_id}/{permission}/query"
         );
         assert_eq!(
             endpoint.write,

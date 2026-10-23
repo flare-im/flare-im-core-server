@@ -40,7 +40,7 @@ use super::administer::{
     HookAdministrator, READ_OPERATIONS, WRITE_OPERATIONS, dispatch_hook_administer,
 };
 use crate::application::handler::admin_dispatch::{
-    AdminCall, AdminEvidence, AdminOutcome, AdminPluginRequest, admin_evidence_action,
+    AdminCall, AdminEvidence, AdminIntent, AdminOutcome, AdminPluginRequest, admin_evidence_action,
     dispatch_admin,
 };
 use crate::application::handler::{VerifiedDispatchOrigin, dispatch_capability_command};
@@ -156,8 +156,9 @@ impl CapabilityGrpcServer {
     /// The admin gate: the forwarded Staff context with `permission`; without a key set every
     /// admin RPC is UNAUTHENTICATED.
     /// `dispatch_admin` (`flare.plugin.v1.admin.query` / `.dispatch`): the payload is
-    /// `PayloadJson` `{"pluginId","operation","input"}`; the Staff context must carry
-    /// `plugin:<pluginId>:admin` for one concrete application. The answer is `PayloadJson`
+    /// `PayloadJson` `{"pluginId","operation","input","idempotencyKey"?}`; the Staff context must
+    /// carry the `plugin:<pluginId>:<permission>` code the operation declares, for one concrete
+    /// application. The answer is `PayloadJson`
     /// `{"pluginId","operation","requestId","success","data","errorCode"?}`; a plugin rejection is
     /// `success: false`, not an RPC error.
     async fn administer_plugin(
@@ -187,7 +188,14 @@ impl CapabilityGrpcServer {
             AdminCall::Query => "query",
             AdminCall::Dispatch => "dispatch",
         };
-        let evidence = StaffEffectEvidence(self.audit.as_deref());
+        let evidence = StaffEffectEvidence {
+            audit: self.audit.as_deref(),
+            actor_id: &staff.actor_id,
+            plugin_id: &plugin_id,
+            operation: &operation,
+            request_id: &staff.request_id,
+            trace_id: trace.as_deref(),
+        };
         let outcome = dispatch_admin(
             &staff,
             &self.plugin_routes,
@@ -207,6 +215,7 @@ impl CapabilityGrpcServer {
                     "success": result.success,
                     "errorCode": result.error_code,
                     "auditTarget": result.audit_target,
+                    "reason": staff.reason,
                 }),
                 Err(error) => serde_json::json!({
                     "pluginId": plugin_id,
@@ -214,6 +223,7 @@ impl CapabilityGrpcServer {
                     "requestId": staff.request_id,
                     "success": false,
                     "error": error.plugin_code().unwrap_or("CAPABILITY_ERROR"),
+                    "reason": staff.reason,
                 }),
             };
             audit
@@ -1006,9 +1016,17 @@ impl CapabilityService for CapabilityGrpcServer {
     }
 }
 
-/// [`AdminEvidence`] on the durable audit outbox (`record_staff_effect`, inside the Staff scope).
-/// Without an audit store no admin call reaches a plugin.
-struct StaffEffectEvidence<'a>(Option<&'a PostgresCapabilityAuditLog>);
+/// [`AdminEvidence`] on the durable audit outbox (`record_staff_effect`, inside the Staff scope);
+/// the intent also keeps the stated reason and the audited target in `capability_audit_log`, in
+/// the same transaction. Without an audit store no admin call reaches a plugin.
+struct StaffEffectEvidence<'a> {
+    audit: Option<&'a PostgresCapabilityAuditLog>,
+    actor_id: &'a str,
+    plugin_id: &'a str,
+    operation: &'a str,
+    request_id: &'a str,
+    trace_id: Option<&'a str>,
+}
 
 #[async_trait::async_trait]
 impl AdminEvidence for StaffEffectEvidence<'_> {
@@ -1017,9 +1035,32 @@ impl AdminEvidence for StaffEffectEvidence<'_> {
         tenant_id: &str,
         aggregate_id: &str,
         call: AdminCall,
+        intent: AdminIntent<'_>,
     ) -> std::result::Result<(), String> {
-        self.record(tenant_id, aggregate_id, admin_evidence_action(call, None))
+        let audit = self
+            .audit
+            .ok_or_else(|| "plugin admin audit store is not configured".to_owned())?;
+        let action = admin_evidence_action(call, None);
+        let detail = serde_json::json!({
+            "pluginId": self.plugin_id,
+            "call": action,
+            "requestId": self.request_id,
+            "reason": intent.reason,
+            "auditTarget": intent.audit_target,
+        });
+        audit
+            .record_staff_intent(
+                tenant_id,
+                "plugin_admin",
+                aggregate_id,
+                action,
+                self.actor_id,
+                self.operation,
+                detail,
+                self.trace_id,
+            )
             .await
+            .map_err(|error| error.to_string())
     }
 
     async fn outcome(
@@ -1046,7 +1087,7 @@ impl StaffEffectEvidence<'_> {
         action: &'static str,
     ) -> std::result::Result<(), String> {
         let audit = self
-            .0
+            .audit
             .ok_or_else(|| "plugin admin audit store is not configured".to_owned())?;
         audit
             .record_staff_effect(tenant_id, "plugin_admin", aggregate_id, action)

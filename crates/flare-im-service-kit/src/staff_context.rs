@@ -87,6 +87,8 @@ pub struct VerifiedStaff {
     pub permission: Option<String>,
     pub request_id: String,
     pub trace_id: Option<String>,
+    /// The reason the staff member stated, as the admin partition signed it (`x-audit-reason`).
+    pub reason: Option<String>,
     pub ctx: Ctx,
 }
 
@@ -99,6 +101,7 @@ impl std::fmt::Debug for VerifiedStaff {
             .field("permission", &self.permission)
             .field("request_id", &self.request_id)
             .field("trace_id", &self.trace_id)
+            .field("reason", &self.reason)
             .finish()
     }
 }
@@ -148,6 +151,7 @@ impl VerifiedStaff {
             permission: claims.permission.clone(),
             request_id: claims.request_id.clone(),
             trace_id: claims.trace_id.clone(),
+            reason: claims.reason.clone(),
             ctx,
         })
     }

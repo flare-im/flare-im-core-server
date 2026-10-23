@@ -51,8 +51,8 @@ DELETE /api/v1/admin/hooks/{hook_id}
 PUT  /api/v1/admin/hooks/{hook_id}/status
 GET  /api/v1/admin/hooks/{hook_id}/statistics
 GET  /api/v1/admin/hooks/{hook_id}/executions
-POST /api/v1/admin/plugin-admin/{plugin_id}/query
-POST /api/v1/admin/plugin-admin/{plugin_id}/dispatch
+POST /api/v1/admin/plugin-admin/{plugin_id}/{permission}/query
+POST /api/v1/admin/plugin-admin/{plugin_id}/{permission}/dispatch
 GET  /api/v1/admin/medias/bucket
 GET  /api/v1/admin/medias/objects
 POST /api/v1/admin/medias/cleanup-orphaned-assets

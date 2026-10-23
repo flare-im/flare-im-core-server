@@ -757,11 +757,18 @@ fn rejection(
 /// A gRPC error from the plugin. A status the plugin (or its host, before running the command)
 /// answers definitely — invalid input, failed precondition, not found, conflict, refused
 /// credential, unimplemented — is [`PluginAnswer::Refused`] with the code its `ErrorDetail`
-/// carries: the command did not run. Anything else (unavailable, deadline, internal, unknown, a
-/// response over the size limit) leaves the outcome unknown.
+/// carries: the command did not run. A host whose projection is not current yet (or that is
+/// draining) answers `Unavailable`: the call did not run and may be retried, an open outcome
+/// ([`CapabilityError::Timeout`], `CAPABILITY_OUTCOME_UNKNOWN` to clients), never a plugin
+/// rejection. Anything else (deadline, internal, unknown, a response over the size limit) leaves
+/// the outcome unknown too.
 fn plugin_status_outcome(call: &PluginCall<'_>, status: Status) -> Result<PluginAnswer> {
     use tonic::Code;
     match status.code() {
+        Code::Unavailable => Err(CapabilityError::Timeout(format!(
+            "plugin {} is not ready for this call yet",
+            call.plugin_id
+        ))),
         code @ (Code::InvalidArgument
         | Code::FailedPrecondition
         | Code::NotFound
@@ -880,18 +887,13 @@ async fn client_ui_catalog(
             }
             let configuration = client_configuration(&manifest, projected);
             let mut extensions = manifest.client_extensions;
-            let declared_client_surfaces = extensions
-                .contributions
-                .iter()
-                .any(|c| c.kind.is_client_surface());
-            // Console-only surfaces (admin-page) never reach clients; then every reference to
-            // an action the viewer may not invoke goes with it (choices, rows, translations, a
-            // detail whose operation is not offered).
+            let declared_client_surfaces = !extensions.contributions.is_empty();
+            // Every reference to an action the viewer may not invoke goes with it (choices,
+            // rows, translations, a detail whose operation is not offered).
             extensions.contributions.retain(|c| {
-                c.kind.is_client_surface()
-                    && c.required_permissions
-                        .iter()
-                        .all(|p| permissions.contains(p))
+                c.required_permissions
+                    .iter()
+                    .all(|p| permissions.contains(p))
             });
             let pages = extensions
                 .contributions

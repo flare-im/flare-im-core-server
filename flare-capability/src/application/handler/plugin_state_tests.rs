@@ -554,7 +554,7 @@ fn entity_inputs_list_every_card_that_passes_its_entity() {
         ["example.poll.card=pollId", "example.poll.card2=poll"]
     );
     assert!(pairs("example.poll.create").is_empty());
-    // The admin page passes pollId to remove, but it is no card: not listed.
+    // The console page passes pollId to remove, but it is no card: not listed.
     assert!(pairs("example.poll.remove").is_empty());
     // invocation_entity takes the first input that carries a valid entity.
     assert_eq!(

@@ -292,7 +292,8 @@ fn authorize_admin_request(
     headers: &HeaderMap,
     staff: &VerifiedStaff,
 ) -> Result<&'static CoreAdminRoute, Rejection> {
-    // Per-plugin routes require `plugin:<plugin_id>:admin` of the path's plugin, not the template.
+    // A plugin admin route requires `plugin:<plugin_id>:<permission>` of its path, not the
+    // template.
     let (route, permission) =
         core_admin::resolve_with_permission(method.as_str(), path).ok_or_else(not_found)?;
     if staff.permission.as_deref() != Some(permission.as_str()) {

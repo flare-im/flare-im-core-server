@@ -1,5 +1,6 @@
 use axum::http::HeaderMap;
 use flare_core_base::context::keys;
+use flare_server_core::auth::stated_reason;
 use flare_server_core::grpc::middleware::signed_context::SIGNED_CONTEXT_HEADER;
 use serde::Serialize;
 
@@ -7,7 +8,7 @@ pub const APP_ID_HEADER: &str = "x-app-id";
 pub const AUDIT_REASON_HEADER: &str = "x-audit-reason";
 pub const IDEMPOTENCY_KEY_HEADER: &str = "idempotency-key";
 /// `x-audit-reason` 的长度上限（字节，按解码后的 UTF-8 计）。
-pub const MAX_AUDIT_REASON_BYTES: usize = 512;
+pub const MAX_AUDIT_REASON_BYTES: usize = stated_reason::MAX_STATED_REASON_BYTES;
 /// `x-audit-reason` 原始头值的长度上限（字节）：百分号编码后一个字节至多占三个字符。
 pub const MAX_AUDIT_REASON_HEADER_BYTES: usize = 3 * MAX_AUDIT_REASON_BYTES;
 /// `x-request-id` 与 `idempotency-key` 的长度上限（字节，按原始头值计）。
@@ -16,8 +17,9 @@ pub const MAX_CORRELATION_ID_BYTES: usize = 128;
 /// `x-audit-reason` 不合规的两种情形，各对应一个 400 原因。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AuditReasonError {
-    /// 重复的头、非可见 ASCII 的原始值、坏的百分号编码（`%` 后不是两位十六进制）或解码后
-    /// 不是 UTF-8：`ADMIN_AUDIT_REASON_INVALID`。
+    /// 重复的头、非可见 ASCII 的原始值、坏的百分号编码（`%` 后不是两位十六进制）、解码后
+    /// 不是 UTF-8，或去掉首尾空白后含控制字符、格式字符（bidi 嵌入/覆盖/隔离符、零宽字符等）
+    /// 或行/段分隔符：`ADMIN_AUDIT_REASON_INVALID`。
     Invalid,
     /// 原始值超过 [`MAX_AUDIT_REASON_HEADER_BYTES`]，或解码后超过 [`MAX_AUDIT_REASON_BYTES`]：
     /// `ADMIN_AUDIT_HEADER_TOO_LONG`。
@@ -28,8 +30,9 @@ pub enum AuditReasonError {
 /// 头值因此是可见 ASCII，中文等非 ASCII 原因也能经浏览器与 Social 网关原样到达）；不含 `%`
 /// 的纯 ASCII 原因解码后不变。规则与 Social 网关 admin 分区一致：恰好一个头，原始值至多
 /// [`MAX_AUDIT_REASON_HEADER_BYTES`] 字节，解码后是合法 UTF-8 且至多 [`MAX_AUDIT_REASON_BYTES`]
-/// 字节。去掉首尾空白后为空与没带一样，返回 `None`；否则返回去掉首尾空白的解码值，审计日志
-/// 与下游（Online 的踢线原因）用的都是它。
+/// 字节，并按 `flare_server_core::auth::stated_reason` 校验：去掉首尾空白后含控制、格式或分隔
+/// 字符即拒（不替换）；没有可见字符与没带一样，返回 `None`；否则返回去掉首尾空白的解码值，
+/// 审计日志与下游（Online 的踢线原因）用的都是它。
 pub fn audit_reason(headers: &HeaderMap) -> Result<Option<String>, AuditReasonError> {
     let mut values = headers.get_all(AUDIT_REASON_HEADER).iter();
     let Some(value) = values.next() else {
@@ -47,8 +50,11 @@ pub fn audit_reason(headers: &HeaderMap) -> Result<Option<String>, AuditReasonEr
     if decoded.len() > MAX_AUDIT_REASON_BYTES {
         return Err(AuditReasonError::TooLong);
     }
-    let reason = decoded.trim();
-    Ok((!reason.is_empty()).then(|| reason.to_owned()))
+    match stated_reason::stated_reason(&decoded) {
+        Ok(reason) => Ok(Some(reason.to_owned())),
+        Err(stated_reason::StatedReasonError::Missing) => Ok(None),
+        Err(stated_reason::StatedReasonError::Invalid) => Err(AuditReasonError::Invalid),
+    }
 }
 
 /// 百分号解码：`%XX`（十六进制，大小写均可）还原为一个字节，其余字符原样保留（`+` 不是
@@ -268,15 +274,19 @@ pub fn build_admin_capabilities() -> AdminCapabilitiesResponse {
             admin_write_endpoint("PUT", "/api/v1/admin/hooks/{hook_id}/status"),
             admin_endpoint("/api/v1/admin/hooks/{hook_id}/statistics"),
             admin_endpoint("/api/v1/admin/hooks/{hook_id}/executions"),
-            // Plugin admin pages: permission `plugin:<plugin_id>:admin`; the query POST is a read.
+            // Plugin admin operations: permission `plugin:<plugin_id>:<permission>`; the query POST
+            // is a read.
             AdminEndpointDescriptor {
                 method: "POST".to_string(),
-                path: "/api/v1/admin/plugin-admin/{plugin_id}/query".to_string(),
+                path: "/api/v1/admin/plugin-admin/{plugin_id}/{permission}/query".to_string(),
                 scope: "admin_gateway:admin".to_string(),
                 write: false,
                 status: "available".to_string(),
             },
-            admin_write_endpoint("POST", "/api/v1/admin/plugin-admin/{plugin_id}/dispatch"),
+            admin_write_endpoint(
+                "POST",
+                "/api/v1/admin/plugin-admin/{plugin_id}/{permission}/dispatch",
+            ),
         ],
         organization_policy: AdminOrganizationPolicyDescriptor {
             status: EnterprisePolicyStatus::ExternalPolicyRequired,
@@ -414,5 +424,28 @@ mod tests {
             reason_of(&[raw_over.as_bytes()]),
             Err(AuditReasonError::TooLong)
         );
+    }
+
+    /// 控制、格式（bidi 覆盖/隔离符、零宽字符）与分隔字符一律拒绝，不替换；只有不可见字符的
+    /// 原因与没带一样。
+    #[test]
+    fn hidden_characters_refuse_the_reason_and_an_invisible_one_is_none() {
+        for hidden in [
+            &b"kick%0Auser"[..],
+            b"refund%20%E2%80%AE001",
+            b"a%E2%80%8Bb",
+            b"a%E2%81%A6b",
+            b"a%E2%80%A8b",
+            b"%E2%80%8B",
+        ] {
+            assert_eq!(
+                reason_of(&[hidden]),
+                Err(AuditReasonError::Invalid),
+                "{hidden:?}"
+            );
+        }
+        for invisible in [&b"%E3%85%A4"[..], b"%CC%81", b"%EF%B8%8F%20"] {
+            assert_eq!(reason_of(&[invisible]), Ok(None), "{invisible:?}");
+        }
     }
 }

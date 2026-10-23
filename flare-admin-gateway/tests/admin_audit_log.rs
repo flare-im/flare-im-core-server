@@ -173,7 +173,7 @@ async fn sensitive_reads_and_writes_are_audited_other_reads_are_not() {
     assert_eq!(field(&events[0], "idempotency_key"), "idem-1");
 
     // `x-audit-reason` 是百分号编码的 UTF-8：中文原因解码后记下；解码出的控制字符（换行）
-    // 转义后记下，伪造不了日志行。
+    // 让原因整个被拒，读请求也一样，伪造不了日志行。
     let kick = "/api/v1/admin/users/u1/devices/d1/kick";
     let token = h.gateway.token_for("POST", kick);
     let (status, body) = send(
@@ -211,14 +211,12 @@ async fn sensitive_reads_and_writes_are_audited_other_reads_are_not() {
         ),
     )
     .await;
-    assert_eq!(status, StatusCode::OK, "{body}");
-    let events = capture.take();
-    assert_eq!(events.len(), 1, "{events:?}");
-    assert_eq!(field(&events[0], "access"), "read");
-    assert_eq!(
-        field(&events[0], "audit_reason"),
-        r"工单\nINFO admin_audit access=write"
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(
+        body.to_string().contains("ADMIN_AUDIT_REASON_INVALID"),
+        "{body}"
     );
+    assert!(capture.take().is_empty());
     // A malformed reason is refused before anything is logged.
     let (status, _) = send(
         &h.router,
@@ -411,10 +409,11 @@ async fn sensitive_reads_and_writes_are_audited_other_reads_are_not() {
         format!("{}!truncated:1000", "n".repeat(256))
     );
 
-    // 共 3+1 条敏感读、1 条踢线、2 条编码原因、7 条 Capability 写、2 条媒资写，加上 2 条转义用例；
-    // 任何事件里都没有上下文令牌，任何目标都只含 unreserved 字符、`%XX`、分隔符 `/` 与截断标记。
+    // 共 3+1 条敏感读、1 条踢线、1 条编码原因（带换行的被拒）、7 条 Capability 写、2 条媒资写，
+    // 加上 2 条转义用例；任何事件里都没有上下文令牌，任何目标都只含 unreserved 字符、`%XX`、
+    // 分隔符 `/` 与截断标记。
     let history = capture.history();
-    assert_eq!(history.len(), 18, "{history:?}");
+    assert_eq!(history.len(), 17, "{history:?}");
     let all = format!("{history:?}");
     for token in [
         h.gateway.token_for("GET", "/api/v1/admin/users/u1/devices"),

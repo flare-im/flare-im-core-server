@@ -32,6 +32,43 @@ impl PostgresCapabilityAuditLog {
         tx.commit().await
     }
 
+    /// The intent of a plugin admin call: its durable Staff effect evidence (as
+    /// [`Self::record_staff_effect`]) and a `capability_audit_log` row `plugin_admin_intent`
+    /// keeping what the effect event does not carry (the stated reason, the audited target), in
+    /// one transaction: both are written or neither. Must run inside the Staff scope.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn record_staff_intent(
+        &self,
+        app: &str,
+        aggregate: &'static str,
+        id: &str,
+        action: &'static str,
+        actor_id: &str,
+        capability_id: &str,
+        detail: Value,
+        trace_id: Option<&str>,
+    ) -> sqlx::Result<()> {
+        let mut tx = self.pool.begin().await?;
+        flare_im_service_kit::audit_effects::durable::record(&mut tx, app, aggregate, id, action)
+            .await?;
+        sqlx::query(
+            r#"
+            INSERT INTO public.capability_audit_log (
+                action, tenant_id, actor_id, target_user_id, capability_id, detail, trace_id
+            )
+            VALUES ('plugin_admin_intent', $1, $2, NULL, $3, $4, $5)
+            "#,
+        )
+        .bind(app)
+        .bind(actor_id)
+        .bind(capability_id)
+        .bind(detail)
+        .bind(trace_id)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub async fn record_policy_event(
         &self,

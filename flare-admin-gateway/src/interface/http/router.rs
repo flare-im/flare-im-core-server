@@ -171,7 +171,7 @@ struct AdminApiDoc;
 /// `responses` 里。
 struct AdminRequestRejections;
 
-const AUDIT_HEADER_REJECTION: &str = "ADMIN_AUDIT_HEADER_TOO_LONG: x-audit-reason is longer than 512 bytes once percent-decoded or 1536 bytes as sent, or x-request-id or idempotency-key is longer than 128 bytes (checked on reads too). ADMIN_AUDIT_REASON_INVALID: x-audit-reason is repeated, or is not percent-encoded UTF-8 (checked on reads too)";
+const AUDIT_HEADER_REJECTION: &str = "ADMIN_AUDIT_HEADER_TOO_LONG: x-audit-reason is longer than 512 bytes once percent-decoded or 1536 bytes as sent, or x-request-id or idempotency-key is longer than 128 bytes (checked on reads too). ADMIN_AUDIT_REASON_INVALID: x-audit-reason is repeated, is not percent-encoded UTF-8, or holds a control, format (bidirectional, zero-width) or separator character once decoded (checked on reads too)";
 const JSON_BODY_REJECTION: &str = "ADMIN_INVALID_JSON_BODY: the body is not JSON sent as application/json, or a field is missing or of the wrong type; ADMIN_REQUEST_BODY_TOO_LARGE: the body exceeds the gateway size limit";
 const QUERY_REJECTION: &str =
     "ADMIN_INVALID_QUERY: a query parameter is missing or of the wrong type";
@@ -419,11 +419,11 @@ pub fn create_admin_router(
             get(hooks_handler::query_hook_executions),
         )
         .route(
-            "/plugin-admin/{plugin_id}/query",
+            "/plugin-admin/{plugin_id}/{permission}/query",
             post(plugin_admin_handler::query_plugin_admin),
         )
         .route(
-            "/plugin-admin/{plugin_id}/dispatch",
+            "/plugin-admin/{plugin_id}/{permission}/dispatch",
             post(plugin_admin_handler::dispatch_plugin_admin),
         )
         .layer(axum::Extension(clients))

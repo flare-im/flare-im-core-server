@@ -895,10 +895,10 @@ fn build_gateway_routes() -> AdminGatewayRoutesResponse {
                 "admin-hook",
                 "capability",
             ),
-            // Plugin admin pages: the query POST is a read by contract.
+            // Plugin admin operations: the query POST is a read by contract.
             route(
                 "POST",
-                "/api/v1/admin/plugin-admin/{plugin_id}/query",
+                "/api/v1/admin/plugin-admin/{plugin_id}/{permission}/query",
                 "admin-plugin",
                 true,
                 true,
@@ -908,7 +908,7 @@ fn build_gateway_routes() -> AdminGatewayRoutesResponse {
             ),
             ops_route(
                 "POST",
-                "/api/v1/admin/plugin-admin/{plugin_id}/dispatch",
+                "/api/v1/admin/plugin-admin/{plugin_id}/{permission}/dispatch",
                 "admin-plugin",
                 "capability",
             ),

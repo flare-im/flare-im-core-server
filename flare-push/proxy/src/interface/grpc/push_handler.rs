@@ -398,6 +398,7 @@ mod identity_boundary_tests {
             request_id: "req-1".into(),
             org_id: None,
             permission: None,
+            reason: None,
             perm_version: None,
             trace_id: None,
             kid: flare_server_core::auth::LEGACY_KID.to_owned(),

@@ -659,7 +659,7 @@ mod plugin_state_and_catalog {
     }
 
     #[tokio::test]
-    async fn the_client_catalog_drops_admin_pages_and_sends_visible_configuration_only() {
+    async fn the_client_catalog_keeps_console_pages_out_and_sends_visible_configuration_only() {
         let h = harness().await;
         let mut snapshot = poll_snapshot(h.plugin.authority.clone());
         snapshot.plugins[0].client_configuration = serde_json::from_value(
@@ -674,7 +674,7 @@ mod plugin_state_and_catalog {
         command.conversation_id = None;
         let result = dispatch(&h, &command).await.unwrap();
         let text = result.data.to_string();
-        assert!(!text.contains("admin-page") && !text.contains("example.poll.admin"));
+        assert!(!text.contains("\"admin\"") && !text.contains("example.poll.list"));
         assert!(!text.contains("s3cret") && !text.contains("webhookSecret"));
         let catalog: flare_im_capability_core::plugin::ui::UiCatalog =
             serde_json::from_value(result.data).unwrap();
@@ -691,19 +691,25 @@ mod plugin_state_and_catalog {
             .map(|c| c.id.as_str())
             .collect();
         assert_eq!(kinds, ["example.poll.card", "example.poll.create"]);
-        // The operations an admin page also uses (details, close) are admin operations: no user
-        // is offered them, so the card keeps vote only and no detail.
-        assert!(!plugin.operations.contains("example.poll.details"));
-        assert!(!plugin.operations.contains("example.poll.list"));
+        // Admin operations are never offered to users; the card's own operations are.
+        for admin in [
+            "example.poll.list",
+            "example.poll.inspect",
+            "example.poll.end",
+            "example.poll.remove",
+        ] {
+            assert!(!plugin.operations.contains(admin), "{admin}");
+        }
+        assert!(plugin.operations.contains("example.poll.details"));
         let card = &plugin.extensions.contributions[0];
-        assert!(card.detail.is_none());
+        assert!(card.detail.is_some());
         assert_eq!(
             card.schema
                 .actions
                 .iter()
                 .map(|a| a.id.as_str())
                 .collect::<Vec<_>>(),
-            ["vote"]
+            ["vote", "close"]
         );
         card.schema.validate().unwrap();
     }

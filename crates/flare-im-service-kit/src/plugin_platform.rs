@@ -289,6 +289,7 @@ mod tests {
             permission: None,
             perm_version: None,
             trace_id: None,
+            reason: None,
             kid: CARD_POST_KID.into(),
         }
     }

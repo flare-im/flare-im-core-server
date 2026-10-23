@@ -1,30 +1,34 @@
-//! `dispatch_admin`: a tenant staff member invokes an admin-page operation of a plugin from the
-//! console (console → gateway admin partition → admin-gateway → `CapabilityService.Administer`).
+//! `dispatch_admin`: a tenant staff member invokes an admin operation of a plugin from the console
+//! (console → gateway admin partition → admin-gateway → `CapabilityService.Administer`).
 //!
 //! The Staff context is verified upstream for one concrete application with a permission code of
-//! this plugin. Here the operation must be one of the plugin's admin operations
-//! ([`PluginManifest::admin_operations`]) — reads (rows sources, detail operations, `query`
-//! operations of the `admin` section) through [`AdminCall::Query`], actions through
-//! [`AdminCall::Dispatch`] — the staff code must be exactly the one the operation declares
-//! ([`PluginManifest::admin_permission_for`]: `plugin:<pluginId>:<permission>`, or
-//! [`plugin_admin_permission`] for an admin-page operation), and the operation must belong to the
-//! enabled, approved grant of the local projection. Core then signs a staff ticket
-//! ([`PluginCallSigner::sign_staff`]) and calls the plugin like a user call, without a
-//! conversation. A successful action may return `data.sharedState`; it is published tenant-wide
-//! (staff closing a poll ends it on every card).
-use std::collections::BTreeSet;
+//! this plugin, and carries the reason the staff member stated when they gave one. Here the
+//! operation must be one of the plugin's admin operations (the manifest's `admin.operations`,
+//! `PluginManifest::admin_operations`) — `query` operations through [`AdminCall::Query`],
+//! `command` operations through [`AdminCall::Dispatch`] — the staff code must be exactly the one
+//! the operation declares (`PluginManifest::admin_permission_for`:
+//! `plugin:<pluginId>:<permission>`), an operation declaring `requiresReason` needs the stated
+//! reason, and the operation must belong to the enabled, approved grant of the local projection.
+//! Core writes the intent evidence (with the reason and the audited target), signs a staff ticket
+//! ([`PluginCallSigner::sign_staff`], with the reason) and calls the plugin like a user call,
+//! without a conversation. A successful action may return `data.sharedState`; it is published
+//! tenant-wide (staff closing a poll ends it on every card).
+//!
+//! An action the console sent with an `Idempotency-Key` carries the command id of the staff
+//! member's intent in its input (`commandId`, [`staff_command_id`]): every attempt of one console
+//! action has a new request id but the same command id, and the plugin keys staff commands by it,
+//! so a retry after an unknown outcome runs the command once. Every admin command takes one
+//! (the platform refuses to publish one that does not).
 use std::sync::Arc;
 use std::time::Duration;
 
-use flare_im_capability_core::plugin::PluginManifest;
 use flare_im_capability_core::plugin::authorization::PluginInvocation;
 use flare_im_capability_core::plugin::invocation::{
-    PluginStaffCallClaims, plugin_admin_permission, plugin_permission_target,
+    MAX_PERMISSION_CODE_BYTES, PluginStaffCallClaims, plugin_permission_target,
 };
-use flare_im_capability_core::plugin::manifest::{OperationMode, UiContributionKind};
+use flare_im_capability_core::plugin::manifest::OperationMode;
 use flare_im_capability_core::plugin::resource::HostCapability;
 use flare_im_capability_core::plugin::state::SharedState;
-use flare_im_capability_core::plugin::ui::{UiActionTarget, UiBlock, UiDocument};
 use flare_im_service_kit::staff_context::VerifiedStaff;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -34,9 +38,9 @@ use super::remote_dispatch::{PluginCall, call_plugin};
 use crate::domain::capability::{CapabilityError, Result};
 use crate::infrastructure::capability::PluginRouteBook;
 
-/// `Administer` operation: read an admin page's data (rows source or detail operation).
+/// `Administer` operation: call an admin `query` operation.
 pub const PLUGIN_ADMIN_QUERY_OPERATION: &str = "flare.plugin.v1.admin.query";
-/// `Administer` operation: run an admin page action.
+/// `Administer` operation: call an admin `command` operation.
 pub const PLUGIN_ADMIN_DISPATCH_OPERATION: &str = "flare.plugin.v1.admin.dispatch";
 /// Request body bound (the `PayloadJson` value).
 pub const MAX_ADMIN_REQUEST_BYTES: usize = 16 * 1024;
@@ -56,7 +60,9 @@ impl AdminCall {
     }
 }
 
-/// `{"pluginId", "operation", "input"?}`; `input` is an object (default `{}`).
+/// `{"pluginId", "operation", "input"?, "idempotencyKey"?}`; `input` is an object (default `{}`);
+/// `idempotencyKey` is the console's key of an action (1..=128 bytes of ASCII without control
+/// characters).
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AdminPluginRequest {
@@ -64,9 +70,37 @@ pub struct AdminPluginRequest {
     pub operation: String,
     #[serde(default = "empty_object")]
     pub input: Value,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idempotency_key: Option<String>,
+}
+
+/// The command id of the intent `idempotency_key` names for staff member `staff_id`:
+/// `intent-<sha256 hex>` of the two, the same on every attempt and never the same for two staff
+/// members or two keys. It fits a plugin command id (`[A-Za-z0-9_:-]{1,128}`).
+pub fn staff_command_id(staff_id: &str, idempotency_key: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let mut digest = Sha256::new();
+    digest.update(b"flare.plugin.admin.command\0");
+    digest.update(staff_id.as_bytes());
+    digest.update(b"\0");
+    digest.update(idempotency_key.as_bytes());
+    format!("intent-{}", hex::encode(digest.finalize()))
+}
+fn valid_idempotency_key(key: &str) -> bool {
+    !key.is_empty()
+        && key.len() <= 128
+        && key.bytes().all(|b| b.is_ascii() && !b.is_ascii_control())
 }
 fn empty_object() -> Value {
     Value::Object(Default::default())
+}
+/// A plugin id that can carry a staff permission code (`plugin:<pluginId>:<permission>` of at
+/// most [`MAX_PERMISSION_CODE_BYTES`], with a permission id of at least one byte).
+fn valid_plugin_id(plugin_id: &str) -> bool {
+    !plugin_id.is_empty()
+        && plugin_id.len() < MAX_PERMISSION_CODE_BYTES - "plugin::".len()
+        && !plugin_id.contains(':')
+        && !plugin_id.chars().any(char::is_control)
 }
 impl AdminPluginRequest {
     pub fn parse(bytes: &[u8]) -> std::result::Result<Self, &'static str> {
@@ -78,7 +112,11 @@ impl AdminPluginRequest {
         if !request.input.is_object()
             || request.operation.is_empty()
             || request.operation.len() > 128
-            || plugin_admin_permission(&request.plugin_id).is_none()
+            || !valid_plugin_id(&request.plugin_id)
+            || request
+                .idempotency_key
+                .as_deref()
+                .is_some_and(|key| !valid_idempotency_key(key))
         {
             return Err("invalid plugin admin request");
         }
@@ -86,7 +124,7 @@ impl AdminPluginRequest {
     }
     /// Whether `permission` is a staff permission code of this request's plugin
     /// (`plugin:<pluginId>:<permission>`). Which one the operation needs is in the manifest
-    /// ([`PluginManifest::admin_permission_for`]); [`dispatch_admin`] checks that exact code.
+    /// (`PluginManifest::admin_permission_for`); [`dispatch_admin`] checks that exact code.
     pub fn is_plugin_permission(&self, permission: &str) -> bool {
         plugin_permission_target(permission)
             .is_some_and(|(plugin_id, _)| plugin_id == self.plugin_id)
@@ -104,11 +142,20 @@ pub enum AdminOutcome {
     Unknown,
 }
 
+/// What the intent of an admin call records besides its action: the reason the staff member
+/// stated and the audited target the operation declares (`auditTarget`, read from the input).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct AdminIntent<'a> {
+    pub reason: Option<&'a str>,
+    pub audit_target: Option<&'a str>,
+}
+
 /// The durable Staff evidence of a plugin admin call (`core_audit_outbox`, aggregate
 /// `plugin_admin`, id `<pluginId>:<operation>`; the Staff request id ties the two rows together):
-/// the intent is written after the call is authorized and before the plugin is called — when it
-/// cannot be written the plugin is not called (fail closed) — and the outcome once the plugin
-/// answered (or did not). A plugin refusal is recorded as such, never as an effect.
+/// the intent — with [`AdminIntent`] — is written after the call is authorized and before the
+/// plugin is called — when it cannot be written the plugin is not called (fail closed) — and the
+/// outcome once the plugin answered (or did not). A plugin refusal is recorded as such, never as
+/// an effect.
 #[async_trait::async_trait]
 pub trait AdminEvidence: Send + Sync {
     async fn intent(
@@ -116,6 +163,7 @@ pub trait AdminEvidence: Send + Sync {
         tenant_id: &str,
         aggregate_id: &str,
         call: AdminCall,
+        intent: AdminIntent<'_>,
     ) -> std::result::Result<(), String>;
 
     async fn outcome(
@@ -158,44 +206,6 @@ pub struct AdminPluginResult {
     pub audit_target: Option<String>,
 }
 
-fn admin_documents(manifest: &PluginManifest) -> impl Iterator<Item = &UiDocument> {
-    manifest
-        .client_extensions
-        .contributions
-        .iter()
-        .filter(|c| c.kind == UiContributionKind::AdminPage)
-        .flat_map(|c| std::iter::once(&c.schema).chain(c.detail.as_ref().map(|d| &d.document)))
-}
-
-/// Admin-page reads: rows sources and detail operations.
-pub fn admin_sources(manifest: &PluginManifest) -> BTreeSet<String> {
-    let mut sources: BTreeSet<String> = manifest
-        .client_extensions
-        .contributions
-        .iter()
-        .filter(|c| c.kind == UiContributionKind::AdminPage)
-        .filter_map(|c| c.detail.as_ref().map(|d| d.operation.clone()))
-        .collect();
-    for document in admin_documents(manifest) {
-        sources.extend(document.blocks.iter().filter_map(|block| match block {
-            UiBlock::Rows(rows) => Some(rows.source.clone()),
-            _ => None,
-        }));
-    }
-    sources
-}
-
-/// Admin-page actions: the operations their actions target.
-pub fn admin_actions(manifest: &PluginManifest) -> BTreeSet<String> {
-    admin_documents(manifest)
-        .flat_map(|document| document.actions.iter())
-        .filter_map(|action| match &action.target {
-            UiActionTarget::Operation { operation } => Some(operation.clone()),
-            _ => None,
-        })
-        .collect()
-}
-
 fn denied(reason: &str) -> CapabilityError {
     CapabilityError::PolicyDenied(format!("plugin admin call denied: {reason}"))
 }
@@ -207,7 +217,7 @@ pub async fn dispatch_admin(
     staff: &VerifiedStaff,
     routes: &Arc<PluginRouteBook>,
     call: AdminCall,
-    request: AdminPluginRequest,
+    mut request: AdminPluginRequest,
     timeout: Duration,
     evidence: &dyn AdminEvidence,
 ) -> Result<AdminPluginResult> {
@@ -247,33 +257,26 @@ pub async fn dispatch_admin(
     let manifest = projected
         .manifest()
         .map_err(|_| denied("plugin projection invalid"))?;
-    // An operation of the `admin` section is a read or an action by its declared mode; one of an
-    // admin-page by where the page uses it (rows source and detail, or action target).
+    // An admin operation is a read or an action by its declared mode.
     let declared = manifest
         .admin
         .as_ref()
-        .and_then(|admin| admin.operation(&request.operation));
-    let allowed = match (declared, call) {
-        (Some(op), AdminCall::Query) => op.mode == OperationMode::Query,
-        (Some(op), AdminCall::Dispatch) => op.mode == OperationMode::Command,
-        (None, AdminCall::Query) => admin_sources(&manifest).contains(&request.operation),
-        (None, AdminCall::Dispatch) => admin_actions(&manifest).contains(&request.operation),
-    };
-    let audit_target = declared
-        .and_then(|op| op.audit_target.as_deref())
+        .and_then(|admin| admin.operation(&request.operation))
+        .filter(|op| match call {
+            AdminCall::Query => op.mode == OperationMode::Query,
+            AdminCall::Dispatch => op.mode == OperationMode::Command,
+        })
+        .ok_or_else(|| denied("operation is not an admin operation of this kind"))?;
+    let audit_target: Option<String> = declared
+        .audit_target
+        .as_deref()
         .and_then(|pointer| request.input.pointer(pointer))
         .map(|value| match value {
             Value::String(text) => text.chars().take(256).collect(),
             other => other.to_string().chars().take(256).collect(),
         });
-    if !allowed || !manifest.admin_operations().contains(&request.operation) {
-        return Err(denied(
-            "operation is not an admin-page operation of this kind",
-        ));
-    }
-    // The staff member holds exactly the permission the operation declares (plugin platform v2
-    // §5): `admin.operations[].permission`, or `plugin:<pluginId>:admin` for an admin-page
-    // operation of a manifest without an `admin` section.
+    // The staff member holds exactly the permission the operation declares
+    // (`admin.operations[].permission`).
     let permission = manifest
         .admin_permission_for(&request.operation)
         .ok_or_else(|| denied("operation declares no staff permission"))?;
@@ -281,6 +284,11 @@ pub async fn dispatch_admin(
         return Err(denied(
             "staff permission is not the one this operation needs",
         ));
+    }
+    // A change the manifest asks a reason for comes with the one the staff member stated (the
+    // admin partition signed it into the Staff context).
+    if declared.requires_reason && staff.reason.is_none() {
+        return Err(denied("operation requires the staff member's reason"));
     }
     let operation = manifest
         .operation(&request.operation)
@@ -296,6 +304,18 @@ pub async fn dispatch_admin(
         })
         .map_err(|_| denied("operation not approved for this application"))?;
     let timeout = timeout.min(Duration::from_millis(u64::from(operation.timeout_ms)));
+    // One intent, one command: the command id comes from the staff member and the console's
+    // key, whatever the input said.
+    if call == AdminCall::Dispatch
+        && let Some(key) = request.idempotency_key.as_deref()
+    {
+        let command_id = staff_command_id(&staff.actor_id, key);
+        request
+            .input
+            .as_object_mut()
+            .ok_or_else(|| denied("operation input is not an object"))?
+            .insert("commandId".into(), Value::String(command_id));
+    }
     let claims = PluginStaffCallClaims {
         tenant_id: tenant.to_owned(),
         plugin_id: projected.grant.plugin_id.clone(),
@@ -310,6 +330,7 @@ pub async fn dispatch_admin(
         permission,
         operation: request.operation.clone(),
         request_id: staff.request_id.clone(),
+        reason: staff.reason.clone(),
         issued_at_ms: now,
         expires_at_ms: now
             .saturating_add(timeout.as_millis().min(120_000) as i64)
@@ -323,8 +344,12 @@ pub async fn dispatch_admin(
         .map_err(|_| denied("staff ticket rejected"))?;
     let trace_id = staff.trace_id.clone().unwrap_or_default();
     let aggregate_id = format!("{}:{}", request.plugin_id, request.operation);
+    let intent = AdminIntent {
+        reason: staff.reason.as_deref(),
+        audit_target: audit_target.as_deref(),
+    };
     evidence
-        .intent(tenant, &aggregate_id, call)
+        .intent(tenant, &aggregate_id, call, intent)
         .await
         .map_err(|error| {
             tracing::error!(%error, tenant_id = tenant, %aggregate_id, "plugin admin intent evidence not recorded; the plugin is not called");
