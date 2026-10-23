@@ -37,7 +37,7 @@
 | 路由 | 方法 | 说明 | 认证 |
 |------|------|------|------|
 | `/api/v1/messages/send` | POST | HTTP 发消息，内部转 `SendMessage` | 必须 |
-| `/api/v1/messages/recall` | POST | 撤回消息；身份只取令牌，转 Orchestrator 时带网关签的用户上下文（`/api/v1/messages/events/custom` 相同） | 必须 |
+| `/api/v1/messages/recall` | POST | 撤回消息；身份只取令牌，转 Orchestrator 时带网关签的用户上下文（`/api/v1/messages/events/custom` 相同）。Orchestrator 的授权拒绝回 403，`reason` 是它的原因码（如 `MESSAGE_OPERATION_NOT_SENDER`、`MESSAGE_OPERATION_NOT_MEMBER`）；不合法回 400，找不到回 404；两个接口相同 | 必须 |
 | `/api/v1/messages/read-summaries` | POST | 群聊里自己发送的一批消息（≤50）的已读摘要，转会话服务 `MessageReadReceiptService` | 必须 |
 | `/api/v1/messages/readers` | GET | 群聊里自己发送的一条消息的已读 / 未读成员，按 cursor 分页；不是自己发的消息与不存在的消息同样回 404 | 必须 |
 | `/api/v1/conversations` | GET | 会话列表/摘要 | 必须 |

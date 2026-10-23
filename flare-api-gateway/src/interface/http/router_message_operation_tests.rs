@@ -2,7 +2,8 @@
 //!
 //! 替身 Orchestrator 挂与 Core 相同的身份边界（`SignedFirstContextLayer`，要求签名），只看边界验过
 //! 的身份。用例经路由、鉴权、签名与真实的 gRPC 连接断言：网关为令牌验出的用户与规范化租户签名，
-//! 客户端自带的 `x-user-id`、`x-tenant-id`、`x-actor-*` 头带不下去；没配签名私钥的网关不转发。
+//! 客户端自带的 `x-user-id`、`x-tenant-id`、`x-actor-*` 头带不下去；没配签名私钥的网关不转发；
+//! Orchestrator 的授权拒绝回 4xx 与它的原因码，不并进 500。
 use super::*;
 use crate::interface::http::MessageContextSigner;
 use axum::{
@@ -23,6 +24,7 @@ use flare_im_service_kit::{
     gateway_auth::TenantRuntimeGuard,
     tenant_runtime::{TenantAccessPolicy, TenantRuntimeCache},
 };
+use flare_server_core::error::{ErrorBuilder, ErrorCode};
 use flare_server_core::grpc::middleware::signed_context::VerifiedContext;
 use flare_server_core::{
     AuthError, AuthenticatedPrincipal, SignedActorType, SignedContextSigner, SignedContextVerifier,
@@ -98,6 +100,55 @@ fn unused<T>() -> Result<tonic::Response<T>, tonic::Status> {
     Err(tonic::Status::unimplemented("not used"))
 }
 
+/// The answer the fake gives for a target named `refuse:<kind>` (the recall's message id, the
+/// custom event's conversation): built as the Orchestrator builds its refusals (`FlareError` →
+/// `Status` with the structured `ErrorDetail`), or a bare status where noted.
+fn refusal(target: &str) -> Option<tonic::Status> {
+    let built = |code, reason: &str, details: &str| {
+        Some(tonic::Status::from(
+            ErrorBuilder::new(code, reason)
+                .details(details)
+                .build_error(),
+        ))
+    };
+    match target.strip_prefix("refuse:")? {
+        "not-sender" => built(
+            ErrorCode::PermissionDenied,
+            "MESSAGE_OPERATION_NOT_SENDER",
+            "only the sender may do this (orchestrator 10.0.0.7)",
+        ),
+        "window" => built(
+            ErrorCode::PermissionDenied,
+            "MESSAGE_OPERATION_WINDOW_EXPIRED",
+            "the recall window has passed",
+        ),
+        "not-member" => built(
+            ErrorCode::PermissionDenied,
+            "MESSAGE_OPERATION_NOT_MEMBER",
+            "not a member of this conversation",
+        ),
+        "invalid" => built(
+            ErrorCode::InvalidParameter,
+            "MESSAGE_OPERATION_INVALID",
+            "the event names no message",
+        ),
+        // A refusal whose reason is a sentence, not a code: the fixed reason instead.
+        "sentence" => built(
+            ErrorCode::InvalidParameter,
+            "conversation_id is required for event",
+            "",
+        ),
+        "not-found" => built(ErrorCode::MessageNotFound, "MESSAGE_NOT_FOUND", ""),
+        // No structured detail at all.
+        "bare" => Some(tonic::Status::permission_denied(
+            "policy refused at 10.0.0.7",
+        )),
+        "not-stored" => built(ErrorCode::ServiceUnavailable, "message not stored yet", ""),
+        "boom" => built(ErrorCode::InternalError, "INTERNAL", "boom"),
+        _ => None,
+    }
+}
+
 #[tonic::async_trait]
 impl MessageEventService for FakeOrchestrator {
     async fn execute_event(
@@ -105,6 +156,15 @@ impl MessageEventService for FakeOrchestrator {
         request: tonic::Request<ExecuteEventRequest>,
     ) -> Result<tonic::Response<()>, tonic::Status> {
         self.record("ExecuteEvent", &request);
+        let target = request
+            .get_ref()
+            .event
+            .as_ref()
+            .map(|event| event.conversation_id.as_str())
+            .unwrap_or_default();
+        if let Some(refused) = refusal(target) {
+            return Err(refused);
+        }
         Ok(tonic::Response::new(()))
     }
 }
@@ -116,6 +176,9 @@ impl MessageActionService for FakeOrchestrator {
         request: tonic::Request<RecallMessageRequest>,
     ) -> Result<tonic::Response<RecallMessageResponse>, tonic::Status> {
         self.record("RecallMessage", &request);
+        if let Some(refused) = refusal(&request.get_ref().message_id) {
+            return Err(refused);
+        }
         Ok(tonic::Response::new(RecallMessageResponse {
             success: true,
             ..Default::default()
@@ -377,4 +440,67 @@ async fn without_a_signer_message_operations_are_not_forwarded() {
         );
     }
     assert!(seen.lock().unwrap().is_empty());
+}
+
+/// Orchestrator 的授权拒绝回 403 与它的原因码，事件不合法回 400、找不到回 404；原因只取形如常量
+/// 的码，说明文字（可能带内部地址）不回显，没有码时用固定原因。不可用仍回 503，其余仍回接口的 500。
+#[tokio::test]
+async fn refused_message_operations_answer_4xx_with_the_orchestrator_reason() {
+    let (signer, verifier) = cell_keys(52);
+    let (router, _) = router(Some(signer), verifier).await;
+    let cases = [
+        ("not-sender", 403, "MESSAGE_OPERATION_NOT_SENDER"),
+        ("window", 403, "MESSAGE_OPERATION_WINDOW_EXPIRED"),
+        ("not-member", 403, "MESSAGE_OPERATION_NOT_MEMBER"),
+        ("bare", 403, "MESSAGE_OPERATION_FORBIDDEN"),
+        ("invalid", 400, "MESSAGE_OPERATION_INVALID"),
+        ("sentence", 400, "MESSAGE_OPERATION_INVALID"),
+        ("not-found", 404, "MESSAGE_NOT_FOUND"),
+        ("not-stored", 503, "SERVICE_UNAVAILABLE"),
+    ];
+    for (kind, status, reason) in cases {
+        let target = format!("refuse:{kind}");
+        let recall = json!({"conversation_id": "1-alice-bob", "message_id": target});
+        let mut event = custom_event();
+        event["conversation_id"] = json!(target);
+        for (uri, body) in [
+            ("/api/v1/messages/recall", recall),
+            ("/api/v1/messages/events/custom", event),
+        ] {
+            let (code, body) = post(&router, uri, "alice-a", &[], body).await;
+            assert_eq!(code.as_u16(), status, "{uri} {kind}: {body}");
+            assert_eq!(body["reason"], json!(reason), "{uri} {kind}: {body}");
+            let text = body.to_string();
+            assert!(!text.contains("10.0.0.7"), "{uri} {kind}: {body}");
+            assert!(!text.contains("only the sender"), "{uri} {kind}: {body}");
+        }
+    }
+    // Anything else keeps each endpoint's own 500.
+    let target = "refuse:boom";
+    let (code, body) = post(
+        &router,
+        "/api/v1/messages/recall",
+        "alice-a",
+        &[],
+        json!({"conversation_id": "1-alice-bob", "message_id": target}),
+    )
+    .await;
+    assert_eq!(code, StatusCode::INTERNAL_SERVER_ERROR, "{body}");
+    assert_eq!(body["reason"], json!("MESSAGE_RECALL_FAILED"), "{body}");
+    let mut event = custom_event();
+    event["conversation_id"] = json!(target);
+    let (code, body) = post(
+        &router,
+        "/api/v1/messages/events/custom",
+        "alice-a",
+        &[],
+        event,
+    )
+    .await;
+    assert_eq!(code, StatusCode::INTERNAL_SERVER_ERROR, "{body}");
+    assert_eq!(
+        body["reason"],
+        json!("MESSAGE_EVENT_EXECUTE_FAILED"),
+        "{body}"
+    );
 }

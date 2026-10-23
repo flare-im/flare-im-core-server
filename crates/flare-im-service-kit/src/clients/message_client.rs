@@ -171,12 +171,15 @@ impl MessageEventServiceClientWrapper {
     }
 
     /// 执行操作事件：带网关为已验证用户签的上下文（`signed`），Orchestrator 以签名为准。
+    ///
+    /// 失败时原样返回 gRPC `Status`（保留状态码与 `details` 中的 `ErrorDetail`）：转成 `FlareError`
+    /// 会丢掉授权拒绝的原因码（如 `MESSAGE_OPERATION_NOT_MEMBER`），调用方要按状态码与原因映射。
     pub async fn execute_event_with_ctx(
         &mut self,
         ctx: &Ctx,
         signed: &str,
         request: ExecuteEventRequest,
-    ) -> Result<()> {
+    ) -> std::result::Result<(), tonic::Status> {
         let mut request = Self::request_with_ctx(ctx, request);
         flare_server_core::set_signed_context_token(&mut request, signed)?;
         self.client.execute_event(request).await?;
@@ -210,13 +213,15 @@ impl MessageActionServiceClientWrapper {
         Ok(response.into_inner())
     }
 
-    /// 撤回消息：带网关为已验证用户签的上下文（`signed`），Orchestrator 以签名为准。
+    /// 撤回消息：带网关为已验证用户签的上下文（`signed`），Orchestrator 以签名为准。失败时原样
+    /// 返回 gRPC `Status`，同 [`MessageEventServiceClientWrapper::execute_event_with_ctx`]（撤回被拒的
+    /// 原因如 `MESSAGE_OPERATION_NOT_SENDER`）。
     pub async fn recall_message_with_ctx(
         &mut self,
         ctx: &Ctx,
         signed: &str,
         request: RecallMessageRequest,
-    ) -> Result<RecallMessageResponse> {
+    ) -> std::result::Result<RecallMessageResponse, tonic::Status> {
         let mut request = Self::request_with_ctx(ctx, request);
         flare_server_core::set_signed_context_token(&mut request, signed)?;
         let response = self.client.recall_message(request).await?;

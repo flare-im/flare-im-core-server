@@ -29,6 +29,9 @@ const TENANT_UNAVAILABLE: &str = "TENANT_UNAVAILABLE";
 const MESSAGE_REJECTED: &str = "MESSAGE_REJECTED";
 const INVALID_MESSAGE: &str = "INVALID_MESSAGE";
 const NOT_FOUND: &str = "NOT_FOUND";
+/// 撤回与自定义事件被拒、而 Orchestrator 没给出原因码时的固定原因（与它自己的通用码相同）。
+const OPERATION_FORBIDDEN: &str = "MESSAGE_OPERATION_FORBIDDEN";
+const OPERATION_INVALID: &str = "MESSAGE_OPERATION_INVALID";
 
 /// HTTP 发送把这次实际使用的 `client_msg_id` 放进这个响应头，成功与失败都带。
 pub(crate) const CLIENT_MSG_ID_HEADER: &str = "x-client-msg-id";
@@ -302,6 +305,38 @@ fn send_failure(err: FlareError) -> GatewayError {
     GatewayError(error)
 }
 
+/// Orchestrator 对撤回与自定义事件的应答映射为 HTTP。
+///
+/// 操作授权（只有发送者能撤回、窗口已过、只有成员能操作、事件里的用户必须是操作者等）回
+/// `PERMISSION_DENIED`，结构化 `ErrorDetail.reason` 是原因码：回 403，`reason` 就是这个码（如
+/// `MESSAGE_OPERATION_NOT_SENDER`、`MESSAGE_OPERATION_NOT_MEMBER`），调用方据此提示，不要原样重试。
+/// 事件或请求本身不合法（`INVALID_ARGUMENT`）回 400，找不到对象（`NOT_FOUND`）回 404。原因只取形如
+/// 常量的码；`Status.message` 与详情里的说明不回显，没有这样的码时用固定原因。
+///
+/// 以前这些都并进了 500 与接口自己的原因（`MESSAGE_RECALL_FAILED` 等），原因码只剩在说明文字里。
+/// 下游不可用与超时仍回 503（[`downstream_failure`]），其余仍是 500 与接口的原因。
+fn message_operation_failure(reason: &'static str, status: tonic::Status) -> GatewayError {
+    let (code, fallback) = match status.code() {
+        tonic::Code::PermissionDenied => (ErrorCode::HttpForbidden, OPERATION_FORBIDDEN),
+        tonic::Code::InvalidArgument => (ErrorCode::HttpBadRequest, OPERATION_INVALID),
+        tonic::Code::NotFound => (ErrorCode::HttpNotFound, NOT_FOUND),
+        _ => return downstream_failure(reason, FlareError::from(status)),
+    };
+    let reason = flare_server_core::error::grpc::decode_error_detail(&status)
+        .map(|detail| detail.reason)
+        .filter(|reason| is_reason_code(reason))
+        .unwrap_or_else(|| fallback.to_owned());
+    GatewayError(ErrorBuilder::new(code, reason).build_error())
+}
+
+/// 形如常量的原因码：大写字母开头，只含大写字母、数字与下划线，至多 64 个字符。
+fn is_reason_code(reason: &str) -> bool {
+    let mut chars = reason.chars();
+    reason.len() <= 64
+        && chars.next().is_some_and(|c| c.is_ascii_uppercase())
+        && chars.all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
+}
+
 /// 消息操作（撤回、自定义事件）的身份：只取令牌验出的用户与规范化的租户，请求头里的身份字段
 /// 一概不用；转发时带网关签的 User 上下文（与 HTTP 发送相同），Orchestrator 以签名为准。
 /// 网关没配签名私钥时拒绝，不退回未签名的元数据。
@@ -365,7 +400,9 @@ fn signed_message_operator(
     request_body = ExecuteCustomEventHttpRequest,
     responses(
         (status = 200, description = "成功", body = ApiResponse<ExecuteCustomEventHttpResponse>),
-        (status = 400, description = "参数错误"),
+        (status = 400, description = "参数错误，或 Orchestrator 判事件不合法（reason 为其原因码，如 MESSAGE_OPERATION_INVALID）"),
+        (status = 403, description = "操作授权拒绝，reason 为原因码（如 MESSAGE_OPERATION_NOT_MEMBER、MESSAGE_OPERATION_IDENTITY_MISMATCH），不要原样重试"),
+        (status = 404, description = "Orchestrator 找不到事件指向的对象（reason 为其原因码，缺省 NOT_FOUND）"),
         (status = 503, description = "下游不可用或超过请求超时（reason=SERVICE_UNAVAILABLE），可退避重试"),
     ),
 )]
@@ -394,7 +431,7 @@ pub async fn execute_custom_event(
                 .await
         })
         .await
-        .map_err(|err| downstream_failure("MESSAGE_EVENT_EXECUTE_FAILED", err))?;
+        .map_err(|status| message_operation_failure("MESSAGE_EVENT_EXECUTE_FAILED", status))?;
 
     Ok(Json(ApiResponse::success(ExecuteCustomEventHttpResponse {
         event_id,
@@ -410,7 +447,9 @@ pub async fn execute_custom_event(
     request_body = RecallMessageHttpRequest,
     responses(
         (status = 200, description = "成功", body = ApiResponse<RecallMessageHttpResponse>),
-        (status = 400, description = "参数错误"),
+        (status = 400, description = "参数错误，或 Orchestrator 判请求不合法（reason 为其原因码，如 MESSAGE_OPERATION_INVALID）"),
+        (status = 403, description = "撤回授权拒绝，reason 为原因码（如 MESSAGE_OPERATION_NOT_SENDER、MESSAGE_OPERATION_WINDOW_EXPIRED、MESSAGE_OPERATION_NOT_MEMBER），不要原样重试"),
+        (status = 404, description = "Orchestrator 找不到要撤回的对象（reason 为其原因码，缺省 NOT_FOUND）"),
         (status = 503, description = "下游不可用或超过请求超时（reason=SERVICE_UNAVAILABLE），可退避重试"),
     ),
 )]
@@ -444,7 +483,7 @@ pub async fn recall_message(
                 .await
         })
         .await
-        .map_err(|err| downstream_failure("MESSAGE_RECALL_FAILED", err))?;
+        .map_err(|status| message_operation_failure("MESSAGE_RECALL_FAILED", status))?;
     let response = RecallMessageHttpResponse {
         success: grpc_res.success,
     };
