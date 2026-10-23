@@ -1132,4 +1132,175 @@ mod read_ack_admission_tests {
             .expect_err("plugin state from a member");
         assert_eq!(h.allocated_seqs(), 3);
     }
+
+    /// `MessageActionService` requests for reactions, pins and marks carry no conversation, and
+    /// recall and edit may leave it out: the action handler takes the stored message's
+    /// conversation, so they reach the single event entry with it instead of being refused for
+    /// lacking one. A message not stored yet is retryable; a request naming another conversation
+    /// than its message's is refused there.
+    #[tokio::test]
+    async fn message_actions_take_the_conversation_of_their_message() {
+        use crate::application::commands::{
+            AddReactionCommand, EditMessageCommand, MarkMessageCommand, PinMessageCommand,
+            RecallMessageCommand, RemoveReactionCommand, UnmarkMessageCommand, UnpinMessageCommand,
+        };
+        use crate::application::handlers::MessageActionHandler;
+        use flare_grpc_proto::message::{
+            AddReactionRequest, EditMessageRequest, MarkMessageRequest, PinMessageRequest,
+            RecallMessageRequest, RemoveReactionRequest, UnmarkMessageRequest, UnpinMessageRequest,
+        };
+        let text = |text: &str| flare_proto::common::MessageContent {
+            content: Some(flare_proto::common::message_content::Content::Text(
+                flare_proto::common::TextContent {
+                    text: text.into(),
+                    mentions: vec![],
+                },
+            )),
+        };
+        let sent = Message {
+            server_id: "m-reader".into(),
+            conversation_id: SINGLE_CHAT.into(),
+            sender_id: "reader".into(),
+            created_at: chrono::Utc::now().timestamp_millis() - 1_000,
+            content: Some(text("hi")),
+            ..Default::default()
+        };
+        let h = Harness::with_messages(vec![sent.clone()]);
+        let actions = MessageActionHandler::new(Arc::new(h.handler.clone())).with_message_targets(
+            Arc::new(StoredMessages([("m-reader".to_string(), sent)].into())),
+        );
+        let ctx = ctx_as("act", "reader");
+        let id = || "m-reader".to_string();
+
+        actions
+            .add_reaction(
+                &ctx,
+                AddReactionCommand::from_request(
+                    &AddReactionRequest {
+                        message_id: id(),
+                        emoji: "+1".into(),
+                    },
+                    &ctx,
+                )
+                .unwrap(),
+            )
+            .await
+            .expect("add a reaction");
+        actions
+            .remove_reaction(
+                &ctx,
+                RemoveReactionCommand::from_request(
+                    &RemoveReactionRequest {
+                        message_id: id(),
+                        emoji: "+1".into(),
+                    },
+                    &ctx,
+                )
+                .unwrap(),
+            )
+            .await
+            .expect("remove the reaction");
+        let pin = PinMessageRequest {
+            message_id: id(),
+            ..Default::default()
+        };
+        actions
+            .pin_message(&ctx, PinMessageCommand::from_request(&pin, &ctx).unwrap())
+            .await
+            .expect("pin");
+        let unpin = UnpinMessageRequest {
+            message_id: id(),
+            ..Default::default()
+        };
+        actions
+            .unpin_message(
+                &ctx,
+                UnpinMessageCommand::from_request(&unpin, &ctx).unwrap(),
+            )
+            .await
+            .expect("unpin");
+        let mark = MarkMessageRequest {
+            message_id: id(),
+            ..Default::default()
+        };
+        actions
+            .mark_message(&ctx, MarkMessageCommand::from_request(&mark, &ctx).unwrap())
+            .await
+            .expect("mark");
+        let unmark = UnmarkMessageRequest {
+            message_id: id(),
+            ..Default::default()
+        };
+        actions
+            .unmark_message(
+                &ctx,
+                UnmarkMessageCommand::from_request(&unmark, &ctx).unwrap(),
+            )
+            .await
+            .expect("unmark");
+        let edit = EditMessageRequest {
+            message_id: id(),
+            new_content: Some(text("edited")),
+            ..Default::default()
+        };
+        actions
+            .edit_message(&ctx, EditMessageCommand::from_request(&edit, &ctx).unwrap())
+            .await
+            .expect("edit");
+        let recall = RecallMessageRequest {
+            message_id: id(),
+            ..Default::default()
+        };
+        actions
+            .recall_message(
+                &ctx,
+                RecallMessageCommand::from_request(&recall, &ctx).unwrap(),
+            )
+            .await
+            .expect("recall");
+        let published = h.published();
+        assert_eq!(published.len(), 8);
+        assert!(
+            published
+                .iter()
+                .all(|(event, _)| event.conversation_id == SINGLE_CHAT)
+        );
+        assert_eq!(h.allocated_seqs(), 8);
+
+        // Not stored (yet): retryable, nothing sequenced.
+        let missing = PinMessageRequest {
+            message_id: "m-missing".into(),
+            ..Default::default()
+        };
+        let error = actions
+            .pin_message(
+                &ctx,
+                PinMessageCommand::from_request(&missing, &ctx).unwrap(),
+            )
+            .await
+            .expect_err("no such stored message");
+        assert_eq!(
+            error.code(),
+            Some(flare_server_core::error::ErrorCode::ServiceUnavailable)
+        );
+        // A named conversation is kept and checked against the stored message.
+        let elsewhere = EditMessageRequest {
+            message_id: id(),
+            new_content: Some(text("elsewhere")),
+            conversation_id: "2-group-other".into(),
+            ..Default::default()
+        };
+        let error = actions
+            .edit_message(
+                &ctx,
+                EditMessageCommand::from_request(&elsewhere, &ctx).unwrap(),
+            )
+            .await
+            .expect_err("another conversation than the message's");
+        assert_eq!(
+            error.code(),
+            Some(flare_server_core::error::ErrorCode::PermissionDenied)
+        );
+        assert_eq!(h.allocated_seqs(), 8);
+    }
 }

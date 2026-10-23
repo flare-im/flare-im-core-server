@@ -199,14 +199,15 @@ pub async fn initialize(
         .with_user_sync_index(user_sync_index_repository)
         .with_user_sync_compensation(user_sync_compensation_repository)
         .with_read_watermark(read_watermark_repository)
-        .with_message_targets(message_targets)
+        .with_message_targets(message_targets.clone())
         .with_conversation_members(conversation_members),
     );
 
     let event_handler = Arc::new(EventHandler::new(event_domain_service.clone()));
 
     let message_event_execute_grpc = MessageEventExecuteGrpcHandler::new(event_handler.clone());
-    let message_action_handler = Arc::new(MessageActionHandler::new(event_handler));
+    let message_action_handler =
+        Arc::new(MessageActionHandler::new(event_handler).with_message_targets(message_targets));
 
     let message_action_grpc = MessageActionGrpcHandler::new(message_action_handler);
 

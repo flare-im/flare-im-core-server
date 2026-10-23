@@ -177,7 +177,8 @@ impl EditMessageCommand {
                 operator_id,
                 timestamp: chrono::Utc::now(),
                 tenant_id: tenant_from_ctx(ctx)?,
-                conversation_id: String::new(), // 会在后续填充
+                // 可选；不写时 MessageActionHandler 按目标消息找会话。
+                conversation_id: request.conversation_id.clone(),
             },
             new_content,
             reason: if request.reason.is_empty() {
@@ -350,7 +351,7 @@ impl AddReactionCommand {
                 operator_id,
                 timestamp: chrono::Utc::now(),
                 tenant_id: tenant_from_ctx(ctx)?,
-                conversation_id: String::new(), // 会在后续填充
+                conversation_id: String::new(), // 请求不带会话：MessageActionHandler 按目标消息找
             },
             emoji: request.emoji.clone(),
         })
@@ -384,7 +385,7 @@ impl RemoveReactionCommand {
                 operator_id,
                 timestamp: chrono::Utc::now(),
                 tenant_id: tenant_from_ctx(ctx)?,
-                conversation_id: String::new(), // 会在后续填充
+                conversation_id: String::new(), // 请求不带会话：MessageActionHandler 按目标消息找
             },
             emoji: request.emoji.clone(),
         })
@@ -419,7 +420,7 @@ impl PinMessageCommand {
                 operator_id,
                 timestamp: chrono::Utc::now(),
                 tenant_id: tenant_from_ctx(ctx)?,
-                conversation_id: String::new(), // 会在后续填充
+                conversation_id: String::new(), // 请求不带会话：MessageActionHandler 按目标消息找
             },
             scope: normalize_message_pin_scope(request.scope),
             reason: if request.reason.is_empty() {
@@ -459,7 +460,7 @@ impl UnpinMessageCommand {
                 operator_id,
                 timestamp: chrono::Utc::now(),
                 tenant_id: tenant_from_ctx(ctx)?,
-                conversation_id: String::new(), // 会在后续填充
+                conversation_id: String::new(), // 请求不带会话：MessageActionHandler 按目标消息找
             },
             scope: normalize_message_pin_scope(request.scope),
         })
@@ -493,7 +494,7 @@ impl MarkMessageCommand {
                 operator_id,
                 timestamp: chrono::Utc::now(),
                 tenant_id: tenant_from_ctx(ctx)?,
-                conversation_id: String::new(), // 会在后续填充
+                conversation_id: String::new(), // 请求不带会话：MessageActionHandler 按目标消息找
             },
             mark_type: request.mark_type,
         })
@@ -529,7 +530,7 @@ impl UnmarkMessageCommand {
                 operator_id,
                 timestamp: chrono::Utc::now(),
                 tenant_id: tenant_from_ctx(ctx)?,
-                conversation_id: String::new(), // 会在后续填充
+                conversation_id: String::new(), // 请求不带会话：MessageActionHandler 按目标消息找
             },
             mark_type: if request.mark_type < 0 {
                 None
