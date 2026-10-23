@@ -1024,6 +1024,73 @@ mod tests {
         assert!(request_conversation_matches(&ctx, "2-group-b", &msg).is_err());
     }
 
+    /// The verifier the service is wired with reads the component key set over the Cell key: a
+    /// card post Capability signs with `kid=capability` verifies and passes, a token naming a kid
+    /// the set does not hold is refused. With only the Cell key (what the service loaded before)
+    /// every card post fails verification.
+    #[test]
+    fn the_wired_verifier_admits_capability_card_posts_from_the_key_set() {
+        use ed25519_dalek::pkcs8::{EncodePrivateKey, EncodePublicKey};
+        use flare_server_core::grpc::middleware::signed_context::verify_signed_context_metadata;
+        let pem = |seed: u8| {
+            let key = ed25519_dalek::SigningKey::from_bytes(&[seed; 32]);
+            (
+                key.to_pkcs8_pem(Default::default()).unwrap().to_string(),
+                key.verifying_key()
+                    .to_public_key_pem(Default::default())
+                    .unwrap(),
+            )
+        };
+        let (cell_private, cell_public) = pem(71);
+        let (capability_private, capability_public) = pem(72);
+        let (rogue_private, _) = pem(73);
+        let msg = plugin_card_message("alice");
+        let post = flare_server_core::SignedContextIdentity::new(
+            SignedActorType::User,
+            "alice",
+            "tenant-a",
+            plugin_platform::card_post_request_id("tenant-a", &msg).unwrap(),
+        )
+        .with_roles(vec![plugin_platform::CARD_POST_ROLE.into()]);
+        let signed = |private: &str, kid: Option<&str>| {
+            let signer = flare_server_core::SignedContextSigner::from_private_key(private).unwrap();
+            let signer = match kid {
+                Some(kid) => signer.with_kid(kid).unwrap(),
+                None => signer,
+            };
+            let mut request = tonic::Request::new(());
+            request
+                .metadata_mut()
+                .insert("x-flare-ctx", signer.sign(&post).unwrap().parse().unwrap());
+            request
+        };
+        let key_set =
+            serde_json::json!({ plugin_platform::CARD_POST_KID: capability_public }).to_string();
+        let verifier = crate::wire::send_verifier(Some(&key_set), Some(&cell_public))
+            .unwrap()
+            .expect("configured");
+
+        let card_post = signed(&capability_private, Some(plugin_platform::CARD_POST_KID));
+        let ctx = verify_signed_context_metadata(card_post.metadata(), &verifier).unwrap();
+        assert!(authorize_message(&ctx, &msg, false).is_ok());
+        // Cell-signed contexts keep verifying through the layered legacy key.
+        let cell = signed(&cell_private, None);
+        assert!(verify_signed_context_metadata(cell.metadata(), &verifier).is_ok());
+        // A kid the set does not hold, and the card post kid signed by another key.
+        let rogue = signed(&rogue_private, Some("rogue"));
+        assert!(verify_signed_context_metadata(rogue.metadata(), &verifier).is_err());
+        let forged = signed(&rogue_private, Some(plugin_platform::CARD_POST_KID));
+        assert!(verify_signed_context_metadata(forged.metadata(), &verifier).is_err());
+
+        // The Cell key alone never resolves the capability kid.
+        let single = crate::wire::send_verifier(None, Some(&cell_public))
+            .unwrap()
+            .expect("configured");
+        assert!(verify_signed_context_metadata(card_post.metadata(), &single).is_err());
+        // Neither source: no verifier, the send RPCs fail closed.
+        assert!(crate::wire::send_verifier(None, None).unwrap().is_none());
+    }
+
     #[test]
     fn capability_posts_exactly_the_card_it_signed_and_nothing_else() {
         let msg = plugin_card_message("alice");

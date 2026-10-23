@@ -16,7 +16,9 @@ use flare_im_hooks::hooks::{
 use flare_im_message_pipeline::{ConversationClient, MqPushRepository, RecipientRepositoryImpl};
 use flare_im_seq::SequenceAllocator;
 use flare_im_service_kit::metrics::MessageOrchestratorMetrics;
-use flare_server_core::auth::SignedContextVerifier;
+use flare_server_core::auth::{
+    INTERNAL_CTX_PUBLIC_KEY_ENV, INTERNAL_CTX_PUBLIC_KEYS_ENV, KeySet, SignedContextVerifier,
+};
 use flare_server_core::error::{AnyhowContext, Result};
 use flare_server_core::mq::kafka::KafkaProducer;
 use flare_server_core::mq::nats::NatsProducer;
@@ -283,21 +285,15 @@ async fn initialize_with_config(
     let usage = flare_im_usage::UsageReporter::from_env("flare-message-ingest").await?;
     let message_ingest_handler = Arc::new(message_ingest_handler.with_usage(usage.recorder()));
 
-    let message_verifier = match std::env::var("FLARE_INTERNAL_CTX_PUBLIC_KEY") {
-        Ok(material) => Some(
-            SignedContextVerifier::from_public_key(&material).map_err(|e| {
-                flare_server_core::error::FlareError::system(format!(
-                    "invalid internal context public key: {e}"
-                ))
-            })?,
-        ),
-        Err(_) => {
-            tracing::warn!(
-                "FLARE_INTERNAL_CTX_PUBLIC_KEY is missing; message send RPCs fail closed"
-            );
-            None
-        }
-    };
+    let message_verifier = send_verifier(
+        std::env::var(INTERNAL_CTX_PUBLIC_KEYS_ENV).ok().as_deref(),
+        std::env::var(INTERNAL_CTX_PUBLIC_KEY_ENV).ok().as_deref(),
+    )?;
+    if message_verifier.is_none() {
+        tracing::warn!(
+            "{INTERNAL_CTX_PUBLIC_KEYS_ENV} and {INTERNAL_CTX_PUBLIC_KEY_ENV} are missing; message send RPCs fail closed"
+        );
+    }
     let message_send_grpc =
         MessageSendGrpcHandler::new(message_ingest_handler, ingest_metrics, message_verifier);
 
@@ -312,6 +308,23 @@ async fn initialize_with_config(
         config,
         usage,
     })
+}
+
+/// 发送接口的验签器：组件公钥集（`FLARE_INTERNAL_CTX_PUBLIC_KEYS`，按 kid）叠在 Cell 单钥
+/// （`FLARE_INTERNAL_CTX_PUBLIC_KEY`）上，与 Orchestrator 的加载相同。平台代发插件卡的上下文由
+/// Capability 以 `kid=capability` 签名，只认公钥集里这把命名的公钥：只装单钥时这类上下文全部
+/// 验不过，每张卡都会被当成投递失败。两者都没有时返回 `None`，发送接口 fail closed。
+pub fn send_verifier(
+    key_set: Option<&str>,
+    single_key: Option<&str>,
+) -> Result<Option<SignedContextVerifier>> {
+    KeySet::from_sources(key_set, single_key)
+        .map(|keys| keys.map(SignedContextVerifier::from_key_set))
+        .map_err(|e| {
+            flare_server_core::error::FlareError::system(format!(
+                "invalid internal context public keys: {e}"
+            ))
+        })
 }
 
 async fn build_redis_client(config: &MessageIngestConfig) -> Result<Arc<redis::Client>> {
