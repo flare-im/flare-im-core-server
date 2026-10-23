@@ -163,7 +163,8 @@ impl MessageActionHandler {
             burn_at,
             read_at,
         );
-        self.event_handler.handle_event(ctx, event).await?;
+        // The caller already checked the message, its visibility and its burn setting.
+        self.event_handler.handle_system_event(ctx, event).await?;
         Ok(burn_at)
     }
 

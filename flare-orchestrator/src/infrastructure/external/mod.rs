@@ -1,2 +1,4 @@
-// external 模块已迁移到 rpc 模块
-// 保留此文件用于未来可能的外部适配器
+//! Adapters to other Core services.
+pub mod storage_reader_targets;
+
+pub use storage_reader_targets::StorageReaderMessageTargets;

@@ -135,7 +135,7 @@ impl ResourceBridge {
         }
         let conversation = claims.conversation_id.as_ref().ok_or_else(denied)?;
         self.policy
-            .ensure_dispatch_allowed(&claims.tenant_id, &claims.actor_id, &claims.operation)
+            .ensure_not_suspended(&claims.tenant_id, &claims.operation)
             .await?;
         let snapshot = self
             .authorization
@@ -162,7 +162,9 @@ impl ResourceBridge {
         }
         let manifest = projected.manifest().map_err(|_| denied())?;
         let op = manifest.operation(&claims.operation).ok_or_else(denied)?;
-        if !op.host_capabilities.contains(&request.capability()) {
+        if !op.host_capabilities.contains(&request.capability())
+            || super::remote_dispatch::restricted_operations(&manifest).contains(&claims.operation)
+        {
             return Err(denied());
         }
         projected
@@ -170,7 +172,7 @@ impl ResourceBridge {
                 tenant_id: &claims.tenant_id,
                 actor_id: &claims.actor_id,
                 operation: &claims.operation,
-                actor_permissions: &op.permission_ids.iter().cloned().collect(),
+                actor_permissions: &projected.grant.approved_permissions,
                 platform_enabled: true,
                 now_ms: now,
             })
@@ -206,7 +208,7 @@ impl ResourceBridge {
             return Err(denied());
         }
         self.policy
-            .ensure_dispatch_allowed(&claims.tenant_id, &claims.actor_id, &claims.operation)
+            .ensure_not_suspended(&claims.tenant_id, &claims.operation)
             .await?;
         let fresh = self
             .authorization
@@ -233,7 +235,7 @@ impl ResourceBridge {
                 tenant_id: &claims.tenant_id,
                 actor_id: &claims.actor_id,
                 operation: &claims.operation,
-                actor_permissions: &op.permission_ids.iter().cloned().collect(),
+                actor_permissions: &current.grant.approved_permissions,
                 platform_enabled: true,
                 now_ms: chrono::Utc::now().timestamp_millis(),
             })
@@ -336,10 +338,17 @@ impl ResourceBridge {
         }
         let conversation = claims.conversation_id.clone().ok_or_else(denied)?;
         self.policy
-            .ensure_dispatch_allowed(&claims.tenant_id, &claims.actor_id, &claims.operation)
+            .ensure_not_suspended(&claims.tenant_id, &claims.operation)
             .await?;
         let snapshot = self.snapshot(&claims.tenant_id, now).await?;
         let projected = grant_of(&snapshot, &claims.grant_id)?;
+        if super::remote_dispatch::restricted_operations(
+            &projected.manifest().map_err(|_| denied())?,
+        )
+        .contains(&claims.operation)
+        {
+            return Err(denied());
+        }
         require_identity(
             projected,
             &claims.plugin_id,
@@ -512,7 +521,8 @@ fn require_identity(
 }
 
 /// `operation` declares the write capability and the enabled grant approves it (with the
-/// permission whose data scope is the capability id).
+/// permission whose data scope is the capability id). The writer holds the permissions the
+/// installation approved (plugin platform v2 §2): the projection authorizes, no per-user grant.
 fn authorize_publishing_operation(
     projected: &ProjectedPlugin,
     tenant_id: &str,
@@ -533,7 +543,7 @@ fn authorize_publishing_operation(
             tenant_id,
             actor_id,
             operation,
-            actor_permissions: &op.permission_ids.iter().cloned().collect(),
+            actor_permissions: &projected.grant.approved_permissions,
             platform_enabled: true,
             now_ms: now,
         })

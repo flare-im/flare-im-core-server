@@ -36,7 +36,7 @@ pub trait BurnEventSink: Send + Sync {
 
 impl BurnEventSink for EventHandler {
     async fn publish_burn_event(&self, ctx: &Ctx, event: Event) -> Result<()> {
-        self.handle_event(ctx, event).await
+        self.handle_system_event(ctx, event).await
     }
 }
 

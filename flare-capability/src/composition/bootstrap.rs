@@ -77,6 +77,7 @@ impl ApplicationBootstrap {
         let capability_admin = context.capability_admin;
         let hook_config_listener = context.hook_config_listener;
         let hook_execution_background = context.hook_execution_background;
+        let entity_lifecycle_worker = context.entity_lifecycle_worker;
 
         let mut runtime = runtime_plan.service_runtime();
         if let Some((pool, publisher)) = context.audit_delivery {
@@ -85,6 +86,20 @@ impl ApplicationBootstrap {
                 move |shutdown| async move {
                     publisher
                         .run_durable(pool, async {
+                            let _ = shutdown.await;
+                        })
+                        .await;
+                    Ok(())
+                },
+            );
+        }
+        // 插件实体生命周期通知：至少一次调用插件的 entityLifecycle.unbound，停机时结束本轮。
+        if let Some(worker) = entity_lifecycle_worker {
+            runtime = runtime.add_spawn_with_shutdown(
+                "flare-capability-entity-lifecycle",
+                move |shutdown| async move {
+                    worker
+                        .run(async {
                             let _ = shutdown.await;
                         })
                         .await;

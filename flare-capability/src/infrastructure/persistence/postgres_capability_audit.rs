@@ -16,6 +16,22 @@ impl PostgresCapabilityAuditLog {
         Self { pool }
     }
 
+    /// The durable Staff effect evidence of a governance call that changes no Core table (a
+    /// plugin admin call): one `core_audit_outbox` row in its own transaction. Must run inside the
+    /// Staff scope (`StaffAudit::staff_audit`); outside it nothing is written.
+    pub async fn record_staff_effect(
+        &self,
+        app: &str,
+        aggregate: &'static str,
+        id: &str,
+        action: &'static str,
+    ) -> sqlx::Result<()> {
+        let mut tx = self.pool.begin().await?;
+        flare_im_service_kit::audit_effects::durable::record(&mut tx, app, aggregate, id, action)
+            .await?;
+        tx.commit().await
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub async fn record_policy_event(
         &self,

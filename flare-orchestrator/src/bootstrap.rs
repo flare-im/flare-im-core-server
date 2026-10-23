@@ -45,6 +45,7 @@ impl ApplicationBootstrap {
 
         let address = runtime_plan.address;
         let service_name = runtime_plan.service_name.clone();
+        let identity_layer = event_identity_layer()?;
         let grpc_metrics =
             flare_im_service_kit::metrics::GrpcMetricsLayer::new(service_name.clone());
         let action_grpc = context.message_action_grpc.clone();
@@ -138,14 +139,10 @@ impl ApplicationBootstrap {
         let mut service_runtime = runtime_plan
             .service_runtime()
             .add_spawn_with_shutdown("orchestrator-grpc", move |shutdown_rx| async move {
-                use flare_server_core::middleware::ContextLayer;
-
-                let action_service = ContextLayer::new()
-                    .allow_missing()
-                    .layer(MessageActionServiceServer::new(action_grpc));
-                let event_execute_service = ContextLayer::new()
-                    .allow_missing()
-                    .layer(MessageEventServiceServer::new(event_execute_grpc));
+                let action_service =
+                    identity_layer.layer(MessageActionServiceServer::new(action_grpc));
+                let event_execute_service =
+                    identity_layer.layer(MessageEventServiceServer::new(event_execute_grpc));
 
                 Server::builder()
                     .layer(grpc_metrics)
@@ -243,4 +240,31 @@ impl ApplicationBootstrap {
                 flare_server_core::error::FlareError::system(format!("runtime error: {}", e))
             })
     }
+}
+
+/// The identity boundary of both RPC services: a signed `x-flare-ctx` (verified with the Cell key
+/// set, which includes Capability's own `capability` key when configured) is the only source of a
+/// trusted identity; unsigned callers (the signaling route, the API gateway) keep their legacy
+/// metadata, which the message operation policy treats as a user at most, never as a service or the
+/// platform.
+fn event_identity_layer() -> Result<flare_server_core::SignedFirstContextLayer> {
+    use flare_server_core::SignedActorType;
+    let verifier = flare_server_core::SignedContextVerifier::from_env_optional().map_err(|e| {
+        flare_server_core::error::FlareError::system(format!(
+            "invalid Cell public key set for the orchestrator: {e}"
+        ))
+    })?;
+    if verifier.is_none() {
+        tracing::warn!(
+            "FLARE_INTERNAL_CTX_PUBLIC_KEY(S) is not set: no signed identity is accepted, so plugin shared state and trusted-service operations are refused"
+        );
+    }
+    Ok(
+        flare_server_core::SignedFirstContextLayer::new(verifier).allow_actor_types([
+            SignedActorType::User,
+            SignedActorType::TenantAdmin,
+            SignedActorType::Service,
+            SignedActorType::System,
+        ]),
+    )
 }

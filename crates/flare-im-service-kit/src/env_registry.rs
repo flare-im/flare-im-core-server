@@ -377,6 +377,18 @@ pub const REGISTERED_ENV_VARS: &[EnvVarSpec] = &[
         EnvPurpose::Redis,
     ),
     env("DATABASE_URL", EnvOwner::Capability, EnvPurpose::Database),
+    // Capability's own context key (kid=capability): it signs only the plugin card posts Ingest
+    // accepts on the platform card path (see plugin_card); never a legacy Cell key.
+    env(
+        "FLARE_CAPABILITY_CTX_PRIVATE_KEY",
+        EnvOwner::Capability,
+        EnvPurpose::Auth,
+    ),
+    env(
+        "FLARE_PLUGIN_CARD_INGEST_URL",
+        EnvOwner::Capability,
+        EnvPurpose::ServiceEndpoint,
+    ),
     env(
         "FLARE_PLUGIN_CALL_PUBLIC_KEYS",
         EnvOwner::Capability,

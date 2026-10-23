@@ -29,9 +29,10 @@ use tracing::instrument;
 
 use crate::domain::PersistenceMode;
 use crate::domain::repository::{
-    ReadWatermarkAdvance, ReadWatermarkRepository, RecipientRepository,
+    MessageTargetRepository, ReadWatermarkAdvance, ReadWatermarkRepository, RecipientRepository,
     UserSyncCompensationRepository, UserSyncCompensationTask, UserSyncIndexRepository,
 };
+use crate::domain::service::message_operation_policy::MessageOperationPolicy;
 use flare_im_message_pipeline::{
     CompositeEventValidationStrategy, EventValidationStrategy, ValidationContext,
 };
@@ -87,6 +88,8 @@ where
     user_sync_index: Option<Arc<dyn UserSyncIndexRepository>>,
     user_sync_compensation: Option<Arc<dyn UserSyncCompensationRepository>>,
     read_watermark: Option<Arc<dyn ReadWatermarkRepository>>,
+    /// Who may do what to which message (see [`MessageOperationPolicy`]).
+    operation_policy: Arc<MessageOperationPolicy>,
 }
 
 impl<PR, SA> EventDomainService<PR, SA>
@@ -109,7 +112,31 @@ where
             user_sync_index: None,
             user_sync_compensation: None,
             read_watermark: None,
+            operation_policy: Arc::new(MessageOperationPolicy::default()),
         }
+    }
+
+    /// The stored messages operations are checked against. Without them, operations that name a
+    /// message are refused (retryable).
+    pub fn with_message_targets(mut self, targets: Arc<dyn MessageTargetRepository>) -> Self {
+        self.operation_policy = Arc::new(MessageOperationPolicy::new(Some(targets)));
+        self
+    }
+
+    /// Replace the operation policy (tests: a fixed clock).
+    pub fn with_operation_policy(mut self, policy: MessageOperationPolicy) -> Self {
+        self.operation_policy = Arc::new(policy);
+        self
+    }
+
+    /// Authorize an event's operation and return it normalized (see [`MessageOperationPolicy`]).
+    pub async fn authorize_operation(
+        &self,
+        ctx: &Ctx,
+        tenant_id: &str,
+        event: Event,
+    ) -> Result<Event> {
+        self.operation_policy.authorize(ctx, tenant_id, event).await
     }
 
     pub fn with_user_sync_index(

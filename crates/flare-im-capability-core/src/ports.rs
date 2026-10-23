@@ -216,6 +216,23 @@ pub trait CapabilityPolicyBackend: Send + Sync {
         ))
     }
 
+    /// Emergency stop for a capability whose authorization is not a per-user grant (plugin
+    /// operations, authorized by the tenant's installation projection): refused when the global
+    /// switch is off, when the tenant switch of `capability_id` exists and is off, or when a
+    /// tenant switch `<prefix>.*` whose prefix (with its dot) starts `capability_id` exists and
+    /// is off — `example.poll.*` stops every operation of the plugin `example.poll` with one row.
+    /// Any matching switch that is off stops the call; a more specific one that is on does not
+    /// lift it. An absent tenant switch is not a refusal, and no user grant is read.
+    ///
+    /// No default: a backend that forgot it would leave the emergency stop silently inert. The
+    /// lifecycle worker (`entityLifecycle.unbound`) and staff admin calls do not consult it — a
+    /// stopped plugin still releases funds and staff can still inspect and repair it.
+    async fn ensure_not_suspended(
+        &self,
+        tenant_id: &str,
+        capability_id: &str,
+    ) -> CapabilityResult<()>;
+
     async fn list_user_grants(
         &self,
         tenant_id: &str,

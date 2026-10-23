@@ -85,6 +85,9 @@ mod tests {
 
     #[async_trait]
     impl CapabilityPolicyBackend for AllowAll {
+        async fn ensure_not_suspended(&self, _t: &str, _c: &str) -> Result<()> {
+            Ok(())
+        }
         async fn ensure_dispatch_allowed(&self, _t: &str, _u: &str, _c: &str) -> Result<()> {
             Ok(())
         }
@@ -148,6 +151,7 @@ mod tests {
             conversation_id: None,
             payload: None,
             request_id: Some("req-1".into()),
+            message_id: None,
         }
     }
 
@@ -250,6 +254,9 @@ mod tests {
 
     #[async_trait]
     impl CapabilityPolicyBackend for RecordingPolicy {
+        async fn ensure_not_suspended(&self, _t: &str, _c: &str) -> Result<()> {
+            Ok(())
+        }
         async fn ensure_dispatch_allowed(&self, tenant: &str, _u: &str, _c: &str) -> Result<()> {
             self.tenants.lock().unwrap().push(tenant.to_string());
             Ok(())

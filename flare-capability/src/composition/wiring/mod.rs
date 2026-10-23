@@ -41,10 +41,16 @@ pub(crate) async fn initialize(config: CapabilityServiceConfig) -> Result<Applic
         .as_ref()
         .map(|r| r.connection_pool());
     // 有库时登记写 capability_plugin_endpoints；没有库时只在本进程（plugin_routes 里说明一次）。
-    let plugin_routes = Arc::new(plugin_routes::runtime_authorization(
-        plugin_routes::plugin_route_book(db_pool.as_ref()),
-        db_pool.as_ref(),
-    )?);
+    let plugin_routes = Arc::new(
+        plugin_routes::card_posting(
+            plugin_routes::runtime_authorization(
+                plugin_routes::plugin_route_book(db_pool.as_ref()),
+                db_pool.as_ref(),
+            )?,
+            db_pool.as_ref(),
+        )
+        .await?,
+    );
     let (capability_registry, capability_policy, capability_grpc) =
         init_capability_extension_stack(
             runtime_config_file,
@@ -56,6 +62,9 @@ pub(crate) async fn initialize(config: CapabilityServiceConfig) -> Result<Applic
     let capability_runtime = capability_grpc.runtime_config();
     // 配置发现的端点已在上面进簿；再载入库里的登记（同键时登记覆盖配置），然后起周期重读与清理。
     plugin_routes::load_and_maintain(&plugin_routes, &capability_runtime).await?;
+    // 插件实体生命周期通知（卡片撤回、代发失败）：后台按系统票据投递 outbox。
+    let entity_lifecycle_worker =
+        plugin_routes::lifecycle_worker(&plugin_routes, capability_runtime.plugin_call_timeout);
 
     // 租户投影只在有库时可用：没有库就没有 `tenants` 表可写，控制面推送会得到 Unimplemented 的路由缺席错误。
     // 投影只认平台 worker 的控制断言（FLARE_PLATFORM_PUBLIC_KEY）；员工不经这里。
@@ -126,5 +135,6 @@ pub(crate) async fn initialize(config: CapabilityServiceConfig) -> Result<Applic
         capability_admin,
         hook_config_listener,
         hook_execution_background: hook.execution_background,
+        entity_lifecycle_worker,
     })
 }

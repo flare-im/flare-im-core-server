@@ -258,6 +258,15 @@ impl EventValidationStrategy for EventRequiredFieldsValidationStrategy {
 /// 插件实体共享状态事件（`EVENT_MESSAGE_PLUGIN_STATE`）的载荷校验：类型与载荷一致，消息、插件、实体
 /// 非空且有界，版本 `1..=i64::MAX`，`values_json` 不超过 8 KiB。内容规则（键、值形状）由发布方
 /// （Capability）按插件协议校验，Writer 落库前再校验一次。
+///
+/// 只有 Capability 的签名发布身份能发这种事件（[`is_plugin_state_publisher`]：Capability 自己的
+/// 密钥 `kid=capability` 签的 System 上下文，唯一角色 `plugin.state.publish`）：客户端上行与
+/// Capability 发布走同一个 `ExecuteEvent`，不拦来源时，会话成员拿卡片上公开的消息、插件与实体 ID
+/// 就能伪造计票，或用最大版本号把卡片永久冻结（之后插件的真实版本都更低，写入端单调拒绝）。
+/// 未签名的 `x-actor-type: System` 元数据不算：能直连 Orchestrator 的任何内部进程都
+/// 能发这个头。
+///
+/// [`is_plugin_state_publisher`]: flare_im_service_kit::plugin_platform::is_plugin_state_publisher
 pub struct PluginStateEventValidationStrategy;
 
 /// `PluginStateEvent.values_json` 的上限（与插件协议 `MAX_SHARED_STATE_BYTES` 相同）。
@@ -266,13 +275,22 @@ pub const MAX_PLUGIN_STATE_VALUES_BYTES: usize = 8 * 1024;
 impl EventValidationStrategy for PluginStateEventValidationStrategy {
     fn validate<'a>(
         &'a self,
-        _context: &'a ValidationContext<'a>,
+        context: &'a ValidationContext<'a>,
         event: &'a Event,
     ) -> Pin<Box<dyn Future<Output = Result<ValidationResult>> + Send + 'a>> {
         use flare_proto::common::{EventType, event::Payload};
+        use flare_server_core::grpc::middleware::signed_context::VerifiedContext;
         Box::pin(async move {
             let is_plugin_state = event.r#type == EventType::EventMessagePluginState as i32;
+            let from_system = context
+                .ctx
+                .get_data::<VerifiedContext>()
+                .and_then(VerifiedContext::claims)
+                .is_some_and(flare_im_service_kit::plugin_platform::is_plugin_state_publisher);
             let result = match (&event.payload, is_plugin_state) {
+                (Some(Payload::PluginState(_)), true) if !from_system => {
+                    ValidationResult::invalid("plugin state is published by the system only")
+                }
                 (Some(Payload::PluginState(state)), true) => {
                     let entity_ok = !state.entity.is_empty()
                         && state.entity.len() <= 128
@@ -418,10 +436,74 @@ mod plugin_state_tests {
         }
     }
 
+    fn actor_ctx(actor_type: flare_server_core::context::ActorType) -> Ctx {
+        std::sync::Arc::new(flare_server_core::Context::with_request_id("r").with_actor(
+            flare_server_core::context::ActorContext::new("actor").with_type(actor_type),
+        ))
+    }
+
+    /// A context verified from a token `signer` signed (the way the signed-first layer builds it).
+    pub(crate) fn signed_ctx(
+        seed: u8,
+        kid: Option<&str>,
+        identity: flare_server_core::SignedContextIdentity,
+    ) -> Ctx {
+        use ed25519_dalek::pkcs8::{EncodePrivateKey, EncodePublicKey};
+        let key = ed25519_dalek::SigningKey::from_bytes(&[seed; 32]);
+        let mut signer = flare_server_core::SignedContextSigner::from_private_key(
+            &key.to_pkcs8_pem(Default::default()).unwrap(),
+        )
+        .unwrap();
+        let public = key
+            .verifying_key()
+            .to_public_key_pem(Default::default())
+            .unwrap();
+        let verifier = match kid {
+            Some(kid) => {
+                signer = signer.with_kid(kid).unwrap();
+                let mut keys = flare_server_core::auth::KeySet::empty();
+                keys.insert(kid, &public).unwrap();
+                flare_server_core::SignedContextVerifier::from_key_set(keys)
+            }
+            None => flare_server_core::SignedContextVerifier::from_public_key(&public).unwrap(),
+        };
+        let token = signer.sign(&identity).unwrap();
+        let mut carrier = tonic::Request::new(());
+        carrier
+            .metadata_mut()
+            .insert("x-flare-ctx", token.parse().unwrap());
+        flare_server_core::grpc::middleware::signed_context::verify_signed_context_metadata(
+            carrier.metadata(),
+            &verifier,
+        )
+        .unwrap()
+    }
+
+    /// Capability's signed shared state publisher.
+    pub(crate) fn publisher_ctx() -> Ctx {
+        use flare_im_service_kit::plugin_platform::{
+            CARD_POST_KID, STATE_PUBLISH_ROLE, STATE_PUBLISHER_ID,
+        };
+        signed_ctx(
+            41,
+            Some(CARD_POST_KID),
+            flare_server_core::SignedContextIdentity::new(
+                flare_server_core::SignedActorType::System,
+                STATE_PUBLISHER_ID,
+                "app-a",
+                "r",
+            )
+            .with_roles(vec![STATE_PUBLISH_ROLE.into()]),
+        )
+    }
+
     async fn check(event: &Event) -> bool {
-        let ctx: Ctx = std::sync::Arc::new(flare_server_core::Context::with_request_id("r"));
+        check_as(&publisher_ctx(), event).await
+    }
+
+    async fn check_as(ctx: &Ctx, event: &Event) -> bool {
         let context = ValidationContext {
-            ctx: &ctx,
+            ctx,
             tenant_id: "app-a",
             conversation_id: "2-group",
         };
@@ -471,5 +553,73 @@ mod plugin_state_tests {
         let mut mislabeled = state_event(valid_state());
         mislabeled.r#type = EventType::EventReaction as i32;
         assert!(!check(&mislabeled).await);
+    }
+
+    /// A member's uplink carries a user actor (or none): it must not forge the shared state of a
+    /// card it can see, nor freeze it with a maximal version.
+    #[tokio::test]
+    async fn plugin_state_from_anyone_but_the_system_is_rejected() {
+        use flare_server_core::context::ActorType;
+        let event = state_event(PluginStateEvent {
+            version: i64::MAX as u64,
+            ..valid_state()
+        });
+        assert!(check(&event).await);
+        for actor_type in [
+            ActorType::User,
+            ActorType::Guest,
+            ActorType::Service,
+            ActorType::TenantAdmin,
+            ActorType::Staff,
+            ActorType::Unspecified,
+        ] {
+            assert!(
+                !check_as(&actor_ctx(actor_type), &event).await,
+                "{actor_type:?}"
+            );
+        }
+        let anonymous: Ctx = std::sync::Arc::new(flare_server_core::Context::with_request_id("r"));
+        assert!(!check_as(&anonymous, &event).await);
+        // Unsigned System metadata is not the publisher; nor is a System actor signed by a
+        // Cell key, nor a card post token signed by Capability's own key.
+        assert!(
+            !check_as(
+                &actor_ctx(flare_server_core::context::ActorType::System),
+                &event
+            )
+            .await
+        );
+        use flare_im_service_kit::plugin_platform::{
+            CARD_POST_KID, CARD_POST_ROLE, STATE_PUBLISH_ROLE, STATE_PUBLISHER_ID,
+        };
+        let cell_system = signed_ctx(
+            42,
+            None,
+            flare_server_core::SignedContextIdentity::new(
+                flare_server_core::SignedActorType::System,
+                STATE_PUBLISHER_ID,
+                "app-a",
+                "r",
+            )
+            .with_roles(vec![STATE_PUBLISH_ROLE.into()]),
+        );
+        assert!(!check_as(&cell_system, &event).await);
+        let card_post = signed_ctx(
+            43,
+            Some(CARD_POST_KID),
+            flare_server_core::SignedContextIdentity::new(
+                flare_server_core::SignedActorType::User,
+                "alice",
+                "app-a",
+                "r",
+            )
+            .with_roles(vec![CARD_POST_ROLE.into()]),
+        );
+        assert!(!check_as(&card_post, &event).await);
+        // Other events are not gated by origin.
+        let mut reaction = state_event(valid_state());
+        reaction.r#type = EventType::EventReaction as i32;
+        reaction.payload = None;
+        assert!(check_as(&actor_ctx(ActorType::User), &reaction).await);
     }
 }

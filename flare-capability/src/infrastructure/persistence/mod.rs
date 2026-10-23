@@ -16,6 +16,7 @@ pub use postgres_tenant_projection::PostgresTenantProjectionRepository;
 
 #[cfg(test)]
 mod plugin_endpoints_pg_tests;
+pub mod postgres_entity_lifecycle;
 pub mod postgres_plugin_authorization;
 pub mod postgres_plugin_entity_bindings;
 pub mod postgres_resource_budget;

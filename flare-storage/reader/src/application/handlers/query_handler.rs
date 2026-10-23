@@ -17,6 +17,7 @@ use crate::application::queries::{
     QueryMessagesQuery, SearchMessagesQuery,
 };
 use crate::convert::{datetime_to_timestamp, event_to_proto_or_default};
+use crate::domain::model::plugin_card::PluginCardCarrier;
 use crate::domain::model::{Event, MessageWriteLedgerEntry, MessageWriteLedgerQuery};
 use crate::domain::repository::MessageStorage;
 
@@ -37,6 +38,14 @@ fn storage_error(
 fn required_tenant_id(ctx: &flare_server_core::context::Ctx) -> Result<String> {
     require_tenant_id_from_context(ctx)
         .map_err(|msg| flare_server_core::flare_err!(ErrorCode::InvalidParameter, msg))
+}
+
+/// The page as the carriers of the plugin card copy mark.
+fn carriers(messages: &mut [Message]) -> Vec<&mut dyn PluginCardCarrier> {
+    messages
+        .iter_mut()
+        .map(|message| message as &mut dyn PluginCardCarrier)
+        .collect()
 }
 
 fn required_user_id(ctx: &flare_server_core::context::Ctx) -> Result<String> {
@@ -95,7 +104,8 @@ where
             DateTime::from_timestamp(query.end_time, 0)
         };
 
-        self.storage
+        let mut messages = self
+            .storage
             .query_messages(
                 ctx,
                 &query.conversation_id,
@@ -106,7 +116,11 @@ where
                 query.include_burned_placeholder,
             )
             .await
-            .map_err(|e| storage_error(e, "Failed to query messages"))
+            .map_err(|e| storage_error(e, "Failed to query messages"))?;
+        self.storage
+            .mark_plugin_card_copies(ctx, &mut carriers(&mut messages))
+            .await;
+        Ok(messages)
     }
 
     /// 查询消息列表（带分页结果）
@@ -131,7 +145,7 @@ where
         };
 
         // 直接查询消息
-        let messages = self
+        let mut messages = self
             .storage
             .query_messages(
                 ctx,
@@ -144,6 +158,9 @@ where
             )
             .await
             .map_err(|e| storage_error(e, "Database query failed"))?;
+        self.storage
+            .mark_plugin_card_copies(ctx, &mut carriers(&mut messages))
+            .await;
 
         // 构建简化的 QueryMessagesResult
         let message_count = messages.len() as i32;
@@ -174,11 +191,17 @@ where
         ctx: &flare_server_core::context::Ctx,
         query: GetMessageQuery,
     ) -> Result<Option<Message>> {
-        let _ = ctx; // 上下文用于日志追踪
-        self.storage
+        let mut message = self
+            .storage
             .get_message(ctx, &query.message_id)
             .await
-            .map_err(|e| storage_error(e, "Failed to get message"))
+            .map_err(|e| storage_error(e, "Failed to get message"))?;
+        if let Some(found) = message.as_mut() {
+            self.storage
+                .mark_plugin_card_copies(ctx, &mut [found as &mut dyn PluginCardCarrier])
+                .await;
+        }
+        Ok(message)
     }
 
     /// 获取消息的时间戳
@@ -215,10 +238,15 @@ where
             DateTime::from_timestamp(query.end_time, 0)
         };
 
-        self.storage
+        let mut messages = self
+            .storage
             .search_messages(ctx, &query.filters, start_time, end_time, query.limit)
             .await
-            .map_err(|e| storage_error(e, "Failed to search messages"))
+            .map_err(|e| storage_error(e, "Failed to search messages"))?;
+        self.storage
+            .mark_plugin_card_copies(ctx, &mut carriers(&mut messages))
+            .await;
+        Ok(messages)
     }
 
     /// 列出所有标签
@@ -245,7 +273,7 @@ where
         let _ = ctx; // 上下文用于日志追踪
 
         // 直接使用存储层查询
-        let messages = self
+        let mut messages = self
             .storage
             .query_messages_by_seq(
                 ctx,
@@ -258,6 +286,9 @@ where
             )
             .await
             .map_err(|e| storage_error(e, "Database query failed"))?;
+        self.storage
+            .mark_plugin_card_copies(ctx, &mut carriers(&mut messages))
+            .await;
 
         // 提取最后一条消息的 seq（使用工具函数）
         let last_seq = messages
@@ -278,7 +309,8 @@ where
         newest_window: bool,
         include_burned_placeholder: bool,
     ) -> Result<Vec<(String, Vec<Message>)>> {
-        self.storage
+        let mut windows = self
+            .storage
             .query_conversations_message_windows(
                 ctx,
                 targets,
@@ -288,7 +320,15 @@ where
                 include_burned_placeholder,
             )
             .await
-            .map_err(|e| storage_error(e, "Database query failed"))
+            .map_err(|e| storage_error(e, "Database query failed"))?;
+        // One mark for the whole batch: one bindings lookup across every window.
+        let mut page: Vec<&mut dyn PluginCardCarrier> = windows
+            .iter_mut()
+            .flat_map(|(_, messages)| messages.iter_mut())
+            .map(|message| message as &mut dyn PluginCardCarrier)
+            .collect();
+        self.storage.mark_plugin_card_copies(ctx, &mut page).await;
+        Ok(windows)
     }
 
     /// 查询消息操作历史
@@ -328,7 +368,8 @@ where
     ) -> Result<Vec<(String, Vec<Message>, i64)>> {
         let tenant_id = required_tenant_id(ctx)?;
         let user_id = required_user_id(ctx)?;
-        self.storage
+        let mut snapshot = self
+            .storage
             .get_sync_snapshot(
                 ctx,
                 &tenant_id,
@@ -337,7 +378,14 @@ where
                 messages_per_conversation,
             )
             .await
-            .map_err(|e| storage_error(e, "Failed to get sync snapshot"))
+            .map_err(|e| storage_error(e, "Failed to get sync snapshot"))?;
+        let mut page: Vec<&mut dyn PluginCardCarrier> = snapshot
+            .iter_mut()
+            .flat_map(|(_, messages, _)| messages.iter_mut())
+            .map(|message| message as &mut dyn PluginCardCarrier)
+            .collect();
+        self.storage.mark_plugin_card_copies(ctx, &mut page).await;
+        Ok(snapshot)
     }
 
     /// 查询事件
@@ -396,8 +444,19 @@ where
             rows.truncate(want as usize);
         }
         let last_seq = rows.last().map(|e| e.seq as i64).unwrap_or(after_seq);
-        let events: Vec<flare_proto::common::Event> =
+        let mut events: Vec<flare_proto::common::Event> =
             rows.iter().map(event_to_proto_or_default).collect();
+        // Messages carried by message events are marked like any message page.
+        let mut page: Vec<&mut dyn PluginCardCarrier> = events
+            .iter_mut()
+            .filter_map(|event| match event.payload.as_mut() {
+                Some(flare_proto::common::event::Payload::Message(message)) => {
+                    Some(message as &mut dyn PluginCardCarrier)
+                }
+                _ => None,
+            })
+            .collect();
+        self.storage.mark_plugin_card_copies(ctx, &mut page).await;
         let next_cursor = events
             .last()
             .map(|e| format!("evt:{}", e.conversation_seq))

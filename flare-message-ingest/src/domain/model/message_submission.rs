@@ -9,12 +9,15 @@ use uuid::Uuid;
 use crate::domain::model::message_kind::MessageProfile;
 
 /// Message attributes only Core writes: the plugin card shared layer (`pluginSharedStateJson`,
-/// `pluginSharedStateVersion`, `pluginSharedEntity`). Removed from the attributes and extensions of
-/// every submitted message: a preset version would hold back every later state of the card.
+/// `pluginSharedStateVersion`, `pluginSharedEntity`) and the unbound-copy mark Storage Reader sets
+/// (`pluginCardUnbound`). Removed from the attributes and extensions of every submitted message: a
+/// preset version would hold back every later state of the card, and only Core says which card is
+/// bound to its entity.
 pub const SERVER_OWNED_ATTRIBUTES: &[&str] = &[
     "pluginSharedStateJson",
     "pluginSharedStateVersion",
     "pluginSharedEntity",
+    "pluginCardUnbound",
 ];
 
 #[derive(Clone, Debug)]
@@ -160,6 +163,7 @@ mod tests {
                     ("pluginSharedStateJson", r#"{"counts":[999]}"#),
                     ("pluginSharedStateVersion", "9223372036854775807"),
                     ("pluginSharedEntity", "poll-1"),
+                    ("pluginCardUnbound", "false"),
                     ("kept", "yes"),
                 ]
                 .into_iter()
@@ -168,6 +172,7 @@ mod tests {
                 extensions: [
                     ("pluginSharedStateVersion", b"9223372036854775807".to_vec()),
                     ("pluginSharedEntity", b"poll-1".to_vec()),
+                    ("pluginCardUnbound", b"false".to_vec()),
                     ("kept", b"yes".to_vec()),
                 ]
                 .into_iter()

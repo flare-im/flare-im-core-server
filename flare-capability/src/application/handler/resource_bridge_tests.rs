@@ -116,8 +116,8 @@ fn fixture() -> (
     verifier
         .insert(signer.key_id().into(), signer.public_key())
         .unwrap();
+    // No user grant: the installation projection authorizes the plugin's callbacks.
     let policy = Arc::new(InMemoryCapabilityGrants::new());
-    policy.grant_user_capability("201", "u1", "example.resource.run", None, None, None);
     let backend = Arc::new(Backend::default());
     let bridge = Arc::new(ResourceBridge::new(
         projection.clone(),
@@ -163,21 +163,26 @@ async fn read(
 }
 
 #[tokio::test]
-async fn resource_callback_revalidates_tenant_actor_revision_scope_and_membership() {
-    let (bridge, projection, backend, signer, claims, _) = fixture();
+async fn resource_callback_revalidates_tenant_revision_scope_switch_and_membership() {
+    let (bridge, projection, backend, signer, claims, policy) = fixture();
     assert!(read(&bridge, &signer, &claims).await.is_ok());
-    for mode in 0..5 {
+    for mode in 0..4 {
         let mut bad = claims.clone();
         match mode {
             0 => bad.tenant_id = "202".into(),
-            1 => bad.actor_id = "u2".into(),
-            2 => bad.grant_revision = 1,
-            3 => bad.conversation_id = None,
+            1 => bad.grant_revision = 1,
+            2 => bad.conversation_id = None,
             _ => bad.configuration_digest = format!("sha256:{}", "b".repeat(64)),
         }
         assert!(read(&bridge, &signer, &bad).await.is_err());
     }
     assert_eq!(backend.hits.load(Ordering::SeqCst), 1);
+    // The emergency switch of the operation stops its callbacks too.
+    policy.set_tenant_capability("201", "example.resource.run", false);
+    assert!(read(&bridge, &signer, &claims).await.is_err());
+    policy.set_tenant_capability("201", "example.resource.run", true);
+    assert!(read(&bridge, &signer, &claims).await.is_ok());
+    assert_eq!(backend.hits.load(Ordering::SeqCst), 2);
     projection.0.lock().unwrap().plugins[0]
         .grant
         .approved_data_scopes

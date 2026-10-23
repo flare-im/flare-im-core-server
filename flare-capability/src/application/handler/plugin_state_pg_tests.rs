@@ -9,7 +9,9 @@
 use super::plugin_state::tests::poll_snapshot;
 use super::plugin_state::{PluginStateMetrics, PluginStatePublisher, PublishScope, PublishSource};
 use crate::domain::repository::plugin_state::PluginStateEventSink;
-use crate::infrastructure::adapters::plugin_state_events::{plugin_state_event, system_context};
+use crate::infrastructure::adapters::plugin_state_events::{
+    plugin_state_event, verified_publisher_context,
+};
 use crate::infrastructure::persistence::postgres_plugin_entity_bindings::PostgresPluginEntityBindings;
 use flare_im_capability_core::plugin::resource::EntityStatePublishOutcome;
 use flare_im_capability_core::plugin::state::SharedState;
@@ -157,7 +159,7 @@ impl PluginStateEventSink for InProcessOrchestrator {
     ) -> Result<()> {
         self.0
             .handle_event(
-                &system_context(tenant_id),
+                &verified_publisher_context(tenant_id),
                 plugin_state_event(conversation_id, event),
             )
             .await
@@ -219,8 +221,12 @@ fn card() -> StoredMessage {
     }
 }
 
+/// Both tests reset and use the same tenant: they run one at a time.
+static SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 async fn reset(pool: &sqlx::PgPool) {
     for table in [
+        "DELETE FROM plugin_entity_lifecycle_outbox WHERE tenant_id = $1",
         "DELETE FROM message_plugin_states WHERE tenant_id = $1",
         "DELETE FROM plugin_entity_bindings WHERE tenant_id = $1",
         "DELETE FROM events WHERE tenant_id = $1",
@@ -246,6 +252,7 @@ async fn wait_for(mut done: impl FnMut() -> bool) {
 #[tokio::test]
 #[ignore = "needs FLARE_PLUGIN_STATE_TEST_DATABASE_URL (a disposable flare_c2_* database from deploy/init.sql)"]
 async fn two_voters_publish_a_third_member_receives_and_offline_sync_converges() {
+    let _serial = SERIAL.lock().await;
     let url = std::env::var("FLARE_PLUGIN_STATE_TEST_DATABASE_URL").expect("database url");
     let pool = sqlx::PgPool::connect(&url).await.unwrap();
     let name: String = sqlx::query_scalar("SELECT current_database()")
@@ -377,7 +384,12 @@ async fn two_voters_publish_a_third_member_receives_and_offline_sync_converges()
     late.conversation_seq = 4;
     late.event_id = "late".into();
     topics
-        .publish_event(&system_context(TENANT), late, vec![], GROUP.into())
+        .publish_event(
+            &verified_publisher_context(TENANT),
+            late,
+            vec![],
+            GROUP.into(),
+        )
         .await
         .unwrap();
 
@@ -462,11 +474,376 @@ async fn two_voters_publish_a_third_member_receives_and_offline_sync_converges()
             .await
             .is_err()
     );
+    // The recall committed the plugin's lifecycle notification with it, once.
+    messages
+        .update_message_fsm_state(&ctx(), TENANT, CARD, "RECALLED", None)
+        .await
+        .unwrap();
+    let notices: Vec<(String, String, String, Option<String>, String)> = sqlx::query_as(
+        "SELECT plugin_id, contribution_id, entity, server_msg_id, reason \
+         FROM plugin_entity_lifecycle_outbox WHERE tenant_id = $1",
+    )
+    .bind(TENANT)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        notices,
+        [(
+            "example.poll".to_string(),
+            "example.poll.card".to_string(),
+            "poll-1".to_string(),
+            Some(CARD.to_string()),
+            "recalled".to_string()
+        )]
+    );
+    reset(&pool).await;
+}
+
+/// The lifecycle outbox on PostgreSQL: one row per (entity, reason), leased claims, retries and
+/// ends; and the platform's own binding of a posted card, which the writer's later registration of
+/// the stored card keeps.
+#[tokio::test]
+#[ignore = "needs FLARE_PLUGIN_STATE_TEST_DATABASE_URL (a disposable flare_c2_* database from deploy/init.sql)"]
+async fn the_lifecycle_outbox_and_platform_bindings_hold_on_postgres() {
+    let _serial = SERIAL.lock().await;
+    use crate::domain::repository::entity_lifecycle::{EntityLifecycleOutbox, LifecycleOutcome};
+    use crate::domain::repository::plugin_state::PluginEntityBindingStore;
+    use crate::infrastructure::persistence::postgres_entity_lifecycle::PostgresEntityLifecycleOutbox;
+    let url = std::env::var("FLARE_PLUGIN_STATE_TEST_DATABASE_URL").expect("database url");
+    let pool = sqlx::PgPool::connect(&url).await.unwrap();
+    let name: String = sqlx::query_scalar("SELECT current_database()")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert!(name.starts_with("flare_c2_"), "refusing database {name}");
+    // The migrations apply over a database that already has the tables (IF NOT EXISTS).
+    for migration in [
+        include_str!("../../../../migrations/0017_20261022_plugin_projection_tables.sql"),
+        include_str!("../../../../migrations/0018_20261022_plugin_entity_lifecycle_outbox.sql"),
+    ] {
+        sqlx::raw_sql(migration).execute(&pool).await.unwrap();
+    }
+    reset(&pool).await;
+    let pool = Arc::new(pool);
+    let outbox = PostgresEntityLifecycleOutbox { pool: pool.clone() };
+    outbox.check_schema().await.unwrap();
+
+    for _ in 0..2 {
+        outbox
+            .enqueue(
+                TENANT,
+                "example.poll",
+                "example.poll.card",
+                "poll-7",
+                "post_failed",
+                None,
+            )
+            .await
+            .unwrap();
+    }
     assert!(
-        publisher
-            .entity_recalled(TENANT, "example.poll", "poll-1")
+        outbox
+            .post_failed(TENANT, "example.poll", "poll-7")
             .await
             .unwrap()
+    );
+    assert!(
+        !outbox
+            .post_failed(TENANT, "example.poll", "poll-8")
+            .await
+            .unwrap()
+    );
+    // A reason value the table does not know is refused.
+    assert!(
+        outbox
+            .enqueue(
+                TENANT,
+                "example.poll",
+                "example.poll.card",
+                "poll-7",
+                "deleted",
+                None
+            )
+            .await
+            .is_err()
+    );
+    let ours = |tasks: Vec<crate::domain::repository::entity_lifecycle::LifecycleTask>| {
+        tasks
+            .into_iter()
+            .filter(|t| t.tenant_id == TENANT)
+            .collect::<Vec<_>>()
+    };
+    let claimed = ours(
+        outbox
+            .claim_due(100, Duration::from_secs(60))
+            .await
+            .unwrap(),
+    );
+    assert_eq!(claimed.len(), 1, "one row per entity and reason");
+    let task = &claimed[0];
+    assert_eq!(
+        (task.entity.as_str(), task.reason.as_str(), task.attempts),
+        ("poll-7", "post_failed", 1)
+    );
+    // Leased: not claimable again until it is handed back.
+    assert!(
+        ours(
+            outbox
+                .claim_due(100, Duration::from_secs(60))
+                .await
+                .unwrap()
+        )
+        .is_empty()
+    );
+    outbox
+        .retry_after(task.id, Duration::ZERO, "plugin unreachable")
+        .await
+        .unwrap();
+    let again = ours(
+        outbox
+            .claim_due(100, Duration::from_secs(60))
+            .await
+            .unwrap(),
+    );
+    assert_eq!(again.len(), 1);
+    assert_eq!(again[0].attempts, 2);
+    outbox
+        .complete(task.id, LifecycleOutcome::Delivered, None)
+        .await
+        .unwrap();
+    outbox
+        .retry_after(task.id, Duration::ZERO, "late")
+        .await
+        .unwrap();
+    assert!(
+        ours(
+            outbox
+                .claim_due(100, Duration::from_secs(60))
+                .await
+                .unwrap()
+        )
+        .is_empty()
+    );
+    let status: String =
+        sqlx::query_scalar("SELECT status FROM plugin_entity_lifecycle_outbox WHERE id = $1")
+            .bind(task.id)
+            .fetch_one(pool.as_ref())
+            .await
+            .unwrap();
+    assert_eq!(status, "delivered", "an ended row stays ended");
+
+    // The platform binds the card it posted; the writer's registration of the stored card and a
+    // forged second card of the same entity change nothing.
+    let bindings = PostgresPluginEntityBindings { pool: pool.clone() };
+    bindings
+        .register(
+            TENANT,
+            "example.poll",
+            "example.poll.card",
+            "poll-1",
+            CARD,
+            GROUP,
+        )
+        .await
+        .unwrap();
+    bindings
+        .register(
+            TENANT,
+            "example.poll",
+            "example.poll.card",
+            "poll-1",
+            "forged",
+            GROUP,
+        )
+        .await
+        .unwrap();
+    let snapshot = poll_snapshot("http://127.0.0.1:1".into());
+    sqlx::query("INSERT INTO plugin_authorization_snapshots(app_id, version, snapshot, valid_until_ms) VALUES ($1, $2, $3, $4)")
+        .bind(TENANT)
+        .bind(snapshot.version as i64)
+        .bind(serde_json::to_value(&snapshot).unwrap())
+        .bind(snapshot.valid_until_ms)
+        .execute(pool.as_ref())
+        .await
+        .unwrap();
+    let messages = PostgresMessageStore::from_pool(pool.as_ref().clone());
+    messages.store_archive(&ctx(), &card()).await.unwrap();
+    assert_eq!(
+        messages
+            .plugin_entity_bindings()
+            .register(&ctx(), TENANT, &[card()])
+            .await
+            .unwrap(),
+        0
+    );
+    let bound = bindings
+        .bindings(TENANT, "example.poll", "poll-1")
+        .await
+        .unwrap();
+    assert_eq!(bound.len(), 1);
+    assert_eq!(
+        (
+            bound[0].server_msg_id.as_str(),
+            bound[0].conversation_id.as_str()
+        ),
+        (CARD, GROUP)
+    );
+    // The card is found by its message (card action checks), with its contribution; a message
+    // that is no bound card is not.
+    let by_message = bindings
+        .binding_by_message(TENANT, CARD)
+        .await
+        .unwrap()
+        .expect("bound card");
+    assert_eq!(
+        (
+            by_message.plugin_id.as_str(),
+            by_message.contribution_id.as_str(),
+            by_message.entity.as_str(),
+            by_message.conversation_id.as_str(),
+            by_message.recalled,
+        ),
+        ("example.poll", "example.poll.card", "poll-1", GROUP, false)
+    );
+    assert!(
+        bindings
+            .binding_by_message(TENANT, "forged")
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        bindings
+            .binding_by_message("app-other", CARD)
+            .await
+            .unwrap()
+            .is_none()
+    );
+
+    // An unconfirmed post_failed (outcome unknown): not due before its delay, not counted as
+    // given up; a confirmed one for the entity replaces it and is due at once. Recalled rows are
+    // never unconfirmed.
+    outbox
+        .enqueue_unconfirmed(
+            TENANT,
+            "example.poll",
+            "example.poll.card",
+            "poll-9",
+            Duration::from_secs(600),
+        )
+        .await
+        .unwrap();
+    assert!(
+        !outbox
+            .post_failed(TENANT, "example.poll", "poll-9")
+            .await
+            .unwrap()
+    );
+    assert!(
+        ours(
+            outbox
+                .claim_due(100, Duration::from_secs(60))
+                .await
+                .unwrap()
+        )
+        .is_empty(),
+        "not due before the verification delay"
+    );
+    // A second unknown outcome changes nothing.
+    outbox
+        .enqueue_unconfirmed(
+            TENANT,
+            "example.poll",
+            "example.poll.card",
+            "poll-9",
+            Duration::ZERO,
+        )
+        .await
+        .unwrap();
+    assert!(
+        ours(
+            outbox
+                .claim_due(100, Duration::from_secs(60))
+                .await
+                .unwrap()
+        )
+        .is_empty()
+    );
+    outbox
+        .enqueue(
+            TENANT,
+            "example.poll",
+            "example.poll.card",
+            "poll-9",
+            "post_failed",
+            None,
+        )
+        .await
+        .unwrap();
+    assert!(
+        outbox
+            .post_failed(TENANT, "example.poll", "poll-9")
+            .await
+            .unwrap()
+    );
+    let confirmed = ours(
+        outbox
+            .claim_due(100, Duration::from_secs(60))
+            .await
+            .unwrap(),
+    );
+    assert_eq!(confirmed.len(), 1);
+    assert_eq!(
+        (confirmed[0].entity.as_str(), confirmed[0].unconfirmed),
+        ("poll-9", false)
+    );
+    // An unconfirmed row that the worker ended counts as given up.
+    outbox
+        .enqueue_unconfirmed(
+            TENANT,
+            "example.poll",
+            "example.poll.card",
+            "poll-10",
+            Duration::ZERO,
+        )
+        .await
+        .unwrap();
+    let due = ours(
+        outbox
+            .claim_due(100, Duration::from_secs(60))
+            .await
+            .unwrap(),
+    );
+    assert_eq!(due.len(), 1);
+    assert!(due[0].unconfirmed);
+    assert!(
+        !outbox
+            .post_failed(TENANT, "example.poll", "poll-10")
+            .await
+            .unwrap()
+    );
+    outbox
+        .complete(due[0].id, LifecycleOutcome::Delivered, None)
+        .await
+        .unwrap();
+    assert!(
+        outbox
+            .post_failed(TENANT, "example.poll", "poll-10")
+            .await
+            .unwrap()
+    );
+    assert!(
+        sqlx::query(
+            "INSERT INTO plugin_entity_lifecycle_outbox \
+             (tenant_id, plugin_id, contribution_id, entity, reason, unconfirmed) \
+             VALUES ($1, 'example.poll', 'example.poll.card', 'poll-11', 'recalled', TRUE)"
+        )
+        .bind(TENANT)
+        .execute(pool.as_ref())
+        .await
+        .is_err(),
+        "a recall is never unconfirmed"
     );
     reset(&pool).await;
 }

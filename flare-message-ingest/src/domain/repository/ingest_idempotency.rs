@@ -20,6 +20,10 @@ pub struct IdempotentRecord {
     pub server_id: String,
     pub conversation_seq: u64,
     pub durability: SendAckDurability,
+    /// What the first send was, beyond its key: the signed request digest of a platform card post
+    /// (`pcard2-…`), empty for every other send. A replay must carry the same value, so a card post
+    /// only ever replays the card it was signed for.
+    pub fingerprint: String,
 }
 
 /// `begin` 的三态结果。

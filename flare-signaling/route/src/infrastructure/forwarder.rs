@@ -814,6 +814,15 @@ impl MessageForwarder {
             grpc_request.metadata_mut(),
             &forwarding_ctx,
         );
+        // A signed connection identity travels on unchanged: the Orchestrator decides the operator
+        // from it, never from the metadata above.
+        flare_server_core::forward_signed_context(&mut grpc_request, ctx).map_err(|_| {
+            map_infra_error(
+                std::io::Error::new(std::io::ErrorKind::InvalidData, "signed context"),
+                ErrorCode::InternalError,
+                "Failed to forward the signed event context",
+            )
+        })?;
 
         let response = match business_clients.event.execute_event(grpc_request).await {
             Ok(response) => response,

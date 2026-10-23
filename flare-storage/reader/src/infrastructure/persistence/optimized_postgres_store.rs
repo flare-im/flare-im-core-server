@@ -24,6 +24,7 @@ use crate::domain::model::{
 use crate::domain::repository::message_storage::MessageStorage;
 use crate::infrastructure::persistence::DbResultExt;
 use crate::infrastructure::persistence::event_stream_row::proto_event_from_events_row;
+use crate::infrastructure::persistence::plugin_card_bindings::PostgresPluginCardBindings;
 use crate::infrastructure::persistence::postgres_base::PostgresBaseStorage;
 use crate::infrastructure::persistence::redis_cache::RedisMessageCache;
 use flare_im_contracts::Ctx;
@@ -151,6 +152,8 @@ pub struct OptimizedPostgresMessageStorageImpl {
     pub base: PostgresBaseStorage,
     pub cache: Option<Arc<RedisMessageCache>>,
     pub metrics: Option<Arc<PerformanceMetrics>>,
+    /// Bindings and projection rules behind the plugin card copy mark.
+    plugin_cards: Arc<PostgresPluginCardBindings>,
 }
 
 impl OptimizedPostgresMessageStorageImpl {
@@ -159,10 +162,12 @@ impl OptimizedPostgresMessageStorageImpl {
         cache: Option<Arc<RedisMessageCache>>,
         metrics: Option<Arc<PerformanceMetrics>>,
     ) -> Self {
+        let plugin_cards = Arc::new(PostgresPluginCardBindings::new(base.pool.clone()));
         Self {
             base,
             cache,
             metrics,
+            plugin_cards,
         }
     }
 
@@ -975,6 +980,29 @@ impl MessageStorage for OptimizedPostgresMessageStorageImpl {
             .collect())
     }
 
+    async fn mark_plugin_card_copies(
+        &self,
+        ctx: &Ctx,
+        messages: &mut [&mut dyn crate::domain::model::plugin_card::PluginCardCarrier],
+    ) {
+        let Ok(tenant_id) = tenant_id_from_ctx(ctx) else {
+            // No tenant: the read itself was refused before any message was loaded.
+            for message in messages.iter_mut() {
+                message
+                    .attributes()
+                    .remove(crate::domain::model::plugin_card::PLUGIN_CARD_UNBOUND_KEY);
+            }
+            return;
+        };
+        crate::domain::model::plugin_card::mark_plugin_card_copies(
+            self.plugin_cards.as_ref(),
+            tenant_id,
+            messages,
+            Utc::now().timestamp_millis(),
+        )
+        .await;
+    }
+
     #[instrument(skip(self), fields(message_id))]
     async fn get_message(&self, ctx: &Ctx, message_id: &str) -> Result<Option<Message>> {
         let tenant_id = tenant_id_from_ctx(ctx)?.to_string();
@@ -1011,6 +1039,8 @@ impl MessageStorage for OptimizedPostgresMessageStorageImpl {
                 ) AS is_pinned
 	            FROM messages
 	            WHERE tenant_id = $1 AND (server_id = $2 OR client_msg_id = $2)
+	            -- A server id match always wins: another sender's client_msg_id may equal it.
+	            ORDER BY (server_id = $2) DESC
 	            LIMIT 1
 	            "#,
         )

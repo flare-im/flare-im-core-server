@@ -39,7 +39,10 @@ use tonic::{Request, Response, Status};
 use super::administer::{
     HookAdministrator, READ_OPERATIONS, WRITE_OPERATIONS, dispatch_hook_administer,
 };
-use crate::application::handler::admin_dispatch::{AdminCall, AdminPluginRequest, dispatch_admin};
+use crate::application::handler::admin_dispatch::{
+    AdminCall, AdminEvidence, AdminOutcome, AdminPluginRequest, admin_evidence_action,
+    dispatch_admin,
+};
 use crate::application::handler::{VerifiedDispatchOrigin, dispatch_capability_command};
 use crate::application::queries::list_registered_capabilities;
 use crate::domain::capability::PluginHealthProbe;
@@ -170,16 +173,62 @@ impl CapabilityGrpcServer {
             .and_then(|payload| {
                 AdminPluginRequest::parse(&payload.value).map_err(Status::invalid_argument)
             })?;
-        let staff = self.staff(&request, &admin.permission())?;
-        let result = dispatch_admin(
+        let staff = self.plugin_staff(&request, &admin)?;
+        let trace = trace_id_from_request(&request);
+        // Audited like every other governance RPC: inside the Staff scope, the durable evidence
+        // (`plugin_admin`, `<pluginId>:<operation>`) is an intent written before the plugin is
+        // called (no evidence store, or a failed write: the plugin is not called) and the outcome
+        // after it (`*_succeeded`, `*_refused`, `*_unknown`); every attempt is also logged in
+        // capability_audit_log. Reads are audited too: an admin page may show personal data (a
+        // poll's voter list).
+        let plugin_id = admin.plugin_id.clone();
+        let operation = admin.operation.clone();
+        let effect = match call {
+            AdminCall::Query => "query",
+            AdminCall::Dispatch => "dispatch",
+        };
+        let evidence = StaffEffectEvidence(self.audit.as_deref());
+        let outcome = dispatch_admin(
             &staff,
             &self.plugin_routes,
             call,
             admin,
             self.runtime.plugin_call_timeout,
+            &evidence,
         )
-        .await
-        .map_err(capability_error_to_status)?;
+        .staff_audit(&staff.ctx, "flare-capability")
+        .await;
+        if let Some(audit) = &self.audit {
+            let detail = match &outcome {
+                Ok(result) => serde_json::json!({
+                    "pluginId": plugin_id,
+                    "call": effect,
+                    "requestId": result.request_id,
+                    "success": result.success,
+                    "errorCode": result.error_code,
+                    "auditTarget": result.audit_target,
+                }),
+                Err(error) => serde_json::json!({
+                    "pluginId": plugin_id,
+                    "call": effect,
+                    "requestId": staff.request_id,
+                    "success": false,
+                    "error": error.plugin_code().unwrap_or("CAPABILITY_ERROR"),
+                }),
+            };
+            audit
+                .record_policy_event(
+                    "plugin_admin",
+                    &staff.tenant_id,
+                    Some(staff.actor_id.as_str()),
+                    None,
+                    Some(operation.as_str()),
+                    detail,
+                    trace.as_deref(),
+                )
+                .await;
+        }
+        let result = outcome.map_err(capability_error_to_status)?;
         let value = serde_json::to_vec(&result)
             .map_err(|_| Status::internal("plugin admin result encoding"))?;
         Ok(Response::new(GenericResponse {
@@ -192,6 +241,34 @@ impl CapabilityGrpcServer {
             error_code: String::new(),
             error_message: String::new(),
         }))
+    }
+
+    /// The forwarded Staff context of a plugin admin call: its permission must be one of the
+    /// plugin's staff codes (`plugin:<pluginId>:<permission>`); `dispatch_admin` then requires the
+    /// exact code the operation declares, which needs the tenant's manifest.
+    fn plugin_staff<T>(
+        &self,
+        request: &Request<T>,
+        admin: &AdminPluginRequest,
+    ) -> Result<VerifiedStaff, Status> {
+        let verifier = self
+            .staff_verifier
+            .as_ref()
+            .ok_or_else(|| Status::unauthenticated("staff context verifier not configured"))?;
+        let ctx = verify_signed_context_metadata(request.metadata(), verifier)?;
+        let claims = flare_im_service_kit::staff_context::staff_claims_of(&ctx)
+            .ok_or_else(|| Status::permission_denied("staff context required"))?
+            .clone();
+        if !claims
+            .permission
+            .as_deref()
+            .is_some_and(|code| admin.is_plugin_permission(code))
+        {
+            return Err(Status::permission_denied(
+                "staff permission is not a permission of this plugin",
+            ));
+        }
+        VerifiedStaff::from_verified(&claims, ctx)
     }
 
     fn staff<T>(&self, request: &Request<T>, permission: &str) -> Result<VerifiedStaff, Status> {
@@ -531,6 +608,9 @@ impl CapabilityService for CapabilityGrpcServer {
         if r.capability_id.is_empty() {
             return Err(Status::invalid_argument("capability_id required"));
         }
+        if r.message_id.len() > 256 || r.message_id.chars().any(char::is_control) {
+            return Err(Status::invalid_argument("invalid message_id"));
+        }
         // 规范写法检查已拒绝空租户，这里的租户必然非空，日志直接记它，不再有 "0" 兜底（W13-D）。
         tracing::trace!(
             capability_id = %r.capability_id,
@@ -587,6 +667,7 @@ impl CapabilityService for CapabilityGrpcServer {
             } else {
                 Some(r.request_id)
             },
+            message_id: (!r.message_id.is_empty()).then_some(r.message_id),
         };
 
         let plugin_health_stale = self.runtime.plugin_health_check_interval.saturating_mul(2);
@@ -922,6 +1003,55 @@ impl CapabilityService for CapabilityGrpcServer {
             &HookAdministrator::from_staff(&staff),
         )
         .await
+    }
+}
+
+/// [`AdminEvidence`] on the durable audit outbox (`record_staff_effect`, inside the Staff scope).
+/// Without an audit store no admin call reaches a plugin.
+struct StaffEffectEvidence<'a>(Option<&'a PostgresCapabilityAuditLog>);
+
+#[async_trait::async_trait]
+impl AdminEvidence for StaffEffectEvidence<'_> {
+    async fn intent(
+        &self,
+        tenant_id: &str,
+        aggregate_id: &str,
+        call: AdminCall,
+    ) -> std::result::Result<(), String> {
+        self.record(tenant_id, aggregate_id, admin_evidence_action(call, None))
+            .await
+    }
+
+    async fn outcome(
+        &self,
+        tenant_id: &str,
+        aggregate_id: &str,
+        call: AdminCall,
+        outcome: AdminOutcome,
+    ) -> std::result::Result<(), String> {
+        self.record(
+            tenant_id,
+            aggregate_id,
+            admin_evidence_action(call, Some(outcome)),
+        )
+        .await
+    }
+}
+
+impl StaffEffectEvidence<'_> {
+    async fn record(
+        &self,
+        tenant_id: &str,
+        aggregate_id: &str,
+        action: &'static str,
+    ) -> std::result::Result<(), String> {
+        let audit = self
+            .0
+            .ok_or_else(|| "plugin admin audit store is not configured".to_owned())?;
+        audit
+            .record_staff_effect(tenant_id, "plugin_admin", aggregate_id, action)
+            .await
+            .map_err(|error| error.to_string())
     }
 }
 

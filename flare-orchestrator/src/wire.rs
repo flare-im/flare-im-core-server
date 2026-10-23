@@ -113,6 +113,35 @@ pub async fn initialize(
             "FLARE_INTERNAL_CTX_PRIVATE_KEY is missing: conversation member reads go unsigned"
         );
     }
+    // Message operations (recall, edit, delete, reaction, pin, mark) are authorized against the
+    // stored message, read from Storage Reader as this service (see MessageOperationPolicy).
+    let storage_reader_name = flare_im_contracts::service_names::get_service_name(
+        flare_im_contracts::service_names::STORAGE_READER,
+    );
+    let storage_reader_channel =
+        flare_im_service_kit::discovery::connect_grpc_channel_lazy_from_app_config(
+            app_config,
+            &storage_reader_name,
+            flare_im_service_kit::discovery::default_static_grpc_fallback(
+                flare_im_contracts::service_names::STORAGE_READER,
+            ),
+        )
+        .map_err(|e| {
+            flare_server_core::error::FlareError::system(format!(
+                "lazy storage reader channel ({storage_reader_name}) failed: {e}"
+            ))
+        })?;
+    if read_signer.is_none() {
+        tracing::warn!(
+            "FLARE_INTERNAL_CTX_PRIVATE_KEY is missing: recall, edit, delete, reaction, pin and mark events are refused (their message cannot be read)"
+        );
+    }
+    let message_targets: Arc<dyn crate::domain::repository::MessageTargetRepository> = Arc::new(
+        crate::infrastructure::external::StorageReaderMessageTargets::new(
+            storage_reader_channel,
+            read_signer.clone(),
+        ),
+    );
     let conversation_repository = Arc::new(
         ConversationClient::new(conversation_channel)
             .with_service_read_signer(read_signer, flare_im_contracts::service_names::ORCHESTRATOR),
@@ -158,7 +187,8 @@ pub async fn initialize(
         )
         .with_user_sync_index(user_sync_index_repository)
         .with_user_sync_compensation(user_sync_compensation_repository)
-        .with_read_watermark(read_watermark_repository),
+        .with_read_watermark(read_watermark_repository)
+        .with_message_targets(message_targets),
     );
 
     let event_handler = Arc::new(EventHandler::new(event_domain_service.clone()));

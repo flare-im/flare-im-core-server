@@ -49,4 +49,7 @@ pub struct ApplicationContext {
     pub hook_config_listener: Option<HookConfigListener>,
     /// Hook 执行证据的批量写入与保留期清理（有库且开启记录时）；随进程停机结束，停机时写完缓冲。
     pub(crate) hook_execution_background: Option<HookExecutionBackground>,
+    /// 插件实体生命周期 outbox 的投递任务（有库且配置了插件调用签名器时）；随进程停机结束。
+    pub(crate) entity_lifecycle_worker:
+        Option<crate::application::handler::entity_lifecycle::EntityLifecycleWorker>,
 }

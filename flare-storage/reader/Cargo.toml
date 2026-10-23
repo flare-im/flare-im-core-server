@@ -19,6 +19,7 @@ flare-core-runtime = { workspace = true }
 flare-proto = { workspace = true }
 flare-grpc-proto = { workspace = true }
 flare-im-contracts = { workspace = true }
+flare-im-capability-core = { workspace = true }
 flare-im-service-kit = { workspace = true }
 tokio = { workspace = true }
 tonic = { workspace = true }

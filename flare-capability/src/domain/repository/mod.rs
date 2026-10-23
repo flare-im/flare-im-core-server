@@ -148,5 +148,7 @@ pub trait HookExecutionRepository: Send + Sync {
         filter: &crate::domain::model::HookExecutionFilter,
     ) -> flare_server_core::error::Result<Vec<crate::domain::model::StoredHookExecution>>;
 }
+pub mod entity_lifecycle;
+pub mod plugin_card;
 pub mod plugin_state;
 pub mod resource_access;

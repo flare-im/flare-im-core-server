@@ -100,11 +100,12 @@ pub fn build_long_connection_handler(
         storage_sync_pool,
         message_signer.clone(),
     ));
+    let event_port: Arc<dyn crate::domain::ports::IEventCommandPort> = Arc::new(
+        RouterEventCommandPort::new(route_pool.clone(), message_signer.clone()),
+    );
     let message_port: Arc<dyn crate::domain::ports::IMessageCommandPort> = Arc::new(
         RouterMessageCommandPort::new(route_pool.clone(), message_signer),
     );
-    let event_port: Arc<dyn crate::domain::ports::IEventCommandPort> =
-        Arc::new(RouterEventCommandPort::new(route_pool.clone()));
     let sync_port: Arc<dyn crate::domain::ports::ISyncPort> = storage_sync;
 
     let sync_service = Arc::new(

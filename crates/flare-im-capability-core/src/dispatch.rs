@@ -11,6 +11,10 @@ pub struct CapabilityDispatchCommand {
     pub conversation_id: Option<String>,
     pub payload: Option<Value>,
     pub request_id: Option<String>,
+    /// The stored message a plugin card action or detail came from (its server message id). Core
+    /// accepts a call naming a card's entity only from the card bound to that entity.
+    #[serde(default)]
+    pub message_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

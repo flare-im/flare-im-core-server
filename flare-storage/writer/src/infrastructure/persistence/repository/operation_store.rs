@@ -173,11 +173,23 @@ impl OperationStore {
         }
         if status_int == MessageStatus::Recalled as i32 {
             // 撤回的插件卡片不再接收共享状态，针对它的插件调用也被拒绝（Capability 读这一列）。
-            // 走 (tenant_id, server_msg_id) 索引；不是插件卡片的消息命中零行。
+            // 同一条语句给插件写生命周期通知（outbox，migrations/0018）：撤回与通知一起提交，
+            // Capability 之后至少一次调用插件的 entityLifecycle.unbound（reason recalled），插件取消
+            // 投票、退回红包。走 (tenant_id, server_msg_id) 索引；不是插件卡片的消息命中零行，
+            // 重复的撤回事件不再命中（recalled_at 已写），通知也只有一条。
             sqlx::query(
                 r#"
-                UPDATE plugin_entity_bindings SET recalled_at = CURRENT_TIMESTAMP
-                WHERE tenant_id = $1 AND server_msg_id = $2 AND recalled_at IS NULL
+                WITH recalled AS (
+                    UPDATE plugin_entity_bindings SET recalled_at = CURRENT_TIMESTAMP
+                    WHERE tenant_id = $1 AND server_msg_id = $2 AND recalled_at IS NULL
+                    RETURNING tenant_id, plugin_id, contribution_id, entity, server_msg_id
+                )
+                INSERT INTO plugin_entity_lifecycle_outbox (
+                    tenant_id, plugin_id, contribution_id, entity, reason, server_msg_id
+                )
+                SELECT tenant_id, plugin_id, contribution_id, entity, 'recalled', server_msg_id
+                FROM recalled
+                ON CONFLICT (tenant_id, plugin_id, entity, reason) DO NOTHING
                 "#,
             )
             .bind(tenant_id)

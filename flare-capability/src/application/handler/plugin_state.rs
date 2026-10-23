@@ -369,74 +369,79 @@ impl PluginStatePublisher {
             }
         }
     }
-
-    /// Whether every card bound to the entity was recalled (`false` without a binding: an entity
-    /// not shown by any card yet, such as one being created).
-    pub async fn entity_recalled(
-        &self,
-        tenant_id: &str,
-        plugin_id: &str,
-        entity: &str,
-    ) -> Result<bool> {
-        let bindings = self
-            .bindings
-            .bindings(tenant_id, plugin_id, entity)
-            .await
-            .map_err(|_| CapabilityError::System("plugin entity bindings unavailable".into()))?;
-        Ok(!bindings.is_empty() && bindings.iter().all(|b| b.recalled))
-    }
 }
 
-/// The entity an invocation of `operation` names: the value an action of a message-content
-/// contribution binds from the card's `entityPath` (or its detail operation's input does).
-/// `None` when no card action of this operation carries the entity.
+/// Where an invocation of `operation` carries a card's entity: one `(contribution, input name)`
+/// for every message-content contribution with an `entityPath` whose card actions, detail
+/// operation input or detail actions bind that path into an input of `operation`. Empty when no
+/// card passes its entity to this operation (it creates one, or is not a card operation).
+pub fn entity_inputs(manifest: &PluginManifest, operation: &str) -> Vec<(String, String)> {
+    let mut found: Vec<(String, String)> = Vec::new();
+    let mut add = |contribution: &str, name: &str| {
+        if !found.iter().any(|(c, n)| c == contribution && n == name) {
+            found.push((contribution.to_owned(), name.to_owned()));
+        }
+    };
+    let from_document = |document: &UiDocument, entity_path: &str, add: &mut dyn FnMut(&str)| {
+        for action in &document.actions {
+            if let UiActionTarget::Operation { operation: target } = &action.target
+                && target == operation
+            {
+                for (name, path) in &action.input {
+                    if path.as_str() == entity_path {
+                        add(name);
+                    }
+                }
+            }
+        }
+    };
+    for contribution in manifest
+        .client_extensions
+        .contributions
+        .iter()
+        .filter(|c| c.kind == UiContributionKind::MessageContent)
+    {
+        let Some(entity_path) = contribution.entity_path.as_deref() else {
+            continue;
+        };
+        let id = contribution.id.as_str();
+        from_document(&contribution.schema, entity_path, &mut |name| add(id, name));
+        if let Some(detail) = contribution.detail.as_ref() {
+            if detail.operation == operation {
+                for (name, path) in &detail.input {
+                    if path.as_str() == entity_path {
+                        add(id, name);
+                    }
+                }
+            }
+            from_document(&detail.document, entity_path, &mut |name| add(id, name));
+        }
+    }
+    found
+}
+
+/// The entity id `input` carries under `name`: a string, or an integer as its decimal text, that
+/// is a valid entity id. Anything else names nothing.
+pub fn entity_at(input: &Value, name: &str) -> Option<String> {
+    let id = match input.get(name)? {
+        Value::String(id) => id.clone(),
+        Value::Number(n) if n.is_u64() || n.is_i64() => n.to_string(),
+        _ => return None,
+    };
+    valid_entity_id(&id).then_some(id)
+}
+
+/// The entity an invocation of `operation` names: the value at the first input
+/// [`entity_inputs`] lists that carries a valid entity id. `None` when no card action of this
+/// operation carries the entity, or the input carries none.
 pub fn invocation_entity(
     manifest: &PluginManifest,
     operation: &str,
     input: &Value,
 ) -> Option<String> {
-    let entity_at = |name: &str| -> Option<String> {
-        let id = match input.get(name)? {
-            Value::String(id) => id.clone(),
-            Value::Number(n) if n.is_u64() || n.is_i64() => n.to_string(),
-            _ => return None,
-        };
-        valid_entity_id(&id).then_some(id)
-    };
-    let from_document = |document: &UiDocument, entity_path: &str| {
-        document
-            .actions
-            .iter()
-            .find_map(|action| match &action.target {
-                UiActionTarget::Operation { operation: target } if target == operation => action
-                    .input
-                    .iter()
-                    .find(|(_, path)| path.as_str() == entity_path)
-                    .and_then(|(name, _)| entity_at(name)),
-                _ => None,
-            })
-    };
-    manifest
-        .client_extensions
-        .contributions
+    entity_inputs(manifest, operation)
         .iter()
-        .filter(|c| c.kind == UiContributionKind::MessageContent)
-        .find_map(|contribution| {
-            let entity_path = contribution.entity_path.as_deref()?;
-            from_document(&contribution.schema, entity_path).or_else(|| {
-                let detail = contribution.detail.as_ref()?;
-                if detail.operation == operation
-                    && let Some(found) = detail
-                        .input
-                        .iter()
-                        .find(|(_, path)| path.as_str() == entity_path)
-                        .and_then(|(name, _)| entity_at(name))
-                {
-                    return Some(found);
-                }
-                from_document(&detail.document, entity_path)
-            })
-        })
+        .find_map(|(_, name)| entity_at(input, name))
 }
 
 #[cfg(test)]

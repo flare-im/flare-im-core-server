@@ -38,6 +38,7 @@ mod tests {
             conversation_id: None,
             payload: None,
             request_id: Some("r1".into()),
+            message_id: None,
         }
     }
 

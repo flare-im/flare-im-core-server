@@ -1,8 +1,9 @@
-//! `plugin_entity_bindings` for Capability: Storage Writer registers the rows when it stores a plugin
-//! card and marks them recalled; Capability reads them and raises `published_version` by
-//! compare-and-set before it fans a version out (migrations/0016).
+//! `plugin_entity_bindings` for Capability: Capability registers the card it posts and Storage Writer
+//! the cards it stores, and the writer marks them recalled; Capability reads them, checks card
+//! actions against them and raises `published_version` by compare-and-set before it fans a version
+//! out (migrations/0016).
 use crate::domain::repository::plugin_state::{
-    ClaimedBinding, EntityBinding, PluginEntityBindingStore,
+    ClaimedBinding, EntityBinding, MessageBinding, PluginEntityBindingStore,
 };
 use flare_server_core::error::{FlareError, Result};
 use sqlx::PgPool;
@@ -23,7 +24,7 @@ fn version_param(version: u64) -> Result<i64> {
 impl PostgresPluginEntityBindings {
     /// Fails when the table is absent (migration 0016 not applied).
     pub async fn check_schema(&self) -> Result<()> {
-        sqlx::query("SELECT tenant_id, plugin_id, entity, server_msg_id, conversation_id, published_version, recalled_at FROM plugin_entity_bindings LIMIT 0")
+        sqlx::query("SELECT tenant_id, plugin_id, entity, server_msg_id, conversation_id, contribution_id, published_version, recalled_at FROM plugin_entity_bindings LIMIT 0")
             .execute(self.pool.as_ref())
             .await
             .map_err(unavailable)?;
@@ -61,6 +62,38 @@ impl PluginEntityBindingStore for PostgresPluginEntityBindings {
                 },
             )
             .collect())
+    }
+
+    async fn binding_by_message(
+        &self,
+        tenant_id: &str,
+        server_msg_id: &str,
+    ) -> Result<Option<MessageBinding>> {
+        // idx_plugin_entity_bindings_message. Two rows for one message would mean two entities on
+        // one card: refused rather than guessed.
+        let mut rows: Vec<(String, String, String, String, bool)> = sqlx::query_as(
+            "SELECT plugin_id, contribution_id, entity, conversation_id, recalled_at IS NOT NULL \
+             FROM plugin_entity_bindings WHERE tenant_id = $1 AND server_msg_id = $2 LIMIT 2",
+        )
+        .bind(tenant_id)
+        .bind(server_msg_id)
+        .fetch_all(self.pool.as_ref())
+        .await
+        .map_err(unavailable)?;
+        if rows.len() > 1 {
+            return Err(FlareError::system(
+                "plugin card bound to more than one entity",
+            ));
+        }
+        Ok(rows.pop().map(
+            |(plugin_id, contribution_id, entity, conversation_id, recalled)| MessageBinding {
+                plugin_id,
+                contribution_id,
+                entity,
+                conversation_id,
+                recalled,
+            },
+        ))
     }
 
     async fn claim_version(
@@ -108,6 +141,42 @@ impl PluginEntityBindingStore for PostgresPluginEntityBindings {
                 },
             )
             .collect())
+    }
+
+    async fn register(
+        &self,
+        tenant_id: &str,
+        plugin_id: &str,
+        contribution_id: &str,
+        entity: &str,
+        server_msg_id: &str,
+        conversation_id: &str,
+    ) -> Result<()> {
+        // The writer's statement (`plugin_entity_bindings.rs` in Storage Writer): one binding per
+        // entity; the writer's later registration of the same card finds this row.
+        sqlx::query(
+            r#"
+            INSERT INTO plugin_entity_bindings (
+                tenant_id, plugin_id, entity, server_msg_id, conversation_id, contribution_id
+            )
+            SELECT $1, $2, $3, $4, $5, $6
+            WHERE NOT EXISTS (
+                SELECT 1 FROM plugin_entity_bindings
+                WHERE tenant_id = $1 AND plugin_id = $2 AND entity = $3
+            )
+            ON CONFLICT DO NOTHING
+            "#,
+        )
+        .bind(tenant_id)
+        .bind(plugin_id)
+        .bind(entity)
+        .bind(server_msg_id)
+        .bind(conversation_id)
+        .bind(contribution_id)
+        .execute(self.pool.as_ref())
+        .await
+        .map_err(unavailable)?;
+        Ok(())
     }
 
     async fn release_version(

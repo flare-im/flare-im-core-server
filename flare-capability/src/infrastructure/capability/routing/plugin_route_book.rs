@@ -73,6 +73,15 @@ pub struct PluginRouteBook {
     /// a database or an Orchestrator authority: shared state is then never published.
     pub(crate) state_publisher:
         Option<Arc<crate::application::handler::plugin_state::PluginStatePublisher>>,
+    /// Plugin entity bindings (the database): card actions are checked against them and a posted
+    /// card is bound at once. `None` without a database: calls naming an entity are refused.
+    pub(crate) entity_bindings:
+        Option<Arc<dyn crate::domain::repository::plugin_state::PluginEntityBindingStore>>,
+    /// Platform posting of the card a call result carries (`data.message`).
+    pub(crate) card_poster: Option<Arc<crate::application::handler::plugin_card::PluginCardPoster>>,
+    /// The entity lifecycle outbox (`post_failed` and `recalled` notifications to plugins).
+    pub(crate) lifecycle:
+        Option<Arc<dyn crate::domain::repository::entity_lifecycle::EntityLifecycleOutbox>>,
     inner: Arc<DashMap<String, RouteEntry>>,
     health: Arc<DashMap<String, PluginHealthStatus>>,
     /// 本进程注销的时刻：注销前开始的重读不得把它们再加回来。
@@ -97,6 +106,26 @@ impl PluginRouteBook {
         publisher: Option<Arc<crate::application::handler::plugin_state::PluginStatePublisher>>,
     ) -> Self {
         self.state_publisher = publisher;
+        self
+    }
+    pub fn with_entity_bindings(
+        mut self,
+        bindings: Option<
+            Arc<dyn crate::domain::repository::plugin_state::PluginEntityBindingStore>,
+        >,
+    ) -> Self {
+        self.entity_bindings = bindings;
+        self
+    }
+    pub fn with_card_posting(
+        mut self,
+        poster: Option<Arc<crate::application::handler::plugin_card::PluginCardPoster>>,
+        lifecycle: Option<
+            Arc<dyn crate::domain::repository::entity_lifecycle::EntityLifecycleOutbox>,
+        >,
+    ) -> Self {
+        self.card_poster = poster;
+        self.lifecycle = lifecycle;
         self
     }
     pub fn new() -> Self {

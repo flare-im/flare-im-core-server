@@ -11,6 +11,8 @@ pub use hook_query::HookQueryHandler;
 pub(crate) use remote_dispatch::VerifiedDispatchOrigin;
 pub(crate) use remote_dispatch::dispatch_remote;
 pub mod admin_dispatch;
+pub mod entity_lifecycle;
+pub mod plugin_card;
 pub mod plugin_state;
 #[cfg(test)]
 mod plugin_state_pg_tests;

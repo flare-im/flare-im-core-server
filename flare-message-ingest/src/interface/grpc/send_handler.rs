@@ -14,6 +14,7 @@ use flare_grpc_proto::message::{
 use flare_im_contracts::utils::normalize_tenant_id;
 use flare_im_hooks::is_pre_send_rejection;
 use flare_im_service_kit::metrics::MessageOrchestratorMetrics;
+use flare_im_service_kit::plugin_platform;
 use flare_proto::common::{Message, MessageSource, MessageType};
 use flare_server_core::auth::{SignedActorType, SignedContextClaims, SignedContextVerifier};
 use flare_server_core::error::grpc::IntoGrpc;
@@ -104,6 +105,29 @@ fn authorize_message_claims(
             ));
         }
     }
+    // Plugin cards come from the platform only: Capability's card post context authorizes exactly
+    // the card it was signed for and nothing else; nobody else may send a top-level plugin card.
+    if plugin_platform::is_card_post_context(claims) {
+        if system_only {
+            return Err(Status::permission_denied("invalid platform plugin card"));
+        }
+        return plugin_platform::verify_card_post(claims, message)
+            .map_err(|_| Status::permission_denied("invalid platform plugin card"));
+    }
+    // A wire Custom of the plugin card type renders as a card too, and case or white-space
+    // variants of either type are refused with it.
+    if plugin_platform::message_claims_plugin_card(message) {
+        return Err(platform_only(
+            "plugin cards are posted by the platform from the plugin's result",
+        ));
+    }
+    // The card post namespace is the platform's: a sender occupying the client message id of a
+    // card would make Ingest and Storage Writer deduplicate the real card into its message.
+    if plugin_platform::is_reserved_client_msg_id(&message.client_msg_id) {
+        return Err(platform_only(
+            "client message ids starting with pcard- belong to platform plugin cards",
+        ));
+    }
     match claims.actor_type {
         SignedActorType::User if !system_only => {
             if message.sender_id != claims.actor_id
@@ -173,6 +197,39 @@ fn authorize_message_claims(
     Ok(())
 }
 
+/// `PERMISSION_DENIED` with reason [`plugin_platform::PLUGIN_CARD_PLATFORM_ONLY`].
+fn platform_only(details: &str) -> Status {
+    Status::from(
+        flare_server_core::error::ErrorBuilder::new(
+            flare_server_core::error::ErrorCode::PermissionDenied,
+            plugin_platform::PLUGIN_CARD_PLATFORM_ONLY,
+        )
+        .details(details)
+        .build_error(),
+    )
+}
+
+/// A card post is signed for the message's conversation; the request-level conversation may only
+/// repeat it, so a card cannot be rerouted to another conversation.
+fn request_conversation_matches(
+    ctx: &flare_server_core::context::Ctx,
+    request_conversation_id: &str,
+    message: &Message,
+) -> Result<(), Status> {
+    use flare_server_core::grpc::middleware::signed_context::VerifiedContext;
+    let card_post = ctx
+        .get_data::<VerifiedContext>()
+        .and_then(|verified| verified.claims())
+        .is_some_and(plugin_platform::is_card_post_context);
+    if card_post
+        && !request_conversation_id.is_empty()
+        && request_conversation_id != message.conversation_id
+    {
+        return Err(Status::permission_denied("invalid platform plugin card"));
+    }
+    Ok(())
+}
+
 /// 发送失败转成 gRPC `Status`，`details` 带结构化的 `ErrorDetail`。
 ///
 /// PreSend 扩展明确拒绝（策略拒绝，见 [`is_pre_send_rejection`]）回 `FAILED_PRECONDITION`：它是
@@ -232,6 +289,7 @@ impl MessageSendService for MessageSendGrpcHandler {
             Status::invalid_argument("message required")
         })?;
         authorize_message(&ctx, &message, false)?;
+        request_conversation_matches(&ctx, &req.conversation_id, &message)?;
         self.metrics
             .observe_send_stage("grpc_request_decode", "success", decode_start.elapsed());
 
@@ -306,6 +364,7 @@ impl MessageSendService for MessageSendGrpcHandler {
             match m.message {
                 Some(msg) => {
                     authorize_message(&ctx, &msg, false)?;
+                    request_conversation_matches(&ctx, &m.conversation_id, &msg)?;
                     messages.push(crate::application::commands::SendMessageCommand {
                         burn_enabled: false,
                         burn_after_read_seconds: None,
@@ -795,6 +854,203 @@ mod tests {
         }
         forged.sender_id = caller.actor_id.clone();
         assert!(authorize_message_claims(&caller, &forged, true).is_err());
+    }
+
+    fn plugin_card_message(sender: &str) -> Message {
+        let mut msg = message(sender, MessageSource::User, MessageType::AppCard);
+        msg.conversation_id = "2-group-a".into();
+        msg.client_msg_id = "pcard-1".into();
+        msg.content = Some(flare_proto::common::MessageContent {
+            content: Some(flare_proto::common::message_content::Content::AppCard(
+                flare_proto::common::AppCardContent {
+                    app_id: "example.poll".into(),
+                    card_type: plugin_platform::PLUGIN_CARD_TYPE.into(),
+                    payload_schema: plugin_platform::PLUGIN_CARD_PAYLOAD_SCHEMA.into(),
+                    payload: br#"{"pluginId":"example.poll"}"#.to_vec(),
+                    ..Default::default()
+                },
+            )),
+        });
+        msg
+    }
+
+    /// Capability's card post context for exactly `msg`.
+    fn card_poster(msg: &Message) -> SignedContextClaims {
+        let mut caller = claims(SignedActorType::User, &msg.sender_id);
+        caller.kid = plugin_platform::CARD_POST_KID.into();
+        caller.roles = vec![plugin_platform::CARD_POST_ROLE.into()];
+        caller.request_id = plugin_platform::card_post_request_id(&caller.tenant_id, msg).unwrap();
+        caller
+    }
+
+    #[test]
+    fn a_user_cannot_send_a_top_level_plugin_card() {
+        let user = claims(SignedActorType::User, "alice");
+        let status = authorize_message_claims(&user, &plugin_card_message("alice"), false)
+            .expect_err("a user-assembled plugin card must not pass");
+        assert_eq!(status.code(), tonic::Code::PermissionDenied);
+        let detail = flare_server_core::error::grpc::decode_error_detail(&status).expect("detail");
+        assert_eq!(detail.reason, plugin_platform::PLUGIN_CARD_PLATFORM_ONLY);
+        // Neither may the bridge, as a notification.
+        let bridge = claims(SignedActorType::Service, "flare-social-bridge");
+        let mut notice = plugin_card_message("alice");
+        notice.source = MessageSource::System as i32;
+        notice.message_type = MessageType::Notification as i32;
+        assert!(authorize_message_claims(&bridge, &notice, false).is_err());
+        // Forwarding a card puts it among the items: not a top-level card.
+        let mut forward = message("alice", MessageSource::User, MessageType::Forward);
+        forward.content = Some(flare_proto::common::MessageContent {
+            content: Some(flare_proto::common::message_content::Content::Forward(
+                flare_proto::common::ForwardContent {
+                    items: vec![flare_proto::common::ForwardItem {
+                        content: plugin_card_message("bob").content,
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                },
+            )),
+        });
+        assert!(authorize_message_claims(&user, &forward, false).is_ok());
+    }
+
+    /// The core SDK renders a wire Custom of the plugin card type as a card, so a user
+    /// sending one is refused like an APP_CARD, and so are case and white-space variants.
+    #[test]
+    fn a_user_cannot_send_a_custom_or_variant_plugin_card() {
+        let user = claims(SignedActorType::User, "alice");
+        let custom = |kind: &str| {
+            let mut msg = message("alice", MessageSource::User, MessageType::Custom);
+            msg.client_msg_id = "cm-1".into();
+            msg.content = Some(flare_proto::common::MessageContent {
+                content: Some(flare_proto::common::message_content::Content::Custom(
+                    flare_proto::common::CustomContent {
+                        r#type: kind.into(),
+                        payload: br#"{"pluginId":"example.poll","contributionId":"x"}"#.to_vec(),
+                        ..Default::default()
+                    },
+                )),
+            });
+            msg
+        };
+        for kind in [
+            plugin_platform::PLUGIN_CARD_TYPE,
+            "FLARE.PLUGIN.MESSAGE.V1",
+            " flare.plugin.message.v1 ",
+        ] {
+            let status = authorize_message_claims(&user, &custom(kind), false)
+                .expect_err("a forged custom plugin card must not pass");
+            assert_eq!(status.code(), tonic::Code::PermissionDenied, "{kind:?}");
+            let detail =
+                flare_server_core::error::grpc::decode_error_detail(&status).expect("detail");
+            assert_eq!(detail.reason, plugin_platform::PLUGIN_CARD_PLATFORM_ONLY);
+            let mut app_card = plugin_card_message("alice");
+            app_card.client_msg_id = "cm-1".into();
+            if let Some(flare_proto::common::MessageContent {
+                content: Some(flare_proto::common::message_content::Content::AppCard(card)),
+            }) = app_card.content.as_mut()
+            {
+                card.card_type = kind.into();
+            }
+            assert!(
+                authorize_message_claims(&user, &app_card, false).is_err(),
+                "{kind:?}"
+            );
+        }
+        // Ordinary custom messages are untouched.
+        assert!(authorize_message_claims(&user, &custom("red_packet"), false).is_ok());
+    }
+
+    /// Nobody but the platform may use the card post client id namespace, so a creator
+    /// cannot occupy the id of a card before the platform posts it.
+    #[test]
+    fn the_card_client_id_namespace_is_the_platforms() {
+        let user = claims(SignedActorType::User, "alice");
+        for id in ["pcard-0123456789abcdef", "PCARD-x", " pcard-1"] {
+            let mut text = message("alice", MessageSource::User, MessageType::Text);
+            text.client_msg_id = id.into();
+            let status = authorize_message_claims(&user, &text, false)
+                .expect_err("a reserved client id must not pass");
+            assert_eq!(status.code(), tonic::Code::PermissionDenied, "{id:?}");
+        }
+        let mut text = message("alice", MessageSource::User, MessageType::Text);
+        text.client_msg_id = "cm-pcard-1".into();
+        assert!(authorize_message_claims(&user, &text, false).is_ok());
+    }
+
+    /// A card post's request-level conversation can only repeat the signed one.
+    #[test]
+    fn a_card_post_request_names_only_its_signed_conversation() {
+        use flare_server_core::grpc::middleware::signed_context::verify_signed_context_metadata;
+        let key = ed25519_dalek::SigningKey::from_bytes(&[61; 32]);
+        let signer = flare_server_core::SignedContextSigner::from_private_key(
+            &ed25519_dalek::pkcs8::EncodePrivateKey::to_pkcs8_pem(&key, Default::default())
+                .unwrap(),
+        )
+        .unwrap()
+        .with_kid(plugin_platform::CARD_POST_KID)
+        .unwrap();
+        let mut keys = flare_server_core::auth::KeySet::empty();
+        keys.insert(
+            plugin_platform::CARD_POST_KID,
+            &ed25519_dalek::pkcs8::EncodePublicKey::to_public_key_pem(
+                &key.verifying_key(),
+                Default::default(),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let verifier = SignedContextVerifier::from_key_set(keys);
+        let msg = plugin_card_message("alice");
+        let token = signer
+            .sign(
+                &flare_server_core::SignedContextIdentity::new(
+                    SignedActorType::User,
+                    "alice",
+                    "tenant-a",
+                    plugin_platform::card_post_request_id("tenant-a", &msg).unwrap(),
+                )
+                .with_roles(vec![plugin_platform::CARD_POST_ROLE.into()]),
+            )
+            .unwrap();
+        let mut request = tonic::Request::new(());
+        request
+            .metadata_mut()
+            .insert("x-flare-ctx", token.parse().unwrap());
+        let ctx = verify_signed_context_metadata(request.metadata(), &verifier).unwrap();
+        assert!(authorize_message(&ctx, &msg, false).is_ok());
+        assert!(request_conversation_matches(&ctx, "", &msg).is_ok());
+        assert!(request_conversation_matches(&ctx, &msg.conversation_id, &msg).is_ok());
+        assert!(request_conversation_matches(&ctx, "2-group-b", &msg).is_err());
+    }
+
+    #[test]
+    fn capability_posts_exactly_the_card_it_signed_and_nothing_else() {
+        let msg = plugin_card_message("alice");
+        let poster = card_poster(&msg);
+        assert!(authorize_message_claims(&poster, &msg, false).is_ok());
+        // Not as a system message.
+        assert!(authorize_message_claims(&poster, &msg, true).is_err());
+        // Another sender or conversation than the post was signed for.
+        let mut other = msg.clone();
+        other.sender_id = "bob".into();
+        assert!(authorize_message_claims(&poster, &other, false).is_err());
+        let mut other = msg.clone();
+        other.conversation_id = "2-group-b".into();
+        assert!(authorize_message_claims(&poster, &other, false).is_err());
+        // Any other content under the card post key, even a well-formed text by the same user.
+        let text = message("alice", MessageSource::User, MessageType::Text);
+        let mut text_poster = poster.clone();
+        text_poster.request_id = "req-1".into();
+        assert!(authorize_message_claims(&poster, &text, false).is_err());
+        assert!(authorize_message_claims(&text_poster, &text, false).is_err());
+        // The card post role under another key is a plain user context: no plugin card.
+        let mut legacy = poster.clone();
+        legacy.kid = flare_server_core::auth::LEGACY_KID.into();
+        assert!(authorize_message_claims(&legacy, &msg, false).is_err());
+        // The card post key without the role.
+        let mut roleless = poster;
+        roleless.roles.clear();
+        assert!(authorize_message_claims(&roleless, &msg, false).is_err());
     }
 
     #[test]

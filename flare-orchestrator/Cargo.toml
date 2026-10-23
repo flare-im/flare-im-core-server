@@ -42,6 +42,10 @@ flare-im-service-kit = { workspace = true }
 flare-im-seq = { workspace = true }
 flare-im-hooks = { workspace = true }
 
+[dev-dependencies]
+# Signed test contexts (a throwaway Ed25519 key per test) for the message operation policy.
+ed25519-dalek = { version = "2", features = ["pkcs8", "pem"] }
+
 [features]
 default = []
 

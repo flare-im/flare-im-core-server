@@ -75,12 +75,19 @@ fn command() -> CapabilityDispatchCommand {
         conversation_id: Some("conversation-1".into()),
         payload: None,
         request_id: Some("r1".into()),
+        message_id: None,
     }
 }
+/// A policy backend with no user grant at all: plugin operations never need one.
 fn policy() -> Arc<InMemoryCapabilityGrants> {
-    let policy = Arc::new(InMemoryCapabilityGrants::new());
-    policy.grant_user_capability("app-a", "u1", "example.echo.run", None, None, None);
-    policy
+    Arc::new(InMemoryCapabilityGrants::new())
+}
+
+fn plugin_code(result: &Result<CapabilityDispatchResult>) -> Option<&str> {
+    match result {
+        Err(error) => error.plugin_code(),
+        Ok(_) => None,
+    }
 }
 
 #[tokio::test]
@@ -103,7 +110,17 @@ async fn registered_endpoint_cannot_bypass_absent_expired_disabled_or_revoked_pr
         },
     );
     let backend: Arc<dyn CapabilityPolicyBackend> = policy();
-    for mode in 0..6 {
+    use flare_im_service_kit::plugin_platform::{
+        PLUGIN_DISABLED, PLUGIN_NOT_INSTALLED, PLUGIN_PERMISSION_DENIED,
+    };
+    for (mode, code) in [
+        (0, PLUGIN_NOT_INSTALLED),
+        (1, PLUGIN_DISABLED),
+        (2, PLUGIN_DISABLED),
+        (3, PLUGIN_NOT_INSTALLED),
+        (4, PLUGIN_PERMISSION_DENIED),
+        (5, PLUGIN_NOT_INSTALLED),
+    ] {
         let mut value = snapshot("http://127.0.0.1:1".into());
         match mode {
             0 => value.plugins.clear(),
@@ -114,15 +131,14 @@ async fn registered_endpoint_cannot_bypass_absent_expired_disabled_or_revoked_pr
             _ => value.tenant_id = "other".into(),
         };
         *reader.0.lock().unwrap() = Some(value);
-        assert!(matches!(
-            dispatch_remote(&ctx, &command(), &routes, &backend, Duration::from_secs(1)).await,
-            Err(CapabilityError::PolicyDenied(_))
-        ));
+        let result =
+            dispatch_remote(&ctx, &command(), &routes, &backend, Duration::from_secs(1)).await;
+        assert_eq!(plugin_code(&result), Some(code), "mode {mode}");
     }
 }
 
 #[tokio::test]
-async fn projected_target_gets_only_scoped_ticket_and_user_switch_still_applies() {
+async fn an_installed_plugin_needs_no_user_grant_and_the_emergency_switch_still_stops_it() {
     use flare_grpc_proto::capability::{
         GenericResponse,
         extension_plugin_server::{ExtensionPlugin, ExtensionPluginServer},
@@ -189,15 +205,19 @@ async fn projected_target_gets_only_scoped_ticket_and_user_switch_still_applies(
     let (ctx, _, _) = identity(SignedActorType::User);
     let policy = policy();
     let backend: Arc<dyn CapabilityPolicyBackend> = policy.clone();
+    // The tenant has no capability_user_grants row: the enabled installation authorizes.
+    assert!(policy.list_user_capabilities("app-a", "u1").is_empty());
     let result = dispatch_remote(&ctx, &command(), &routes, &backend, Duration::from_secs(1))
         .await
         .unwrap();
     assert!(result.success);
+    // An absent tenant switch is no refusal; a switch turned off is the emergency stop.
     policy.set_tenant_capability("app-a", "example.echo.run", false);
-    assert!(matches!(
-        dispatch_remote(&ctx, &command(), &routes, &backend, Duration::from_secs(1)).await,
-        Err(CapabilityError::PolicyDenied(_))
-    ));
+    let result = dispatch_remote(&ctx, &command(), &routes, &backend, Duration::from_secs(1)).await;
+    assert_eq!(
+        plugin_code(&result),
+        Some(flare_im_service_kit::plugin_platform::PLUGIN_DISABLED)
+    );
     stop.send(()).unwrap();
     server.await.unwrap().unwrap();
 }
@@ -288,7 +308,7 @@ async fn authorization_storage_wait_is_bounded_by_dispatch_deadline() {
 }
 
 #[tokio::test]
-async fn ui_catalog_uses_local_projection_actor_policy_and_strips_runtime_details() {
+async fn ui_catalog_uses_local_projection_and_strips_runtime_details() {
     let (ctx, _, _) = identity(SignedActorType::User);
     let mut projected = snapshot("http://127.0.0.1:1".into());
     let p = &mut projected.plugins[0];
@@ -326,40 +346,56 @@ async fn ui_catalog_uses_local_projection_actor_policy_and_strips_runtime_detail
     assert!(catalog.valid_until_ms <= grant_deadline);
     schema.validate().unwrap();
     assert!(!schema.translations["en-US"].actions.contains_key("other"));
-    let denied: Arc<dyn CapabilityPolicyBackend> = Arc::new(InMemoryCapabilityGrants::new());
-    let result = dispatch_remote(&ctx, &command, &routes, &denied, Duration::from_secs(1))
+    assert!(catalog.unavailable.is_empty());
+    // Stopping the plugin's only offered operation leaves nothing to show: the plugin is listed
+    // as disabled, so its cards say why they are inert.
+    let stopped = policy();
+    stopped.set_tenant_capability("app-a", "example.echo.run", false);
+    let stopped: Arc<dyn CapabilityPolicyBackend> = stopped;
+    let result = dispatch_remote(&ctx, &command, &routes, &stopped, Duration::from_secs(1))
         .await
         .unwrap();
     assert!(result.data["plugins"].as_array().unwrap().is_empty());
-    projected.plugins[0].grant.enabled = false;
-    *reader.0.lock().unwrap() = Some(projected);
-    let result = dispatch_remote(&ctx, &command, &routes, &backend, Duration::from_secs(1))
-        .await
-        .unwrap();
-    assert!(result.data["plugins"].as_array().unwrap().is_empty());
+    assert_eq!(
+        result.data["unavailable"],
+        serde_json::json!([{"pluginId": "example.echo", "reason": "disabled"}])
+    );
+    // Disabled or revoked installations are listed with their reason.
+    for (disable, reason) in [(true, "disabled"), (false, "not_installed")] {
+        let mut value = projected.clone();
+        if disable {
+            value.plugins[0].grant.enabled = false;
+        } else {
+            value.plugins[0].grant.revoked = true;
+        }
+        *reader.0.lock().unwrap() = Some(value);
+        let result = dispatch_remote(&ctx, &command, &routes, &backend, Duration::from_secs(1))
+            .await
+            .unwrap();
+        assert!(result.data["plugins"].as_array().unwrap().is_empty());
+        assert_eq!(
+            result.data["unavailable"],
+            serde_json::json!([{"pluginId": "example.echo", "reason": reason}])
+        );
+    }
 }
 
 mod plugin_state_and_catalog {
     use super::*;
+    use crate::application::handler::plugin_card::PluginCardPoster;
+    use crate::application::handler::plugin_card::tests::{MemoryOutbox, ScriptedDelivery};
     use crate::application::handler::plugin_state::tests::{
         MemoryBindings, RecordingSink, poll_snapshot, publisher,
     };
     use crate::application::handler::plugin_test_server::PluginServer;
+    use flare_im_service_kit::plugin_platform::{
+        PLUGIN_CARD_UNBOUND, PLUGIN_MESSAGE_RECALLED, PLUGIN_PERMISSION_DENIED,
+    };
     use serde_json::json;
 
+    /// No user grant anywhere: the installation projection authorizes.
     fn poll_policy() -> Arc<InMemoryCapabilityGrants> {
-        let policy = Arc::new(InMemoryCapabilityGrants::new());
-        for operation in [
-            "example.poll.create",
-            "example.poll.vote",
-            "example.poll.close",
-            "example.poll.details",
-            "example.poll.list",
-            "example.poll.remove",
-        ] {
-            policy.grant_user_capability("app-a", "u1", operation, None, None, None);
-        }
-        policy
+        Arc::new(InMemoryCapabilityGrants::new())
     }
 
     fn poll_command(operation: &str, input: Value) -> CapabilityDispatchCommand {
@@ -370,6 +406,14 @@ mod plugin_state_and_catalog {
             conversation_id: Some("2-group".into()),
             payload: Some(input),
             request_id: Some("r1".into()),
+            message_id: None,
+        }
+    }
+
+    fn from_card(operation: &str, input: Value, message_id: &str) -> CapabilityDispatchCommand {
+        CapabilityDispatchCommand {
+            message_id: Some(message_id.into()),
+            ..poll_command(operation, input)
         }
     }
 
@@ -379,24 +423,46 @@ mod plugin_state_and_catalog {
         reader: Arc<Projection>,
         bindings: Arc<MemoryBindings>,
         sink: Arc<RecordingSink>,
+        delivery: Arc<ScriptedDelivery>,
+    }
+
+    fn poll_card(poll_id: &str) -> Value {
+        json!({
+            "pluginId": "example.poll", "contributionId": "example.poll.card", "schemaVersion": 1,
+            "summary": "[Poll]", "payload": {"pollId": poll_id, "question": "Lunch?"}
+        })
     }
 
     async fn harness() -> Harness {
-        let plugin = PluginServer::start(Arc::new(|operation, _| {
+        harness_answering(Arc::new(|operation, _| {
             let state = json!({"entity": "poll-1", "version": 2, "values": {"counts": [1, 0]}});
             Ok(match operation {
-                // vote declares im.plugin.entity_state.publish; details does not.
+                // vote declares im.plugin.entity_state.publish; create does not.
                 "example.poll.vote" => json!({"messageState": {"version": 1, "values": {"mySelection": [0]}}, "sharedState": state}),
-                "example.poll.details" => json!({"voters": [], "sharedState": state}),
+                "example.poll.create" => json!({"pollId": "poll-9", "message": poll_card("poll-9"), "sharedState": state}),
                 _ => json!({}),
             })
         }))
-        .await;
+        .await
+    }
+
+    async fn harness_answering(
+        respond: Arc<crate::application::handler::plugin_test_server::Respond>,
+    ) -> Harness {
+        let plugin = PluginServer::start(respond).await;
         let reader = Arc::new(Projection(Mutex::new(Some(poll_snapshot(
             plugin.authority.clone(),
         )))));
         let bindings = Arc::new(MemoryBindings::default());
         let sink = Arc::new(RecordingSink::default());
+        let delivery = Arc::new(ScriptedDelivery::accepting("m-posted"));
+        let outbox = Arc::new(MemoryOutbox::default());
+        let poster = PluginCardPoster::new(
+            Some(delivery.clone()),
+            Some(bindings.clone()),
+            Some(outbox.clone()),
+        )
+        .without_backoff();
         let routes = Arc::new(
             PluginRouteBook::new()
                 .with_runtime_authorization(
@@ -405,7 +471,9 @@ mod plugin_state_and_catalog {
                         PluginCallSigner::new("call".into(), [29; 32]).unwrap(),
                     )),
                 )
-                .with_state_publisher(Some(publisher(bindings.clone(), sink.clone()))),
+                .with_state_publisher(Some(publisher(bindings.clone(), sink.clone())))
+                .with_entity_bindings(Some(bindings.clone()))
+                .with_card_posting(Some(Arc::new(poster)), Some(outbox)),
         );
         Harness {
             routes,
@@ -413,6 +481,7 @@ mod plugin_state_and_catalog {
             reader,
             bindings,
             sink,
+            delivery,
         }
     }
 
@@ -425,22 +494,27 @@ mod plugin_state_and_catalog {
         }
     }
 
+    async fn dispatch(
+        h: &Harness,
+        command: &CapabilityDispatchCommand,
+    ) -> Result<CapabilityDispatchResult> {
+        let (ctx, _, _) = identity(SignedActorType::User);
+        let backend: Arc<dyn CapabilityPolicyBackend> = poll_policy();
+        dispatch_remote(&ctx, command, &h.routes, &backend, Duration::from_secs(2)).await
+    }
+
     #[tokio::test]
     async fn a_call_result_shared_state_reaches_the_bound_card_of_its_conversation() {
         let h = harness().await;
         h.bindings
             .bind("app-a", "example.poll", "poll-1", "2-group", "m-1");
-        let (ctx, _, _) = identity(SignedActorType::User);
-        let backend: Arc<dyn CapabilityPolicyBackend> = poll_policy();
-        let result = dispatch_remote(
-            &ctx,
-            &poll_command(
+        let result = dispatch(
+            &h,
+            &from_card(
                 "example.poll.vote",
                 json!({"pollId": "poll-1", "selection": [0]}),
+                "m-1",
             ),
-            &h.routes,
-            &backend,
-            Duration::from_secs(2),
         )
         .await
         .unwrap();
@@ -459,47 +533,46 @@ mod plugin_state_and_catalog {
             ("app-a", "2-group", "m-1")
         );
         assert_eq!(event.values_json, r#"{"counts":[1,0]}"#);
-
-        // An operation that does not declare the capability publishes nothing.
-        let mut snapshot = poll_snapshot(h.plugin.authority.clone());
-        snapshot.version += 1;
-        *h.reader.0.lock().unwrap() = Some(snapshot);
-        let result = dispatch_remote(
-            &ctx,
-            &poll_command("example.poll.details", json!({"pollId": "poll-1"})),
-            &h.routes,
-            &backend,
-            Duration::from_secs(2),
-        )
-        .await
-        .unwrap();
-        assert!(result.success);
-        tokio::time::sleep(Duration::from_millis(600)).await;
-        assert_eq!(h.sink.versions(), vec![2]);
     }
 
     #[tokio::test]
-    async fn a_card_in_another_conversation_gets_no_state_from_this_call() {
+    async fn card_actions_are_accepted_only_from_the_card_bound_to_the_entity() {
         let h = harness().await;
         h.bindings
-            .bind("app-a", "example.poll", "poll-1", "2-other-group", "m-9");
-        let (ctx, _, _) = identity(SignedActorType::User);
-        let backend: Arc<dyn CapabilityPolicyBackend> = poll_policy();
-        let result = dispatch_remote(
-            &ctx,
-            &poll_command(
-                "example.poll.vote",
-                json!({"pollId": "poll-1", "selection": [0]}),
-            ),
-            &h.routes,
-            &backend,
-            Duration::from_secs(2),
+            .bind("app-a", "example.poll", "poll-1", "2-group", "m-1");
+        let vote = json!({"pollId": "poll-1", "selection": [0]});
+        // No message, a forged copy, the real card seen from another conversation.
+        for command in [
+            poll_command("example.poll.vote", vote.clone()),
+            from_card("example.poll.vote", vote.clone(), "m-forged"),
+            CapabilityDispatchCommand {
+                conversation_id: Some("2-other".into()),
+                ..from_card("example.poll.vote", vote.clone(), "m-1")
+            },
+        ] {
+            let result = dispatch(&h, &command).await;
+            assert_eq!(
+                plugin_code(&result),
+                Some(PLUGIN_CARD_UNBOUND),
+                "{command:?}"
+            );
+        }
+        // An entity no card is bound to.
+        let result = dispatch(
+            &h,
+            &from_card("example.poll.vote", json!({"pollId": "poll-2"}), "m-1"),
         )
-        .await
-        .unwrap();
-        assert!(result.success, "the call itself is unaffected");
-        tokio::time::sleep(Duration::from_millis(200)).await;
-        assert!(h.sink.versions().is_empty());
+        .await;
+        assert_eq!(plugin_code(&result), Some(PLUGIN_CARD_UNBOUND));
+        assert!(h.plugin.calls().is_empty(), "refused before the plugin");
+        // The bound card itself.
+        assert!(
+            dispatch(&h, &from_card("example.poll.vote", vote, "m-1"))
+                .await
+                .unwrap()
+                .success
+        );
+        assert_eq!(h.plugin.calls().len(), 1);
     }
 
     #[tokio::test]
@@ -508,37 +581,81 @@ mod plugin_state_and_catalog {
         h.bindings
             .bind("app-a", "example.poll", "poll-1", "2-group", "m-1");
         h.bindings.recall("m-1");
-        let (ctx, _, _) = identity(SignedActorType::User);
-        let backend: Arc<dyn CapabilityPolicyBackend> = poll_policy();
-        let result = dispatch_remote(
-            &ctx,
-            &poll_command(
+        let result = dispatch(
+            &h,
+            &from_card(
                 "example.poll.vote",
                 json!({"pollId": "poll-1", "selection": [0]}),
+                "m-1",
             ),
-            &h.routes,
-            &backend,
-            Duration::from_secs(2),
         )
-        .await
-        .unwrap();
-        assert!(!result.success);
-        assert_eq!(result.data["errorCode"], PLUGIN_MESSAGE_RECALLED);
+        .await;
+        assert_eq!(plugin_code(&result), Some(PLUGIN_MESSAGE_RECALLED));
         assert!(h.plugin.calls().is_empty());
         // Creating a new poll names no card and passes.
         assert!(
-            dispatch_remote(
-                &ctx,
-                &poll_command("example.poll.create", json!({"question": "Again?"})),
-                &h.routes,
-                &backend,
-                Duration::from_secs(2),
+            dispatch(
+                &h,
+                &poll_command("example.poll.create", json!({"question": "Again?"}))
             )
             .await
             .unwrap()
             .success
         );
         assert_eq!(h.plugin.calls().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_created_card_is_posted_by_the_platform_and_its_actions_work_at_once() {
+        let h = harness().await;
+        let result = dispatch(
+            &h,
+            &poll_command(
+                "example.poll.create",
+                json!({"question": "Lunch?", "commandId": "c-1"}),
+            ),
+        )
+        .await
+        .unwrap();
+        assert!(result.success);
+        assert!(result.data.get("message").is_none());
+        assert_eq!(result.data["posted"]["serverMsgId"], "m-posted");
+        assert_eq!(result.data["posted"]["conversationId"], "2-group");
+        let posts = h.delivery.posts.lock().unwrap().clone();
+        assert_eq!(posts.len(), 1);
+        assert_eq!(posts[0].1.sender_id, "u1");
+        assert_eq!(posts[0].1.conversation_id, "2-group");
+        // Create does not declare entity state publishing: its sharedState is not fanned out.
+        tokio::time::sleep(Duration::from_millis(600)).await;
+        assert!(h.sink.versions().is_empty());
+        // The card is bound already: a vote from it reaches the plugin.
+        assert!(
+            dispatch(
+                &h,
+                &from_card(
+                    "example.poll.vote",
+                    json!({"pollId": "poll-9", "selection": [0]}),
+                    "m-posted"
+                )
+            )
+            .await
+            .unwrap()
+            .success
+        );
+    }
+
+    #[tokio::test]
+    async fn user_tickets_never_reach_admin_operations() {
+        let h = harness().await;
+        for operation in ["example.poll.list", "example.poll.remove"] {
+            let result = dispatch(&h, &poll_command(operation, json!({}))).await;
+            assert_eq!(
+                plugin_code(&result),
+                Some(PLUGIN_PERMISSION_DENIED),
+                "{operation}"
+            );
+        }
+        assert!(h.plugin.calls().is_empty());
     }
 
     #[tokio::test]
@@ -550,21 +667,18 @@ mod plugin_state_and_catalog {
         )
         .unwrap();
         *h.reader.0.lock().unwrap() = Some(snapshot);
-        let (ctx, _, _) = identity(SignedActorType::User);
         let mut command = poll_command(
             flare_im_capability_core::plugin::ui::UI_CATALOG_OPERATION,
             Value::Null,
         );
         command.conversation_id = None;
-        let backend: Arc<dyn CapabilityPolicyBackend> = poll_policy();
-        let result = dispatch_remote(&ctx, &command, &h.routes, &backend, Duration::from_secs(2))
-            .await
-            .unwrap();
+        let result = dispatch(&h, &command).await.unwrap();
         let text = result.data.to_string();
         assert!(!text.contains("admin-page") && !text.contains("example.poll.admin"));
         assert!(!text.contains("s3cret") && !text.contains("webhookSecret"));
         let catalog: flare_im_capability_core::plugin::ui::UiCatalog =
             serde_json::from_value(result.data).unwrap();
+        assert!(catalog.unavailable.is_empty());
         let plugin = &catalog.plugins[0];
         assert_eq!(
             Value::Object(plugin.configuration.clone()),
@@ -577,21 +691,11 @@ mod plugin_state_and_catalog {
             .map(|c| c.id.as_str())
             .collect();
         assert_eq!(kinds, ["example.poll.card", "example.poll.create"]);
+        // The operations an admin page also uses (details, close) are admin operations: no user
+        // is offered them, so the card keeps vote only and no detail.
+        assert!(!plugin.operations.contains("example.poll.details"));
+        assert!(!plugin.operations.contains("example.poll.list"));
         let card = &plugin.extensions.contributions[0];
-        assert!(card.detail.is_some(), "details is offered to this user");
-
-        // A user without the details and close operations: the detail and the close action go.
-        let narrow = Arc::new(InMemoryCapabilityGrants::new());
-        for operation in ["example.poll.create", "example.poll.vote"] {
-            narrow.grant_user_capability("app-a", "u1", operation, None, None, None);
-        }
-        let narrow: Arc<dyn CapabilityPolicyBackend> = narrow;
-        let result = dispatch_remote(&ctx, &command, &h.routes, &narrow, Duration::from_secs(2))
-            .await
-            .unwrap();
-        let catalog: flare_im_capability_core::plugin::ui::UiCatalog =
-            serde_json::from_value(result.data).unwrap();
-        let card = &catalog.plugins[0].extensions.contributions[0];
         assert!(card.detail.is_none());
         assert_eq!(
             card.schema
@@ -602,5 +706,158 @@ mod plugin_state_and_catalog {
             ["vote"]
         );
         card.schema.validate().unwrap();
+    }
+
+    /// The example poll with a second card (`example.poll.card2`) whose vote passes the poll as
+    /// `id` instead of `pollId`.
+    fn two_card_snapshot(
+        authority: String,
+    ) -> flare_im_capability_core::plugin::runtime::PluginRuntimeSnapshot {
+        use crate::application::handler::plugin_state::tests::POLL_MANIFEST;
+        let mut raw: Value = serde_json::from_str(POLL_MANIFEST).unwrap();
+        let mut second = raw["clientExtensions"]["contributions"][0].clone();
+        second["id"] = json!("example.poll.card2");
+        for action in second["schema"]["actions"].as_array_mut().unwrap() {
+            if action.get("input").is_some() {
+                action["input"] = json!({"id": "/pollId"});
+            }
+        }
+        second.as_object_mut().unwrap().remove("detail");
+        raw["clientExtensions"]["contributions"]
+            .as_array_mut()
+            .unwrap()
+            .push(second);
+        let raw = serde_json::to_string(&raw).unwrap();
+        let digest = digest_bytes(raw.as_bytes());
+        let mut snapshot = poll_snapshot(authority);
+        let projected = &mut snapshot.plugins[0];
+        projected.manifest_json = raw;
+        projected.grant.manifest_digest = digest.clone();
+        projected.deployment.manifest_digest = digest;
+        snapshot
+    }
+
+    /// The call's message is looked up first; the entity must be the bound one, read at
+    /// the input the bound card's own contribution uses, and no other entity input may name
+    /// another entity. A card operation without the entity, with a malformed one, or from another
+    /// plugin's card is refused before the plugin.
+    #[tokio::test]
+    async fn the_bound_card_decides_the_entity_not_the_input() {
+        let h = harness().await;
+        h.bindings
+            .bind("app-a", "example.poll", "poll-1", "2-group", "m-1");
+        h.bindings
+            .bind("app-a", "example.other", "poll-2", "2-group", "m-other");
+        for (case, input, message) in [
+            ("entity missing", json!({"selection": [0]}), "m-1"),
+            ("entity null", json!({"pollId": null}), "m-1"),
+            ("entity malformed", json!({"pollId": "a b"}), "m-1"),
+            (
+                "entity an object",
+                json!({"pollId": {"id": "poll-1"}}),
+                "m-1",
+            ),
+            ("another entity", json!({"pollId": "poll-2"}), "m-1"),
+            (
+                "another plugin's card",
+                json!({"pollId": "poll-2"}),
+                "m-other",
+            ),
+        ] {
+            let result = dispatch(&h, &from_card("example.poll.vote", input, message)).await;
+            assert_eq!(plugin_code(&result), Some(PLUGIN_CARD_UNBOUND), "{case}");
+        }
+        assert!(h.plugin.calls().is_empty(), "refused before the plugin");
+        // Bindings unavailable: refused, never let through.
+        h.bindings
+            .fail
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        let result = dispatch(
+            &h,
+            &from_card("example.poll.vote", json!({"pollId": "poll-1"}), "m-1"),
+        )
+        .await;
+        assert!(
+            matches!(result, Err(CapabilityError::System(_))),
+            "{result:?}"
+        );
+        assert!(h.plugin.calls().is_empty());
+    }
+
+    /// With two cards passing the entity under different input names, each card's call
+    /// is checked at its own contribution's input, and a call filling both with different
+    /// entities is refused.
+    #[tokio::test]
+    async fn each_card_names_its_entity_at_its_own_input() {
+        let h = harness().await;
+        *h.reader.0.lock().unwrap() = Some(two_card_snapshot(h.plugin.authority.clone()));
+        h.bindings
+            .bind("app-a", "example.poll", "poll-1", "2-group", "m-1");
+        h.bindings.bind_through(
+            "app-a",
+            "example.poll",
+            "example.poll.card2",
+            "poll-2",
+            "2-group",
+            "m-2",
+        );
+        for (case, input, message) in [
+            ("card2 read at pollId", json!({"pollId": "poll-2"}), "m-2"),
+            (
+                "a second entity input names another entity",
+                json!({"pollId": "poll-1", "id": "poll-2"}),
+                "m-1",
+            ),
+            ("card read at id", json!({"id": "poll-1"}), "m-1"),
+        ] {
+            let result = dispatch(&h, &from_card("example.poll.vote", input, message)).await;
+            assert_eq!(plugin_code(&result), Some(PLUGIN_CARD_UNBOUND), "{case}");
+        }
+        assert!(h.plugin.calls().is_empty());
+        for (input, message) in [
+            (json!({"id": "poll-2", "selection": [0]}), "m-2"),
+            (json!({"pollId": "poll-1", "id": "poll-1"}), "m-1"),
+        ] {
+            assert!(
+                dispatch(&h, &from_card("example.poll.vote", input.clone(), message))
+                    .await
+                    .unwrap()
+                    .success,
+                "{input}"
+            );
+        }
+        assert_eq!(h.plugin.calls().len(), 2);
+    }
+
+    /// A plugin cannot answer a platform code (`PLUGIN_*`, `CAPABILITY_*`) — clients act
+    /// on those — whether it answers `ok: false` or a refusing gRPC status; its own codes pass.
+    #[tokio::test]
+    async fn plugins_cannot_answer_platform_codes() {
+        for (answer, expected) in [
+            ("PLUGIN_CARD_NOT_POSTED", "PLUGIN_REJECTED"),
+            ("PLUGIN_DISABLED", "PLUGIN_REJECTED"),
+            ("CAPABILITY_OUTCOME_UNKNOWN", "PLUGIN_REJECTED"),
+            (
+                "grpc:failed_precondition:PLUGIN_NOT_INSTALLED",
+                "PLUGIN_REJECTED",
+            ),
+            (
+                "grpc:permission_denied:CAPABILITY_RATE_LIMITED",
+                "PLUGIN_REJECTED",
+            ),
+            ("POLL_CLOSED", "POLL_CLOSED"),
+            ("grpc:failed_precondition:POLL_CLOSED", "POLL_CLOSED"),
+            ("not a code", "PLUGIN_REJECTED"),
+        ] {
+            let h = harness_answering(Arc::new(move |_, _| Err(answer.to_owned()))).await;
+            let result = dispatch(
+                &h,
+                &poll_command("example.poll.create", json!({"question": "Lunch?"})),
+            )
+            .await
+            .unwrap();
+            assert!(!result.success, "{answer}");
+            assert_eq!(result.data["errorCode"], expected, "{answer}");
+        }
     }
 }

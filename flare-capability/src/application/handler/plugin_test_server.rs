@@ -1,5 +1,7 @@
 //! A plugin endpoint for handler tests: records every call (operation, ticket, payload) and answers
-//! with `respond(operation, payload)`.
+//! with `respond(operation, payload)`. An error `grpc:<code>` or `grpc:<code>:<reason>` (code
+//! `permission_denied`, `unauthenticated`, `failed_precondition`, `unavailable`) answers that gRPC
+//! status instead of `ok: false`, with `reason` as its `ErrorDetail.reason`.
 use flare_grpc_proto::capability::{
     GenericRequest, GenericResponse,
     extension_plugin_server::{ExtensionPlugin, ExtensionPluginServer},
@@ -50,6 +52,7 @@ impl ExtensionPlugin for Endpoint {
         });
         let (ok, data, error_code) = match (self.respond)(&body.operation, &payload) {
             Ok(data) => (true, data, String::new()),
+            Err(code) if code.starts_with("grpc:") => return Err(scripted_status(&code[5..])),
             Err(code) => (false, Value::Null, code),
         };
         Ok(Response::new(GenericResponse {
@@ -63,6 +66,25 @@ impl ExtensionPlugin for Endpoint {
             error_message: String::new(),
         }))
     }
+}
+
+/// `<code>[:<reason>]` as a status (see the module docs).
+fn scripted_status(spec: &str) -> Status {
+    use flare_server_core::error::{ErrorBuilder, ErrorCode};
+    let (code, reason) = spec.split_once(':').unwrap_or((spec, ""));
+    let code = match code {
+        "permission_denied" => tonic::Code::PermissionDenied,
+        "unauthenticated" => tonic::Code::Unauthenticated,
+        "failed_precondition" => tonic::Code::FailedPrecondition,
+        _ => tonic::Code::Unavailable,
+    };
+    if reason.is_empty() {
+        return Status::new(code, "scripted refusal");
+    }
+    flare_server_core::error::grpc::with_code(
+        Status::from(ErrorBuilder::new(ErrorCode::PermissionDenied, reason).build_error()),
+        code,
+    )
 }
 
 pub(crate) struct PluginServer {

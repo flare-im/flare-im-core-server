@@ -72,7 +72,46 @@ where
         let staff = require_staff(request, verifier, permission)?;
         Ok(admin_context(request.metadata(), &staff))
     }
+
+    /// `GetMessage` for a message operation check: the Orchestrator reads the target of a
+    /// recall, edit or delete as itself (a Cell-signed `Service` actor named
+    /// [`MESSAGE_OPERATION_READERS`]) before it sequences the event. The tenant is the signed one;
+    /// nothing else in the request names an identity. `None` when the call carries no such
+    /// context (the Staff path then decides).
+    fn message_operation_ctx<T>(
+        &self,
+        request: &Request<T>,
+    ) -> Result<Option<flare_server_core::context::Ctx>, Status> {
+        let Some(verifier) = self.staff_verifier.as_ref() else {
+            return Ok(None);
+        };
+        if request
+            .metadata()
+            .get(flare_server_core::grpc::middleware::SIGNED_CONTEXT_HEADER)
+            .is_none()
+        {
+            return Ok(None);
+        }
+        let ctx =
+            flare_server_core::grpc::middleware::signed_context::verify_signed_context_metadata(
+                request.metadata(),
+                verifier,
+            )?;
+        let admitted = ctx
+            .get_data::<VerifiedContext>()
+            .and_then(VerifiedContext::claims)
+            .is_some_and(|claims| {
+                claims.actor_type == SignedActorType::Service
+                    && MESSAGE_OPERATION_READERS.contains(&claims.actor_id.as_str())
+                    && !claims.tenant_id.trim().is_empty()
+            });
+        Ok(admitted.then_some(ctx))
+    }
 }
+
+/// Services that read a message by id to authorize an operation on it (see
+/// [`StorageReaderGrpcHandler::message_operation_ctx`]).
+pub const MESSAGE_OPERATION_READERS: [&str; 1] = [flare_im_contracts::service_names::ORCHESTRATOR];
 
 /// 请求号与追踪号的长度上限：更长的值不用（请求号另生成），只为关联日志，不是身份。
 const MAX_CORRELATION_ID_BYTES: usize = 128;
@@ -688,7 +727,10 @@ where
         &self,
         request: Request<GetMessageRequest>,
     ) -> Result<Response<GetMessageResponse>, Status> {
-        let ctx = self.admin_ctx(&request, MESSAGES_READ)?;
+        let ctx = match self.message_operation_ctx(&request)? {
+            Some(ctx) => ctx,
+            None => self.admin_ctx(&request, MESSAGES_READ)?,
+        };
 
         let req = request.into_inner();
 
@@ -1402,6 +1444,57 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(status.code(), tonic::Code::Unauthenticated);
+    }
+
+    /// Orchestrator 授权撤回、编辑等操作前以自身服务身份按 ID 读目标消息。只有
+    /// `MESSAGE_OPERATION_READERS` 里的 Service 能这样调 `GetMessage`（通过后走到存储，这里库
+    /// 不可达回 UNAVAILABLE）；别的 Service、用户与无签名调用仍然只能走 Staff 路径，被拒。
+    #[tokio::test]
+    async fn only_the_orchestrator_reads_a_message_for_an_operation_check() {
+        let handler = unreachable_store_handler(Some(staff_verifier()));
+        let service = |actor_type, actor: &str| {
+            SignedContextSigner::from_private_key(&pem(HOOK_KEY).0)
+                .unwrap()
+                .with_kid(kid::HOOK)
+                .unwrap()
+                .sign(&SignedContextIdentity::new(
+                    actor_type, actor, "tenant-a", "req-op",
+                ))
+                .unwrap()
+        };
+        let get = |token: String| {
+            let handler = &handler;
+            async move {
+                handler
+                    .get_message(with_metadata(
+                        GetMessageRequest {
+                            message_id: "m1".into(),
+                        },
+                        &[("x-flare-ctx", token.as_str())],
+                    ))
+                    .await
+                    .unwrap_err()
+                    .code()
+            }
+        };
+        assert_eq!(
+            get(service(SignedActorType::Service, "flare-orchestrator")).await,
+            tonic::Code::Unavailable
+        );
+        for token in [
+            service(SignedActorType::Service, "flare-media"),
+            service(SignedActorType::User, "flare-orchestrator"),
+            service(SignedActorType::System, "flare-orchestrator"),
+        ] {
+            let code = get(token).await;
+            assert!(
+                matches!(
+                    code,
+                    tonic::Code::Unauthenticated | tonic::Code::PermissionDenied
+                ),
+                "{code:?}"
+            );
+        }
     }
 
     /// 权限码按 RPC 族复核：四条检索要 `core:messages:read`，导出要 `core:messages:export`；

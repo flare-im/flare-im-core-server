@@ -169,6 +169,7 @@ mod tests {
             conversation_id: Some("conv-1".into()),
             payload: None,
             request_id: Some("req-1".into()),
+            message_id: None,
         }
     }
 

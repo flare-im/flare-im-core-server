@@ -3,6 +3,7 @@
 mod conversation_head;
 mod event;
 mod message;
+pub mod plugin_card;
 mod storage_dtos;
 
 pub use conversation_head::ConversationMessageHead;

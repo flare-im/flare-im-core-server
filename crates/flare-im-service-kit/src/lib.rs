@@ -66,3 +66,4 @@ pub use tenant_runtime::{
 };
 pub use tracing::{TracingGuard, init_tracing_from_config};
 pub mod platform_send;
+pub mod plugin_platform;

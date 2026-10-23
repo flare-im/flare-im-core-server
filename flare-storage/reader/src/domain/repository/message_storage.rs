@@ -13,6 +13,7 @@
 //!
 //! 典型实现：PostgreSQL（+ 可选 Redis 缓存）见 `infrastructure::persistence::optimized_postgres_store`。
 
+use crate::domain::model::plugin_card::{PLUGIN_CARD_UNBOUND_KEY, PluginCardCarrier};
 use crate::domain::model::{
     ConversationMessageHead, EditHistoryEntry, Event, EventType, FilterExpression, MarkEntry,
     Message, MessageExportTaskDraft, MessageUpdate, MessageWriteLedgerEntry,
@@ -104,6 +105,20 @@ pub trait MessageStorage: Send + Sync {
     ) -> Result<i64>;
 
     async fn get_message(&self, ctx: &Ctx, message_id: &str) -> Result<Option<Message>>;
+
+    /// Mark the plugin card copies among `messages`, one page at a time (see
+    /// [`crate::domain::model::plugin_card`]): every message-returning read calls it before
+    /// answering. Never fails the read. The default marks nothing (a backend without plugin
+    /// entity bindings) but still removes a stored key, which only the server may set.
+    async fn mark_plugin_card_copies(
+        &self,
+        _ctx: &Ctx,
+        messages: &mut [&mut dyn PluginCardCarrier],
+    ) {
+        for message in messages.iter_mut() {
+            message.attributes().remove(PLUGIN_CARD_UNBOUND_KEY);
+        }
+    }
 
     /// 获取消息时间戳（用于清除会话等）
     async fn get_message_timestamp(

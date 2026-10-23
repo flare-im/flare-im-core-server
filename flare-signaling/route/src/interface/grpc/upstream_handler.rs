@@ -103,12 +103,36 @@ impl RouterUpstreamService for RouterUpstreamHandler {
     }
 
     /// 路由事件
+    ///
+    /// 网关为已认证连接签了 `x-flare-ctx` 时，操作者只取自签名（必须是 User），验签后的上下文
+    /// （连同原令牌）转发给 Orchestrator，由它的消息操作授权按签名身份判断；没有令牌的调用保持
+    /// 元数据身份（Orchestrator 只把它当作用户，从不当作受信服务）。
     async fn route_event(
         &self,
         request: Request<RouteEventRequest>,
     ) -> Result<Response<RouteEventResponse>, Status> {
         // 1. 提取上下文
-        let ctx = require_ctx_from_request(&request)?;
+        let ctx = match (
+            self.message_verifier.as_ref(),
+            request
+                .metadata()
+                .get(flare_server_core::grpc::middleware::SIGNED_CONTEXT_HEADER),
+        ) {
+            (Some(verifier), Some(_)) => {
+                let ctx = verify_signed_context_metadata(request.metadata(), verifier)?;
+                let user = ctx
+                    .get_data::<VerifiedContext>()
+                    .and_then(VerifiedContext::claims)
+                    .is_some_and(|claims| claims.actor_type == SignedActorType::User);
+                if !user {
+                    return Err(Status::permission_denied(
+                        "event context must be a signed user",
+                    ));
+                }
+                ctx
+            }
+            _ => require_ctx_from_request(&request)?,
+        };
 
         // 2. 解析请求
         let req = request.into_inner();

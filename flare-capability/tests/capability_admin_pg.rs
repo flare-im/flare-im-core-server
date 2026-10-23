@@ -138,3 +138,87 @@ async fn tenant_runtime_and_switches_read_back_per_tenant() {
             .unwrap();
     }
 }
+
+/// On PostgreSQL: one `<pluginId>.*` tenant switch that is off stops every operation of
+/// the plugin and nothing else; an operation switch that is on does not lift it.
+#[tokio::test]
+#[ignore = "requires FLARE_TENANT_TEST_DATABASE_URL pointing at a database initialised with deploy/init.sql"]
+async fn a_plugin_prefix_switch_stops_all_its_operations() {
+    let url = std::env::var(ENV_DATABASE_URL).unwrap_or_else(|_| {
+        panic!("set {ENV_DATABASE_URL} to a database initialised with deploy/init.sql")
+    });
+    let pool = Arc::new(
+        PgPoolOptions::new()
+            .max_connections(2)
+            .connect(&url)
+            .await
+            .expect("connect tenant test database"),
+    );
+    let (tenant_a, tenant_b) = (tenant(), tenant());
+    let policy = PostgresCapabilityPolicy::new(Arc::clone(&pool));
+    assert!(
+        policy
+            .ensure_not_suspended(&tenant_a, "example.poll.vote")
+            .await
+            .is_ok()
+    );
+    policy
+        .set_tenant_capability(&tenant_a, "example.poll.*", false)
+        .await
+        .unwrap();
+    policy
+        .set_tenant_capability(&tenant_a, "example.poll.vote", true)
+        .await
+        .unwrap();
+    policy
+        .set_tenant_capability(&tenant_b, ".*", false)
+        .await
+        .unwrap();
+    for stopped in [
+        "example.poll.vote",
+        "example.poll.create",
+        "example.poll.a.b",
+    ] {
+        assert!(
+            policy
+                .ensure_not_suspended(&tenant_a, stopped)
+                .await
+                .is_err(),
+            "{stopped}"
+        );
+    }
+    for open in [
+        "example.pollster.vote",
+        "example.poll",
+        "example.other.vote",
+    ] {
+        assert!(
+            policy.ensure_not_suspended(&tenant_a, open).await.is_ok(),
+            "{open}"
+        );
+    }
+    assert!(
+        policy
+            .ensure_not_suspended(&tenant_b, "example.poll.vote")
+            .await
+            .is_ok(),
+        "another tenant, and `.*` is no prefix switch"
+    );
+    policy
+        .set_tenant_capability(&tenant_a, "example.poll.*", true)
+        .await
+        .unwrap();
+    assert!(
+        policy
+            .ensure_not_suspended(&tenant_a, "example.poll.create")
+            .await
+            .is_ok()
+    );
+    for tenant in [&tenant_a, &tenant_b] {
+        sqlx::query("DELETE FROM capability_tenant_switches WHERE tenant_id = $1")
+            .bind(tenant)
+            .execute(&*pool)
+            .await
+            .unwrap();
+    }
+}

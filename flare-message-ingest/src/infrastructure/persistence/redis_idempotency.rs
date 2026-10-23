@@ -2,7 +2,8 @@
 //!
 //! 状态机（值约定）：
 //! - 占位中：`"PENDING"`（短 TTL `reserve_ttl`，覆盖一次发送处理时长）。
-//! - 完成：`"<server_id>|<conversation_seq>|<durability>"`（长 TTL `result_ttl`，覆盖合理重试窗口）。
+//! - 完成：`"<server_id>|<conversation_seq>|<durability>"`，平台代发卡另带 `"|<fingerprint>"`（签名请求
+//!   摘要）（长 TTL `result_ttl`，覆盖合理重试窗口）。
 //!
 //! `begin` 先 `SET NX`：成功 = 首次([`Fresh`]); 失败则 `GET` 判定 [`Replay`] 或 [`InFlight`]。
 
@@ -69,10 +70,15 @@ impl RedisIngestIdempotencyStore {
     }
 
     fn encode(record: &IdempotentRecord) -> String {
-        format!(
+        let mut encoded = format!(
             "{}|{}|{}",
             record.server_id, record.conversation_seq, record.durability as i32
-        )
+        );
+        if !record.fingerprint.is_empty() {
+            encoded.push('|');
+            encoded.push_str(&record.fingerprint);
+        }
+        encoded
     }
 
     fn decode(value: &str) -> Option<IdempotentRecord> {
@@ -88,10 +94,15 @@ impl RedisIngestIdempotencyStore {
             .and_then(|raw| raw.parse::<i32>().ok())
             .and_then(|raw| SendAckDurability::try_from(raw).ok())
             .unwrap_or(SendAckDurability::Persisted);
+        let fingerprint = parts.next().unwrap_or_default().to_string();
+        if parts.next().is_some() {
+            return None;
+        }
         Some(IdempotentRecord {
             server_id: server_id.to_string(),
             conversation_seq,
             durability,
+            fingerprint,
         })
     }
 }
@@ -172,10 +183,28 @@ mod tests {
             server_id: "srv-123".into(),
             conversation_seq: 42,
             durability: SendAckDurability::TransientAccepted,
+            fingerprint: String::new(),
         };
         let encoded = RedisIngestIdempotencyStore::encode(&rec);
         assert_eq!(encoded, "srv-123|42|1");
         assert_eq!(RedisIngestIdempotencyStore::decode(&encoded), Some(rec));
+    }
+
+    #[test]
+    fn a_card_post_record_keeps_its_fingerprint() {
+        let rec = IdempotentRecord {
+            server_id: "srv-9".into(),
+            conversation_seq: 3,
+            durability: SendAckDurability::Persisted,
+            fingerprint: "pcard2-abc".into(),
+        };
+        let encoded = RedisIngestIdempotencyStore::encode(&rec);
+        assert_eq!(
+            encoded,
+            format!("srv-9|3|{}|pcard2-abc", SendAckDurability::Persisted as i32)
+        );
+        assert_eq!(RedisIngestIdempotencyStore::decode(&encoded), Some(rec));
+        assert_eq!(RedisIngestIdempotencyStore::decode("srv-9|3|0|a|b"), None);
     }
 
     #[test]
@@ -186,6 +215,7 @@ mod tests {
                 server_id: "srv-123".into(),
                 conversation_seq: 42,
                 durability: SendAckDurability::Persisted,
+                fingerprint: String::new(),
             })
         );
     }

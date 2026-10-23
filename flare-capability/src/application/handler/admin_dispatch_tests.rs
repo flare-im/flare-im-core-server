@@ -17,6 +17,65 @@ use flare_server_core::{
 use serde_json::json;
 use std::sync::Mutex;
 
+/// Evidence that is always written and not looked at.
+struct AllowEvidence;
+#[async_trait::async_trait]
+impl AdminEvidence for AllowEvidence {
+    async fn intent(&self, _: &str, _: &str, _: AdminCall) -> std::result::Result<(), String> {
+        Ok(())
+    }
+    async fn outcome(
+        &self,
+        _: &str,
+        _: &str,
+        _: AdminCall,
+        _: AdminOutcome,
+    ) -> std::result::Result<(), String> {
+        Ok(())
+    }
+}
+static ALLOW_EVIDENCE: AllowEvidence = AllowEvidence;
+
+/// Evidence rows in order (`tenant`, `aggregate id`, action); `fail_intent` refuses the intent.
+#[derive(Default)]
+struct RecordingEvidence {
+    rows: Mutex<Vec<(String, String, &'static str)>>,
+    fail_intent: bool,
+}
+#[async_trait::async_trait]
+impl AdminEvidence for RecordingEvidence {
+    async fn intent(
+        &self,
+        tenant_id: &str,
+        aggregate_id: &str,
+        call: AdminCall,
+    ) -> std::result::Result<(), String> {
+        if self.fail_intent {
+            return Err("audit store down".into());
+        }
+        self.rows.lock().unwrap().push((
+            tenant_id.into(),
+            aggregate_id.into(),
+            admin_evidence_action(call, None),
+        ));
+        Ok(())
+    }
+    async fn outcome(
+        &self,
+        tenant_id: &str,
+        aggregate_id: &str,
+        call: AdminCall,
+        outcome: AdminOutcome,
+    ) -> std::result::Result<(), String> {
+        self.rows.lock().unwrap().push((
+            tenant_id.into(),
+            aggregate_id.into(),
+            admin_evidence_action(call, Some(outcome)),
+        ));
+        Ok(())
+    }
+}
+
 struct Projection(Mutex<Option<PluginRuntimeSnapshot>>);
 #[async_trait::async_trait]
 impl PluginAuthorizationReader for Projection {
@@ -125,6 +184,7 @@ async fn staff_reads_and_acts_through_a_staff_ticket_without_a_conversation() {
         AdminCall::Query,
         request("example.poll.list", json!({"status": "open", "cursor": ""})),
         Duration::from_secs(2),
+        &ALLOW_EVIDENCE,
     )
     .await
     .unwrap();
@@ -172,6 +232,7 @@ async fn staff_reads_and_acts_through_a_staff_ticket_without_a_conversation() {
         AdminCall::Dispatch,
         request("example.poll.remove", json!({"pollId": "poll-1"})),
         Duration::from_secs(2),
+        &ALLOW_EVIDENCE,
     )
     .await
     .unwrap();
@@ -190,6 +251,7 @@ async fn an_admin_action_result_publishes_its_shared_state_tenant_wide() {
         AdminCall::Dispatch,
         request("example.poll.close", json!({"pollId": "poll-1"})),
         Duration::from_secs(2),
+        &ALLOW_EVIDENCE,
     )
     .await
     .unwrap();
@@ -214,7 +276,17 @@ async fn permission_operation_kind_and_grant_are_enforced() {
     let h = harness().await;
     let call = |staff: VerifiedStaff, kind, request| {
         let routes = h.routes.clone();
-        async move { dispatch_admin(&staff, &routes, kind, request, Duration::from_secs(2)).await }
+        async move {
+            dispatch_admin(
+                &staff,
+                &routes,
+                kind,
+                request,
+                Duration::from_secs(2),
+                &ALLOW_EVIDENCE,
+            )
+            .await
+        }
     };
     // Another plugin's code, or a Core code.
     for permission in ["plugin:example.other:admin", "core:plugins:write"] {
@@ -283,6 +355,104 @@ async fn permission_operation_kind_and_grant_are_enforced() {
     );
 }
 
+/// The example poll with an `admin` section: `remove` is a command needing `manage`, with the
+/// poll id as its audited target.
+fn snapshot_with_admin_section(authority: String) -> PluginRuntimeSnapshot {
+    use flare_im_capability_core::plugin::runtime::digest_bytes;
+    let mut raw: Value = serde_json::from_str(POLL_MANIFEST).unwrap();
+    raw["admin"] = json!({
+        "contractVersion": 1,
+        "permissions": [{"id": "manage", "label": {"en-US": "Manage polls"}, "risk": "high"}],
+        "operations": [{"id": "example.poll.remove", "mode": "command", "permission": "manage",
+                        "requiresReason": true, "auditTarget": "/pollId"}]
+    });
+    let raw = serde_json::to_string(&raw).unwrap();
+    PluginManifest::from_json(raw.as_bytes()).expect("a valid admin section");
+    let digest = digest_bytes(raw.as_bytes());
+    let mut snapshot = poll_snapshot(authority);
+    let projected = &mut snapshot.plugins[0];
+    projected.manifest_json = raw;
+    projected.grant.manifest_digest = digest.clone();
+    projected.deployment.manifest_digest = digest;
+    snapshot
+}
+
+#[tokio::test]
+async fn an_admin_section_operation_needs_its_own_permission_and_mode() {
+    let h = harness().await;
+    *h.reader.0.lock().unwrap() = Some(snapshot_with_admin_section(h.plugin.authority.clone()));
+    let remove = || request("example.poll.remove", json!({"pollId": "poll-1"}));
+    // The plugin-wide admin code no longer covers an operation that declares its permission.
+    assert!(matches!(
+        dispatch_admin(
+            &staff(ADMIN),
+            &h.routes,
+            AdminCall::Dispatch,
+            remove(),
+            Duration::from_secs(2),
+            &ALLOW_EVIDENCE
+        )
+        .await,
+        Err(CapabilityError::PolicyDenied(_))
+    ));
+    // A command is no read.
+    let manage = "plugin:example.poll:manage";
+    assert!(matches!(
+        dispatch_admin(
+            &staff(manage),
+            &h.routes,
+            AdminCall::Query,
+            remove(),
+            Duration::from_secs(2),
+            &ALLOW_EVIDENCE
+        )
+        .await,
+        Err(CapabilityError::PolicyDenied(_))
+    ));
+    assert!(h.plugin.calls().is_empty());
+    let removed = dispatch_admin(
+        &staff(manage),
+        &h.routes,
+        AdminCall::Dispatch,
+        remove(),
+        Duration::from_secs(2),
+        &ALLOW_EVIDENCE,
+    )
+    .await
+    .unwrap();
+    assert_eq!(removed.audit_target.as_deref(), Some("poll-1"));
+    assert!(
+        serde_json::to_value(&removed)
+            .unwrap()
+            .get("auditTarget")
+            .is_none(),
+        "the audited target is for Core's audit only"
+    );
+    let now = chrono::Utc::now().timestamp_millis();
+    let claims = h
+        .verifier
+        .verify_staff(&h.plugin.calls()[0].ticket, now)
+        .unwrap();
+    assert_eq!(
+        claims.permission, manage,
+        "the ticket carries the operation's code"
+    );
+    // Admin-page operations keep the plugin-wide code.
+    assert!(
+        dispatch_admin(
+            &staff(ADMIN),
+            &h.routes,
+            AdminCall::Query,
+            request("example.poll.list", json!({})),
+            Duration::from_secs(2),
+            &ALLOW_EVIDENCE
+        )
+        .await
+        .unwrap()
+        .success
+    );
+}
+
 #[test]
 fn admin_sets_split_reads_from_actions() {
     let manifest = PluginManifest::from_json(POLL_MANIFEST.as_bytes()).unwrap();
@@ -308,7 +478,15 @@ fn admin_requests_are_bounded_objects_of_one_plugin() {
         br#"{"pluginId":"example.poll","operation":"example.poll.list","input":{"cursor":""}}"#,
     )
     .unwrap();
-    assert_eq!(parsed.permission(), ADMIN);
+    assert!(parsed.is_plugin_permission(ADMIN));
+    assert!(parsed.is_plugin_permission("plugin:example.poll:manage"));
+    for other in [
+        "plugin:example.other:admin",
+        "core:plugins:write",
+        "plugin:example.poll",
+    ] {
+        assert!(!parsed.is_plugin_permission(other), "{other}");
+    }
     assert_eq!(
         AdminPluginRequest::parse(
             br#"{"pluginId":"example.poll","operation":"example.poll.list"}"#
@@ -335,4 +513,77 @@ fn admin_requests_are_bounded_objects_of_one_plugin() {
         "x".repeat(MAX_ADMIN_REQUEST_BYTES)
     );
     assert!(AdminPluginRequest::parse(huge.as_bytes()).is_err());
+}
+
+/// The intent is durable before the plugin runs (no evidence, no call), the outcome
+/// after it, and a plugin refusal is recorded as a refusal, not an effect.
+#[tokio::test]
+async fn admin_calls_record_intent_before_the_plugin_and_their_outcome_after() {
+    let h = harness().await;
+    let staff = staff(ADMIN);
+    let evidence = RecordingEvidence::default();
+    let listed = dispatch_admin(
+        &staff,
+        &h.routes,
+        AdminCall::Query,
+        request("example.poll.list", json!({"status": "open", "cursor": ""})),
+        Duration::from_secs(2),
+        &evidence,
+    )
+    .await
+    .unwrap();
+    assert!(listed.success);
+    let removed = dispatch_admin(
+        &staff,
+        &h.routes,
+        AdminCall::Dispatch,
+        request("example.poll.remove", json!({"pollId": "poll-1"})),
+        Duration::from_secs(2),
+        &evidence,
+    )
+    .await
+    .unwrap();
+    assert!(!removed.success);
+    let row = |id: &str, action: &'static str| ("app-a".to_string(), id.to_string(), action);
+    assert_eq!(
+        evidence.rows.lock().unwrap().clone(),
+        vec![
+            row("example.poll:example.poll.list", "query_intent"),
+            row("example.poll:example.poll.list", "query_succeeded"),
+            row("example.poll:example.poll.remove", "dispatch_intent"),
+            row("example.poll:example.poll.remove", "dispatch_refused"),
+        ]
+    );
+    assert_eq!(h.plugin.calls().len(), 2);
+
+    // The intent cannot be written: the plugin is never called.
+    let failing = RecordingEvidence {
+        fail_intent: true,
+        ..Default::default()
+    };
+    let refused = dispatch_admin(
+        &staff,
+        &h.routes,
+        AdminCall::Dispatch,
+        request("example.poll.remove", json!({"pollId": "poll-1"})),
+        Duration::from_secs(2),
+        &failing,
+    )
+    .await;
+    assert!(matches!(refused, Err(CapabilityError::System(_))));
+    assert_eq!(h.plugin.calls().len(), 2, "no call without its intent");
+    assert!(failing.rows.lock().unwrap().is_empty());
+
+    // An unauthorized call writes no intent at all.
+    let read_only = dispatch_admin(
+        &staff,
+        &h.routes,
+        AdminCall::Query,
+        request("example.poll.remove", json!({"pollId": "poll-1"})),
+        Duration::from_secs(2),
+        &evidence,
+    )
+    .await;
+    assert!(read_only.is_err());
+    assert_eq!(evidence.rows.lock().unwrap().len(), 4);
 }

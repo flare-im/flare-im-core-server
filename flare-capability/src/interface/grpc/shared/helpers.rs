@@ -23,6 +23,11 @@ pub fn ctx_allow_missing<T>(req: &Request<T>) -> flare_im_contracts::Ctx {
 }
 
 pub fn capability_error_to_status(e: CapabilityError) -> Status {
+    // A plugin platform refusal keeps its code as the error reason (`ErrorDetail`): the API
+    // gateway answers `PLUGIN_DISABLED`, `PLUGIN_CARD_UNBOUND` and so on with their own status.
+    if let CapabilityError::Plugin { .. } = e {
+        return Status::from(e.into_flare());
+    }
     let msg = e.to_string();
     match &e {
         CapabilityError::PolicyDenied(_) | CapabilityError::Rejected(_) => {

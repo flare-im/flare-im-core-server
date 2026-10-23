@@ -1,5 +1,5 @@
 use super::*;
-use crate::domain::repository::plugin_state::ClaimedBinding;
+use crate::domain::repository::plugin_state::{ClaimedBinding, MessageBinding};
 use serde_json::json;
 use std::collections::BTreeMap;
 
@@ -12,9 +12,27 @@ pub(crate) const POLL_MANIFEST: &str = include_str!(concat!(
 #[derive(Default)]
 pub(crate) struct MemoryBindings {
     pub rows: Mutex<BTreeMap<(String, String, String), Vec<EntityBinding>>>,
+    /// The contribution of a bound message, when not the example poll's card.
+    pub contributions: Mutex<BTreeMap<String, String>>,
     pub fail: std::sync::atomic::AtomicBool,
 }
 impl MemoryBindings {
+    /// Bind like [`Self::bind`] through the card of `contribution`.
+    pub(crate) fn bind_through(
+        &self,
+        tenant: &str,
+        plugin: &str,
+        contribution: &str,
+        entity: &str,
+        conversation: &str,
+        message: &str,
+    ) {
+        self.bind(tenant, plugin, entity, conversation, message);
+        self.contributions
+            .lock()
+            .unwrap()
+            .insert(message.into(), contribution.into());
+    }
     pub(crate) fn bind(
         &self,
         tenant: &str,
@@ -65,6 +83,37 @@ impl PluginEntityBindingStore for MemoryBindings {
             .cloned()
             .unwrap_or_default())
     }
+    async fn binding_by_message(
+        &self,
+        tenant_id: &str,
+        server_msg_id: &str,
+    ) -> flare_server_core::error::Result<Option<MessageBinding>> {
+        if self.fail.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err(flare_server_core::error::FlareError::system("injected"));
+        }
+        let rows = self.rows.lock().unwrap();
+        let found = rows
+            .iter()
+            .filter(|((tenant, _, _), _)| tenant == tenant_id)
+            .find_map(|((_, plugin, entity), rows)| {
+                rows.iter()
+                    .find(|row| row.server_msg_id == server_msg_id)
+                    .map(|row| (plugin.clone(), entity.clone(), row.clone()))
+            });
+        Ok(found.map(|(plugin_id, entity, row)| MessageBinding {
+            plugin_id,
+            contribution_id: self
+                .contributions
+                .lock()
+                .unwrap()
+                .get(server_msg_id)
+                .cloned()
+                .unwrap_or_else(|| "example.poll.card".into()),
+            entity,
+            conversation_id: row.conversation_id,
+            recalled: row.recalled,
+        }))
+    }
     async fn claim_version(
         &self,
         tenant_id: &str,
@@ -88,6 +137,33 @@ impl PluginEntityBindingStore for MemoryBindings {
                 }
             })
             .collect())
+    }
+    async fn register(
+        &self,
+        tenant_id: &str,
+        plugin_id: &str,
+        contribution_id: &str,
+        entity: &str,
+        server_msg_id: &str,
+        conversation_id: &str,
+    ) -> flare_server_core::error::Result<()> {
+        let mut rows = self.rows.lock().unwrap();
+        let rows = rows
+            .entry(Self::key(tenant_id, plugin_id, entity))
+            .or_default();
+        if rows.is_empty() {
+            rows.push(EntityBinding {
+                conversation_id: conversation_id.into(),
+                server_msg_id: server_msg_id.into(),
+                published_version: 0,
+                recalled: false,
+            });
+            self.contributions
+                .lock()
+                .unwrap()
+                .insert(server_msg_id.into(), contribution_id.into());
+        }
+        Ok(())
     }
     async fn release_version(
         &self,
@@ -340,18 +416,6 @@ async fn unbound_other_conversation_recalled_and_malformed_states_are_refused() 
     // A recalled card takes no more state.
     bindings.recall("m-1");
     assert!(refused(PublishScope::Tenant, "example.poll", state(2, 2)).await);
-    assert!(
-        publisher
-            .entity_recalled("app-a", "example.poll", "poll-1")
-            .await
-            .unwrap()
-    );
-    assert!(
-        !publisher
-            .entity_recalled("app-a", "example.poll", "poll-9")
-            .await
-            .unwrap()
-    );
     settle(Duration::from_secs(1)).await;
     assert_eq!(sink.versions(), vec![1]);
     // The binding store being down is an error, not a silent drop.
@@ -453,6 +517,49 @@ fn invocation_entity_follows_the_card_actions_that_bind_entity_path() {
     assert_eq!(
         invocation_entity(&manifest, "example.poll.vote", &json!({"pollId": 7})).as_deref(),
         Some("7")
+    );
+}
+
+/// Where each card passes its entity — per contribution, through card actions, the
+/// detail operation's input and detail actions.
+#[test]
+fn entity_inputs_list_every_card_that_passes_its_entity() {
+    let mut raw: Value = serde_json::from_str(POLL_MANIFEST).unwrap();
+    let mut second = raw["clientExtensions"]["contributions"][0].clone();
+    second["id"] = json!("example.poll.card2");
+    for action in second["schema"]["actions"].as_array_mut().unwrap() {
+        if action.get("input").is_some() {
+            action["input"] = json!({"id": "/pollId"});
+        }
+    }
+    second["detail"]["input"] = json!({"poll": "/pollId"});
+    raw["clientExtensions"]["contributions"]
+        .as_array_mut()
+        .unwrap()
+        .push(second);
+    let manifest =
+        PluginManifest::from_json(serde_json::to_string(&raw).unwrap().as_bytes()).unwrap();
+    let pairs = |operation: &str| {
+        entity_inputs(&manifest, operation)
+            .into_iter()
+            .map(|(c, n)| format!("{c}={n}"))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        pairs("example.poll.vote"),
+        ["example.poll.card=pollId", "example.poll.card2=id"]
+    );
+    assert_eq!(
+        pairs("example.poll.details"),
+        ["example.poll.card=pollId", "example.poll.card2=poll"]
+    );
+    assert!(pairs("example.poll.create").is_empty());
+    // The admin page passes pollId to remove, but it is no card: not listed.
+    assert!(pairs("example.poll.remove").is_empty());
+    // invocation_entity takes the first input that carries a valid entity.
+    assert_eq!(
+        invocation_entity(&manifest, "example.poll.vote", &json!({"id": "poll-2"})).as_deref(),
+        Some("poll-2")
     );
 }
 

@@ -165,9 +165,37 @@ impl MessageIngestHandler {
         Err(ErrorBuilder::new(ErrorCode::PermissionDenied, "TENANT_UNAVAILABLE").build_error())
     }
 
+    /// 平台代发卡（Capability 的 card post 上下文）的幂等 key，与其他发送分开的命名空间：
+    /// `idem-pcard:{tenant}:{sender}:{conversation}:{client_msg_id}`。用户发送的 key 都以 `idem:`
+    /// 开头，任何会话 ID、客户端 ID 都拼不出这个前缀，用户先占同一组 ID 也碰不到代发卡。
+    fn card_post_idempotency_key(
+        tenant_id: &str,
+        message: &flare_proto::common::Message,
+    ) -> Option<String> {
+        let client_msg_id = message.client_msg_id.trim();
+        if client_msg_id.is_empty() {
+            return None;
+        }
+        Some(format!(
+            "idem-pcard:{tenant_id}:{}:{}:{client_msg_id}",
+            message.sender_id.trim(),
+            message.conversation_id.trim()
+        ))
+    }
+
+    /// The signed request digest of a platform card post (see
+    /// [`flare_im_service_kit::plugin_platform::card_post_request_id`]); `None` for any other send.
+    fn card_post_fingerprint(ctx: &Ctx) -> Option<String> {
+        ctx.get_data::<VerifiedContext>()
+            .and_then(|verified| verified.claims())
+            .filter(|claims| flare_im_service_kit::plugin_platform::is_card_post_context(claims))
+            .map(|claims| claims.request_id.clone())
+    }
+
     /// 摄入幂等 key：
     /// - 有可信设备上下文：`idem:{tenant}:{sender}:device:{device}:{conversation}:{client_msg_id}`。
     /// - 无设备上下文：`idem:{tenant}:{sender}:{conversation}:{client_msg_id}`。
+    /// - 平台代发卡另用 [`Self::card_post_idempotency_key`]。
     ///
     /// client_msg_id 为空 → 无法去重 → None。
     fn idempotency_key(
@@ -359,16 +387,32 @@ impl MessageIngestHandler {
         Self::tenant_gate(&tenant_id, &tenant_lookup, self.tenant_policy)?;
         // 摄入边界幂等：按 client_msg_id 去重重发，闭合"首发成功但 ACK 丢失 → SDK 重试"导致的重复 echo + seq 空洞。
         let device_id = ctx.device_id().filter(|device_id| !device_id.is_empty());
-        let idem_key = self
-            .idempotency
-            .as_ref()
-            .and_then(|_| Self::idempotency_key(&tenant_id, device_id, &cmd.message));
+        let fingerprint = Self::card_post_fingerprint(ctx);
+        let idem_key = self.idempotency.as_ref().and_then(|_| match &fingerprint {
+            Some(_) => Self::card_post_idempotency_key(&tenant_id, &cmd.message),
+            None => Self::idempotency_key(&tenant_id, device_id, &cmd.message),
+        });
+        let fingerprint = fingerprint.unwrap_or_default();
 
         let mut reservation = None;
         if let (Some(store), Some(key)) = (self.idempotency.as_ref(), idem_key.as_ref()) {
             let idempotency_start = Instant::now();
             match store.begin(key).await? {
                 crate::domain::repository::IdempotencyBegin::Replay(record) => {
+                    // 同一个 key 下的首发必须是同一种发送：代发卡只回放签名摘要相同的那张卡，
+                    // 用户发送（摘要为空）不会回放成代发卡，反之亦然。
+                    if record.fingerprint != fingerprint {
+                        self.metrics.observe_send_stage(
+                            "idempotency",
+                            "conflict",
+                            idempotency_start.elapsed(),
+                        );
+                        return Err(ErrorBuilder::new(
+                            ErrorCode::PermissionDenied,
+                            "client message id already used by another send",
+                        )
+                        .build_error());
+                    }
                     // 真正的重试：返回首发的 (server_id, conversation_seq)，绝不再分配 seq / 再投递。
                     self.metrics.observe_send_stage(
                         "idempotency",
@@ -400,7 +444,11 @@ impl MessageIngestHandler {
                         idempotency_start.elapsed(),
                     );
                     // 从这里起每条退出路径都要释放或提交占位，包括被取消（见守卫说明）。
-                    reservation = Some(IdempotencyReservation::new(Arc::clone(store), key));
+                    reservation = Some(IdempotencyReservation::new(
+                        Arc::clone(store),
+                        key,
+                        fingerprint.clone(),
+                    ));
                 }
             }
         }
@@ -487,13 +535,20 @@ impl MessageIngestHandler {
                     && (claims.actor_id == "flare-social-bridge"
                         || flare_im_service_kit::platform_send::is_platform_system_sender(claims))
             });
-        let hook_context = self
+        // A platform card post was verified as exactly this message; keep it to restore after the
+        // hook (see `after_pre_send`). Other sends only keep their conversation.
+        let card_post = Self::card_post_fingerprint(ctx)
+            .is_some()
+            .then(|| message.clone());
+        let conversation_id = message.conversation_id.clone();
+        let mut hook_context = self
             .measure_stage(
                 "pre_send_hook",
                 self.extension_orchestrator
                     .execute_pre_send(ctx, message, execute_user_pre_send),
             )
             .await?;
+        hook_context.message = after_pre_send(hook_context.message, card_post, &conversation_id)?;
 
         // PreSend Hook 可以整体改写 attributes：改出别的租户声明即拒绝。落库租户只认消息头，
         // 但带着别的租户声明的消息不该再往下游走。
@@ -795,6 +850,8 @@ fn stage_timeout_error(stage: &'static str, timeout: Duration) -> FlareError {
 struct IdempotencyReservation {
     store: Arc<dyn crate::domain::repository::IngestIdempotencyStore>,
     key: String,
+    /// [`crate::domain::repository::IdempotentRecord::fingerprint`] of this send.
+    fingerprint: String,
     state: std::sync::Mutex<ReservationState>,
 }
 
@@ -808,10 +865,15 @@ enum ReservationState {
 }
 
 impl IdempotencyReservation {
-    fn new(store: Arc<dyn crate::domain::repository::IngestIdempotencyStore>, key: &str) -> Self {
+    fn new(
+        store: Arc<dyn crate::domain::repository::IngestIdempotencyStore>,
+        key: &str,
+        fingerprint: String,
+    ) -> Self {
         Self {
             store,
             key: key.to_string(),
+            fingerprint,
             state: std::sync::Mutex::new(ReservationState::Reserved),
         }
     }
@@ -826,14 +888,17 @@ impl IdempotencyReservation {
 
     /// 发送已到达确定结果：此后被取消就提交它。
     fn mark_accepted(&self, outcome: &SendMessageOutcome) {
-        self.replace_state(ReservationState::Accepted(record_of(outcome)));
+        self.replace_state(ReservationState::Accepted(record_of(
+            outcome,
+            &self.fingerprint,
+        )));
     }
 
     /// 显式结算：成功提交结果，失败回滚。结算途中被取消，由 `Drop` 重做同一件事。
     async fn settle(self, result: &Result<SendMessageOutcome>) {
         match result {
             Ok(outcome) => {
-                let record = record_of(outcome);
+                let record = record_of(outcome, &self.fingerprint);
                 self.replace_state(ReservationState::Accepted(record.clone()));
                 if let Err(error) = self.store.commit(&self.key, &record).await {
                     // commit 失败只削弱后续去重能力，不影响本次已 durable 的发送。
@@ -892,11 +957,55 @@ impl Drop for IdempotencyReservation {
     }
 }
 
-fn record_of(outcome: &SendMessageOutcome) -> crate::domain::repository::IdempotentRecord {
+/// The rules a PreSend hook's draft must still obey. Hooks run after the identity check
+/// and may rewrite the content, the conversation and the attributes (a tenant's own webhook or
+/// gRPC hook among them), so the entry rules are applied again to the message they return:
+///
+/// - A platform card post (`card_post`, the message exactly as its signed context authorized it)
+///   is not rewritable: a hook may only let it through or refuse it, and whatever it changed is
+///   dropped in favour of the signed message. Dropping rather than refusing, because the hook
+///   pipeline itself rewrites the attribute bag of every message it runs on, and a policy hook that
+///   rewrites text (a word filter) must not turn every card into a refusal.
+/// - Any other message keeps its conversation (a hook moving it would deliver it where its sender
+///   was never checked) and must not have become a plugin card ([`PLUGIN_CARD_PLATFORM_ONLY`]).
+///
+/// [`PLUGIN_CARD_PLATFORM_ONLY`]: flare_im_service_kit::plugin_platform::PLUGIN_CARD_PLATFORM_ONLY
+fn after_pre_send(
+    hooked: flare_proto::common::Message,
+    card_post: Option<flare_proto::common::Message>,
+    conversation_id: &str,
+) -> Result<flare_proto::common::Message> {
+    use flare_im_service_kit::plugin_platform;
+    if let Some(signed) = card_post {
+        return Ok(signed);
+    }
+    if hooked.conversation_id != conversation_id {
+        return Err(ErrorBuilder::new(
+            ErrorCode::PermissionDenied,
+            "a pre-send hook may not move a message to another conversation",
+        )
+        .build_error());
+    }
+    if plugin_platform::message_claims_plugin_card(&hooked) {
+        return Err(ErrorBuilder::new(
+            ErrorCode::PermissionDenied,
+            plugin_platform::PLUGIN_CARD_PLATFORM_ONLY,
+        )
+        .details("a pre-send hook may not turn a message into a plugin card")
+        .build_error());
+    }
+    Ok(hooked)
+}
+
+fn record_of(
+    outcome: &SendMessageOutcome,
+    fingerprint: &str,
+) -> crate::domain::repository::IdempotentRecord {
     crate::domain::repository::IdempotentRecord {
         server_id: outcome.message_id.clone(),
         conversation_seq: outcome.conversation_seq,
         durability: outcome.durability,
+        fingerprint: fingerprint.to_owned(),
     }
 }
 

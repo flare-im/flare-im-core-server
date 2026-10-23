@@ -163,6 +163,34 @@ impl PostgresCapabilityPolicy {
         Ok(matches!(row, Some((false,))))
     }
 
+    /// Whether a tenant switch that is off covers `capability_id`: its own, or a `<prefix>.*`
+    /// switch whose prefix (with the dot) starts it (see
+    /// `CapabilityPolicyBackend::ensure_not_suspended`).
+    async fn tenant_capability_suspended(
+        &self,
+        tenant_id: &str,
+        capability_id: &str,
+    ) -> Result<bool> {
+        let tenant_id = normalize_tenant_id(tenant_id);
+        let row: Option<(i64,)> = sqlx::query_as(
+            r#"
+            SELECT 1::bigint FROM public.capability_tenant_switches
+            WHERE tenant_id = $1 AND enabled = FALSE
+              AND (capability_id = $2
+                   OR (right(capability_id, 2) = '.*'
+                       AND char_length(capability_id) > 2
+                       AND starts_with($2, left(capability_id, -1))))
+            LIMIT 1
+            "#,
+        )
+        .bind(&tenant_id)
+        .bind(capability_id)
+        .fetch_optional(self.pool.as_ref())
+        .await
+        .map_err(|e| CapabilityError::System(format!("capability tenant switch: {e}")))?;
+        Ok(row.is_some())
+    }
+
     async fn has_active_grant(
         &self,
         tenant_id: &str,
@@ -216,6 +244,24 @@ impl CapabilityPolicyBackend for PostgresCapabilityPolicy {
                 "capability {capability_id} is not installed for tenant {tenant_id}"
             ))),
         }
+    }
+
+    async fn ensure_not_suspended(&self, tenant_id: &str, capability_id: &str) -> Result<()> {
+        let tenant_id = normalize_tenant_id(tenant_id);
+        if !self.load_global_enabled().await? {
+            return Err(CapabilityError::PolicyDenied(
+                "global capability switch is disabled".into(),
+            ));
+        }
+        if self
+            .tenant_capability_suspended(&tenant_id, capability_id)
+            .await?
+        {
+            return Err(CapabilityError::PolicyDenied(format!(
+                "capability {capability_id} disabled for tenant {tenant_id}"
+            )));
+        }
+        Ok(())
     }
 
     async fn ensure_dispatch_allowed(

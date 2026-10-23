@@ -317,5 +317,6 @@ impl HookAdapter for LocalHookAdapter {
         LocalHookAdapter::recall(self, "", ctx, event).await
     }
 }
+pub mod plugin_card_ingest;
 pub mod plugin_state_events;
 pub mod resource_access;
