@@ -67,9 +67,17 @@ command = "/usr/local/bin/flare-capability"
 inherit_env_prefixes = ["CAPABILITY_", "FLARE_CAPABILITY_", "PLUGIN_"]
 # The Cell key set verifies dispatch, plugin self-registration and the Staff context Admin
 # Gateway forwards; the platform public key verifies only the projection worker.
+# FLARE_CAPABILITY_CTX_PRIVATE_KEY (kid=capability, via the FLARE_CAPABILITY_ prefix) signs the
+# plugin card posts sent to FLARE_PLUGIN_CARD_INGEST_URL and the shared state events sent to
+# FLARE_PLUGIN_STATE_EVENT_URL; the FLARE_PLUGIN_CALL_* and runtime keys sign and verify the
+# calls to plugin hosts.
 inherit_env = [
   "FLARE_INTERNAL_CTX_PUBLIC_KEY", "FLARE_INTERNAL_CTX_PUBLIC_KEYS", "FLARE_PLATFORM_PUBLIC_KEY",
   "CONFIG_CENTER_ENDPOINT", "TENANT_ID",
+  "FLARE_PLUGIN_CARD_INGEST_URL", "FLARE_PLUGIN_STATE_EVENT_URL",
+  "FLARE_PLUGIN_RESOURCE_CONVERSATION_URL", "FLARE_PLUGIN_RESOURCE_SOCIAL_GROUP_URL",
+  "FLARE_PLUGIN_CALL_KEY_ID", "FLARE_PLUGIN_CALL_SIGNING_KEY", "FLARE_PLUGIN_CALL_PUBLIC_KEYS",
+  "FLARE_PLUGIN_RUNTIME_PUBLIC_KEYS",
 ]
 required_env = ["FLARE_INTERNAL_CTX_PUBLIC_KEY"]
 tcp_health = "127.0.0.1:50110"
@@ -108,6 +116,8 @@ inherit_env_prefixes = ["MESSAGE_INGEST_", "INGEST_", "FLARE_USAGE_"]
 # The seq floor self-heal reads Storage Reader as ingest's own Service identity for
 # the message tenant; forwarding the inbound token fails whenever its tenant differs.
 # Without the private key ingest keeps forwarding (and warns once at startup).
+# Plugin card posts are signed by Capability (kid=capability) and verify only with that
+# key in FLARE_INTERNAL_CTX_PUBLIC_KEYS.
 inherit_env = [
   "FLARE_INTERNAL_CTX_PUBLIC_KEY", "FLARE_INTERNAL_CTX_PUBLIC_KEYS", "FLARE_INTERNAL_CTX_PRIVATE_KEY",
   "FLARE_CAPABILITY_GRPC_URI",
@@ -124,8 +134,14 @@ inherit_env_prefixes = ["MESSAGE_ORCHESTRATOR_", "ORCHESTRATOR_"]
 # Event recipients read single-chat members from the conversation read service,
 # which admits only signed context: the orchestrator signs those reads as its own
 # Service identity (it has no inbound token to forward from MQ or action RPCs).
-inherit_env = ["FLARE_USER_SYNC_INDEX_CHUNK", "FLARE_INTERNAL_CTX_PRIVATE_KEY"]
-required_env = ["FLARE_INTERNAL_CTX_PRIVATE_KEY"]
+# The Cell key set verifies the x-flare-ctx of event and action RPCs; it includes
+# Capability's key (kid=capability) for plugin shared state. Without it every signed
+# identity is refused.
+inherit_env = [
+  "FLARE_USER_SYNC_INDEX_CHUNK", "FLARE_INTERNAL_CTX_PRIVATE_KEY",
+  "FLARE_INTERNAL_CTX_PUBLIC_KEY", "FLARE_INTERNAL_CTX_PUBLIC_KEYS",
+]
+required_env = ["FLARE_INTERNAL_CTX_PRIVATE_KEY", "FLARE_INTERNAL_CTX_PUBLIC_KEY"]
 tcp_health = "127.0.0.1:50181"
 
 [[services]]

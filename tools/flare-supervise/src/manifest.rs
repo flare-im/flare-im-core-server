@@ -858,6 +858,48 @@ required_env_unless = [
         }
     }
 
+    /// The platform plugin card path: Capability holds its own context key, the endpoints and the
+    /// plugin call keys; Ingest (card posts) and the Orchestrator (shared state events) hold the
+    /// key set that resolves `kid=capability`.
+    #[test]
+    fn core_manifest_gives_the_plugin_card_path_its_keys_and_endpoints() {
+        let manifest: Manifest =
+            toml::from_str(include_str!("../../../release/supervise-core.toml")).unwrap();
+        manifest.validate().unwrap();
+        let holders = |variable: &str| -> Vec<&str> {
+            manifest
+                .services
+                .iter()
+                .filter(|service| manifest.env_allowed(service, variable))
+                .map(|service| service.name.as_str())
+                .collect()
+        };
+        for variable in [
+            "FLARE_CAPABILITY_CTX_PRIVATE_KEY",
+            "FLARE_PLUGIN_CARD_INGEST_URL",
+            "FLARE_PLUGIN_STATE_EVENT_URL",
+            "FLARE_PLUGIN_RESOURCE_CONVERSATION_URL",
+            "FLARE_PLUGIN_RESOURCE_SOCIAL_GROUP_URL",
+            "FLARE_PLUGIN_CALL_KEY_ID",
+            "FLARE_PLUGIN_CALL_SIGNING_KEY",
+            "FLARE_PLUGIN_CALL_PUBLIC_KEYS",
+            "FLARE_PLUGIN_RUNTIME_PUBLIC_KEYS",
+        ] {
+            assert_eq!(holders(variable), ["capability"], "{variable}");
+        }
+        for receiver in ["message-ingest", "orchestrator"] {
+            for variable in [
+                "FLARE_INTERNAL_CTX_PUBLIC_KEY",
+                "FLARE_INTERNAL_CTX_PUBLIC_KEYS",
+            ] {
+                assert!(
+                    holders(variable).contains(&receiver),
+                    "{receiver} {variable}"
+                );
+            }
+        }
+    }
+
     #[test]
     fn core_manifest_covers_all_existing_binaries_and_scopes_private_keys() {
         let manifest: Manifest =

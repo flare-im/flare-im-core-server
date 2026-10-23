@@ -809,6 +809,11 @@ for service in "${CORE_SERVICES[@]}"; do
             env_args+=("FLARE_INTERNAL_CTX_PUBLIC_KEY=$CORE_INTERNAL_PUBLIC_KEY") ;;
         api-gateway)
             env_args+=("FLARE_INTERNAL_CTX_PRIVATE_KEY=$CORE_INTERNAL_PRIVATE_KEY") ;;
+        message-orchestrator)
+            # Signs its own reads (message targets, single-chat members) and verifies the
+            # x-flare-ctx of event and action RPCs, as release/supervise-core.toml gives it.
+            env_args+=("FLARE_INTERNAL_CTX_PRIVATE_KEY=$CORE_INTERNAL_PRIVATE_KEY")
+            env_args+=("FLARE_INTERNAL_CTX_PUBLIC_KEY=$CORE_INTERNAL_PUBLIC_KEY") ;;
         push-server|push-worker)
             # broker-isolated Push provenance attests each consumed record as this Cell.
             env_args+=("FLARE_INTERNAL_CTX_PRIVATE_KEY=$CORE_INTERNAL_PRIVATE_KEY")
