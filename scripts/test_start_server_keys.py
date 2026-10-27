@@ -79,6 +79,14 @@ def launch(env):
 
 
 class LauncherKeysTest(unittest.TestCase):
+    def test_push_proxy_is_started_and_receives_only_verification_key(self):
+        self.assertIn('push-proxy', SERVICES)
+        self.assertIn('flare-push-proxy', array('REQUIRED_CORE_BINARIES'))
+        self.assertRegex(SCRIPT, r'"push-proxy"\)\s+PACKAGE="flare-push-proxy"\s+BIN_NAME="flare-push-proxy"')
+        _, services = launch({})
+        self.assertEqual(services['push-proxy']['FLARE_INTERNAL_CTX_PUBLIC_KEY'], 'cell-public')
+        self.assertNotIn(CELL_PRIVATE, services['push-proxy'])
+
     def test_capability_only_variables_are_the_manifests(self):
         capability = manifest_service("capability")
         expected = {v for v in capability["inherit_env"] if v.startswith("FLARE_PLUGIN_")}

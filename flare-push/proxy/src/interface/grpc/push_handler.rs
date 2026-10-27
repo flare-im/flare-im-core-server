@@ -401,6 +401,7 @@ mod identity_boundary_tests {
             reason: None,
             perm_version: None,
             trace_id: None,
+            session_id: None,
             kid: flare_server_core::auth::LEGACY_KID.to_owned(),
         }
     }

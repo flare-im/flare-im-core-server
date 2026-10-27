@@ -61,6 +61,7 @@ cleanup_launchctl_dev_labels() {
             flare-storage-writer \
             flare-storage-reader \
             flare-sync-orchestrator \
+            flare-push-proxy \
             flare-push-server \
             flare-push-worker \
             flare-media \
@@ -336,6 +337,7 @@ REQUIRED_CORE_BINARIES=(
     flare-storage-writer
     flare-storage-reader
     flare-sync-orchestrator
+    flare-push-proxy
     flare-push-server
     flare-push-worker
     flare-media
@@ -511,6 +513,7 @@ CORE_SERVICES=(
     "storage-writer"
     "storage-reader"
     "sync-orchestrator"
+    "push-proxy"
     "push-server"
     "push-worker"
     "media"
@@ -749,6 +752,11 @@ for service in "${CORE_SERVICES[@]}"; do
             BIN_NAME="flare-sync-orchestrator"
             export SYNC_ORCHESTRATOR_HOST="${SYNC_ORCHESTRATOR_HOST:-0.0.0.0}"
             export SYNC_ORCHESTRATOR_PORT="${SYNC_ORCHESTRATOR_PORT:-60084}"
+            ENV_VARS=""
+            ;;
+        "push-proxy")
+            PACKAGE="flare-push-proxy"
+            BIN_NAME="flare-push-proxy"
             ENV_VARS=""
             ;;
         "push-server")

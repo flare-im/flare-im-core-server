@@ -7,7 +7,11 @@ use flare_im_contracts::{
 use sha2::{Digest, Sha256};
 use std::{sync::Arc, time::Duration};
 const BUDGET: Duration = Duration::from_secs(3);
-const REGISTER: &str = r#"
+// A binding stores the prior account's index/command keys. These two bounded
+// writes follow those authority-owned references atomically. Dragonfly must
+// acquire the global transaction lock; Redis ignores the comment. Never add
+// disable-atomicity: a late PUT must not survive its revocation tombstone.
+const REGISTER: &str = r#"--!df flags=allow-undeclared-keys
 local time=redis.call('TIME'); local now=tonumber(time[1])*1000+math.floor(tonumber(time[2])/1000)
 local deadline=tonumber(ARGV[4])
 if not deadline or deadline<now or deadline>now+600000 then return -3 end
@@ -37,7 +41,7 @@ redis.call('SET',KEYS[1],cjson.encode(slot))
 redis.call('HSET',KEYS[2],ARGV[5],cjson.encode(value))
 return 1
 "#;
-const REVOKE: &str = r#"
+const REVOKE: &str = r#"--!df flags=allow-undeclared-keys
 local raw=redis.call('GET',KEYS[1]);local cmd=nil
 if raw then cmd=cjson.decode(raw) end
 if not raw then

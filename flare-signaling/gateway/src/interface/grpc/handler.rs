@@ -481,6 +481,7 @@ mod realtime_relay_tests {
             permission: None,
             perm_version: None,
             trace_id: None,
+            session_id: None,
             reason: None,
             kid: flare_server_core::auth::LEGACY_KID.to_owned(),
         }
