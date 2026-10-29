@@ -1079,12 +1079,6 @@ COMMENT ON COLUMN capability_user_grants.expires_at IS '过期时间，NULL 表�
 COMMENT ON COLUMN capability_user_grants.user_id IS '用户 ID；特殊值 * 表示该 tenant_id 下任意用户（仅建议开发/内网；生产按用户灌库后应删除通配行）';
 CREATE INDEX IF NOT EXISTS idx_capability_user_grants_tenant_user ON capability_user_grants(tenant_id, user_id);
 
--- 默认租户 0 + 租户级 RTC 通配（与编排器 ctx.tenant_id().unwrap_or("0")、Capability Dispatch 对齐）
--- 默认租户统一使用 tenant_id `0`。
-INSERT INTO capability_user_grants (tenant_id, user_id, capability_id, plan_code, source)
-VALUES ('0', '*', 'rtc.*', 'dev', 'init_bootstrap')
-ON CONFLICT (tenant_id, user_id, capability_id) DO NOTHING;
-
 -- 策略变更审计（Grant / Revoke / SetTenantSwitch；Dispatch 高频路径默认不落库）
 CREATE TABLE capability_audit_log (
     id BIGSERIAL PRIMARY KEY,
@@ -1166,11 +1160,6 @@ CREATE TABLE capability_plugin_endpoints (
         CHECK (unverified = (cardinality(declared_operations) = 0))
 );
 COMMENT ON TABLE capability_plugin_endpoints IS '插件端点登记（RegisterPluginEndpoint）；多实例共享，配置发现的端点不入库';
-
--- 可按用户追加（示例，与 tenant 0 一致时取消注释）
--- INSERT INTO capability_user_grants (tenant_id, user_id, capability_id, plan_code, source)
--- VALUES ('0', '具体用户ID', 'rtc.*', 'dev', 'bootstrap')
--- ON CONFLICT (tenant_id, user_id, capability_id) DO NOTHING;
 
 -- FLARE_EXTRACT:END_HOOK_CAPABILITY（第 9 节边界标记，勿删改此行）
 -- ============================================================================
