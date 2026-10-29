@@ -37,6 +37,15 @@ impl ResourceAccessBackend for NoReads {
     async fn read(&self, _: &ResourceActor, _: &ResourceRequest) -> Result<Value> {
         Err(CapabilityError::PolicyDenied("no reads here".into()))
     }
+    async fn tenant_members(
+        &self,
+        _: &str,
+        _: &str,
+        _: &str,
+        _: &[String],
+    ) -> Result<std::collections::BTreeSet<String>> {
+        Err(CapabilityError::PolicyDenied("no reads here".into()))
+    }
 }
 
 const OPERATION: &str = "im.plugin.entity_state.publish";

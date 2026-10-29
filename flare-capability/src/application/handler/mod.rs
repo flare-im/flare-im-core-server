@@ -20,6 +20,8 @@ mod plugin_state_pg_tests;
 mod plugin_test_server;
 pub mod resource_bridge;
 #[cfg(test)]
+mod resource_bridge_realtime_tests;
+#[cfg(test)]
 mod resource_bridge_tests;
 #[cfg(test)]
 mod resource_bridge_write_tests;

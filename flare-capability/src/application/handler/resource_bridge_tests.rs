@@ -64,6 +64,15 @@ impl ResourceAccessBackend for Backend {
         }
         Ok(json!({"conversationId":actor.conversation_id}))
     }
+    async fn tenant_members(
+        &self,
+        _: &str,
+        _: &str,
+        _: &str,
+        _: &[String],
+    ) -> Result<std::collections::BTreeSet<String>> {
+        Err(CapabilityError::PolicyDenied("no reads here".into()))
+    }
 }
 fn fixture() -> (
     Arc<ResourceBridge>,

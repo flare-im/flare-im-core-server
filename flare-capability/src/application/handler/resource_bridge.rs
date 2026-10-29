@@ -1,13 +1,18 @@
 //! Revalidate the current local grant and original user's operation before
 //! every resource callback. Resource membership is checked by the owner next.
 //!
-//! The one write, `im.plugin.entity_state.publish`, accepts three credentials: the delegation
-//! ticket of a user call or of a staff call (`x-flare-plugin-call`) whose operation declares the
-//! capability, or the plugin runtime credential (`x-flare-plugin-runtime`) bound to the exact
-//! request bytes. Each is revalidated against the current grant; the plugin writes only its own
-//! entities (see [`super::plugin_state`]).
+//! Writes accept the credentials their capability allows, each revalidated against the current
+//! grant and required to name an operation that declares the capability:
+//!
+//! - `im.plugin.entity_state.publish`: the delegation ticket of a user call or of a staff call
+//!   (`x-flare-plugin-call`), or the plugin runtime credential (`x-flare-plugin-runtime`) bound to
+//!   the exact request bytes. The plugin writes only its own entities (see [`super::plugin_state`]).
+//! - `im.realtime.deliver`: a user call ticket, for the conversation it is bound to, or the
+//!   runtime credential, for any conversation of its tenant. Only members of the conversation
+//!   receive the packet; the others are listed as skipped.
 use crate::domain::capability::{CapabilityError, CapabilityPolicyBackend, Result};
 use crate::domain::repository::PluginAuthorizationReader;
+use crate::domain::repository::realtime_delivery::{RealtimePacket, RealtimePacketDelivery};
 use crate::domain::repository::resource_access::{
     ResourceAccessBackend, ResourceActor, ResourceCallBudget,
 };
@@ -16,9 +21,11 @@ use flare_im_capability_core::plugin::{
     invocation::{PluginCallVerifier, PluginRuntimeVerifier},
     resource::{
         EntityStatePublishView, HostCapability, MAX_RESOURCE_BYTES, MAX_RESOURCE_REQUEST_BYTES,
-        ResourceRequest, ResourceWriteRequest,
+        MembersCheckView, RealtimeDelivery, RealtimeDeliveryView, ResourceRequest,
+        ResourceWriteRequest,
     },
     runtime::{PluginRuntimeSnapshot, ProjectedPlugin},
+    state::SharedState,
 };
 use serde_json::Value;
 use std::{sync::Arc, time::Duration};
@@ -43,6 +50,7 @@ pub struct ResourceBridge {
     slots: tokio::sync::Semaphore,
     publisher: Option<Arc<PluginStatePublisher>>,
     runtime_verifier: Option<PluginRuntimeVerifier>,
+    realtime: Option<Arc<dyn RealtimePacketDelivery>>,
 }
 fn denied() -> CapabilityError {
     CapabilityError::PolicyDenied("plugin resource access denied".into())
@@ -64,6 +72,7 @@ impl ResourceBridge {
             slots: tokio::sync::Semaphore::new(16),
             publisher: None,
             runtime_verifier: None,
+            realtime: None,
         }
     }
     /// Enables the write capability: `publisher` stores and fans out shared state,
@@ -75,6 +84,11 @@ impl ResourceBridge {
     ) -> Self {
         self.publisher = publisher;
         self.runtime_verifier = runtime_verifier;
+        self
+    }
+    /// Enables `im.realtime.deliver` (none: deliveries answer unavailable).
+    pub fn with_realtime(mut self, realtime: Option<Arc<dyn RealtimePacketDelivery>>) -> Self {
+        self.realtime = realtime;
         self
     }
     /// A request carrying the ticket of the call in flight.
@@ -103,7 +117,7 @@ impl ResourceBridge {
             if bytes.len() > MAX_RESOURCE_REQUEST_BYTES {
                 return Err(denied());
             }
-            if operation == HostCapability::EntityStatePublish.id() {
+            if write_capability(operation).is_some() {
                 return self.write(credential, operation, request_id, bytes).await;
             }
             match credential {
@@ -254,8 +268,7 @@ impl ResourceBridge {
         Ok(snapshot)
     }
 
-    /// `im.plugin.entity_state.publish`: who may write, then the publisher's own checks (bound
-    /// entity of this plugin, version order, coalescing).
+    /// A write: who may write, then the capability's own checks.
     async fn write(
         &self,
         credential: BridgeCredential<'_>,
@@ -268,21 +281,23 @@ impl ResourceBridge {
         if request.capability().id() != operation {
             return Err(denied());
         }
-        let ResourceWriteRequest::EntityStatePublish(state) = request;
-        let publisher = self.publisher.as_ref().ok_or_else(|| {
-            CapabilityError::System("plugin shared state publishing unavailable".into())
-        })?;
+        let capability = request.capability();
         let now = chrono::Utc::now().timestamp_millis();
         let writer = match credential {
             BridgeCredential::Call(token) => {
                 if let Ok(claims) = self.verifier.verify(token, now) {
-                    self.user_writer(claims, request_id, now).await?
-                } else {
+                    self.user_writer(claims, capability, request_id, now)
+                        .await?
+                } else if capability == HostCapability::EntityStatePublish {
                     let claims = self
                         .verifier
                         .verify_staff(token, now)
                         .map_err(|_| denied())?;
-                    self.staff_writer(claims, request_id, now).await?
+                    self.staff_writer(claims, capability, request_id, now)
+                        .await?
+                } else {
+                    // A staff call has no conversation to deliver into.
+                    return Err(denied());
                 }
             }
             BridgeCredential::Runtime(token) => {
@@ -292,19 +307,28 @@ impl ResourceBridge {
                     .await?
             }
         };
-        if !self
-            .budget
-            .reserve(
-                &writer.tenant_id,
-                &writer.plugin_id,
-                &writer.actor,
-                request_id,
-                writer.expires_at_ms,
-            )
-            .await?
-        {
-            return Err(denied());
+        match request {
+            ResourceWriteRequest::EntityStatePublish(state) => {
+                self.publish_state(writer, request_id, state).await
+            }
+            ResourceWriteRequest::RealtimeDeliver(delivery) => {
+                self.deliver(writer, request_id, delivery, now).await
+            }
         }
+    }
+
+    /// `im.plugin.entity_state.publish`: the publisher's own checks (bound entity of this plugin,
+    /// version order, coalescing).
+    async fn publish_state(
+        &self,
+        writer: Writer,
+        request_id: &str,
+        state: SharedState,
+    ) -> Result<Value> {
+        let publisher = self.publisher.as_ref().ok_or_else(|| {
+            CapabilityError::System("plugin shared state publishing unavailable".into())
+        })?;
+        self.reserve(&writer, request_id).await?;
         let scope = match writer.conversation_id.as_deref() {
             Some(conversation) => PublishScope::Conversation(conversation),
             None => PublishScope::Tenant,
@@ -327,9 +351,109 @@ impl ResourceBridge {
         .map_err(|_| denied())
     }
 
+    /// `im.realtime.deliver`: a user ticket delivers into its own conversation only, the runtime
+    /// credential into any conversation of its tenant; members receive it, the rest are skipped.
+    async fn deliver(
+        &self,
+        writer: Writer,
+        request_id: &str,
+        delivery: RealtimeDelivery,
+        now: i64,
+    ) -> Result<Value> {
+        let realtime = self.realtime.as_ref().ok_or_else(|| {
+            CapabilityError::System("plugin realtime delivery unavailable".into())
+        })?;
+        if writer
+            .conversation_id
+            .as_ref()
+            .is_some_and(|bound| *bound != delivery.conversation_id)
+        {
+            return Err(denied());
+        }
+        self.reserve(&writer, request_id).await?;
+        let members: std::collections::BTreeSet<String> = match &writer.user_id {
+            // As the ticket's user: the user must be a member too.
+            Some(user_id) => {
+                let answer = self
+                    .backend
+                    .read(
+                        &ResourceActor {
+                            tenant_id: writer.tenant_id.clone(),
+                            user_id: user_id.clone(),
+                            conversation_id: delivery.conversation_id.clone(),
+                            request_id: request_id.to_owned(),
+                        },
+                        &ResourceRequest::ConversationMembersCheck {
+                            user_ids: delivery.user_ids.clone(),
+                        },
+                    )
+                    .await?;
+                let view: MembersCheckView =
+                    serde_json::from_value(answer).map_err(|_| denied())?;
+                view.validate_for(&delivery.user_ids)
+                    .map_err(|_| denied())?;
+                view.members.into_iter().collect()
+            }
+            None => {
+                self.backend
+                    .tenant_members(
+                        &writer.tenant_id,
+                        &delivery.conversation_id,
+                        request_id,
+                        &delivery.user_ids,
+                    )
+                    .await?
+            }
+        };
+        let (recipients, skipped): (Vec<String>, Vec<String>) = delivery
+            .user_ids
+            .iter()
+            .cloned()
+            .partition(|id| members.contains(id));
+        let view = RealtimeDeliveryView {
+            delivery_id: uuid::Uuid::new_v4().to_string(),
+            delivered: recipients.len() as u32,
+            skipped,
+        };
+        if !recipients.is_empty() {
+            realtime
+                .deliver(&RealtimePacket {
+                    tenant_id: writer.tenant_id,
+                    request_id: request_id.to_owned(),
+                    plugin_id: writer.plugin_id,
+                    conversation_id: delivery.conversation_id,
+                    user_ids: recipients,
+                    packet_type: delivery.packet_type,
+                    payload_json: serde_json::to_vec(&delivery.payload).map_err(|_| denied())?,
+                    delivery_id: view.delivery_id.clone(),
+                    expires_at_ms: now + i64::from(delivery.ttl_ms),
+                })
+                .await?;
+        }
+        serde_json::to_value(view).map_err(|_| denied())
+    }
+
+    async fn reserve(&self, writer: &Writer, request_id: &str) -> Result<()> {
+        if !self
+            .budget
+            .reserve(
+                &writer.tenant_id,
+                &writer.plugin_id,
+                &writer.actor,
+                request_id,
+                writer.expires_at_ms,
+            )
+            .await?
+        {
+            return Err(denied());
+        }
+        Ok(())
+    }
+
     async fn user_writer(
         &self,
         claims: flare_im_capability_core::plugin::invocation::PluginCallClaims,
+        capability: HostCapability,
         request_id: &str,
         now: i64,
     ) -> Result<Writer> {
@@ -361,8 +485,9 @@ impl ResourceBridge {
         if claims.configuration_digest != projected.configuration_digest {
             return Err(denied());
         }
-        authorize_publishing_operation(
+        authorize_writing_operation(
             projected,
+            capability,
             &claims.tenant_id,
             &claims.actor_id,
             &claims.operation,
@@ -371,7 +496,8 @@ impl ResourceBridge {
         Ok(Writer {
             tenant_id: claims.tenant_id,
             plugin_id: claims.plugin_id,
-            actor: claims.actor_id,
+            actor: claims.actor_id.clone(),
+            user_id: Some(claims.actor_id),
             conversation_id: Some(conversation),
             expires_at_ms: claims.expires_at_ms,
         })
@@ -380,6 +506,7 @@ impl ResourceBridge {
     async fn staff_writer(
         &self,
         claims: flare_im_capability_core::plugin::invocation::PluginStaffCallClaims,
+        capability: HostCapability,
         request_id: &str,
         now: i64,
     ) -> Result<Writer> {
@@ -404,8 +531,9 @@ impl ResourceBridge {
         if !manifest.admin_operations().contains(&claims.operation) {
             return Err(denied());
         }
-        authorize_publishing_operation(
+        authorize_writing_operation(
             projected,
+            capability,
             &claims.tenant_id,
             &claims.staff_id,
             &claims.operation,
@@ -415,6 +543,7 @@ impl ResourceBridge {
             tenant_id: claims.tenant_id,
             plugin_id: claims.plugin_id,
             actor: format!("staff:{}", claims.staff_id),
+            user_id: None,
             conversation_id: None,
             expires_at_ms: claims.expires_at_ms,
         })
@@ -454,8 +583,9 @@ impl ResourceBridge {
             })
             .any(|(wire, op)| {
                 op.host_capabilities.contains(&claims.capability)
-                    && authorize_publishing_operation(
+                    && authorize_writing_operation(
                         projected,
+                        claims.capability,
                         &claims.tenant_id,
                         &claims.deployment_id,
                         &wire,
@@ -470,6 +600,7 @@ impl ResourceBridge {
             tenant_id: claims.tenant_id,
             plugin_id: claims.plugin_id,
             actor: format!("runtime:{}", claims.deployment_id),
+            user_id: None,
             conversation_id: None,
             expires_at_ms: claims.expires_at_ms,
         })
@@ -482,7 +613,9 @@ struct Writer {
     plugin_id: String,
     /// Budget key of the writer: the user, `staff:<id>` or `runtime:<deployment>`.
     actor: String,
-    /// User calls only: a bound card must be in this conversation.
+    /// User calls only: the ticket's user.
+    user_id: Option<String>,
+    /// User calls only: the ticket's conversation, the only one the write may touch.
     conversation_id: Option<String>,
     expires_at_ms: i64,
 }
@@ -520,11 +653,19 @@ fn require_identity(
     Ok(())
 }
 
-/// `operation` declares the write capability and the enabled grant approves it (with the
+/// The write capability an operation id names, if it names one.
+fn write_capability(operation: &str) -> Option<HostCapability> {
+    serde_json::from_value::<HostCapability>(Value::String(operation.to_owned()))
+        .ok()
+        .filter(|capability| capability.is_write())
+}
+
+/// `operation` declares the write `capability` and the enabled grant approves it (with the
 /// permission whose data scope is the capability id). The writer holds the permissions the
 /// installation approved (plugin platform v2 §2): the projection authorizes, no per-user grant.
-fn authorize_publishing_operation(
+fn authorize_writing_operation(
     projected: &ProjectedPlugin,
+    capability: HostCapability,
     tenant_id: &str,
     actor_id: &str,
     operation: &str,
@@ -532,10 +673,7 @@ fn authorize_publishing_operation(
 ) -> Result<()> {
     let manifest = projected.manifest().map_err(|_| denied())?;
     let op = manifest.operation(operation).ok_or_else(denied)?;
-    if !op
-        .host_capabilities
-        .contains(&HostCapability::EntityStatePublish)
-    {
+    if !op.host_capabilities.contains(&capability) {
         return Err(denied());
     }
     projected

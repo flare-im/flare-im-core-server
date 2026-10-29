@@ -1,8 +1,10 @@
 use crate::{
     application::handler::resource_bridge::ResourceBridge,
     domain::capability::CapabilityPolicyBackend,
+    domain::repository::realtime_delivery::RealtimePacketDelivery,
     infrastructure::{
-        adapters::resource_access::GrpcResourceAccess, capability::PluginRouteBook,
+        adapters::{realtime_push::GrpcRealtimePush, resource_access::GrpcResourceAccess},
+        capability::PluginRouteBook,
         persistence::postgres_resource_budget::PostgresResourceBudget,
     },
     interface::grpc::resource_bridge::PluginHostBridgeGrpc,
@@ -49,9 +51,11 @@ pub async fn compose(
     verifier
         .insert(signer.key_id().into(), signer.public_key())
         .map_err(|_| invalid())?;
-    let service_signer =
+    let service_signer = Arc::new(
         flare_im_service_kit::signed_read::service_signer_from_env("plugin resource bridge")?
-            .ok_or_else(invalid)?;
+            .ok_or_else(invalid)?,
+    );
+    let realtime = realtime_push(&service_signer)?;
     // Plugin deployments' runtime credentials (`x-flare-plugin-runtime`) for the write
     // capability: `[{"key_id","deployment_id","public_key_base64"}]`. Absent: refused.
     let runtime_verifier = match std::env::var("FLARE_PLUGIN_RUNTIME_PUBLIC_KEYS") {
@@ -74,10 +78,38 @@ pub async fn compose(
             Arc::new(GrpcResourceAccess {
                 conversation_authority: conversation,
                 social_group_authority: social,
-                signer: Arc::new(service_signer),
+                signer: service_signer,
             }),
             budget,
         )
-        .with_writes(routes.state_publisher.clone(), runtime_verifier),
+        .with_writes(routes.state_publisher.clone(), runtime_verifier)
+        .with_realtime(realtime),
     ))))
+}
+
+/// `im.realtime.deliver` goes to Push Proxy `PushService` at `FLARE_PLUGIN_REALTIME_PUSH_URL`
+/// (`http(s)://` or `discovery://`), signed with the Cell key. Absent: deliveries answer
+/// unavailable.
+fn realtime_push(
+    signer: &Arc<flare_server_core::SignedContextSigner>,
+) -> Result<Option<Arc<dyn RealtimePacketDelivery>>> {
+    let authority = match std::env::var("FLARE_PLUGIN_REALTIME_PUSH_URL") {
+        Ok(value) if !value.trim().is_empty() => value.trim().to_owned(),
+        Ok(_) | Err(std::env::VarError::NotPresent) => {
+            tracing::warn!(
+                "FLARE_PLUGIN_REALTIME_PUSH_URL absent; im.realtime.deliver answers unavailable"
+            );
+            return Ok(None);
+        }
+        Err(_) => return Err(FlareError::system("invalid FLARE_PLUGIN_REALTIME_PUSH_URL")),
+    };
+    if !(authority.starts_with("discovery://") && authority.len() > "discovery://".len()
+        || flare_im_capability_core::plugin::runtime::valid_grpc_authority(&authority))
+    {
+        return Err(FlareError::system("invalid FLARE_PLUGIN_REALTIME_PUSH_URL"));
+    }
+    Ok(Some(Arc::new(GrpcRealtimePush {
+        authority,
+        signer: signer.clone(),
+    })))
 }

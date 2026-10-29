@@ -405,6 +405,11 @@ pub const REGISTERED_ENV_VARS: &[EnvVarSpec] = &[
         EnvPurpose::Auth,
     ),
     env(
+        "FLARE_PLUGIN_REALTIME_PUSH_URL",
+        EnvOwner::Capability,
+        EnvPurpose::ServiceEndpoint,
+    ),
+    env(
         "FLARE_PLUGIN_RUNTIME_PUBLIC_KEYS",
         EnvOwner::Capability,
         EnvPurpose::Auth,

@@ -12,6 +12,12 @@ Flare IM **能力服务**：**Hook 引擎**（配置与 gRPC 调度）+ **能力
 - **扩展机制**：支持 gRPC、WebHook、Local Plugin（Hook 传输侧）三种扩展方式；Hook 的 gRPC 面（`HookExtension` / `HookService`）与 `CapabilityService` 同文件 **`capability_service.proto`**、同包 **`flare.capability.v1`**，Rust 侧统一 `flare_grpc_proto::capability`
 - **能力扩展**：通过 `CapabilityExtensionRegistry` 聚合 Guard / Resolver；插件是托管插件（由租户的插件授权投影授权），经 `RegisterPluginEndpoint` 登记端点。核心不认识任何具体插件：通话、投票等都是建立在业务中立宿主能力上的插件。能力目录、授权与命令分发经 **`flare.capability.v1.CapabilityService` gRPC** 与本进程 Hook 端口同服暴露；外部 HTTP 由接入网关转发至该 gRPC（无旧版 plugin 宿主与 outbox）
 
+### 环境变量（能力扩展）
+
+| 变量 | 说明 |
+|------|------|
+| `FLARE_PLUGIN_REALTIME_PUSH_URL` | 宿主能力 `im.realtime.deliver` 用的 Push Proxy `PushService`（`http(s)://` 或 `discovery://`）：插件向会话成员在线连接投递的非持久实时包（未配置时投递回不可用） |
+
 ### 能力 gRPC（`CapabilityService`）
 
 与 `config/base.toml` 中 `port`（默认 **50051**）一致；客户端使用 `flare-grpc-proto` 生成的 `CapabilityServiceClient`。主要 RPC：`ListCapabilities`、`ListUserCapabilities`、`Dispatch`、`GrantUserCapability`、`RevokeUserCapability`、`SetTenantCapabilitySwitch`。`Dispatch` 的 `payload_json` 为 JSON 字符串，例如 `example.poll.vote`：

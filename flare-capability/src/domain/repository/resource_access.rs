@@ -3,6 +3,7 @@
 use crate::domain::capability::Result;
 use flare_im_capability_core::plugin::resource::ResourceRequest;
 use serde_json::Value;
+use std::collections::BTreeSet;
 
 #[derive(Clone)]
 pub struct ResourceActor {
@@ -15,6 +16,17 @@ pub struct ResourceActor {
 #[async_trait::async_trait]
 pub trait ResourceAccessBackend: Send + Sync {
     async fn read(&self, actor: &ResourceActor, request: &ResourceRequest) -> Result<Value>;
+
+    /// The members (not left; hiding the conversation does not matter) among `user_ids` of
+    /// `conversation_id`, read as Capability itself for `tenant_id` rather than as a user. The
+    /// lookup is scoped to that tenant: a conversation of another tenant has no members.
+    async fn tenant_members(
+        &self,
+        tenant_id: &str,
+        conversation_id: &str,
+        request_id: &str,
+        user_ids: &[String],
+    ) -> Result<BTreeSet<String>>;
 }
 
 #[async_trait::async_trait]

@@ -205,7 +205,7 @@ impl ApplicationBootstrap {
                     .add_service(capability_service)
                     .add_service(capability_admin_service)
                     .add_optional_service(plugin_resource_bridge.map(|bridge| flare_grpc_proto::capability::plugin_host_bridge_server::PluginHostBridgeServer::new(bridge)
-                        .max_decoding_message_size(8192).max_encoding_message_size(66560)))
+                        .max_decoding_message_size(16384).max_encoding_message_size(66560)))
                     .add_optional_service(tenant_projection_service);
 
                 server

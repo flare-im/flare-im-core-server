@@ -319,4 +319,5 @@ impl HookAdapter for LocalHookAdapter {
 }
 pub mod plugin_card_ingest;
 pub mod plugin_state_events;
+pub mod realtime_push;
 pub mod resource_access;

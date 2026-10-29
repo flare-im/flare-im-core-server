@@ -48,17 +48,23 @@ pub struct GrpcResourceAccess {
 fn denied<T>(_: T) -> CapabilityError {
     CapabilityError::PolicyDenied("resource unavailable or access denied".into())
 }
+/// Actor id of the reads Capability makes as itself (no user), e.g. for a plugin runtime credential.
+pub const CAPABILITY_SERVICE_ACTOR: &str = "flare-capability";
+
 impl GrpcResourceAccess {
     fn request<T>(&self, actor: &ResourceActor, body: T) -> Result<tonic::Request<T>> {
-        let token = self
-            .signer
-            .sign(&SignedContextIdentity::new(
+        self.signed(
+            &SignedContextIdentity::new(
                 SignedActorType::User,
                 &actor.user_id,
                 &actor.tenant_id,
                 &actor.request_id,
-            ))
-            .map_err(denied)?;
+            ),
+            body,
+        )
+    }
+    fn signed<T>(&self, identity: &SignedContextIdentity, body: T) -> Result<tonic::Request<T>> {
+        let token = self.signer.sign(identity).map_err(denied)?;
         let mut request = tonic::Request::new(body);
         set_signed_context_token(&mut request, &token).map_err(denied)?;
         Ok(request)
@@ -81,7 +87,8 @@ impl GrpcResourceAccess {
     async fn active_members(
         &self,
         im: &mut ConversationReadServiceClient<tonic::transport::Channel>,
-        actor: &ResourceActor,
+        identity: &SignedContextIdentity,
+        conversation_id: &str,
         user_ids: &[String],
     ) -> Result<std::collections::BTreeSet<String>> {
         let wanted: std::collections::BTreeSet<&str> =
@@ -91,10 +98,10 @@ impl GrpcResourceAccess {
         for _ in 0..MAX_MEMBERS_CHECK_PAGES {
             let page = im
                 .list_conversation_participants(
-                    self.request(
-                        actor,
+                    self.signed(
+                        identity,
                         ListConversationParticipantsRequest {
-                            conversation_id: actor.conversation_id.clone(),
+                            conversation_id: conversation_id.to_owned(),
                             cursor: cursor.clone(),
                             limit: MAX_PARTICIPANTS_PAGE as i32,
                             include_removed: false,
@@ -116,7 +123,7 @@ impl GrpcResourceAccess {
                 .await
                 .map_err(denied)?
                 .into_inner();
-            if page.conversation_id != actor.conversation_id
+            if page.conversation_id != conversation_id
                 || page.participants.len() > MAX_PARTICIPANTS_PAGE as usize
             {
                 return Err(denied(()));
@@ -233,7 +240,15 @@ impl ResourceAccessBackend for GrpcResourceAccess {
                 .map_err(denied)
             }
             ResourceRequest::ConversationMembersCheck { user_ids } => {
-                let members = self.active_members(&mut im, actor, user_ids).await?;
+                let identity = SignedContextIdentity::new(
+                    SignedActorType::User,
+                    &actor.user_id,
+                    &actor.tenant_id,
+                    &actor.request_id,
+                );
+                let members = self
+                    .active_members(&mut im, &identity, &actor.conversation_id, user_ids)
+                    .await?;
                 serde_json::to_value(MembersCheckView::partition(user_ids, |id| {
                     members.contains(id)
                 }))
@@ -283,5 +298,27 @@ impl ResourceAccessBackend for GrpcResourceAccess {
                 serde_json::to_value(member).map_err(denied)
             }
         }
+    }
+
+    async fn tenant_members(
+        &self,
+        tenant_id: &str,
+        conversation_id: &str,
+        request_id: &str,
+        user_ids: &[String],
+    ) -> Result<std::collections::BTreeSet<String>> {
+        let channel = resolve_plugin_channel(&self.conversation_authority)
+            .await
+            .map_err(denied)?;
+        let mut im = ConversationReadServiceClient::new(channel)
+            .max_decoding_message_size(IM_RESPONSE_BYTES);
+        let identity = SignedContextIdentity::new(
+            SignedActorType::Service,
+            CAPABILITY_SERVICE_ACTOR,
+            tenant_id,
+            request_id,
+        );
+        self.active_members(&mut im, &identity, conversation_id, user_ids)
+            .await
     }
 }
