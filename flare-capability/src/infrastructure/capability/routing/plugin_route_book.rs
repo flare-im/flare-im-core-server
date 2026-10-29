@@ -2,15 +2,14 @@
 //!
 //! 两种来源：
 //!
-//! - **配置发现**（`plugin_discovery_endpoints`、`FLARE_MEDIA_CONTROL_GRPC_ENDPOINT`）：
-//!   [`PluginRouteBook::upsert`]，只在本进程，不入库，从不按 TTL 清理。
+//! - **进程内登记**：[`PluginRouteBook::upsert`]，只在本进程，不入库，从不按 TTL 清理。
 //! - **登记**（`RegisterPluginEndpoint`）：[`PluginRouteBook::register`]。有库时
 //!   （[`PluginRouteBook::with_store`]）先写 `capability_plugin_endpoints` 再进内存，写库失败即登记失败；
 //!   启动时 [`PluginRouteBook::reload`] 整表载入，之后按周期重读，多实例由此收敛、重启不丢；
 //!   健康检查通过的登记批量记 `last_healthy_at`，超过 TTL 不健康的登记由
 //!   [`PluginRouteBook::cleanup_stale`] 删除。没有库时登记只在本进程（启动日志说明一次）。
 //!
-//! 同一 `(tenant, plugin)` 先由配置发现、后被登记时，登记覆盖之（来源变为登记）。
+//! 同一 `(tenant, plugin)` 先由进程内登记、后经 `RegisterPluginEndpoint` 登记时，登记覆盖之（来源变为登记）。
 
 use std::collections::HashSet;
 use std::sync::Arc;

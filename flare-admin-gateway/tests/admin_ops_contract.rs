@@ -650,7 +650,7 @@ async fn plugins_shape_and_filter() {
         &h.router,
         admin_request(
             "GET",
-            "/api/v1/admin/plugins?capability_id=rtc.call",
+            "/api/v1/admin/plugins?capability_id=example.poll",
             &h.gateway,
         ),
     )
@@ -685,7 +685,7 @@ async fn plugins_shape_and_filter() {
     assert_eq!(call.method, "ListRegisteredPlugins");
     assert_eq!(
         call.request,
-        format!("tenant_id={TENANT} capability_id=rtc.call")
+        format!("tenant_id={TENANT} capability_id=example.poll")
     );
     assert_forwarded_for_route(call, &h.gateway, "GET", "/api/v1/admin/plugins");
 }

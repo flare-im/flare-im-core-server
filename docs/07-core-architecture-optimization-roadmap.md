@@ -43,10 +43,10 @@ flowchart LR
 
 核心结论：
 
-- 客户端长连接统一由 `flare-signaling/gateway` 承载，消息、ACK、sync、custom data、call signaling 在连接内逻辑多路复用。
+- 客户端长连接统一由 `flare-signaling/gateway` 承载，消息、ACK、sync、custom data、插件实时包在连接内逻辑多路复用。
 - `flare-api-gateway` 是业务系统和三方 HTTP facade，不再作为客户端 WebSocket 入口。
 - `flare-conversation` 不再承担消息发送、seq 分配或通话生命周期，只维护会话元数据、成员、游标、未读和读模型。
-- `flare-call` 拥有通话会话业务 FSM；`flare-signaling/gateway` 只处理连接侧信令路由，`flare-capability` / 插件只处理 RTC/SFU 能力编排。
+- 通话是托管插件 `flare.call`：呼叫状态机与媒体都在插件侧；Core 只提供业务中立的 `im.realtime.deliver` 与租户目录变更通知。
 - `flare-message-ingest` 是上行消息写入真源，负责校验、Hook、seq、WAL、conversation ensure 和主消息流发布。
 - `flare-storage/writer` 异步消费 MQ，使用 PostgreSQL / TimescaleDB 持久化消息、事件和 ledger。
 - MongoDB 不再出现在 Core 持久化路径中；Redis 不是主存储，只做热状态和短期恢复辅助。
@@ -116,8 +116,7 @@ flowchart LR
 | `flare-admin-gateway` | 管理面、审计、运维查询、管理员权限 | 客户端接入、业务主链写入 |
 | `flare-message-ingest` | send command、幂等、校验、Hook、seq、WAL、conversation ensure、MQ main publish | 会话读模型、存储事务、推送执行 |
 | `flare-conversation` | 会话元数据、成员、游标、未读、presence 聚合、conversation ensure 消费 | send message、seq 分配、消息体落库、通话生命周期 FSM |
-| `flare-call` | 通话会话生命周期、业务 FSM、通话命令处理 | 长连接路由、媒体/SFU 控制、会话读模型 |
-| `flare-im-capability-core` | 能力/插件共享契约、dispatch DTO、guard/resolver/RTC 端口 | 服务运行时、gRPC server、路由登记簿、持久化 |
+| `flare-im-capability-core` | 能力/插件共享契约、dispatch DTO、guard/resolver 端口 | 服务运行时、gRPC server、路由登记簿、持久化 |
 | `flare-orchestrator` | MQ main 消费、storage/push fanout、操作事件执行、capability enrich | 客户端协议适配、conversation metadata 事务 |
 | `flare-storage/writer` | 消息归档、事件流、ledger、热缓存、ACK、retry/DLQ | 路由、实时推送、业务权限 |
 | `flare-storage/reader` | 历史消息、事件、ledger、审计查询 | 写入主链、状态变更 |

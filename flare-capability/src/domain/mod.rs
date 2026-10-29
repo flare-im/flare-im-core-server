@@ -2,7 +2,7 @@
 //!
 //! - **Hook**：[`model`]（配置与执行计划）、[`repository`]、[`service::HookOrchestrationService`]
 //! - **HookIntegration**：[`hook_integration`]（出站 gRPC/Webhook/Local 传输分类与物化前策略）
-//! - **Capability**：[`capability`]（Guard / Resolver / RTC、分发 DTO、策略端口、[`capability::execute_capability_dispatch`]）
+//! - **Capability**：[`capability`]（Guard / Resolver、分发 DTO、策略端口）
 
 pub mod capability;
 pub mod hook_integration;

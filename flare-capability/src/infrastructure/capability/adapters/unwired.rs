@@ -4,83 +4,9 @@ use async_trait::async_trait;
 use flare_core_base::context::Ctx;
 
 use crate::domain::capability::{
-    AcceptCallRequest, AcceptCallResponse, CapabilityError, ConversationKind, CreateCallRequest,
-    CreateCallResponse, GetJoinTokenRequest, GetJoinTokenResponse, GuardDecision,
-    HangupCallRequest, HangupCallResponse, ListParticipantsRequest, ListParticipantsResponse,
-    PreSendEvaluateInput, PreSendGuard, RecipientResolveRequest, RecipientResolveResult,
-    RecipientResolver, RejectCallRequest, RejectCallResponse, ResolveTrigger, Result,
-    RtcCapability,
+    CapabilityError, ConversationKind, GuardDecision, PreSendEvaluateInput, PreSendGuard,
+    RecipientResolveRequest, RecipientResolveResult, RecipientResolver, ResolveTrigger, Result,
 };
-
-/// RTC：未注入媒体后端（本地或远端）时返回 `NotSupported`
-pub struct UnwiredRtcCapability;
-
-impl Default for UnwiredRtcCapability {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl UnwiredRtcCapability {
-    pub fn new() -> Self {
-        Self
-    }
-}
-
-#[async_trait]
-impl RtcCapability for UnwiredRtcCapability {
-    fn id(&self) -> &str {
-        "unwired.rtc"
-    }
-
-    async fn create_call(
-        &self,
-        _ctx: &Ctx,
-        _req: &CreateCallRequest,
-    ) -> Result<CreateCallResponse> {
-        Err(CapabilityError::NotSupported("UnwiredRtcCapability".into()))
-    }
-
-    async fn accept_call(
-        &self,
-        _ctx: &Ctx,
-        _req: &AcceptCallRequest,
-    ) -> Result<AcceptCallResponse> {
-        Err(CapabilityError::NotSupported("UnwiredRtcCapability".into()))
-    }
-
-    async fn reject_call(
-        &self,
-        _ctx: &Ctx,
-        _req: &RejectCallRequest,
-    ) -> Result<RejectCallResponse> {
-        Err(CapabilityError::NotSupported("UnwiredRtcCapability".into()))
-    }
-
-    async fn hangup_call(
-        &self,
-        _ctx: &Ctx,
-        _req: &HangupCallRequest,
-    ) -> Result<HangupCallResponse> {
-        Err(CapabilityError::NotSupported("UnwiredRtcCapability".into()))
-    }
-
-    async fn get_join_token(
-        &self,
-        _ctx: &Ctx,
-        _req: &GetJoinTokenRequest,
-    ) -> Result<GetJoinTokenResponse> {
-        Err(CapabilityError::NotSupported("UnwiredRtcCapability".into()))
-    }
-
-    async fn list_participants(
-        &self,
-        _ctx: &Ctx,
-        _req: &ListParticipantsRequest,
-    ) -> Result<ListParticipantsResponse> {
-        Err(CapabilityError::NotSupported("UnwiredRtcCapability".into()))
-    }
-}
 
 /// 接收者解析占位（未启用任何远端解析器）
 pub struct UnwiredRecipientResolver;

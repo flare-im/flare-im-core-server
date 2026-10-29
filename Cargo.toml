@@ -10,7 +10,6 @@ members = [
     "crates/flare-im-ack",
     "crates/flare-im-hooks",
     "crates/flare-im-capability-core",
-    "crates/flare-call",
     "crates/flare-im-usage",
     
     # 通信核心层 - 统一网关
@@ -153,7 +152,6 @@ flare-im-seq = { version = "1.0.3", path = "crates/flare-im-seq" }
 flare-im-ack = { version = "1.0.3", path = "crates/flare-im-ack" }
 flare-im-hooks = { version = "1.0.3", path = "crates/flare-im-hooks" }
 flare-im-capability-core = { version = "1.0.3", path = "crates/flare-im-capability-core" }
-flare-call = { version = "1.0.3", path = "crates/flare-call" }
 flare-im-usage = { version = "1.0.3", path = "crates/flare-im-usage" }
 
 # Flare Proto

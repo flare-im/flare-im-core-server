@@ -2,7 +2,7 @@
 
 [English](README.md) · 中文
 
-Flare IM **能力服务**：**Hook 引擎**（配置与 gRPC 调度）+ **能力扩展子系统**（DDD：`domain/capability` 领域模型、端口与 **Dispatch 领域服务**；CQRS：`application` 仅 **`commands` / `handler` / `queries`**；基础设施：`infrastructure/capability` 下按 **`registration` / `dispatch` / `routing` / `internal`** 分包，当前 RTC 通过远端媒体控制 gRPC 适配与自动注册装配）。进程装配入口为 **`composition`**（`process_config` / `runtime_context` / **`wiring`** / `bootstrap` / `hook_registry`；原 `service`）。
+Flare IM **能力服务**：**Hook 引擎**（配置与 gRPC 调度）+ **能力扩展子系统**（DDD：`domain/capability` 领域模型与端口；CQRS：`application` 仅 **`commands` / `handler` / `queries`**；基础设施：`infrastructure/capability` 下按 **`registration` / `dispatch` / `routing`** 分包）。进程装配入口为 **`composition`**（`process_config` / `runtime_context` / **`wiring`** / `bootstrap` / `hook_registry`；原 `service`）。
 
 ## 核心职责
 
@@ -10,17 +10,11 @@ Flare IM **能力服务**：**Hook 引擎**（配置与 gRPC 调度）+ **能力
 - **执行调度**：按优先级执行Hook，支持并发执行和超时控制
 - **执行证据与熔断**：把 Hook 执行记录写进 `hook_executions`（失败全量、成功采样）并提供统计，按 (租户, Hook) 熔断，见[执行证据与熔断](#执行证据与熔断)
 - **扩展机制**：支持 gRPC、WebHook、Local Plugin（Hook 传输侧）三种扩展方式；Hook 的 gRPC 面（`HookExtension` / `HookService`）与 `CapabilityService` 同文件 **`capability_service.proto`**、同包 **`flare.capability.v1`**，Rust 侧统一 `flare_grpc_proto::capability`
-- **能力扩展**：通过 `CapabilityExtensionRegistry` 聚合 Guard / Resolver / `RtcCapability`；RTC 后端通过 `capability_runtime.plugin_discovery_endpoints`（`capability_id = rtc.media.control`）或环境变量 `FLARE_MEDIA_CONTROL_GRPC_ENDPOINT` 装配。能力目录、授权与命令分发经 **`flare.capability.v1.CapabilityService` gRPC** 与本进程 Hook 端口同服暴露；外部 HTTP 由接入网关转发至该 gRPC（无旧版 plugin 宿主与 outbox）
-
-### 环境变量（能力扩展）
-
-| 变量 | 说明 |
-|------|------|
-| `FLARE_MEDIA_CONTROL_GRPC_ENDPOINT` | 覆盖媒体控制 gRPC 地址（未配置时走 `capability_runtime.plugin_discovery_endpoints` 自动发现） |
+- **能力扩展**：通过 `CapabilityExtensionRegistry` 聚合 Guard / Resolver；插件是托管插件（由租户的插件授权投影授权），经 `RegisterPluginEndpoint` 登记端点。核心不认识任何具体插件：通话、投票等都是建立在业务中立宿主能力上的插件。能力目录、授权与命令分发经 **`flare.capability.v1.CapabilityService` gRPC** 与本进程 Hook 端口同服暴露；外部 HTTP 由接入网关转发至该 gRPC（无旧版 plugin 宿主与 outbox）
 
 ### 能力 gRPC（`CapabilityService`）
 
-与 `config/base.toml` 中 `port`（默认 **50051**）一致；客户端使用 `flare-grpc-proto` 生成的 `CapabilityServiceClient`。主要 RPC：`ListCapabilities`、`ListUserCapabilities`、`Dispatch`、`GrantUserCapability`、`RevokeUserCapability`、`SetTenantCapabilitySwitch`。`Dispatch` 的 `payload_json` 为 JSON 字符串，例如 `rtc.call.video`：
+与 `config/base.toml` 中 `port`（默认 **50051**）一致；客户端使用 `flare-grpc-proto` 生成的 `CapabilityServiceClient`。主要 RPC：`ListCapabilities`、`ListUserCapabilities`、`Dispatch`、`GrantUserCapability`、`RevokeUserCapability`、`SetTenantCapabilitySwitch`。`Dispatch` 的 `payload_json` 为 JSON 字符串，例如 `example.poll.vote`：
 
 ```json
 { "codec": "VP8" }
@@ -28,16 +22,13 @@ Flare IM **能力服务**：**Hook 引擎**（配置与 gRPC 调度）+ **能力
 
 进程配置 **`database_url`** 时，`CapabilityService` 的授权/租户开关走 **`PostgresCapabilityPolicy`**，与 Hook 配置共用连接池；Hook 与 capability 表均在 **`deploy/init.sql`** 的「Hook 引擎 + Capability 策略」节（`hook_configs`、`hook_executions`、`capability_user_grants`、`capability_tenant_switches`、`capability_service_settings`、`capability_audit_log` 等；该节对前述对象均 **`DROP TABLE IF EXISTS ... CASCADE` 后再 `CREATE TABLE`**）。若报错 `relation "capability_service_settings" does not exist`，说明 **flare-capability 当前连接的那套 PostgreSQL** 里没有该表：常见原因是 **脚本跑在别的实例/库**（例如编排器用 `5432`，独立进程 **`flare-capability` 连 `DATABASE_URL`，没有则连所加载配置里 `[services.capability].postgres` 指定的 postgres 档（未指定时 `[postgres.media]`）；两者都没有时拒绝启动**，不再回落到内置的连接串，见 `composition/bootstrap.rs`）。启动时会打 `flare_capability::db` 日志（脱敏后的 `host:port/dbname`），请与执行 `deploy/init.sql` 的目标对齐。**注意**：该节会删除并重建 Hook/Capability 相关表，生产库请用迁移流程评估数据。未配置数据库时使用 **`InMemoryCapabilityGrants`** 并注入开发用示例授权。
 
-**`user capability grant missing or expired`**：`Dispatch` 在 `capability_user_grants` 中未找到匹配 **tenant_id + user_id + capability_id**（含 `namespace.*`）的未过期行。编排器默认 **tenant_id = `0`**（见 `ctx.tenant_id().unwrap_or("0")`）。`deploy/init.sql` 会插入 **`('0','*','rtc.*')`**：`user_id = *` 表示该租户下任意用户均可 RTC（开发友好；生产请按用户灌库并删除通配行）。若库是旧版脚本建的，请手动执行：
+**`user capability grant missing or expired`**：`Dispatch` 在 `capability_user_grants` 中未找到匹配 **tenant_id + user_id + capability_id**（含 `namespace.*`）的未过期行。编排器默认 **tenant_id = `0`**（见 `ctx.tenant_id().unwrap_or("0")`）。`user_id = *` 表示该租户下任意用户（开发友好；生产请按用户灌库）。例如：
 
-`INSERT INTO public.capability_user_grants (tenant_id, user_id, capability_id, plan_code, source) VALUES ('0', '*', 'rtc.*', 'dev', 'manual') ON CONFLICT DO NOTHING;`
+`INSERT INTO public.capability_user_grants (tenant_id, user_id, capability_id, plan_code, source) VALUES ('0', '*', 'example.*', 'dev', 'manual') ON CONFLICT DO NOTHING;`
 
 ### 插件登记（`RegisterPluginEndpoint`）
 
-插件端点有两种来源：
-
-- **配置发现**：`capability_runtime.plugin_discovery_endpoints` 与 `FLARE_MEDIA_CONTROL_GRPC_ENDPOINT`。这类端点只在读到配置的进程里，从不写库，也不会被下面的 TTL 清理。
-- **登记**：`CapabilityService.RegisterPluginEndpoint` / `DeregisterPluginEndpoint`，由平台员工经 Admin Gateway 调用（`core:plugins:write`），或由插件宿主带 Cell 签发的、租户为自己的 `Service` 上下文调用。有库时 Capability 先把登记写进 `capability_plugin_endpoints`（迁移 `0011`），写成功才进本进程的路由簿；写库失败则调用回 `UNAVAILABLE`，什么也不变。注销先删库里的行。同一 `(tenant, plugin)` 先由配置发现、后被登记时，登记覆盖配置。
+插件端点经**登记**进入路由簿：`CapabilityService.RegisterPluginEndpoint` / `DeregisterPluginEndpoint`，由平台员工经 Admin Gateway 调用（`core:plugins:write`），或由插件宿主带 Cell 签发的、租户为自己的 `Service` 上下文调用。有库时 Capability 先把登记写进 `capability_plugin_endpoints`（迁移 `0011`），写成功才进本进程的路由簿；写库失败则调用回 `UNAVAILABLE`，什么也不变。注销先删库里的行。
 
 每个 Capability 实例启动时整表载入（表不存在则启动失败：先跑迁移），之后按周期重读，多实例由此收敛，重启也不丢登记。比某次重读快照更新的本地写不会被那次快照覆盖。每轮健康检查通过的登记记下 `last_healthy_at`；超过 TTL 既没重新登记、也没通过一次健康检查的登记被删除（每分钟检查一次），其他实例在下次重读时去掉。没有库时登记只在本进程：其他实例看不到，重启即丢（启动日志说明一次）。
 

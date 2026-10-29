@@ -19,7 +19,6 @@ flare-im-service-kit = { workspace = true }
 flare-im-hooks = { workspace = true }
 flare-im-capability-core = { workspace = true }
 flare-core-base = { version = "1.0.3", path = "../../flare-server-core/flare-core-base" }
-# NOTE: 能力侧仅保留远端媒体控制 gRPC 适配；核心不内嵌具体媒体后端实现。
 flare-proto = { workspace = true }
 flare-grpc-proto = { workspace = true }
 flare-server-core = { workspace = true, features = ["grpc", "discovery"] }
@@ -73,10 +72,6 @@ tokio-test = { workspace = true }
 tracing-subscriber = { workspace = true }
 prost-types = { workspace = true }
 ed25519-dalek = { version = "2", features = ["pkcs8", "pem"] }
-
-[features]
-default = ["backend-remote"]
-backend-remote = ["flare-grpc-proto/sfu_control"]
 
 [lints]
 workspace = true

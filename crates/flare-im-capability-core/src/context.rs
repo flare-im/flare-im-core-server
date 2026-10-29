@@ -13,7 +13,6 @@ pub enum ConversationKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ResolveTrigger {
     MessageDelivery,
-    RtcInvite,
     Broadcast,
 }
 
@@ -40,7 +39,6 @@ pub struct PreSendEvaluateInput {
     pub sender_user_id: String,
     pub conversation_id: String,
     pub conversation_kind: ConversationKind,
-    pub rtc_intent: bool,
     pub payload_type: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub payload: Option<Vec<u8>>,

@@ -12,7 +12,7 @@
 //! 一个 `if capability_id.starts_with("xxx.")`，功能测试全都会通过。
 //! 唯一能抓住它的办法就是检查源码本身。
 //!
-//! 扫描是白名单制：kind 专有的模块（RTC 路由、媒体装配、约定常量）本来就
+//! 扫描是白名单制：kind 专有的模块（适配器、约定常量、组合根）本来就
 //! 应该认识自己的 id，它们不在扫描范围内。白名单越短越好 —— 每加一项都要
 //! 说明为什么它不是通用路径。
 
@@ -28,25 +28,14 @@ fn src_root() -> PathBuf {
 ///
 /// 每一项的理由：
 /// - `plugin_contract.rs`：约定常量的**唯一**定义处，集中就是为了别处不再出现字面量。
-/// - `routing/rtc_router.rs` / `routing/rtc_dispatch_route.rs`：RTC 自己的路由实现。
-/// - `internal/`：媒体后端装配，等同于 RTC 适配器。
-/// - `domain/capability/command_dispatch_service.rs`：RTC 能力适配器，按具体 op 分派。
-/// - `infrastructure/config/capability_runtime.rs`：媒体发现项的配置过滤。
-/// - `routing/sfu_health_probe.rs`：媒体面的健康探针实现。
 /// - `adapters/`：各 kind 的后端适配器，实现领域端口本就是 kind 专有代码。
 /// - `use_case_samples.rs`：示例，不进任何运行路径。
-/// - `composition/`：组合根。「本部署包含 RTC」是**装配决策**而非核心知识，
+/// - `composition/`：组合根。「本部署装配哪些后端」是**装配决策**而非核心知识，
 ///   装配处必须能点名它要装什么，否则就没法装配了。
 const KIND_SPECIFIC_ALLOWLIST: &[&str] = &[
     "infrastructure/capability/plugin_contract.rs",
-    "infrastructure/capability/routing/rtc_router.rs",
-    "infrastructure/capability/routing/rtc_dispatch_route.rs",
-    "infrastructure/capability/routing/sfu_health_probe.rs",
-    "infrastructure/capability/internal/",
     "infrastructure/capability/adapters/",
     "infrastructure/capability/use_case_samples.rs",
-    "domain/capability/command_dispatch_service.rs",
-    "infrastructure/config/capability_runtime.rs",
     "composition/",
 ];
 
@@ -72,7 +61,7 @@ fn rust_files(dir: &Path, out: &mut Vec<PathBuf>) {
 /// 截掉 `#[cfg(test)]` 之后的内容。
 ///
 /// 测试里出现具体插件 id 往往恰恰是为了证明核心**不**特殊对待它 ——
-/// `capability_dispatch.rs` 的用例就断言「空路由表下 rtc.call.video 只是普通
+/// `capability_dispatch.rs` 的用例就断言「空路由表下 vendorx.call.video 只是普通
 /// 未认领 id」。把这类断言判成违规，等于逼人删掉最有价值的那条测试。
 fn strip_test_modules(source: &str) -> String {
     match source.find("#[cfg(test)]") {
@@ -240,7 +229,7 @@ fn generic_paths_do_not_know_specific_plugins() {
     assert!(
         violations.is_empty(),
         "通用路径里出现了具体插件的知识：\n{}\n\n\
-         要加插件专有逻辑，请放到该 kind 自己的模块（如 routing/rtc_*.rs），\n\
+         要加插件专有逻辑，请放到插件自己的服务里，\n\
          或让插件在注册时**声明**它的需求（如 labels 里的 health_protocol），\n\
          而不是在通用路径里加分支。",
         violations
@@ -263,10 +252,8 @@ fn generic_host_types_carry_no_kind_specific_types() {
 
     // 这些类型名一旦出现在通用路径里，就说明 kind 专有**数据/客户端**漏进了宿主。
     //
-    // 刻意不含 `RtcCapability`：它是**领域端口**（一个 trait），适配器实现它、
-    // 注册表持有它都是正常的分层，不是数据泄漏。而且按子串匹配它还会误命中
-    // `RtcCapabilityRouter`。不变量 3.6 说的是 kind 专有的**载荷类型**
-    // （如已删除的 `RtcBackendDescriptor`）不得出现在通用结构里。
+    // 不变量 3.6 说的是 kind 专有的**载荷类型**（如已删除的 `RtcBackendDescriptor`）
+    // 不得出现在通用结构里。
     const KIND_TYPES: &[&str] = &["RtcBackendDescriptor", "SfuControlClient"];
 
     let mut violations = BTreeSet::new();
@@ -276,7 +263,7 @@ fn generic_host_types_carry_no_kind_specific_types() {
         if is_kind_specific(&rel) || test_only.contains(&file) {
             continue;
         }
-        // 领域端口与注册表是 RTC 能力的定义与装配处，不算通用宿主。
+        // 领域端口与注册表是能力的定义与装配处，不算通用宿主。
         if rel.starts_with("domain/capability/")
             || rel.starts_with("infrastructure/capability/registration/")
             || rel.starts_with("composition/")

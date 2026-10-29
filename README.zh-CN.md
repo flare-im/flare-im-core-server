@@ -170,7 +170,6 @@ flowchart LR
 | `flare-storage/writer` | 消费存储 topic，完成幂等、归档、事件流、热缓存、ledger、ACK。 |
 | `flare-storage/reader` | 消息、事件、审计和历史读模型查询。 |
 | `flare-conversation` | 会话、参与者、游标、未读和会话同步读模型。 |
-| `flare-call` | 通话会话生命周期、业务 FSM 和 CQRS 命令处理；不承载长连接路由或媒体/SFU 控制。 |
 | `flare-push/server` | 消费推送 topic，区分在线/离线推送任务。 |
 | `flare-push/worker` | 执行离线推送任务和重试。 |
 | `flare-push/proxy` | 推送代理与边界适配。 |

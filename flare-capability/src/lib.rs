@@ -2,7 +2,7 @@
 //!
 //! ## 分层（DDD + CQRS）
 //!
-//! - **Domain**（`domain`）：Hook 编排模型、Hook 集成策略、能力扩展端口（Guard / Resolver / RTC）。
+//! - **Domain**（`domain`）：Hook 编排模型、Hook 集成策略、能力扩展端口（Guard / Resolver）。
 //! - **Application**（`application`）：仅 **`commands` / `handler` / `queries`** — 物化、编排、读目录；**Dispatch / Hook 执行规则在 [`domain`](crate::domain)**。
 //! - **Infrastructure**（`infrastructure`）：配置仓储、适配器工厂、能力扩展（注册 / 路由 等）、**插件路由登记簿**
 //!   [`PluginRouteBook`](crate::infrastructure::capability::PluginRouteBook)。
@@ -14,7 +14,7 @@
 //!   - [`ExtensionPluginRouter`](crate::interface::grpc::ExtensionPluginRouter) — `ExtensionPlugin.Call`
 //!     通用路由器：按 `operation` 前缀分发给插件注册的
 //!     [`ExtensionOperationHandler`](crate::domain::capability::ExtensionOperationHandler)；
-//!     核心不认识任何具体后端（媒体控制协议实现 / LiveKit / Janus …）。
+//!     核心不认识任何具体后端。
 //! - **Composition**（`composition`）：进程组合根 — `process_config` / `runtime_context` / **`wiring`**（`initialize` 总装）/ `bootstrap` / `hook_registry`；[`ApplicationBootstrap`](crate::composition::ApplicationBootstrap)、[`init_capability_extension_stack`](crate::composition::init_capability_extension_stack)。
 //!
 //!

@@ -771,9 +771,9 @@ mod tests {
             "req-9",
             AdminPluginRegisterHttpRequest {
                 plugin_id: " plugin-a ".into(),
-                capability_id: "rtc.call".into(),
-                grpc_authority: "http://sfu:9".into(),
-                declared_operations: vec!["rtc.call".into()],
+                capability_id: "example.poll".into(),
+                grpc_authority: "http://plugin:9".into(),
+                declared_operations: vec!["example.poll".into()],
                 plugin_version: "1.0.0".into(),
                 api_version: "1.0".into(),
                 manifest_sha256: "a".repeat(64),
@@ -785,9 +785,9 @@ mod tests {
         assert_eq!(proto.request_id, "req-9");
         assert_eq!(proto.plugin_id, "plugin-a");
         for (plugin_id, capability_id, authority) in [
-            ("", "rtc.call", "http://sfu:9"),
-            ("plugin-a", " ", "http://sfu:9"),
-            ("plugin-a", "rtc.call", ""),
+            ("", "example.poll", "http://plugin:9"),
+            ("plugin-a", " ", "http://plugin:9"),
+            ("plugin-a", "example.poll", ""),
         ] {
             let error = register_plugin_request(
                 "tenant-a",
@@ -810,7 +810,7 @@ mod tests {
             AdminPluginRegisterHttpRequest {
                 plugin_id: plugin_id.into(),
                 capability_id: capability_id.into(),
-                grpc_authority: "http://sfu:9".into(),
+                grpc_authority: "http://plugin:9".into(),
                 declared_operations: operations.iter().map(|op| op.to_string()).collect(),
                 plugin_version: "1.0.0".into(),
                 api_version: "1.0".into(),
@@ -832,23 +832,27 @@ mod tests {
         let long = "p".repeat(129);
         for (invalid, field) in [
             (
-                request("p1\nWARN forged line", "rtc.call", &[]),
+                request("p1\nWARN forged line", "example.poll", &[]),
                 "plugin_id",
             ),
-            (request("plugin a", "rtc.call", &[]), "plugin_id"),
-            (request(&long, "rtc.call", &[]), "plugin_id"),
+            (request("plugin a", "example.poll", &[]), "plugin_id"),
+            (request(&long, "example.poll", &[]), "plugin_id"),
             (
-                request("plugin-a", "rtc.call\r\nWARN x", &[]),
+                request("plugin-a", "example.poll\r\nWARN x", &[]),
                 "capability_id",
             ),
-            (request("plugin-a", "rtc/call", &[]), "capability_id"),
-            (request("插件", "rtc.call", &[]), "plugin_id"),
+            (request("plugin-a", "example/poll", &[]), "capability_id"),
+            (request("插件", "example.poll", &[]), "plugin_id"),
             (
-                request("plugin-a", "rtc.call", &["rtc.call", "rtc.call\nWARN x"]),
+                request(
+                    "plugin-a",
+                    "example.poll",
+                    &["example.poll", "example.poll\nWARN x"],
+                ),
                 "declared_operations",
             ),
             (
-                request("plugin-a", "rtc.call", &["rtc.call", ""]),
+                request("plugin-a", "example.poll", &["example.poll", ""]),
                 "declared_operations",
             ),
         ] {
@@ -862,7 +866,7 @@ mod tests {
     #[test]
     fn the_capability_catalog_is_sorted_by_capability_id() {
         let catalog = capability_catalog_http(ListCapabilitiesResponse {
-            capabilities: ["rtc.call", "ai.summary"]
+            capabilities: ["example.poll", "ai.summary"]
                 .into_iter()
                 .map(|id| CapabilityDescriptor {
                     capability_id: id.into(),
@@ -875,7 +879,7 @@ mod tests {
             .iter()
             .map(|c| c.capability_id.as_str())
             .collect();
-        assert_eq!(ids, ["ai.summary", "rtc.call"]);
+        assert_eq!(ids, ["ai.summary", "example.poll"]);
     }
 
     #[test]

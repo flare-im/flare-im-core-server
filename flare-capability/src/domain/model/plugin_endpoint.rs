@@ -1,7 +1,7 @@
 //! 经 `RegisterPluginEndpoint` 登记的插件端点（持久化行）。
 //!
 //! 插件端点的读模型是进程内的 `PluginRouteBook`；有库时登记写进 `capability_plugin_endpoints`，
-//! 各实例从表里收敛。配置发现来的端点（`plugin_discovery_endpoints`）不是这里的记录。
+//! 各实例从表里收敛。进程内登记的端点（`PluginRouteBook::upsert`）不是这里的记录。
 
 use flare_grpc_proto::capability::RegisteredPluginInstance;
 
@@ -106,7 +106,7 @@ mod tests {
             tenant_id: "t1".into(),
             instance: RegisteredPluginInstance {
                 plugin_id: "p1".into(),
-                capability_id: "rtc.call".into(),
+                capability_id: "example.poll".into(),
                 grpc_authority: "http://p1:9".into(),
                 ..Default::default()
             },
@@ -135,8 +135,8 @@ mod tests {
     fn identifiers_are_ascii_words_up_to_128_bytes() {
         for valid in [
             "p",
-            "flare-strom-sfu",
-            "rtc.media.control",
+            "flare-poll",
+            "example.poll.vote",
             "social.moments.delete_moment",
             "ns:op-1",
             "p".repeat(128).as_str(),
@@ -164,11 +164,12 @@ mod tests {
         let mut plugin = endpoint();
         plugin.instance.plugin_id = "p1\nINFO forged line".into();
         let mut capability = endpoint();
-        capability.instance.capability_id = "rtc.call\r\nWARN x".into();
+        capability.instance.capability_id = "example.poll\r\nWARN x".into();
         let mut operation = endpoint();
-        operation.instance.declared_operations = vec!["rtc.call".into(), "rtc.hang up".into()];
+        operation.instance.declared_operations =
+            vec!["example.poll".into(), "example.poll vote".into()];
         let mut empty_operation = endpoint();
-        empty_operation.instance.declared_operations = vec!["rtc.call".into(), String::new()];
+        empty_operation.instance.declared_operations = vec!["example.poll".into(), String::new()];
         for (invalid, field) in [
             (plugin, "plugin_id"),
             (capability, "capability_id"),
@@ -180,7 +181,8 @@ mod tests {
             assert!(!error.contains('\n') && !error.contains('\r'), "{error}");
         }
         let mut declared = endpoint();
-        declared.instance.declared_operations = vec!["rtc.call".into(), "rtc.hangup".into()];
+        declared.instance.declared_operations =
+            vec!["example.poll".into(), "example.poll.vote".into()];
         assert!(validate_plugin_endpoint(&declared).is_ok());
     }
 }

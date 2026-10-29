@@ -33,11 +33,7 @@ impl RecipientResolver for DirectConversationRecipientResolver {
     }
 
     fn supports(&self, kind: &ConversationKind, trigger: ResolveTrigger) -> bool {
-        matches!(kind, ConversationKind::Direct)
-            && matches!(
-                trigger,
-                ResolveTrigger::MessageDelivery | ResolveTrigger::RtcInvite
-            )
+        matches!(kind, ConversationKind::Direct) && trigger == ResolveTrigger::MessageDelivery
     }
 
     async fn resolve(

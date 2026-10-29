@@ -1,4 +1,4 @@
-//! 应用层 **Handler**：用例编排（委托领域服务 / 读端口），不包含具体 RTC、Hook 执行细节。
+//! 应用层 **Handler**：用例编排（委托领域服务 / 读端口），不包含具体插件、Hook 执行细节。
 
 mod capability_dispatch;
 mod hook_command;

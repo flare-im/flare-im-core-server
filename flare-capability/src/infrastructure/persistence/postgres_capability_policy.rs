@@ -102,7 +102,7 @@ impl PostgresCapabilityPolicy {
             tracing::warn!(
                 target = "flare_capability::db",
                 "public.capability_user_grants is empty: Dispatch will fail with \"user capability grant missing or expired\" until seeded. \
-                 Apply flare-im-core/deploy/init.sql Hook+Capability section (INSERT tenant_id='0', user_id='*', capability_id='rtc.*') on **this** database (host/db must match DATABASE_URL / startup log postgres_after_at)."
+                 Grant the capabilities on **this** database (host/db must match DATABASE_URL / startup log postgres_after_at)."
             );
         }
         Ok(())
@@ -292,7 +292,7 @@ impl CapabilityPolicyBackend for PostgresCapabilityPolicy {
                 tenant_id = %tenant_id,
                 capability_id = %capability_id,
                 user_id_len = user_id.len(),
-                "capability_user_grants: no matching row (need rtc.* or exact capability + user or user_id='*')"
+                "capability_user_grants: no matching row (need a matching `<prefix>.*` or exact capability, for the user or user_id='*')"
             );
             return Err(CapabilityError::PolicyDenied(
                 "user capability grant missing or expired".into(),

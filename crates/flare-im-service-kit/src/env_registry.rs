@@ -769,11 +769,6 @@ pub const REGISTERED_ENV_VARS: &[EnvVarSpec] = &[
         EnvPurpose::Discovery,
     ),
     env(
-        "FLARE_MEDIA_CONTROL_GRPC_ENDPOINT",
-        EnvOwner::Capability,
-        EnvPurpose::ServiceEndpoint,
-    ),
-    env(
         "FLARE_MEDIA_TEST_DATABASE_URL",
         EnvOwner::Media,
         EnvPurpose::TestOnly,

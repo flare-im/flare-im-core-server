@@ -8,18 +8,6 @@ use crate::context::{ConversationKind, PreSendEvaluateInput, ResolveTrigger};
 use crate::error::{CapabilityError, GuardDecision, Result as CapabilityResult};
 use crate::grant::{TenantCapabilitySwitch, UserCapabilityGrant};
 use crate::recipient::{RecipientResolveRequest, RecipientResolveResult};
-use crate::rtc::{
-    AcceptCallRequest, AcceptCallResponse, AddIceCandidateRequest, AddIceCandidateResponse,
-    CreateCallRequest, CreateCallResponse, GetJoinTokenRequest, GetJoinTokenResponse,
-    HandleSdpAnswerRequest, HandleSdpAnswerResponse, HandleSdpOfferRequest, HandleSdpOfferResponse,
-    HangupCallRequest, HangupCallResponse, ListParticipantsRequest, ListParticipantsResponse,
-    MediaGetNetworkQualityRequest, MediaGetNetworkQualityResponse, MediaGetRoomStateRequest,
-    MediaGetRoomStateResponse, MediaJoinTransportRequest, MediaJoinTransportResponse,
-    MediaLeaveTransportRequest, MediaLeaveTransportResponse, MediaSetPublisherMuteRequest,
-    MediaSetPublisherMuteResponse, MediaSetSimulcastLayerRequest, MediaSetSimulcastLayerResponse,
-    MediaSetSubscriptionRequest, MediaSetSubscriptionResponse, RejectCallRequest,
-    RejectCallResponse,
-};
 
 #[async_trait]
 pub trait PreSendGuard: Send + Sync {
@@ -52,147 +40,6 @@ pub trait RecipientResolver: Send + Sync {
         ctx: &Ctx,
         req: &RecipientResolveRequest,
     ) -> CapabilityResult<RecipientResolveResult>;
-}
-
-#[async_trait]
-pub trait RtcCapability: Send + Sync {
-    fn id(&self) -> &str;
-
-    async fn create_call(
-        &self,
-        ctx: &Ctx,
-        req: &CreateCallRequest,
-    ) -> CapabilityResult<CreateCallResponse>;
-
-    async fn accept_call(
-        &self,
-        ctx: &Ctx,
-        req: &AcceptCallRequest,
-    ) -> CapabilityResult<AcceptCallResponse>;
-
-    async fn reject_call(
-        &self,
-        ctx: &Ctx,
-        req: &RejectCallRequest,
-    ) -> CapabilityResult<RejectCallResponse>;
-
-    async fn hangup_call(
-        &self,
-        ctx: &Ctx,
-        req: &HangupCallRequest,
-    ) -> CapabilityResult<HangupCallResponse>;
-
-    async fn get_join_token(
-        &self,
-        ctx: &Ctx,
-        req: &GetJoinTokenRequest,
-    ) -> CapabilityResult<GetJoinTokenResponse>;
-
-    async fn list_participants(
-        &self,
-        ctx: &Ctx,
-        req: &ListParticipantsRequest,
-    ) -> CapabilityResult<ListParticipantsResponse>;
-
-    async fn media_join_transport(
-        &self,
-        _ctx: &Ctx,
-        _req: &MediaJoinTransportRequest,
-    ) -> CapabilityResult<MediaJoinTransportResponse> {
-        Err(CapabilityError::NotSupported(
-            "media_join_transport: not supported for this RTC backend".into(),
-        ))
-    }
-
-    async fn media_leave_transport(
-        &self,
-        _ctx: &Ctx,
-        _req: &MediaLeaveTransportRequest,
-    ) -> CapabilityResult<MediaLeaveTransportResponse> {
-        Err(CapabilityError::NotSupported(
-            "media_leave_transport: not supported for this RTC backend".into(),
-        ))
-    }
-
-    async fn media_handle_sdp_offer(
-        &self,
-        _ctx: &Ctx,
-        _req: &HandleSdpOfferRequest,
-    ) -> CapabilityResult<HandleSdpOfferResponse> {
-        Err(CapabilityError::NotSupported(
-            "media_handle_sdp_offer: not supported for this RTC backend".into(),
-        ))
-    }
-
-    async fn media_handle_sdp_answer(
-        &self,
-        _ctx: &Ctx,
-        _req: &HandleSdpAnswerRequest,
-    ) -> CapabilityResult<HandleSdpAnswerResponse> {
-        Err(CapabilityError::NotSupported(
-            "media_handle_sdp_answer: not supported for this RTC backend".into(),
-        ))
-    }
-
-    async fn media_add_ice_candidate(
-        &self,
-        _ctx: &Ctx,
-        _req: &AddIceCandidateRequest,
-    ) -> CapabilityResult<AddIceCandidateResponse> {
-        Err(CapabilityError::NotSupported(
-            "media_add_ice_candidate: not supported for this RTC backend".into(),
-        ))
-    }
-
-    async fn media_set_publisher_mute(
-        &self,
-        _ctx: &Ctx,
-        _req: &MediaSetPublisherMuteRequest,
-    ) -> CapabilityResult<MediaSetPublisherMuteResponse> {
-        Err(CapabilityError::NotSupported(
-            "media_set_publisher_mute: not supported for this RTC backend".into(),
-        ))
-    }
-
-    async fn media_set_subscription(
-        &self,
-        _ctx: &Ctx,
-        _req: &MediaSetSubscriptionRequest,
-    ) -> CapabilityResult<MediaSetSubscriptionResponse> {
-        Err(CapabilityError::NotSupported(
-            "media_set_subscription: not supported for this RTC backend".into(),
-        ))
-    }
-
-    async fn media_set_simulcast_layer(
-        &self,
-        _ctx: &Ctx,
-        _req: &MediaSetSimulcastLayerRequest,
-    ) -> CapabilityResult<MediaSetSimulcastLayerResponse> {
-        Err(CapabilityError::NotSupported(
-            "media_set_simulcast_layer: not supported for this RTC backend".into(),
-        ))
-    }
-
-    async fn media_get_network_quality(
-        &self,
-        _ctx: &Ctx,
-        _req: &MediaGetNetworkQualityRequest,
-    ) -> CapabilityResult<MediaGetNetworkQualityResponse> {
-        Err(CapabilityError::NotSupported(
-            "media_get_network_quality: not supported for this RTC backend".into(),
-        ))
-    }
-
-    async fn media_get_room_state(
-        &self,
-        _ctx: &Ctx,
-        _req: &MediaGetRoomStateRequest,
-    ) -> CapabilityResult<MediaGetRoomStateResponse> {
-        Err(CapabilityError::NotSupported(
-            "media_get_room_state: not supported for this RTC backend".into(),
-        ))
-    }
 }
 
 #[async_trait]
@@ -278,12 +125,10 @@ pub trait CapabilityPolicyBackend: Send + Sync {
 
 /// 能力分发路由：**把「哪些 capability_id 交给哪个后端」变成可注册的数据。**
 ///
-/// 在此之前，应用层的分发器里写着 `if capability_id.starts_with("rtc.")` ——
-/// 核心因此认识一个具体的插件种类，每加一类插件都要回来改分发器。这是插件系统
-/// 最典型的老化方式：支持的插件越多，核心越臃肿。
-///
-/// 现在核心只做两件事：按注册顺序问每条路由「这个 id 归你吗」，没人认领就走
-/// 远端插件路由表。核心代码里不该再出现任何具体插件的名字。
+/// A dispatcher that matched id prefixes itself would know concrete plugin kinds and grow
+/// with every new one. Instead the core asks each registered route, in order, whether it owns
+/// the id, and sends unclaimed ids to the remote plugin route book. No concrete plugin is
+/// named in core code.
 ///
 /// # 为什么 `matches` 不是返回前缀字符串
 ///
@@ -292,7 +137,7 @@ pub trait CapabilityPolicyBackend: Send + Sync {
 /// 所以这里刻意留出判定自由度。
 #[async_trait]
 pub trait CapabilityDispatchRoute: Send + Sync {
-    /// 路由标识，用于日志与冲突排查（例如 `rtc`）。
+    /// Route id for logs and conflict diagnosis.
     fn route_id(&self) -> &str;
 
     /// 该 capability_id 是否由本路由接管。
@@ -308,12 +153,9 @@ pub trait CapabilityDispatchRoute: Send + Sync {
 
 /// 插件健康探针：**把「用哪种协议探活」也变成可注册的数据。**
 ///
-/// 通用健康检查器原本内嵌着 `if capability_id == "rtc.media.control"` 与
-/// 一整段 SfuControl 客户端代码 —— 选择依据后来改成了插件声明的标签，
-/// 但实现仍然留在通用路径里。加第二种需要特殊探活语义的插件时，
-/// 还是只能回到那个文件里加分支。
-///
-/// 现在通用侧只做两件事：按插件声明的协议名找探针，找不到就用通用协议。
+/// A generic checker that embedded a protocol-specific client would need a new branch for every
+/// plugin with special liveness semantics. Instead the generic side looks up the probe of the
+/// protocol the plugin declares and falls back to the generic protocol.
 ///
 /// # 为什么探针拿的是 authority 而不是已建好的连接
 ///

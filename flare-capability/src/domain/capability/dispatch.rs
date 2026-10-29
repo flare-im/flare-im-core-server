@@ -8,8 +8,7 @@ use super::error::{CapabilityError, Result};
 pub const DISPATCH_TENANT_REQUIRED: &str = "tenant required to dispatch a capability";
 
 /// 去掉首尾空白后的租户；缺失或只有空白时为 `None`。调度路径上判断租户与取用租户都按它
-/// （`require_dispatch_tenant`、RTC 选路上下文与路由器），同一个带空白的取值在授权、选路与
-/// 选 RTC 后端时是同一个租户。
+/// （`require_dispatch_tenant`、分发路由），同一个带空白的取值在授权与选路时是同一个租户。
 pub fn trimmed_dispatch_tenant(tenant_id: Option<&str>) -> Option<&str> {
     tenant_id
         .map(str::trim)
@@ -17,7 +16,7 @@ pub fn trimmed_dispatch_tenant(tenant_id: Option<&str>) -> Option<&str> {
 }
 
 /// 调度命令的租户：缺失或空白即 `PolicyDenied`（gRPC `PERMISSION_DENIED`，与同一命令缺 `user_id`
-/// 的拒绝同类），在查路由簿、查授权、选 RTC 后端、调远端插件之前拒绝，不再按租户 "0" 处理
+/// 的拒绝同类），在查路由簿、查授权、调远端插件之前拒绝，不再按租户 "0" 处理
 /// （W13-D）。显式的租户 "0" 照常。返回去掉首尾空白后的取值（见 [`trimmed_dispatch_tenant`]），
 /// 不做别的归一化；gRPC 入口已要求规范写法并与签名身份比对，带空白的取值只可能来自其他入口。
 pub fn require_dispatch_tenant(req: &CapabilityDispatchCommand) -> Result<String> {
@@ -43,7 +42,7 @@ mod tests {
     }
 
     /// 缺租户（`None`、空串、全空白）以 `tenant required …` 口径拒绝；带首尾空白的租户按去掉
-    /// 空白后的取值返回（与 RTC 选路上下文一致），显式的 "0" 照常。
+    /// 空白后的取值返回，显式的 "0" 照常。
     #[test]
     fn the_dispatch_tenant_is_trimmed_before_it_is_judged_and_used() {
         assert_eq!(

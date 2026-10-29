@@ -24,7 +24,7 @@
 | P12 | ~ 低 | MQ 主题分区键 conversation_id，10万人热群=单分区热点 | topic 设计 | 待分片 |
 | P13 | ✓ 治理 | `doc/` 与 `docs/` 并存 | 仓库根 | 待归档 |
 | P14 | ✓ 治理 | service-kit 6.6K 未拆（08 W4 列了未排期） | `crates/flare-im-service-kit` | 待排期 |
-| P15 | ✓ 治理 | gateway 8041 行最大，call_signal 子模块待收敛 | `flare-signaling/gateway` | 待收敛 |
+| P15 | ✓ 治理 | gateway 8041 行最大，call_signal 子模块待收敛 | `flare-signaling/gateway` | 已完成：通话改为托管插件 `flare.call`，网关通话子模块删除 |
 
 > 核查更正：`logs/` 与 `data/` 经 `git ls-files` 确认**未被跟踪**，无需处理。上一轮报告中此项作废。
 
@@ -251,7 +251,7 @@ if let Some(idx) = &self.user_sync_index {
 6.6K 行 7 关切，全员扇入。按已验证的 capability-core 模式拆 `flare-im-grpc-clients` / `flare-im-observability` / `flare-im-gateway-auth`，config+runtime-plan 留本体；拆后加依赖方向契约。补进 08 W4 排期。成本 1-2 周。
 
 ### P15（治理）gateway call_signal 收敛
-gateway 8041 行（全仓最大），call_signal 子模块随 flare-call 接线完成后应收敛：gateway 只留连接侧信令路由，FSM 归 flare-call（`call_boundary` 契约已锁 conversation，补锁 gateway 不得持有 CallSession）。成本随 flare-call 接线。
+已完成：通话是托管插件 `flare.call`，呼叫状态机在插件服务端；网关通话子模块与核心通话 crate 一并删除，`call_boundary` 改为反向门禁（Core 生产源码不得出现通话专用代码）。
 
 ---
 

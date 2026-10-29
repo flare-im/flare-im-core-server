@@ -49,9 +49,7 @@ use crate::domain::capability::PluginHealthProbe;
 use crate::domain::capability::{CapabilityDispatchCommand, CapabilityPolicyBackend};
 use crate::domain::model::{PluginEndpoint, validate_plugin_endpoint};
 use crate::infrastructure::capability::plugin_channel::resolve_plugin_channel;
-use crate::infrastructure::capability::plugin_contract::{
-    HEALTH_PROTOCOL_SFU_CONTROL, LABEL_HEALTH_PROTOCOL,
-};
+use crate::infrastructure::capability::plugin_contract::LABEL_HEALTH_PROTOCOL;
 use crate::infrastructure::capability::{
     CapabilityExtensionRegistry, DispatchRateLimiter, PluginRouteBook,
 };
@@ -144,7 +142,6 @@ impl CapabilityGrpcServer {
             staff_verifier,
             registration_verifier: None,
         };
-        server.register_discovered_plugin_endpoints();
         server.spawn_plugin_health_checker();
         server
     }
@@ -330,48 +327,6 @@ impl CapabilityGrpcServer {
 
     pub fn runtime_config(&self) -> Arc<CapabilityRuntimeConfig> {
         Arc::clone(&self.runtime)
-    }
-
-    fn register_discovered_plugin_endpoints(&self) {
-        let endpoints = self.runtime.media_control_endpoints();
-        if endpoints.is_empty() {
-            tracing::warn!(
-                "no media control endpoints discovered from capability_runtime.plugin_discovery_endpoints"
-            );
-        }
-        for ep in endpoints {
-            // 发现来的媒体控制端点同样要声明健康协议 —— 它们是被
-            // `media_control_endpoints()` 按能力 id 选出来的，配置里未必写了标签；
-            // 漏声明会让健康检查静默退化成通用协议，丢掉 draining 语义。
-            // 用 entry().or_insert 而非直接插入：配置里显式写了的以配置为准。
-            let mut labels = ep.labels.clone();
-            labels
-                .entry(LABEL_HEALTH_PROTOCOL.to_string())
-                .or_insert_with(|| HEALTH_PROTOCOL_SFU_CONTROL.to_string());
-
-            let instance = RegisteredPluginInstance {
-                plugin_id: ep.plugin_id.clone(),
-                capability_id: ep.capability_id.clone(),
-                grpc_authority: ep.discovery_route_authority(),
-                labels,
-                // 配置发现来的端点没有清单信息：如实标为 unverified，
-                // 而不是伪造一份声明——否则「已验证」这个状态就失去意义了。
-                plugin_version: String::new(),
-                api_version: String::new(),
-                manifest_sha256: String::new(),
-                declared_operations: Vec::new(),
-                unverified: true,
-                // 配置发现来的端点没有清单，也就无从得知计费单位：沿用旧语义。
-            };
-            self.plugin_routes.upsert(ep.tenant_id.as_str(), instance);
-            tracing::trace!(
-                tenant_id = %ep.tenant_id,
-                plugin_id = %ep.plugin_id,
-                capability_id = %ep.capability_id,
-                service_name = %ep.service_name,
-                "auto-registered discovered capability plugin endpoint"
-            );
-        }
     }
 
     fn spawn_plugin_health_checker(&self) {
@@ -1159,7 +1114,7 @@ mod plugin_route_book_tests {
     fn plugin(plugin_id: &str) -> RegisteredPluginInstance {
         RegisteredPluginInstance {
             plugin_id: plugin_id.to_string(),
-            capability_id: "rtc.call".to_string(),
+            capability_id: "example.poll".to_string(),
             grpc_authority: "http://127.0.0.1:9".to_string(),
             plugin_version: "1.0.0".to_string(),
             api_version: "1.0".to_string(),
@@ -1180,7 +1135,6 @@ mod plugin_route_book_tests {
                 max_payload_json_bytes: 1024,
                 dispatch_timeout: Duration::from_secs(1),
                 dispatch_max_per_minute: None,
-                plugin_discovery_endpoints: Vec::new(),
                 plugin_health_check_interval: Duration::from_secs(3600),
                 plugin_call_timeout: Duration::from_millis(50),
                 plugin_route_refresh_interval: Duration::from_secs(10),
@@ -1488,9 +1442,9 @@ mod plugin_route_book_tests {
         let mut request = Request::new(RegisterPluginEndpointRequest {
             tenant_id: tenant_id.to_string(),
             plugin_id: plugin_id.to_string(),
-            capability_id: "rtc.call".to_string(),
+            capability_id: "example.poll".to_string(),
             grpc_authority: "http://127.0.0.1:9".to_string(),
-            declared_operations: vec!["rtc.call".to_string()],
+            declared_operations: vec!["example.poll".to_string()],
             request_id: "req-2".to_string(),
             plugin_version: "1.0.0".to_string(),
             api_version: "1.0".to_string(),
@@ -1680,10 +1634,10 @@ mod plugin_route_book_tests {
         };
         let capture = crate::test_logs::LogCapture::start(tracing::Level::WARN);
         for request in [
-            unverified("p1\nWARN forged line", "rtc.call"),
-            unverified("plugin-c", "rtc.call\r\nWARN forged line"),
-            unverified("plugin c", "rtc.call"),
-            unverified("plugin-c", "rtc/call"),
+            unverified("p1\nWARN forged line", "example.poll"),
+            unverified("plugin-c", "example.poll\r\nWARN forged line"),
+            unverified("plugin c", "example.poll"),
+            unverified("plugin-c", "example/poll"),
         ] {
             let status = server.register_plugin_endpoint(request).await.unwrap_err();
             assert_eq!(status.code(), Code::InvalidArgument, "{status:?}");
@@ -1691,8 +1645,8 @@ mod plugin_route_book_tests {
         }
         let mut operation = register(&platform, "tenant-a", "plugin-c");
         operation.get_mut().declared_operations = vec![
-            "rtc.call".to_string(),
-            "rtc.call\nWARN forged line".to_string(),
+            "example.poll".to_string(),
+            "example.poll\nWARN forged line".to_string(),
         ];
         let status = server
             .register_plugin_endpoint(operation)
@@ -1706,7 +1660,7 @@ mod plugin_route_book_tests {
         // 标识合法也不能省略 operation 声明。
         assert_eq!(
             server
-                .register_plugin_endpoint(unverified("plugin-c", "rtc.call"))
+                .register_plugin_endpoint(unverified("plugin-c", "example.poll"))
                 .await
                 .unwrap_err()
                 .code(),

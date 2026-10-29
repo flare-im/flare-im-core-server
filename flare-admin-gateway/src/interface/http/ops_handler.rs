@@ -780,7 +780,7 @@ pub async fn list_tenant_capabilities(
     tag = "Admin",
     request_body = AdminTenantCapabilitySwitchHttpRequest,
     params(
-        ("capability_id" = String, Path, description = "Capability id, for example rtc.call"),
+        ("capability_id" = String, Path, description = "Capability id, for example ai.summary"),
         ("x-audit-reason" = String, Header, description = "Operator reason as percent-encoded UTF-8 (encodeURIComponent; plain ASCII may be sent as is), at most 512 bytes decoded and 1536 bytes as sent; recorded decoded in the audit log"),
         ("idempotency-key" = Option<String>, Header, description = "Required unless x-request-id is present; correlation only, not deduplicated"),
         ("x-request-id" = Option<String>, Header, description = "Required unless idempotency-key is present"),

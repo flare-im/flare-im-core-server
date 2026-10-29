@@ -106,7 +106,7 @@ fn grant(user: &str) -> GrantUserCapabilityRequest {
     GrantUserCapabilityRequest {
         tenant_id: "app-a".into(),
         user_id: user.into(),
-        capability_id: "rtc.call".into(),
+        capability_id: "example.poll".into(),
         ..Default::default()
     }
 }
@@ -114,9 +114,9 @@ fn plugin(name: &str) -> RegisterPluginEndpointRequest {
     RegisterPluginEndpointRequest {
         tenant_id: "app-a".into(),
         plugin_id: name.into(),
-        capability_id: "rtc.call".into(),
+        capability_id: "example.poll".into(),
         grpc_authority: "http://127.0.0.1:9".into(),
-        declared_operations: vec!["rtc.call".into()],
+        declared_operations: vec!["example.poll".into()],
         ..Default::default()
     }
 }
@@ -191,7 +191,6 @@ async fn server(pool: Arc<PgPool>, url: &str) -> CapabilityGrpcServer {
         max_payload_json_bytes: 1024,
         dispatch_timeout: Duration::from_secs(1),
         dispatch_max_per_minute: None,
-        plugin_discovery_endpoints: vec![],
         plugin_health_check_interval: Duration::from_secs(3600),
         plugin_call_timeout: Duration::from_millis(10),
         plugin_route_refresh_interval: Duration::from_secs(3600),
@@ -369,7 +368,7 @@ async fn normal_staff_rpc_writes_commit_source_evidence_and_tail_failures_roll_b
                 RevokeUserCapabilityRequest {
                     tenant_id: "app-a".into(),
                     user_id: "u1".into(),
-                    capability_id: "rtc.call".into(),
+                    capability_id: "example.poll".into(),
                 },
                 "app-a",
                 "core:capabilities:write",
@@ -384,7 +383,7 @@ async fn normal_staff_rpc_writes_commit_source_evidence_and_tail_failures_roll_b
             request(
                 SetTenantCapabilitySwitchRequest {
                     tenant_id: "app-a".into(),
-                    capability_id: "rtc.call".into(),
+                    capability_id: "example.poll".into(),
                     enabled: true,
                 },
                 "app-a",

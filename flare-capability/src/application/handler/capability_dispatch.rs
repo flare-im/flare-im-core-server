@@ -2,17 +2,14 @@
 //!
 //! # 核心不认识任何具体插件
 //!
-//! 这里曾经写着 `if req.capability_id.starts_with("rtc.")` —— 核心因此认识一个
-//! 具体插件种类，每加一类插件都要回来改这个函数。插件系统最典型的老化方式就是
-//! 这样积累起来的：支持的插件越多，核心越臃肿，而且改核心才能加插件，
-//! 意味着插件的发版永远绑着核心的发版。
+//! A prefix check on the capability id here would make the core know a concrete plugin kind
+//! and change with every new one, tying plugin releases to core releases.
 //!
 //! 现在的规则只有两条：
 //!
 //! 1. 按注册顺序问每条 [`CapabilityDispatchRoute`]「这个 capability_id 归你吗」；
 //! 2. 没人认领 → 走远端插件路由表（`PluginRouteBook`）。
 //!
-//! RTC 的前缀知识搬到了 `RtcDispatchRoute`，由组合根注册。判据很直接：
 //! **本文件里 grep 任何具体插件名，应当零命中。**
 
 use std::sync::Arc;
@@ -236,14 +233,12 @@ mod tests {
 
     /// 空路由表 = 核心对插件零知识。
     ///
-    /// 这条是本次改造的核心断言：**连 `rtc.*` 也不再被特殊对待**，
-    /// 不注册 RtcDispatchRoute 它就只是个普通的未认领 id。
-    /// 改造前这里会走进 RTC 分支。
+    /// No capability id prefix is special: without a registered route every id is unclaimed.
     #[tokio::test]
     async fn empty_route_table_gives_core_zero_plugin_knowledge() {
         let registry = CapabilityExtensionRegistry::new();
         assert!(registry.dispatch_routes().await.is_empty());
-        assert!(dispatch(&registry, "rtc.call.video").await.is_err());
+        assert!(dispatch(&registry, "vendorx.call.video").await.is_err());
     }
 
     /// 记下被问到的租户、一律放行的策略后端。

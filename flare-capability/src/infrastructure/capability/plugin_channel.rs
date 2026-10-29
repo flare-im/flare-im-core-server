@@ -2,8 +2,6 @@
 
 use tonic::transport::Channel;
 
-pub(crate) use flare_im_service_kit::discovery::DISCOVERY_CHANNEL_TIMEOUT as PLUGIN_DISCOVERY_TIMEOUT;
-
 /// 按 `RegisteredPluginInstance.grpc_authority` 解析 gRPC 通道（`http(s)://` 或 `discovery://`）。
 pub async fn resolve_plugin_channel(grpc_authority: &str) -> Result<Channel, String> {
     flare_im_service_kit::discovery::resolve_grpc_channel(grpc_authority).await

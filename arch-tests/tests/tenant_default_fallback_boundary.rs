@@ -96,14 +96,11 @@ const FIXED_BY_W12_T: &[&str] = &[
     "flare-storage/reader/src/infrastructure/persistence/optimized_postgres_store.rs",
 ];
 
-/// W13-D 改成缺租户即报错的 Capability 调度文件（调度请求体、RTC 选路与后端、调度日志字段）：
+/// W13-D 改成缺租户即报错的 Capability 调度文件（调度请求体、调度日志字段）：
 /// 必须保持零兜底，也不得进入 `ALLOWED`。
 const FIXED_BY_W13_D: &[&str] = &[
     "flare-capability/src/application/handler/capability_dispatch.rs",
     "flare-capability/src/application/handler/remote_dispatch.rs",
-    "flare-capability/src/domain/capability/command_dispatch_service.rs",
-    "flare-capability/src/infrastructure/capability/routing/rtc_dispatch_route.rs",
-    "flare-capability/src/infrastructure/capability/routing/rtc_router.rs",
     "flare-capability/src/interface/grpc/capability/service.rs",
 ];
 

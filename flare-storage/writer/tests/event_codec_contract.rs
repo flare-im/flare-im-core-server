@@ -22,7 +22,7 @@ use flare_storage_writer::infrastructure::persistence::repository::operation_sto
 
 /// Writer 领域 `EventType` 的全部变体。新增变体时 `writer_variant_list_is_exhaustive` 的 match 不再
 /// 编译，提醒把它加进来。
-const WRITER_EVENT_TYPES: [EventType; 21] = [
+const WRITER_EVENT_TYPES: [EventType; 20] = [
     EventType::Unspecified,
     EventType::Message,
     EventType::MessageRecall,
@@ -33,7 +33,6 @@ const WRITER_EVENT_TYPES: [EventType; 21] = [
     EventType::ConversationUpdate,
     EventType::ConversationDelete,
     EventType::Presence,
-    EventType::CallSignal,
     EventType::Reaction,
     EventType::Pin,
     EventType::Unpin,
@@ -61,7 +60,6 @@ fn writer_variant_list_is_exhaustive() {
             | EventType::ConversationUpdate
             | EventType::ConversationDelete
             | EventType::Presence
-            | EventType::CallSignal
             | EventType::Reaction
             | EventType::Pin
             | EventType::Unpin
@@ -84,12 +82,10 @@ fn proto_event_types() -> Vec<ProtoEventType> {
 }
 
 /// Reader 读回后应得到的领域类型名：两侧领域枚举的变体同名；proto 没有的实时类
-/// （Typing/Presence/CallSignal）落库为未指定，读回也是未指定。
+/// （Typing/Presence）落库为未指定，读回也是未指定。
 fn expected_reader_type_name(event_type: EventType) -> String {
     match event_type {
-        EventType::Typing | EventType::Presence | EventType::CallSignal => {
-            "Unspecified".to_string()
-        }
+        EventType::Typing | EventType::Presence => "Unspecified".to_string(),
         other => format!("{other:?}"),
     }
 }
@@ -241,8 +237,7 @@ fn sample_payload(event_type: EventType) -> Option<EventPayload> {
         | EventType::Typing
         | EventType::ConversationUpdate
         | EventType::ConversationDelete
-        | EventType::Presence
-        | EventType::CallSignal => return None,
+        | EventType::Presence => return None,
     })
 }
 

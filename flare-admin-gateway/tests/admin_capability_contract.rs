@@ -75,7 +75,7 @@ async fn plugin_registration_is_platform_staff_only() {
     for (path, body) in [
         (
             "/api/v1/admin/plugins/register",
-            r#"{"plugin_id":"plugin-c","capability_id":"rtc.call","grpc_authority":"http://sfu:9","plugin_version":"1.0.0","api_version":"1.0","manifest_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","declared_operations":["rtc.call"]}"#,
+            r#"{"plugin_id":"plugin-c","capability_id":"example.poll","grpc_authority":"http://plugin:9","plugin_version":"1.0.0","api_version":"1.0","manifest_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","declared_operations":["example.poll"]}"#,
         ),
         (
             "/api/v1/admin/plugins/deregister",
@@ -123,7 +123,7 @@ async fn capability_catalog_shape() {
         .iter()
         .map(|c| c["capability_id"].as_str().unwrap().to_string())
         .collect();
-    assert_eq!(ids, ["ai.summary", "rtc.call"]);
+    assert_eq!(ids, ["ai.summary", "example.poll"]);
     assert_eq!(
         keys(&data["capabilities"][0]),
         sorted(&[
@@ -148,7 +148,7 @@ async fn tenant_capability_switch_targets_the_signed_application() {
         &h.router,
         admin_request_with_body(
             "PUT",
-            "/api/v1/admin/capabilities/tenant/rtc.call",
+            "/api/v1/admin/capabilities/tenant/example.poll",
             &h.gateway,
             Some(r#"{"enabled":false}"#),
         ),
@@ -161,27 +161,27 @@ async fn tenant_capability_switch_targets_the_signed_application() {
         sorted(&["tenant_id", "capability_id", "enabled", "message"])
     );
     assert_eq!(data["tenant_id"], TENANT);
-    assert_eq!(data["capability_id"], "rtc.call");
+    assert_eq!(data["capability_id"], "example.poll");
     assert_eq!(data["enabled"], false);
     let call = &h.recorder.calls()[0];
     assert_eq!(call.method, "SetTenantCapabilitySwitch");
     assert_eq!(
         call.request,
-        format!("tenant_id={TENANT} capability_id=rtc.call enabled=false")
+        format!("tenant_id={TENANT} capability_id=example.poll enabled=false")
     );
 
     // 另一应用的员工：租户只取自签名。
     h.recorder.clear();
     let other = h.gateway.token_for_tenant(
         "PUT",
-        "/api/v1/admin/capabilities/tenant/rtc.call",
+        "/api/v1/admin/capabilities/tenant/example.poll",
         OTHER_TENANT,
     );
     let (status, _) = send(
         &h.router,
         request_with_body(
             "PUT",
-            "/api/v1/admin/capabilities/tenant/rtc.call",
+            "/api/v1/admin/capabilities/tenant/example.poll",
             Some(&other),
             WRITE_HEADERS,
             Some(r#"{"enabled":true}"#),
@@ -191,7 +191,7 @@ async fn tenant_capability_switch_targets_the_signed_application() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(
         h.recorder.calls()[0].request,
-        format!("tenant_id={OTHER_TENANT} capability_id=rtc.call enabled=true")
+        format!("tenant_id={OTHER_TENANT} capability_id=example.poll enabled=true")
     );
 
     // 下游拒绝与请求体错误。
@@ -212,7 +212,7 @@ async fn tenant_capability_switch_targets_the_signed_application() {
         &h.router,
         admin_request_with_body(
             "PUT",
-            "/api/v1/admin/capabilities/tenant/rtc.call",
+            "/api/v1/admin/capabilities/tenant/example.poll",
             &h.gateway,
             Some(r#"{"enabled":"leak-marker-77"}"#),
         ),
@@ -233,7 +233,7 @@ async fn plugin_register_and_deregister_shapes_and_requests() {
             "/api/v1/admin/plugins/register",
             &h.gateway,
             Some(
-                r#"{"plugin_id":"plugin-c","capability_id":"rtc.call","grpc_authority":"http://sfu:9","plugin_version":"1.0.0","api_version":"1.0","manifest_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","declared_operations":["rtc.call"]}"#,
+                r#"{"plugin_id":"plugin-c","capability_id":"example.poll","grpc_authority":"http://plugin:9","plugin_version":"1.0.0","api_version":"1.0","manifest_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","declared_operations":["example.poll"]}"#,
             ),
         ),
     )
@@ -252,7 +252,7 @@ async fn plugin_register_and_deregister_shapes_and_requests() {
     assert_eq!(
         call.request,
         format!(
-            "tenant_id={TENANT} plugin_id=plugin-c capability_id=rtc.call grpc_authority=http://sfu:9 request_id=req-staff-1 declared=rtc.call"
+            "tenant_id={TENANT} plugin_id=plugin-c capability_id=example.poll grpc_authority=http://plugin:9 request_id=req-staff-1 declared=example.poll"
         )
     );
 
@@ -264,7 +264,7 @@ async fn plugin_register_and_deregister_shapes_and_requests() {
             "POST",
             "/api/v1/admin/plugins/register",
             &h.gateway,
-            Some(r#"{"plugin_id":"plugin-c","capability_id":"","grpc_authority":"http://sfu:9","plugin_version":"1.0.0","api_version":"1.0","manifest_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","declared_operations":[""]}"#),
+            Some(r#"{"plugin_id":"plugin-c","capability_id":"","grpc_authority":"http://plugin:9","plugin_version":"1.0.0","api_version":"1.0","manifest_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","declared_operations":[""]}"#),
         ),
     )
     .await;
@@ -274,10 +274,10 @@ async fn plugin_register_and_deregister_shapes_and_requests() {
 
     // 标识不合规（换行、空白、斜杠、声明里的非标识）：400，不调用下游，也不回显取值。
     for request in [
-        r#"{"plugin_id":"plugin-c\nWARN forged","capability_id":"rtc.call","grpc_authority":"http://sfu:9","plugin_version":"1.0.0","api_version":"1.0","manifest_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","declared_operations":["rtc.call"]}"#,
-        r#"{"plugin_id":"plugin c","capability_id":"rtc.call","grpc_authority":"http://sfu:9","plugin_version":"1.0.0","api_version":"1.0","manifest_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","declared_operations":["rtc.call"]}"#,
-        r#"{"plugin_id":"plugin-c","capability_id":"rtc/call","grpc_authority":"http://sfu:9","plugin_version":"1.0.0","api_version":"1.0","manifest_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","declared_operations":["rtc/call"]}"#,
-        r#"{"plugin_id":"plugin-c","capability_id":"rtc.call","grpc_authority":"http://sfu:9","declared_operations":["rtc.call","rtc.call\r\nWARN forged"],"plugin_version":"1.0.0","api_version":"1.0","manifest_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}"#,
+        r#"{"plugin_id":"plugin-c\nWARN forged","capability_id":"example.poll","grpc_authority":"http://plugin:9","plugin_version":"1.0.0","api_version":"1.0","manifest_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","declared_operations":["example.poll"]}"#,
+        r#"{"plugin_id":"plugin c","capability_id":"example.poll","grpc_authority":"http://plugin:9","plugin_version":"1.0.0","api_version":"1.0","manifest_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","declared_operations":["example.poll"]}"#,
+        r#"{"plugin_id":"plugin-c","capability_id":"example/poll","grpc_authority":"http://plugin:9","plugin_version":"1.0.0","api_version":"1.0","manifest_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","declared_operations":["example/poll"]}"#,
+        r#"{"plugin_id":"plugin-c","capability_id":"example.poll","grpc_authority":"http://plugin:9","declared_operations":["example.poll","example.poll\r\nWARN forged"],"plugin_version":"1.0.0","api_version":"1.0","manifest_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}"#,
     ] {
         let (status, body) = send(
             &h.router,
@@ -302,7 +302,7 @@ async fn plugin_register_and_deregister_shapes_and_requests() {
             "POST",
             "/api/v1/admin/plugins/register",
             &h.gateway,
-            Some(r#"{"plugin_id":"denied","capability_id":"rtc.call","grpc_authority":"http://sfu:9","plugin_version":"1.0.0","api_version":"1.0","manifest_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","declared_operations":["rtc.call"]}"#),
+            Some(r#"{"plugin_id":"denied","capability_id":"example.poll","grpc_authority":"http://plugin:9","plugin_version":"1.0.0","api_version":"1.0","manifest_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","declared_operations":["example.poll"]}"#),
         ),
     )
     .await;

@@ -962,23 +962,6 @@ fi
 echo -e "${GREEN}✅ 核心服务启动完成${NC}"
 echo ""
 
-# SFU 能力插件（Consul 注册 flare-strom-sfu；capability 通过 service_name 发现）
-STROM_SFU_DIR="$PROJECT_ROOT/../flare-plugin/flare-strom-sfu"
-if [ "${START_STROM_SFU_PLUGIN:-1}" != "0" ] && [ -f "$STROM_SFU_DIR/Makefile" ]; then
-    echo -e "${GREEN}🚀 启动 Strom SFU 插件（flare-strom-sfu → Consul）...${NC}"
-    if (cd "$STROM_SFU_DIR" && make plugin-stop >/dev/null 2>&1 || true) \
-        && (cd "$STROM_SFU_DIR" && make plugin-start); then
-        echo -e "${GREEN}   ✓ Strom SFU plugin 已启动（gRPC :50060，服务名 flare-strom-sfu）${NC}"
-    else
-        echo -e "${YELLOW}   ⚠ Strom SFU plugin 启动失败；RTC 通话需手动: cd flare-plugin/flare-strom-sfu && make plugin-start${NC}"
-    fi
-    echo ""
-else
-    echo -e "${YELLOW}💡 跳过 Strom SFU plugin（START_STROM_SFU_PLUGIN=0 或目录不存在）${NC}"
-    echo -e "${YELLOW}   RTC 通话需: cd flare-plugin/flare-strom-sfu && make plugin-start${NC}"
-    echo ""
-fi
-
 # 启动 Access Gateway（根据模式选择单网关或多网关）
 if [ "$GATEWAY_MODE" == "single" ]; then
     # 单网关模式：启动单个 signaling-gateway 实例 (Signaling Gateway 服务，位于 flare-signaling/gateway)

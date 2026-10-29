@@ -15,7 +15,7 @@
 //! - 标记/取消标记 (EVENT_MARK / EVENT_UNMARK)
 //! - 自定义事件 (EVENT_CUSTOM)
 //!
-//! Realtime control packets such as typing, presence, and RTC signaling are not durable events.
+//! Realtime control packets such as typing, presence, and plugin realtime packets are not durable events.
 
 use std::sync::Arc;
 

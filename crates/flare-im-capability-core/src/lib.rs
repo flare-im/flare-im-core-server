@@ -13,7 +13,6 @@ pub mod extension_operation;
 pub mod grant;
 pub mod ports;
 pub mod recipient;
-pub mod rtc;
 
 pub use context::{CapabilityInvokeMeta, ConversationKind, PreSendEvaluateInput, ResolveTrigger};
 pub use descriptor::CapabilityDescriptor;
@@ -24,18 +23,6 @@ pub use flare_plugin_protocol as plugin;
 pub use grant::{TenantCapabilitySwitch, UserCapabilityGrant};
 pub use ports::{
     CapabilityDispatchRoute, CapabilityPolicyBackend, PluginHealthProbe, PreSendGuard,
-    PreSendGuardPipeline, RecipientResolver, RtcCapability,
+    PreSendGuardPipeline, RecipientResolver,
 };
 pub use recipient::{RecipientResolveRequest, RecipientResolveResult};
-pub use rtc::{
-    AcceptCallRequest, AcceptCallResponse, AddIceCandidateRequest, AddIceCandidateResponse,
-    CreateCallRequest, CreateCallResponse, GetJoinTokenRequest, GetJoinTokenResponse,
-    HandleSdpAnswerRequest, HandleSdpAnswerResponse, HandleSdpOfferRequest, HandleSdpOfferResponse,
-    HangupCallRequest, HangupCallResponse, ListParticipantsRequest, ListParticipantsResponse,
-    MediaGetNetworkQualityRequest, MediaGetNetworkQualityResponse, MediaGetRoomStateRequest,
-    MediaGetRoomStateResponse, MediaJoinTransportRequest, MediaJoinTransportResponse,
-    MediaLeaveTransportRequest, MediaLeaveTransportResponse, MediaSetPublisherMuteRequest,
-    MediaSetPublisherMuteResponse, MediaSetSimulcastLayerRequest, MediaSetSimulcastLayerResponse,
-    MediaSetSubscriptionRequest, MediaSetSubscriptionResponse, RejectCallRequest,
-    RejectCallResponse, RtcParticipant,
-};

@@ -14,7 +14,6 @@ fn capability_contracts_are_owned_by_shared_core_crate() {
         "grant.rs",
         "ports.rs",
         "recipient.rs",
-        "rtc.rs",
     ] {
         assert!(
             contract_root.join(required).is_file(),
@@ -30,7 +29,6 @@ fn capability_contracts_are_owned_by_shared_core_crate() {
         "flare-capability/src/domain/capability/grant.rs",
         "flare-capability/src/domain/capability/ports.rs",
         "flare-capability/src/domain/capability/recipient.rs",
-        "flare-capability/src/domain/capability/rtc.rs",
     ] {
         let content = fs::read_to_string(root.join(facade)).expect("read capability facade");
         assert!(

@@ -151,7 +151,6 @@ pub fn build_pre_send_evaluate_input(
         sender_user_id,
         conversation_id,
         conversation_kind: conversation_kind_from_label(&conversation_type),
-        rtc_intent: false,
         payload_type,
         payload,
         ext,

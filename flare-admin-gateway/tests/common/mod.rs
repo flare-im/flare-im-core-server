@@ -495,7 +495,7 @@ impl CapabilityAdminService for Fakes {
             tenant_id: TENANT.to_string(),
             switches: vec![
                 TenantCapabilitySwitch {
-                    capability_id: "rtc.call".to_string(),
+                    capability_id: "example.poll".to_string(),
                     enabled: true,
                     updated_at: Some(at(1_700_000_000)),
                 },
@@ -594,7 +594,7 @@ impl CapabilityService for Fakes {
             .record("ListCapabilities", &request, String::new());
         self.gate(&request, &[CAPABILITIES_READ])?;
         Ok(GrpcResponse::new(ListCapabilitiesResponse {
-            capabilities: ["rtc.call", "ai.summary"]
+            capabilities: ["example.poll", "ai.summary"]
                 .into_iter()
                 .map(|id| CapabilityDescriptor {
                     capability_id: id.to_string(),
@@ -711,12 +711,12 @@ impl CapabilityService for Fakes {
             .into_iter()
             .map(|plugin_id| RegisteredPluginInstance {
                 plugin_id: plugin_id.to_string(),
-                capability_id: "rtc.call".to_string(),
-                grpc_authority: "discovery://flare-strom-sfu".to_string(),
+                capability_id: "example.poll".to_string(),
+                grpc_authority: "discovery://flare-poll".to_string(),
                 plugin_version: "1.2.0".to_string(),
                 api_version: "v2".to_string(),
                 manifest_sha256: "ab".repeat(32),
-                declared_operations: vec!["rtc.call".to_string()],
+                declared_operations: vec!["example.poll".to_string()],
                 unverified: false,
                 ..Default::default()
             })
@@ -1178,14 +1178,14 @@ pub fn capability_routes() -> Vec<(&'static str, &'static str, Option<&'static s
         ("GET", "/api/v1/admin/capabilities/catalog", None),
         (
             "PUT",
-            "/api/v1/admin/capabilities/tenant/rtc.call",
+            "/api/v1/admin/capabilities/tenant/example.poll",
             Some(r#"{"enabled":false}"#),
         ),
         (
             "POST",
             "/api/v1/admin/plugins/register",
             Some(
-                r#"{"plugin_id":"plugin-c","capability_id":"rtc.call","grpc_authority":"http://sfu:9","declared_operations":["rtc.call"],"plugin_version":"1.0.0","api_version":"1.0","manifest_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}"#,
+                r#"{"plugin_id":"plugin-c","capability_id":"example.poll","grpc_authority":"http://plugin:9","declared_operations":["example.poll"],"plugin_version":"1.0.0","api_version":"1.0","manifest_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}"#,
             ),
         ),
         (

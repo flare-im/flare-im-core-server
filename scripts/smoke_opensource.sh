@@ -16,8 +16,6 @@
 #   - send + local persist
 #   - 事件总线：连接/同步/消息事件的观察
 #   - unread regression
-#   - RTC 房间加入（media-control 链路）—— **仅在 SFU 能力插件在跑时**。
-#     那个插件不在开源仓里，所以它不算进「开源栈自足」的结论；缺席时示例明确跳过。
 #   - 端到端加密：服务端只见密文，仅持钥方可还原
 
 set -u
@@ -57,7 +55,7 @@ fi
 CASES=(
   "e2e_message_ops:send + local persist"
   "e2e_event_observer:event bus (connect/sync)"
-  "e2e_full_event_observer:full event surface (RTC join skipped without the SFU plugin)"
+  "e2e_full_event_observer:full event surface"
   "e2e_full_event_ops:full operation surface"
   "e2e_unread_regression:unread regression"
 )
@@ -110,12 +108,6 @@ for entry in "${CASES[@]}"; do
     fail=$((fail+1))
     if is_timeout_rc "$rc"; then
       echo -e "  ${RED}✗${NC} $desc  — 超过 ${CASE_TIMEOUT}s 未结束（多半是连不上服务端，客户端在死等）"
-    elif grep -q "flare-strom-sfu" "$LOG_DIR/flare-smoke-$ex.log" 2>/dev/null; then
-      # RTC 走的是能力插件，不在核心服务里。插件没起时报出来的是一句
-      # 「discover media-control service ... timeout」，看不出该去做什么。
-      echo -e "  ${RED}✗${NC} $desc  — SFU 能力插件没在跑"
-      echo -e "      RTC 由插件提供，start_server.sh 只在 ../flare-plugin/flare-strom-sfu"
-      echo -e "      存在时才起它。核心链路是否正常看其余几项。"
     else
       echo -e "  ${RED}✗${NC} $desc  — see $LOG_DIR/flare-smoke-$ex.log"
     fi

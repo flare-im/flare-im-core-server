@@ -28,10 +28,6 @@ use flare_server_core::Config;
 use flare_server_core::error::Result;
 use tokio::sync::Mutex;
 
-use crate::call_signal::{
-    CallBindingLookup, CallSignalBridge, CallSignalRouter, InMemoryCallSessionRepository,
-};
-
 /// gRPC 服务集合
 pub struct GrpcServices {
     pub access_gateway_handler: Arc<AccessGatewayHandler>,
@@ -44,7 +40,6 @@ pub struct ApplicationContext {
         Arc<tokio::sync::Mutex<Option<flare_core::server::builder::flare::FlareServer>>>,
     pub grpc_services: GrpcServices,
     pub push_domain_service: Arc<PushDomainService>,
-    pub call_signal_bridge: Arc<CallSignalBridge>,
     pub gateway_id: String,
     pub region: Option<String>,
     /// 指标端点配置。带进上下文是为了让 startup 能真正起 serve_prometheus_metrics
@@ -257,14 +252,6 @@ pub async fn initialize(
         metrics.clone(),
     ));
 
-    // 11. 通话信令生命周期桥：gateway runtime -> flare-call FSM -> capability route hint。
-    let call_session_repository = Arc::new(InMemoryCallSessionRepository::default());
-    let call_binding_lookup: Arc<dyn CallBindingLookup> = call_session_repository.clone();
-    let call_signal_bridge = Arc::new(CallSignalBridge::new(
-        Arc::new(CallSignalRouter::new(call_binding_lookup)),
-        call_session_repository,
-    ));
-
     // 12. 认证器
     let authenticator = build_authenticator(&access_config, tenant_runtime).await?;
 
@@ -333,7 +320,6 @@ pub async fn initialize(
             grpc_addr,
         },
         push_domain_service: push_domain_service.clone(),
-        call_signal_bridge,
         gateway_id,
         region,
     })

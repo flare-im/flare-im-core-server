@@ -33,7 +33,7 @@ pub struct ApplicationContext {
     pub extension_router: ExtensionPluginRouter,
     /// `ExtensionPlugin.Call` 的验签器（Cell 公钥集）；没有时路由器只回答健康检查。
     pub extension_verifier: Option<flare_server_core::SignedContextVerifier>,
-    /// 能力扩展：Guard / Resolver / RTC 注册表。
+    /// 能力扩展：Guard / Resolver 注册表。
     pub capability_registry: CapabilityExtensionRegistry,
     /// 用户授权与租户开关（内存或 PostgreSQL，与 `CapabilityService` 共用）。
     pub capability_policy: Arc<dyn CapabilityPolicyBackend>,

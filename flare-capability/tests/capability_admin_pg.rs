@@ -89,7 +89,7 @@ async fn tenant_runtime_and_switches_read_back_per_tenant() {
     );
 
     policy
-        .set_tenant_capability(&tenant_a, "rtc.call", true)
+        .set_tenant_capability(&tenant_a, "example.poll", true)
         .await
         .unwrap();
     policy
@@ -109,7 +109,7 @@ async fn tenant_runtime_and_switches_read_back_per_tenant() {
         rows,
         vec![
             (tenant_a.as_str(), "ai.summary", false),
-            (tenant_a.as_str(), "rtc.call", true)
+            (tenant_a.as_str(), "example.poll", true)
         ]
     );
     assert!(switches.iter().all(|s| s.updated_at.is_some()));

@@ -81,7 +81,7 @@ pub fn event_to_proto(e: &Event) -> flare_proto::common::Event {
 
 /// 领域事件类型 → `flare.common.v1.EventType` 的取值（`events.event_type` 列与 `Event.type` 存的都是它）。
 ///
-/// 领域枚举的判别值与 proto 不同（领域多了 Typing/Presence/CallSignal，从 6 起错位），不能用
+/// 领域枚举的判别值与 proto 不同（领域多了 Typing/Presence，从 6 起错位），不能用
 /// `as i32`：以前这里直接 `e.r#type as i32`，反应事件（领域 11）落成 `EVENT_MARK`（11），置顶（12）
 /// 落成 `EVENT_UNMARK`，Reader 按 proto 类型解码内层载荷，反应解不开（W10-S1 F1 的
 /// `decode Mark event payload`），置顶则被静默解成取消标记。proto 没有的领域类型记为未指定。
@@ -105,10 +105,7 @@ fn event_type_to_proto_i32(t: EventType) -> i32 {
         EventType::MessageHardDeleted => P::EventMessageRetentionPurged,
         EventType::PluginState => P::EventMessagePluginState,
         EventType::Custom => P::EventCustom,
-        EventType::Typing
-        | EventType::Presence
-        | EventType::CallSignal
-        | EventType::Unspecified => P::Unspecified,
+        EventType::Typing | EventType::Presence | EventType::Unspecified => P::Unspecified,
     };
     proto as i32
 }
@@ -567,7 +564,6 @@ mod tests {
             (EventType::PluginState, 17),
             (EventType::Typing, 0),
             (EventType::Presence, 0),
-            (EventType::CallSignal, 0),
             (EventType::Unspecified, 0),
         ];
         for (domain, proto) in cases {

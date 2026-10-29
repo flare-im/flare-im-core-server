@@ -1,4 +1,4 @@
-//! 插件契约里的**约定常量**：标签键、健康协议取值、媒体控制能力 id。
+//! 插件契约里的**约定常量**：标签键。
 //!
 //! # 为什么要单独一个文件
 //!
@@ -14,25 +14,6 @@
 /// 缺省（未声明）时走通用协议 —— 这是「声明即边界」在健康检查上的体现：
 /// 插件不声明特殊需求，就按通用方式对待，而不是让核心去猜它是什么。
 pub const LABEL_HEALTH_PROTOCOL: &str = "health_protocol";
-
-/// 健康协议取值：走 `SfuControl.HealthCheck`（带 draining 语义）。
-///
-/// 媒体面需要区分「活着」与「活着但正在摘除」——通用协议只回答前者，
-/// 而通话中的实例被当成健康实例继续接新呼叫会导致扩缩容时断线。
-pub const HEALTH_PROTOCOL_SFU_CONTROL: &str = "sfu_control";
-
-/// 媒体控制面的能力 id。
-///
-/// 这是**媒体装配路径**自己的知识（等同于领域层 RTC 适配器认识
-/// `rtc.call.video`），不是通用分发器的知识。集中在这里是为了消除重复，
-/// 不代表核心通用路径可以引用它。
-pub const MEDIA_CONTROL_CAPABILITY_ID: &str = "rtc.media.control";
-
-/// 标签键：后端大类，供运维排查与选路观察使用。
-pub const LABEL_BACKEND_CLASS: &str = "backend_class";
-
-/// 后端大类取值：媒体控制面。
-pub const BACKEND_CLASS_MEDIA_CONTROL: &str = "media_control";
 
 #[cfg(test)]
 mod tests {
@@ -57,7 +38,7 @@ mod tests {
         let instances = book.list_filtered("0", "vendorx.do");
         assert!(
             !instances[0].labels.contains_key(LABEL_HEALTH_PROTOCOL),
-            "普通插件不该被塞上媒体面的健康协议"
+            "普通插件不该被塞上专用健康协议"
         );
     }
 }

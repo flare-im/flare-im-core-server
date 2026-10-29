@@ -14,7 +14,6 @@ pub enum EventType {
     ConversationUpdate = 7,
     ConversationDelete = 8,
     Presence = 9,
-    CallSignal = 10,
     Reaction = 11,
     Pin = 12,
     Unpin = 13,

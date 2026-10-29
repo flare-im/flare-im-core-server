@@ -105,7 +105,7 @@ flowchart TB
 | 0.2 | seq 号段接入热路径（ingest 持有每会话号段，耗尽再 INCRBY） | W2 | 2-3 天 | `allocate_batch` 已有 |
 | 0.3 | WAL fail-closed 契约：KV 不可用时持久消息拒发、临时消息降级 TRANSIENT；KV 后端 Dragonfly 用快照持久化（无 AOF），部署确认快照策略与 noeviction | W3 | 1-2 天 | ingest WAL 错误分支 + arch-tests |
 | 0.4 | OTLP 实装（server-core telemetry 一次配置全员生效）+ SLO 仪表：send P99 / broker-accepted / 端到端投递 | W4 | 3-4 天 | flare-core-infra telemetry |
-| 0.5 | 工程卫生：工作树分批提交、flare-call 接线收尾、PUSH_ENVELOPE topic 5→1 收尾 | W4 | 2-3 天 | — |
+| 0.5 | 工程卫生：工作树分批提交、PUSH_ENVELOPE topic 5→1 收尾 | W4 | 2-3 天 | — |
 
 **出口判据**：压测基线报告（单聊 P99、万人群单消息系统行为全记录）；trace 全链贯通可查。
 

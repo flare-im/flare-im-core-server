@@ -89,7 +89,7 @@ flowchart TB
 
 - 消息上行：`flare-signaling/gateway` 将 send frame 转发到 `flare-signaling/route`，再进入 `flare-message-ingest`。
 - ACK / read / sync：在同一条长连接上承载对应 frame，服务端再转发到 route、conversation 或 sync-orchestrator。
-- call / SFU 信令：`flare-call` 拥有通话会话生命周期和业务 FSM，`flare-capability` / 插件负责 RTC/SFU 资源编排，gateway 只做连接侧路由提示；真实音视频媒体流不进入 IM 消息主链。
+- 插件实时包：插件经宿主能力 `im.realtime.deliver` 向会话成员的全部在线连接下发 `DataPacket.capability`（不入库、至多一次）；音视频通话是托管插件 `flare.call`，呼叫状态与媒体都在插件侧，Core 不含通话专用代码，媒体流不进入 IM 消息主链。
 - 能力/插件契约：`flare-im-capability-core` 是共享 contract 来源；`flare-capability` 只负责运行时注册、授权、路由和 gRPC 服务实现。
 - 下行推送：push worker 向 online 查设备所在 gateway，经 GatewayRouter 直推该 gateway，由同一条长连接下发；不经过 route。
 
@@ -124,7 +124,6 @@ Send Command -> flare-message-ingest -> WAL -> MQ main -> flare-orchestrator fan
 
 - 历史消息和审计查询走 `flare-storage/reader`。
 - 会话列表、成员、未读、游标走 `flare-conversation`。
-- 通话会话生命周期和业务状态机走 `flare-call`，媒体控制面仍由 capability/plugin 承担。
 - 多端同步走 `flare-sync-orchestrator`，基于 conversation seq 和 event stream 收敛。
 - 在线状态走 `flare-signaling/online`。
 - 媒体文件、引用、对象 ACL 走 `flare-media`。

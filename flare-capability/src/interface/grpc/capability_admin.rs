@@ -222,7 +222,7 @@ mod tests {
 
     fn server(with_key: bool, with_db: bool) -> CapabilityAdminGrpcServer<MemoryRuntime> {
         let policy = Arc::new(InMemoryCapabilityGrants::new());
-        policy.set_tenant_capability("tenant-a", "rtc.call", true);
+        policy.set_tenant_capability("tenant-a", "example.poll", true);
         policy.set_tenant_capability("tenant-a", "ai.summary", false);
         policy.set_tenant_capability("tenant-b", "social.moments", true);
         let mut runtime = MemoryRuntime::default();
@@ -394,7 +394,7 @@ mod tests {
             .iter()
             .map(|s| (s.capability_id.as_str(), s.enabled))
             .collect();
-        assert_eq!(a, vec![("ai.summary", false), ("rtc.call", true)]);
+        assert_eq!(a, vec![("ai.summary", false), ("example.poll", true)]);
 
         let b = capability
             .list_tenant_capability_switches(switches("tenant-b"))

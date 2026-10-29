@@ -384,7 +384,7 @@ mod tenant_switch_tests {
             "example.pollster.vote",
             "example.poll",
             "example.other.vote",
-            "rtc.call",
+            "vendorx.do",
         ] {
             assert!(g.check_not_suspended("app-a", open).is_ok(), "{open}");
         }

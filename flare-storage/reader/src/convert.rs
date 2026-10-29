@@ -119,10 +119,9 @@ pub fn event_type_to_proto_i32(v: EventType) -> i32 {
         EventType::MessageHardDeleted => ProtoEventType::EventMessageRetentionPurged as i32,
         EventType::Custom => ProtoEventType::EventCustom as i32,
         EventType::PluginState => ProtoEventType::EventMessagePluginState as i32,
-        EventType::Typing
-        | EventType::Presence
-        | EventType::CallSignal
-        | EventType::Unspecified => ProtoEventType::Unspecified as i32,
+        EventType::Typing | EventType::Presence | EventType::Unspecified => {
+            ProtoEventType::Unspecified as i32
+        }
     }
 }
 

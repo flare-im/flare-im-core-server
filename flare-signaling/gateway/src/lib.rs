@@ -12,7 +12,6 @@
 #![recursion_limit = "512"]
 
 pub mod application;
-pub mod call_signal;
 pub mod config;
 pub mod constants;
 pub mod domain;

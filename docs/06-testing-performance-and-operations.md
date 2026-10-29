@@ -131,7 +131,7 @@ cargo test -p flare-media --lib -- --ignored
 
 | 门禁 | 命令 | 通过标准 |
 |------|------|----------|
-| 协议主干 | `cd flare-proto && rtk cargo test`；`cd flare-grpc-proto && rtk cargo test --features sfu_control` | proto 编译和 SFU opt-in feature 不回退。 |
+| 协议主干 | `cd flare-proto && rtk cargo test`；`cd flare-grpc-proto && rtk cargo test` | proto 编译不回退。 |
 | 服务端大群原语 | `cd flare-im-core && rtk cargo test -p flare-im-message-pipeline`；`rtk cargo test -p flare-orchestrator`；`rtk cargo test -p flare-push-server`；`rtk cargo test -p flare-im-arch-tests large_conversation` | 大群不物化全量收件人；push-only ping 不携带 inline message payload；recipient-less ping 走在线索引。 |
 | 传输与 runtime | `cd flare-core && rtk cargo test --all-features`；`cd flare-server-core && rtk cargo test --all-features` | heartbeat half-open、runtime shutdown、MQ backpressure 等回归保持通过。 |
 | SDK 核心 | `cd flare-im-core-sdk && rtk cargo test`；`rtk cargo test --features storage-sqlite` | 可靠发送、SQLite 本地存储、sync lifecycle 不回退。 |

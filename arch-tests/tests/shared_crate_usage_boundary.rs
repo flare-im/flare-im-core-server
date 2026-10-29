@@ -32,7 +32,6 @@ fn extracted_core_crates_have_runtime_owners() {
         .collect::<Vec<_>>();
 
     for (crate_name, expected_owner_hint) in [
-        ("flare-call", "flare-signaling/gateway"),
         ("flare-im-capability-core", "flare-capability"),
         ("flare-im-message-pipeline", "flare-message-ingest"),
         ("flare-im-hooks", "flare-message-ingest"),

@@ -1,81 +1,101 @@
+//! Calls are a managed plugin (`flare.call`): Core keeps only business-neutral primitives
+//! (realtime delivery to conversation members, the catalog-changed notice) and owns no call
+//! lifecycle, signalling route or media control. This gate keeps call-specific code from
+//! coming back into Core production sources.
+
 use std::fs;
 use std::path::{Path, PathBuf};
 
+/// Identifiers that only call or media-control code would use.
+const FORBIDDEN: &[&str] = &[
+    "flare_call",
+    "flare-call",
+    "CallSession",
+    "call_signal",
+    "CallSignal",
+    "RtcDispatchRoute",
+    "RtcCapability",
+    "RtcInvite",
+    "rtc_intent",
+    "SfuControl",
+    "sfu_control",
+    "flare-strom-sfu",
+    "STROM_SFU",
+    "\"rtc.",
+];
+
 #[test]
-fn call_lifecycle_is_owned_by_flare_call_not_conversation() {
+fn core_production_sources_hold_no_call_specific_code() {
     let root = workspace_root();
+    let mut files = Vec::new();
+    collect_rust_sources(&root, &mut files);
+    assert!(
+        files.len() > 200,
+        "scan found too few sources; the gate would pass vacuously"
+    );
 
-    for required in [
-        "crates/flare-call/src/domain/call_session.rs",
-        "crates/flare-call/src/domain/event.rs",
-        "crates/flare-call/src/domain/repository.rs",
-        "crates/flare-call/src/application/call/start_call_handler.rs",
-    ] {
-        assert!(
-            root.join(required).is_file(),
-            "call lifecycle owner file is missing: {required}"
-        );
-    }
-
-    let conversation_src = root.join("flare-conversation/src");
-    let forbidden = [
-        "CallSession",
-        "CallSessionEvent",
-        "CallSessionRepository",
-        "CallSessionState",
-        "domain::call",
-        "pub mod call;",
-    ];
     let mut violations = Vec::new();
-    collect_rs_files(&conversation_src, &mut violations, &forbidden);
+    for file in &files {
+        let content = fs::read_to_string(file).expect("read rust source");
+        for pattern in FORBIDDEN {
+            if content.contains(pattern) {
+                violations.push(format!(
+                    "{} contains call-specific `{pattern}`",
+                    file.strip_prefix(&root).unwrap_or(file).display()
+                ));
+            }
+        }
+    }
 
     assert!(
         violations.is_empty(),
-        "flare-conversation must not own call lifecycle code:\n{}",
+        "Core must stay call-agnostic; call logic belongs to the flare.call plugin:\n{}",
         violations.join("\n")
     );
 }
 
 #[test]
-fn call_lifecycle_is_wired_into_gateway_runtime() {
+fn removed_call_crates_and_modules_stay_removed() {
     let root = workspace_root();
-
-    let gateway_manifest = fs::read_to_string(root.join("flare-signaling/gateway/Cargo.toml"))
-        .expect("read gateway manifest");
+    for removed in [
+        "crates/flare-call",
+        "flare-signaling/gateway/src/call_signal",
+        "flare-storage/writer/src/call",
+        "crates/flare-im-capability-core/src/rtc.rs",
+        "flare-capability/src/domain/capability/rtc.rs",
+        "flare-capability/src/infrastructure/capability/internal",
+    ] {
+        assert!(!root.join(removed).exists(), "{removed} must not exist");
+    }
+    let manifest = fs::read_to_string(root.join("Cargo.toml")).expect("read workspace manifest");
     assert!(
-        gateway_manifest.contains("flare-call = { workspace = true }"),
-        "flare-signaling-gateway must depend on flare-call so call lifecycle is not a runtime orphan"
+        !manifest.contains("flare-call"),
+        "the workspace must not list a call crate"
     );
+}
 
-    let bridge = fs::read_to_string(root.join("flare-signaling/gateway/src/call_signal/bridge.rs"))
-        .expect("read gateway call bridge");
-    for required in [
-        "flare_call::application::call",
-        "StartCallHandler",
-        "AcceptCallHandler",
-        "RejectCallHandler",
-        "HangupCallHandler",
-        "CancelCallHandler",
-        "StartCallCommand",
-    ] {
-        assert!(
-            bridge.contains(required),
-            "gateway call signal bridge must invoke flare-call command handlers; missing `{required}`"
-        );
-    }
-
-    let wire = fs::read_to_string(root.join("flare-signaling/gateway/src/service/wire.rs"))
-        .expect("read gateway wire");
-    for required in [
-        "pub call_signal_bridge: Arc<CallSignalBridge>",
-        "CallSignalBridge::new",
-        "InMemoryCallSessionRepository",
-    ] {
-        assert!(
-            wire.contains(required),
-            "gateway runtime context must expose a wired call bridge; missing `{required}`"
-        );
-    }
+/// The scanner catches an injected violation, so a broken walk cannot keep the gate green.
+#[test]
+fn the_scanner_catches_an_injected_violation() {
+    let dir = std::env::temp_dir().join(format!("flare-call-gate-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(dir.join("src")).expect("temp dir");
+    fs::create_dir_all(dir.join("tests")).expect("temp dir");
+    fs::write(
+        dir.join("src/lib.rs"),
+        "fn f(id: &str) -> bool { id.starts_with(\"rtc.\") }\n",
+    )
+    .expect("write source");
+    fs::write(dir.join("tests/t.rs"), "const X: &str = \"rtc.call\";\n").expect("write test");
+    let mut files = Vec::new();
+    collect_rust_sources(&dir, &mut files);
+    let _ = fs::remove_dir_all(&dir);
+    assert_eq!(
+        files.len(),
+        1,
+        "only production sources are scanned: {files:?}"
+    );
+    assert!(files[0].ends_with("src/lib.rs"));
 }
 
 fn workspace_root() -> PathBuf {
@@ -85,26 +105,24 @@ fn workspace_root() -> PathBuf {
         .to_path_buf()
 }
 
-fn collect_rs_files(dir: &Path, violations: &mut Vec<String>, forbidden: &[&str]) {
+/// Every `.rs` file under `dir` except `target`, `.git`, `tests`, `benches` and `examples`
+/// directories (the walk `error_boundary` uses).
+fn collect_rust_sources(dir: &Path, files: &mut Vec<PathBuf>) {
     for entry in fs::read_dir(dir).expect("read source directory") {
         let entry = entry.expect("read source entry");
         let path = entry.path();
-
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
         if path.is_dir() {
-            collect_rs_files(&path, violations, forbidden);
-            continue;
-        }
-
-        if path.extension().is_some_and(|ext| ext == "rs") {
-            let content = fs::read_to_string(&path).expect("read rust source");
-            for pattern in forbidden {
-                if content.contains(pattern) {
-                    violations.push(format!(
-                        "{} contains forbidden call lifecycle pattern `{pattern}`",
-                        path.strip_prefix(dir).unwrap_or(path.as_path()).display()
-                    ));
-                }
+            if matches!(
+                name.as_ref(),
+                "target" | ".git" | "tests" | "benches" | "examples"
+            ) {
+                continue;
             }
+            collect_rust_sources(&path, files);
+        } else if path.extension().is_some_and(|ext| ext == "rs") {
+            files.push(path);
         }
     }
 }

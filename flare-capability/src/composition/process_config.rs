@@ -7,7 +7,7 @@
 pub struct CapabilityServiceConfig {
     /// 配置文件路径（可选，最低优先级）
     pub config_file: Option<std::path::PathBuf>,
-    /// 能力运行时配置文件（用于 capability_runtime / plugin_discovery_endpoints）
+    /// 能力运行时配置文件（用于 capability_runtime）
     pub runtime_config_file: Option<std::path::PathBuf>,
     /// 数据库 URL（可选，最高优先级，用于动态 API 配置）
     pub database_url: Option<String>,
