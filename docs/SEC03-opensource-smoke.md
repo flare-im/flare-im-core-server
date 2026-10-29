@@ -32,12 +32,9 @@ Core凭据。没有 Social、Control、Management、Console/SFU 或安装库依�
 在本地入队后即退出，六例退出码通过却只有两个发送者落盘，真实数据库门禁
 检出并保留了失败证据。修复后必须有四个具名发送者真实落盘；不降低判据。
 
-RTC/SFU不属于开源验收：只有真实启动日志同时证明零Hook和零发现插件时，夹具才
-显式设 `FLARE_SMOKE_SFU_ABSENT=true`。观察器必须打印 `N/A … RTC not tested`，
-这不计为 SFU测试通过，也不能把鉴权或连接失败归为插件缺席。未设置该标记时示例
-仍按原方式尝试可选 SFU。当前 SDK 的直接 Capability RPC 不是已签名的内部上下文
-调用，完整商业 RTC 接入还需独立公共入口/适配；本工具不向 SDK 注入 Cell 私钥，
-也不关闭 Capability验签。
+音视频通话是托管插件 `flare.call`，不属于开源 Core 验收：夹具只在真实启动日志
+同时证明零 Hook 和零发现插件后运行示例，示例不探测任何插件。本工具不向 SDK
+注入 Cell 私钥，也不关闭 Capability 验签。
 
 失败/超时同样清理本轮专有名字且专有label的容器、匿名卷和网络。inspect失败不
 当作“已不存在”；标签不符则不删除，cleanup_errors非空不能验收。临时env/PEM在

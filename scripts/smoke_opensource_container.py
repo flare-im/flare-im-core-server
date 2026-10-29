@@ -88,7 +88,6 @@ def client_env(fixture, sdk):
     env.update(FLARE_SDK_ROOT=str(sdk), FLARE_SMOKE_DATA_ROOT=str(fixture / 'sdk-data'),
                FLARE_SMOKE_LOG_DIR=str(fixture / 'case-logs'), CARGO_NET_OFFLINE='true',
                FLARE_SMOKE_WS_URL='ws://127.0.0.1:8080', FLARE_SMOKE_HTTP_URL='http://127.0.0.1:50050',
-               FLARE_SMOKE_SFU_ABSENT='true',
                RUST_LOG='warn', NO_PROXY='localhost,127.0.0.1,::1', no_proxy='localhost,127.0.0.1,::1')
     return env
 
@@ -304,8 +303,7 @@ def execute(stack, sdk, token):
         stack.db_countercheck = stored
         if stored['e2ee_rows'] > 0 and stored['ciphertext_only'] and stored['sender_count'] == 4:
             stack.wait(core, ['flare-supervise', 'health'], timeout=10)
-            return {'sdk_cases': CASES, 'sdk_smoke_exit': 0, 'server_e2ee': stored,
-                    'optional_sfu': 'not installed; not a Core acceptance requirement'}
+            return {'sdk_cases': CASES, 'sdk_smoke_exit': 0, 'server_e2ee': stored}
         time.sleep(0.5)
     raise Failure('smoke exited successfully but durable message/ciphertext countercheck did not pass')
 
