@@ -7,16 +7,16 @@ use std::sync::Arc;
 
 use crate::application::UserConnectionsQuery;
 use crate::application::commands::{
-    PushAckCommand, PushCustomDataCommand, PushEventCommand, PushMessageCommand,
-    PushNotificationCommand,
+    PushAckCommand, PushCapabilityCommand, PushCustomDataCommand, PushEventCommand,
+    PushMessageCommand, PushNotificationCommand,
 };
 use crate::application::handlers::{ConnectionQueryHandler, PushHandler};
 use flare_grpc_proto::access_gateway::access_gateway_server::AccessGateway;
 use flare_grpc_proto::access_gateway::{
     ConnectionInfo as ProtoConnectionInfo, DeliverToConversationRequest, GetUserConnectionsRequest,
-    GetUserConnectionsResponse, PushAckRequest, PushAckResponse, PushCustomRequest,
-    PushEventRequest, PushMessageRequest, PushNotificationRequest, PushNotificationResponse,
-    PushResponse, PushResult, RelayRealtimeControlRequest,
+    GetUserConnectionsResponse, PushAckRequest, PushAckResponse, PushCapabilityRequest,
+    PushCustomRequest, PushEventRequest, PushMessageRequest, PushNotificationRequest,
+    PushNotificationResponse, PushResponse, PushResult, RelayRealtimeControlRequest,
 };
 use flare_im_contracts::Ctx;
 use flare_proto::common::DataPacket;
@@ -92,6 +92,26 @@ fn validate_push_producer_claims(claims: &SignedContextClaims) -> Result<(), Sta
         ));
     }
     Ok(())
+}
+
+/// Recipients of one capability push; Capability sends at most 32.
+const MAX_CAPABILITY_PUSH_USERS: usize = 32;
+
+fn validate_capability_push(
+    body: &PushCapabilityRequest,
+) -> Result<flare_proto::common::CapabilityPacket, Status> {
+    let packet = body
+        .packet
+        .clone()
+        .filter(|packet| !packet.capability_id.trim().is_empty())
+        .ok_or_else(|| Status::invalid_argument("capability packet required"))?;
+    if body.user_ids.is_empty()
+        || body.user_ids.len() > MAX_CAPABILITY_PUSH_USERS
+        || body.user_ids.iter().any(|id| id.trim().is_empty())
+    {
+        return Err(Status::invalid_argument("1 to 32 user ids required"));
+    }
+    Ok(packet)
 }
 
 fn validate_delivery_body(body: &DeliverToConversationRequest) -> Result<(), Status> {
@@ -388,6 +408,31 @@ impl AccessGateway for AccessGatewayHandler {
             .await
             .map_err(|e| {
                 tracing::error!(?e, "Failed to push custom");
+                Status::internal(e.to_string())
+            })?;
+        Ok(Response::new(response))
+    }
+
+    async fn push_capability(
+        &self,
+        request: Request<PushCapabilityRequest>,
+    ) -> Result<Response<PushResponse>, Status> {
+        let ctx = self.require_push_producer(&request)?;
+        let req = request.into_inner();
+        let packet = validate_capability_push(&req)?;
+        let response = self
+            .push_handler
+            .handle_push_capability(
+                &ctx,
+                PushCapabilityCommand {
+                    user_ids: req.user_ids,
+                    packet,
+                    options: req.options,
+                },
+            )
+            .await
+            .map_err(|e| {
+                tracing::warn!(?e, "Failed to push capability packet");
                 Status::internal(e.to_string())
             })?;
         Ok(Response::new(response))

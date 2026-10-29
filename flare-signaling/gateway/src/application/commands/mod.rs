@@ -8,7 +8,7 @@ mod push_command;
 mod send_command;
 
 pub use push_command::{
-    PushAckCommand, PushCustomDataCommand, PushEventCommand, PushMessageCommand,
-    PushNotificationCommand,
+    PushAckCommand, PushCapabilityCommand, PushCustomDataCommand, PushEventCommand,
+    PushMessageCommand, PushNotificationCommand,
 };
 pub use send_command::{SendAckCommand, SendDataCommand, SendEventCommand, SendMessageCommand};

@@ -6,10 +6,11 @@ use std::sync::Arc;
 use flare_grpc_proto::push::push_service_server::PushService;
 use flare_grpc_proto::push::{
     DevicePushProvider, InspectDevicePushBindingRequest, InspectDevicePushBindingResponse,
-    PushCustomRequest, PushCustomResponse, PushMessageRequest, PushMessageResponse,
-    PushNotificationRequest, PushNotificationResponse, QueryPushStatusRequest,
-    QueryPushStatusResponse, RegisterDevicePushTokenRequest, RegisterDevicePushTokenResponse,
-    RevokeDevicePushBindingRequest, RevokeDevicePushBindingResponse,
+    PushCapabilityRequest, PushCapabilityResponse, PushCustomRequest, PushCustomResponse,
+    PushMessageRequest, PushMessageResponse, PushNotificationRequest, PushNotificationResponse,
+    QueryPushStatusRequest, QueryPushStatusResponse, RegisterDevicePushTokenRequest,
+    RegisterDevicePushTokenResponse, RevokeDevicePushBindingRequest,
+    RevokeDevicePushBindingResponse,
 };
 use flare_im_contracts::Ctx;
 use flare_im_contracts::DevicePushToken;
@@ -185,6 +186,27 @@ impl PushService for PushServiceHandler {
         }))
     }
 
+    /// Online-only plugin realtime packet. No task status is kept: there is nothing to query
+    /// for a packet that is dropped once delivered or expired.
+    #[instrument(skip(self, request))]
+    async fn push_capability(
+        &self,
+        request: Request<PushCapabilityRequest>,
+    ) -> Result<Response<PushCapabilityResponse>, Status> {
+        let ctx = require_verified_actor(&request, SignedActorType::Service)?;
+        require_tenant_id(&ctx)?;
+        validate_capability_request(request.get_ref())?;
+        self.require_delivery_ready()?;
+        let req = request.into_inner();
+        self.command_handler
+            .enqueue_push_capability(&ctx, &req)
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
+        Ok(Response::new(PushCapabilityResponse {
+            accepted_user_count: req.user_ids.len() as i32,
+        }))
+    }
+
     async fn register_device_push_token(
         &self,
         request: Request<RegisterDevicePushTokenRequest>,
@@ -342,6 +364,36 @@ fn validate_actor_claims(
     Ok(())
 }
 
+/// Recipients of one realtime packet; Capability sends at most 32.
+const MAX_CAPABILITY_RECIPIENTS: usize = 32;
+/// Encoded packet bound: a 6 KiB JSON payload plus its attributes.
+const MAX_CAPABILITY_PACKET_BYTES: usize = 8 * 1024;
+
+fn validate_capability_request(req: &PushCapabilityRequest) -> Result<(), Status> {
+    use prost::Message as _;
+    let packet = req
+        .packet
+        .as_ref()
+        .ok_or_else(|| Status::invalid_argument("capability packet required"))?;
+    let unique = req
+        .user_ids
+        .iter()
+        .collect::<std::collections::BTreeSet<_>>()
+        .len()
+        == req.user_ids.len();
+    if req.user_ids.is_empty()
+        || req.user_ids.len() > MAX_CAPABILITY_RECIPIENTS
+        || !unique
+        || req.user_ids.iter().any(|id| id.trim().is_empty())
+        || packet.capability_id.trim().is_empty()
+        || packet.packet_type.trim().is_empty()
+        || packet.encoded_len() > MAX_CAPABILITY_PACKET_BYTES
+    {
+        return Err(Status::invalid_argument("invalid capability push"));
+    }
+    Ok(())
+}
+
 fn require_metadata_tenant(
     metadata: &HashMap<String, String>,
     tenant_id: &str,
@@ -380,6 +432,50 @@ fn require_non_empty(value: &str, name: &'static str) -> Result<(), Status> {
 #[cfg(test)]
 mod identity_boundary_tests {
     use super::*;
+
+    #[test]
+    fn capability_pushes_need_a_packet_and_one_to_thirty_two_unique_users() {
+        let packet = flare_proto::common::CapabilityPacket {
+            capability_id: "flare.call".into(),
+            packet_type: "call.snapshot".into(),
+            version: "1".into(),
+            payload: b"{}".to_vec(),
+            ..Default::default()
+        };
+        let request = |users: Vec<&str>, packet: Option<flare_proto::common::CapabilityPacket>| {
+            PushCapabilityRequest {
+                user_ids: users.into_iter().map(String::from).collect(),
+                packet,
+                expire_at_ms: 0,
+            }
+        };
+        assert!(
+            validate_capability_request(&request(vec!["u1", "u2"], Some(packet.clone()))).is_ok()
+        );
+        let many: Vec<String> = (0..33).map(|i| format!("u{i}")).collect();
+        for bad in [
+            request(vec![], Some(packet.clone())),
+            request(vec!["u1", "u1"], Some(packet.clone())),
+            request(vec!["u1"], None),
+            PushCapabilityRequest {
+                user_ids: many,
+                packet: Some(packet.clone()),
+                expire_at_ms: 0,
+            },
+            request(
+                vec!["u1"],
+                Some(flare_proto::common::CapabilityPacket {
+                    payload: vec![b'x'; 9 * 1024],
+                    ..packet.clone()
+                }),
+            ),
+        ] {
+            assert_eq!(
+                validate_capability_request(&bad).unwrap_err().code(),
+                tonic::Code::InvalidArgument
+            );
+        }
+    }
 
     fn claims(actor_type: SignedActorType, tenant_id: &str) -> SignedContextClaims {
         SignedContextClaims {

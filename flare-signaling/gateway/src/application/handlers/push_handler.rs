@@ -16,8 +16,8 @@ use prost_types::Timestamp;
 use tracing::instrument;
 
 use crate::application::commands::{
-    PushAckCommand, PushCustomDataCommand, PushEventCommand, PushMessageCommand,
-    PushNotificationCommand,
+    PushAckCommand, PushCapabilityCommand, PushCustomDataCommand, PushEventCommand,
+    PushMessageCommand, PushNotificationCommand,
 };
 use crate::domain::service::{EventEnvelopePushRequest, PushDomainService};
 use flare_server_core::error::{ErrorBuilder, ErrorCode, Result};
@@ -383,6 +383,34 @@ impl PushHandler {
         Ok(PushResponse {
             result: Some(push_result_at_now(0, 0, window_id)),
             user_results: vec![],
+        })
+    }
+
+    /// PushCapability: the plugin realtime packet to the users' connections on this node.
+    #[instrument(skip(self, ctx, req), fields(user_count = req.user_ids.len()))]
+    pub async fn handle_push_capability(
+        &self,
+        ctx: &Ctx,
+        req: PushCapabilityCommand,
+    ) -> Result<PushResponse> {
+        let window_id = uuid::Uuid::new_v4().to_string();
+        let options = req.options.unwrap_or_default();
+        let per_user = self
+            .push_domain_service
+            .push_capability_to_users(ctx, &req.user_ids, req.packet, &options)
+            .await?;
+        let mut total_pushed: i32 = 0;
+        let mut user_results = Vec::with_capacity(per_user.len());
+        for (user_id, pushed, _failed) in per_user {
+            total_pushed = total_pushed.saturating_add(pushed);
+            user_results.push(UserPushResult {
+                user_id,
+                result: Some(push_result_at_now(pushed, 0, window_id.clone())),
+            });
+        }
+        Ok(PushResponse {
+            result: Some(push_result_at_now(total_pushed, 0, window_id)),
+            user_results,
         })
     }
 

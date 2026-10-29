@@ -20,9 +20,9 @@ use flare_server_core::error::{AnyhowContext, ErrorBuilder, ErrorCode, FlareErro
 
 use flare_grpc_proto::access_gateway::access_gateway_client::AccessGatewayClient;
 use flare_grpc_proto::access_gateway::{
-    DeliverToConversationRequest, PushAckRequest, PushAckResponse, PushCustomRequest,
-    PushEventRequest, PushMessageRequest, PushNotificationRequest, PushNotificationResponse,
-    PushResponse, RelayRealtimeControlRequest,
+    DeliverToConversationRequest, PushAckRequest, PushAckResponse, PushCapabilityRequest,
+    PushCustomRequest, PushEventRequest, PushMessageRequest, PushNotificationRequest,
+    PushNotificationResponse, PushResponse, RelayRealtimeControlRequest,
 };
 use tokio::sync::RwLock;
 use tonic::transport::Channel;
@@ -464,7 +464,7 @@ impl GatewayRouter {
     ) -> Result<()> {
         // Reject unscoped work before opening a channel. Gateway conversation
         // subscriptions are tenant-scoped; a fresh bare Request loses that scope.
-        let request = conversation_delivery_request(ctx, request)?;
+        let request = push_producer_request(ctx, request)?;
         let gateway_ids: Vec<String> = match self.service_discover {
             Some(ref sd) => sd
                 .get_instances()
@@ -483,7 +483,7 @@ impl GatewayRouter {
             match self.get_or_create_client(&gateway_id).await {
                 Ok(mut client) => {
                     if let Err(e) = client
-                        .deliver_to_conversation(conversation_delivery_request(
+                        .deliver_to_conversation(push_producer_request(
                             ctx,
                             request.get_ref().clone(),
                         )?)
@@ -502,6 +502,67 @@ impl GatewayRouter {
                     "broadcast deliver_to_conversation: get gateway client failed (continuing)"
                 ),
             }
+        }
+        Ok(())
+    }
+}
+
+impl GatewayRouter {
+    /// A plugin realtime packet to **every** gateway node; each writes it to the listed users' own
+    /// connections in the producer's tenant, or does nothing. Recipients are few (at most 32), so
+    /// no per-user Online lookup sits on the latency path, and a connection the Online index has
+    /// not seen yet still gets the packet. Best effort: a failed node is logged and skipped (at
+    /// most once, never retried).
+    pub async fn broadcast_push_capability(
+        &self,
+        ctx: &flare_server_core::context::Ctx,
+        request: PushCapabilityRequest,
+    ) -> Result<()> {
+        // Refuse unscoped work before opening a channel.
+        let first = push_producer_request(ctx, request.clone())?;
+        let gateway_ids: Vec<String> = match self.service_discover {
+            Some(ref sd) => sd
+                .get_instances()
+                .await
+                .into_iter()
+                .map(|inst| inst.instance_id)
+                .collect(),
+            None => Vec::new(),
+        };
+        if gateway_ids.is_empty() {
+            let mut client = self.get_or_create_client("__static_fallback__").await?;
+            client
+                .push_capability(first)
+                .await
+                .map_err(|e| gateway_call_failure(format!("push_capability failed: {e}"), &e))?;
+            return Ok(());
+        }
+        let calls = gateway_ids.into_iter().map(|gateway_id| {
+            let request = request.clone();
+            async move {
+                let outcome =
+                    match self.get_or_create_client(&gateway_id).await {
+                        Ok(mut client) => {
+                            let mut call = push_producer_request(ctx, request)?;
+                            call.set_timeout(Duration::from_secs(1));
+                            client.push_capability(call).await.map(|_| ()).map_err(|e| {
+                                gateway_call_failure(format!("push_capability: {e}"), &e)
+                            })
+                        }
+                        Err(e) => Err(e),
+                    };
+                if let Err(error) = outcome {
+                    warn!(
+                        gateway_id = %gateway_id,
+                        error = %error,
+                        "broadcast push_capability to gateway failed (continuing)"
+                    );
+                }
+                Ok::<_, FlareError>(())
+            }
+        });
+        for result in futures::future::join_all(calls).await {
+            result?;
         }
         Ok(())
     }
@@ -768,7 +829,7 @@ mod tests {
         for tenant in ["tenant-a", "tenant-b"] {
             let ctx = Arc::new(Context::with_request_id("delivery-request").with_tenant_id(tenant));
             assert!(
-                conversation_delivery_request(
+                push_producer_request(
                     &ctx,
                     DeliverToConversationRequest {
                         conversation_id: "same-conversation".into(),
@@ -780,12 +841,16 @@ mod tests {
             );
         }
         assert!(
-            conversation_delivery_request(&Arc::new(Context::root()), Default::default()).is_err()
+            push_producer_request(
+                &Arc::new(Context::root()),
+                DeliverToConversationRequest::default()
+            )
+            .is_err()
         );
         assert!(
-            conversation_delivery_request(
+            push_producer_request(
                 &Arc::new(Context::root().with_tenant_id("")),
-                Default::default()
+                PushCapabilityRequest::default()
             )
             .is_err()
         );
@@ -820,10 +885,12 @@ mod tests {
     }
 }
 
-fn conversation_delivery_request(
+/// `request` carrying the verified push producer token of `ctx` (`flare-push-worker`, the
+/// context's own tenant): the gateway admits Push RPCs only under that identity.
+fn push_producer_request<T>(
     ctx: &flare_server_core::context::Ctx,
-    request: DeliverToConversationRequest,
-) -> Result<tonic::Request<DeliverToConversationRequest>> {
+    request: T,
+) -> Result<tonic::Request<T>> {
     use flare_server_core::auth::SignedActorType;
     use flare_server_core::grpc::middleware::signed_context::VerifiedContext;
 
@@ -849,7 +916,7 @@ fn conversation_delivery_request(
     {
         return Err(ErrorBuilder::new(
             ErrorCode::PermissionDenied,
-            "conversation delivery producer identity mismatch",
+            "push producer identity mismatch",
         )
         .build_error());
     }
@@ -963,6 +1030,12 @@ mod delivery_retry_tests {
         async fn push_custom(
             &self,
             _request: Request<PushCustomRequest>,
+        ) -> std::result::Result<Response<PushResponse>, Status> {
+            Err(Status::unimplemented("not used"))
+        }
+        async fn push_capability(
+            &self,
+            _request: Request<PushCapabilityRequest>,
         ) -> std::result::Result<Response<PushResponse>, Status> {
             Err(Status::unimplemented("not used"))
         }

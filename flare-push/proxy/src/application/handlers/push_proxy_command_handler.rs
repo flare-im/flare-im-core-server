@@ -2,7 +2,9 @@
 
 use std::sync::Arc;
 
-use flare_grpc_proto::push::{PushCustomRequest, PushMessageRequest, PushNotificationRequest};
+use flare_grpc_proto::push::{
+    PushCapabilityRequest, PushCustomRequest, PushMessageRequest, PushNotificationRequest,
+};
 use flare_im_contracts::Ctx;
 use flare_server_core::error::Result;
 use tracing::instrument;
@@ -36,5 +38,14 @@ impl PushProxyCommandHandler {
     #[instrument(skip(self, ctx, req), fields(user_count = req.user_ids.len()))]
     pub async fn enqueue_push_custom(&self, ctx: &Ctx, req: &PushCustomRequest) -> Result<()> {
         self.publisher.publish_push_custom(ctx, req).await
+    }
+
+    #[instrument(skip(self, ctx, req), fields(user_count = req.user_ids.len()))]
+    pub async fn enqueue_push_capability(
+        &self,
+        ctx: &Ctx,
+        req: &PushCapabilityRequest,
+    ) -> Result<()> {
+        self.publisher.publish_push_capability(ctx, req).await
     }
 }

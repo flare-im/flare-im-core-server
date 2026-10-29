@@ -14,7 +14,7 @@ use std::collections::{HashMap, HashSet, hash_map::Entry};
 use std::sync::Arc;
 
 use flare_grpc_proto::access_gateway::{
-    PushAckRequest, PushCustomRequest, PushEventRequest, PushMessageRequest,
+    PushAckRequest, PushCapabilityRequest, PushCustomRequest, PushEventRequest, PushMessageRequest,
     PushNotificationRequest, PushOptions,
 };
 use flare_grpc_proto::signaling::router::PushStrategy;
@@ -223,6 +223,17 @@ impl OnlinePushHandler {
                 self.gateway_push
                     .push_custom(ctx, user_id, strategy, req)
                     .await
+            }
+            PushTaskPayloadKind::Capability => {
+                let req = PushCapabilityRequest::decode(envelope.push_payload.as_slice()).map_err(
+                    |e| {
+                        flare_err!(
+                            ErrorCode::InvalidParameter,
+                            format!("decode PushCapabilityRequest: {}", e)
+                        )
+                    },
+                )?;
+                self.gateway_push.push_capability(ctx, req).await
             }
             PushTaskPayloadKind::Unspecified => Err(flare_err!(
                 ErrorCode::InvalidParameter,
@@ -1074,6 +1085,12 @@ mod redelivery_tests {
         async fn push_custom(
             &self,
             _request: Request<PushCustomRequest>,
+        ) -> std::result::Result<Response<PushResponse>, Status> {
+            Err(Status::unimplemented("not used"))
+        }
+        async fn push_capability(
+            &self,
+            _request: Request<PushCapabilityRequest>,
         ) -> std::result::Result<Response<PushResponse>, Status> {
             Err(Status::unimplemented("not used"))
         }

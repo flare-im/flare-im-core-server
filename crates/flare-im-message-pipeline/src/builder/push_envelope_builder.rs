@@ -1,6 +1,6 @@
 //! 推送信封构建器
 //!
-//! 提供统一的 PushEnvelope 构建能力，支持 ACK、通知、CustomData、系统消息。
+//! 提供统一的 PushEnvelope 构建能力，支持 ACK、通知、CustomData、系统消息、插件实时包。
 //!
 //! ## 设计原则
 //! - Builder 模式：流式 API，易于使用
@@ -28,6 +28,7 @@
 //!     .build();
 //! ```
 
+use flare_proto::common::CapabilityPacket;
 use flare_proto::{
     AckPayload, CustomPayload, NotificationPayload, PushEnvelope, PushOptions, PushPayloadKind,
     PushTargetType, SystemPayload,
@@ -49,12 +50,12 @@ pub struct PushEnvelopeBuilder {
     notification: Option<NotificationPayload>,
     custom: Option<CustomPayload>,
     system: Option<SystemPayload>,
+    capability: Option<CapabilityPacket>,
     headers: std::collections::HashMap<String, String>,
 }
 
 impl PushEnvelopeBuilder {
-    /// 创建 ACK 推送构建器
-    pub fn ack() -> Self {
+    fn with_kind(payload_kind: PushPayloadKind) -> Self {
         Self {
             envelope_id: None,
             tenant_id: None,
@@ -63,74 +64,40 @@ impl PushEnvelopeBuilder {
             target_type: PushTargetType::Unspecified,
             target_user_ids: Vec::new(),
             target_device_ids: Vec::new(),
-            payload_kind: PushPayloadKind::Ack,
+            payload_kind,
             options: None,
             ack: None,
             notification: None,
             custom: None,
             system: None,
+            capability: None,
             headers: std::collections::HashMap::new(),
         }
+    }
+
+    /// 创建 ACK 推送构建器
+    pub fn ack() -> Self {
+        Self::with_kind(PushPayloadKind::Ack)
     }
 
     /// 创建通知推送构建器
     pub fn notification() -> Self {
-        Self {
-            envelope_id: None,
-            tenant_id: None,
-            trace_id: None,
-            created_at_ms: None,
-            target_type: PushTargetType::Unspecified,
-            target_user_ids: Vec::new(),
-            target_device_ids: Vec::new(),
-            payload_kind: PushPayloadKind::Notification,
-            options: None,
-            ack: None,
-            notification: None,
-            custom: None,
-            system: None,
-            headers: std::collections::HashMap::new(),
-        }
+        Self::with_kind(PushPayloadKind::Notification)
     }
 
     /// 创建自定义数据推送构建器
     pub fn custom() -> Self {
-        Self {
-            envelope_id: None,
-            tenant_id: None,
-            trace_id: None,
-            created_at_ms: None,
-            target_type: PushTargetType::Unspecified,
-            target_user_ids: Vec::new(),
-            target_device_ids: Vec::new(),
-            payload_kind: PushPayloadKind::Custom,
-            options: None,
-            ack: None,
-            notification: None,
-            custom: None,
-            system: None,
-            headers: std::collections::HashMap::new(),
-        }
+        Self::with_kind(PushPayloadKind::Custom)
     }
 
     /// 创建系统消息推送构建器
     pub fn system() -> Self {
-        Self {
-            envelope_id: None,
-            tenant_id: None,
-            trace_id: None,
-            created_at_ms: None,
-            target_type: PushTargetType::Unspecified,
-            target_user_ids: Vec::new(),
-            target_device_ids: Vec::new(),
-            payload_kind: PushPayloadKind::System,
-            options: None,
-            ack: None,
-            notification: None,
-            custom: None,
-            system: None,
-            headers: std::collections::HashMap::new(),
-        }
+        Self::with_kind(PushPayloadKind::System)
+    }
+
+    /// A plugin realtime packet: online connections only, never stored or pushed offline.
+    pub fn capability() -> Self {
+        Self::with_kind(PushPayloadKind::Capability)
     }
 
     /// 设置信封 ID
@@ -202,6 +169,12 @@ impl PushEnvelopeBuilder {
     /// 设置系统消息载荷
     pub fn system_payload(mut self, payload: SystemPayload) -> Self {
         self.system = Some(payload);
+        self
+    }
+
+    /// The plugin realtime packet, delivered unchanged as `DataPacket.capability`.
+    pub fn capability_packet(mut self, packet: CapabilityPacket) -> Self {
+        self.capability = Some(packet);
         self
     }
 
@@ -288,6 +261,9 @@ impl PushEnvelopeBuilder {
             )),
             PushPayloadKind::System => Some(flare_proto::push_envelope::Payload::System(
                 self.system.ok_or(E::MissingPayload("System"))?,
+            )),
+            PushPayloadKind::Capability => Some(flare_proto::push_envelope::Payload::Capability(
+                self.capability.ok_or(E::MissingPayload("Capability"))?,
             )),
             PushPayloadKind::Unspecified => return Err(E::UnspecifiedKind),
         };

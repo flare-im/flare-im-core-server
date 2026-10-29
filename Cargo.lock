@@ -2111,6 +2111,7 @@ dependencies = [
  "flare-im-contracts",
  "flare-proto",
  "flare-server-core",
+ "futures",
  "hex",
  "hyper-util",
  "moka",

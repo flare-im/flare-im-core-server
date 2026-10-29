@@ -1,9 +1,9 @@
 //! 推送相关命令（与 access_gateway.proto 对齐）
 //!
-//! PushMessage / PushEvent / PushNotification / PushAck / PushCustom 均使用 user_ids + options。
+//! PushMessage / PushEvent / PushNotification / PushAck / PushCustom / PushCapability 均使用 user_ids + options。
 
 use flare_grpc_proto::access_gateway::PushOptions;
-use flare_proto::common::{Ack, CustomData, Event, Message, NotificationMessage};
+use flare_proto::common::{Ack, CapabilityPacket, CustomData, Event, Message, NotificationMessage};
 
 /// 推送消息命令（对应 PushMessageRequest）
 #[derive(Debug, Clone)]
@@ -124,4 +124,12 @@ impl PushCustomDataCommand {
             options,
         }
     }
+}
+
+/// A plugin realtime packet for the listed users (`PushCapabilityRequest`).
+#[derive(Debug, Clone)]
+pub struct PushCapabilityCommand {
+    pub user_ids: Vec<String>,
+    pub packet: CapabilityPacket,
+    pub options: Option<PushOptions>,
 }

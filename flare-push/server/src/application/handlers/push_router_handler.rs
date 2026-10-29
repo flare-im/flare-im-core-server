@@ -497,6 +497,19 @@ fn rewrite_push_payload_user_ids(
             request.user_ids = user_ids.to_vec();
             Ok(request.encode_to_vec())
         }
+        PushTaskPayloadKind::Capability => {
+            let mut request =
+                access_gateway::PushCapabilityRequest::decode(payload).map_err(|e| {
+                    ErrorBuilder::new(
+                        ErrorCode::InvalidParameter,
+                        "decode PushCapabilityRequest failed",
+                    )
+                    .details(e.to_string())
+                    .build_error()
+                })?;
+            request.user_ids = user_ids.to_vec();
+            Ok(request.encode_to_vec())
+        }
         PushTaskPayloadKind::Unspecified => Err(ErrorBuilder::new(
             ErrorCode::InvalidParameter,
             "PushTaskPayloadKind unspecified",
@@ -681,6 +694,25 @@ impl PushRouterHandler {
                     options,
                 };
                 Ok((PushTaskPayloadKind::Custom, req.encode_to_vec(), message_id))
+            }
+            push_envelope::Payload::Capability(packet) => {
+                // Online only: payload_has_mobile_alert is false for this kind, so no offline
+                // task is ever made, and the gateway writes it as DataPacket.capability.
+                let message_id = packet
+                    .correlation_id
+                    .clone()
+                    .filter(|id| !id.is_empty())
+                    .unwrap_or_else(|| envelope.envelope_id.clone());
+                let req = access_gateway::PushCapabilityRequest {
+                    user_ids: target_user_ids,
+                    packet: Some(packet),
+                    options,
+                };
+                Ok((
+                    PushTaskPayloadKind::Capability,
+                    req.encode_to_vec(),
+                    message_id,
+                ))
             }
             push_envelope::Payload::System(system) => {
                 let req = access_gateway::PushNotificationRequest {
@@ -1514,25 +1546,37 @@ impl PushRouterHandler {
         let (payload_kind, push_payload, message_id) =
             Self::push_task_payload(&envelope, target_user_ids.clone())?;
         let conversation_id = String::new();
+        let template = PushTaskTemplate {
+            message_id: &message_id,
+            conversation_id: &conversation_id,
+            tenant_id,
+            priority,
+            expire_at,
+            push_payload: &push_payload,
+            headers: &envelope.headers,
+            payload_kind: payload_kind as i32,
+        };
+
+        // A plugin realtime packet skips the online index: every gateway writes it to the
+        // recipients' own connections or drops it, so an index that lags behind a fresh connection
+        // cannot lose it, and the lookup is not on the latency path. No offline task is made.
+        if payload_kind == PushTaskPayloadKind::Capability {
+            return self
+                .publish_targeted_tasks_inner(
+                    ctx,
+                    &target_user_ids,
+                    &HashMap::new(),
+                    template,
+                    true,
+                    true,
+                    None,
+                )
+                .await;
+        }
 
         let online_statuses = self.load_online_statuses(ctx, &target_user_ids).await?;
-        self.publish_targeted_tasks(
-            ctx,
-            &target_user_ids,
-            &online_statuses,
-            PushTaskTemplate {
-                message_id: &message_id,
-                conversation_id: &conversation_id,
-                tenant_id,
-                priority,
-                expire_at,
-                push_payload: &push_payload,
-                headers: &envelope.headers,
-                payload_kind: payload_kind as i32,
-            },
-            false,
-        )
-        .await?;
+        self.publish_targeted_tasks(ctx, &target_user_ids, &online_statuses, template, false)
+            .await?;
 
         Ok(())
     }
@@ -1733,6 +1777,64 @@ mod tests {
                 .unwrap_err()
                 .code(),
             Some(ErrorCode::PermissionDenied)
+        );
+    }
+
+    /// A plugin realtime packet becomes one online Capability task for every recipient, without
+    /// an online index read, keeping the packet and its expiry; no offline task is ever made.
+    #[tokio::test]
+    async fn capability_envelopes_make_online_tasks_only() {
+        let publisher = Arc::new(MockPushTaskPublisher::default());
+        let handler = PushRouterHandler::new(
+            Arc::new(MockOnlineStatusReader {
+                statuses: HashMap::from([("u1".to_string(), true), ("u2".to_string(), false)]),
+                tenant_id: "0".into(),
+            }),
+            Arc::new(MockConversationOnlineIndexReader {
+                user_ids: Vec::new(),
+                calls: Arc::new(AtomicUsize::new(0)),
+            }),
+            publisher.clone(),
+        );
+        let packet = flare_proto::common::CapabilityPacket {
+            capability_id: "flare.call".into(),
+            packet_type: "call.snapshot".into(),
+            version: "1".into(),
+            payload: b"{}".to_vec(),
+            correlation_id: Some("d-1".into()),
+            ..Default::default()
+        };
+        let envelope = PushEnvelope {
+            envelope_id: "env-1".into(),
+            tenant_id: "t1".into(),
+            target_type: flare_proto::PushTargetType::Users as i32,
+            target_user_ids: vec!["u1".into(), "u2".into()],
+            payload_kind: flare_proto::PushPayloadKind::Capability as i32,
+            options: Some(flare_proto::common::PushOptions {
+                priority: 9,
+                expire_at: Some(1_730_000_060_000),
+                ..Default::default()
+            }),
+            payload: Some(push_envelope::Payload::Capability(packet.clone())),
+            ..Default::default()
+        };
+        let ctx = Arc::new(Context::root().with_tenant_id("t1"));
+        handler.handle_push_envelope(&ctx, envelope).await.unwrap();
+
+        assert!(publisher.offline.lock().unwrap().is_empty());
+        let online = publisher.online.lock().unwrap();
+        assert_eq!(online.len(), 1);
+        let task = &online[0].1;
+        assert_eq!(task.tenant_id, "t1");
+        assert_eq!(task.message_id, "d-1");
+        assert_eq!(task.payload_kind, PushTaskPayloadKind::Capability as i32);
+        let request =
+            access_gateway::PushCapabilityRequest::decode(task.push_payload.as_slice()).unwrap();
+        assert_eq!(request.user_ids, vec!["u1", "u2"]);
+        assert_eq!(request.packet, Some(packet));
+        assert_eq!(
+            request.options.map(|o| o.expire_at_ms),
+            Some(1_730_000_060_000)
         );
     }
 

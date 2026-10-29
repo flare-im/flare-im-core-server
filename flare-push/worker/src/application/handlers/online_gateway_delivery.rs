@@ -6,8 +6,8 @@ use std::time::{Duration, Instant};
 
 use flare_grpc_proto::access_gateway::{
     ConversationEventsDelivery, ConversationMessagesDelivery, ConversationWatermarkPing,
-    DeliverToConversationRequest, PushAckRequest, PushCustomRequest, PushEventRequest,
-    PushMessageRequest, PushNotificationRequest,
+    DeliverToConversationRequest, PushAckRequest, PushCapabilityRequest, PushCustomRequest,
+    PushEventRequest, PushMessageRequest, PushNotificationRequest,
     deliver_to_conversation_request::Payload as DeliverPayload,
 };
 use flare_grpc_proto::signaling::online::DeviceInfo;
@@ -347,6 +347,27 @@ impl GatewayPushExecutor {
         Ok(())
     }
 
+    /// A plugin realtime packet: broadcast to every gateway node, each of which writes it to the
+    /// listed users' own connections. At most once: past its expiry it is dropped, and a failed
+    /// node is skipped rather than retried (a redelivered packet would arrive twice).
+    pub async fn push_capability(&self, ctx: &Ctx, push: PushCapabilityRequest) -> Result<()> {
+        if capability_expired(&push, chrono::Utc::now().timestamp_millis()) {
+            tracing::debug!(
+                user_count = push.user_ids.len(),
+                "Dropping expired capability packet"
+            );
+            return Ok(());
+        }
+        if let Err(error) = self
+            .gateway_router
+            .broadcast_push_capability(ctx, push)
+            .await
+        {
+            tracing::warn!(%error, "Capability packet not delivered (dropped)");
+        }
+        Ok(())
+    }
+
     pub async fn push_custom(
         &self,
         ctx: &Ctx,
@@ -399,6 +420,13 @@ impl GatewayPushExecutor {
     }
 }
 
+/// `options.expire_at_ms > 0` and already reached.
+fn capability_expired(push: &PushCapabilityRequest, now_ms: i64) -> bool {
+    push.options
+        .as_ref()
+        .is_some_and(|options| options.expire_at_ms > 0 && now_ms >= options.expire_at_ms)
+}
+
 fn device_route_cache_ttl() -> Duration {
     std::env::var(DEVICE_ROUTE_CACHE_TTL_ENV)
         .ok()
@@ -410,6 +438,21 @@ fn device_route_cache_ttl() -> Duration {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn capability_packets_expire_at_their_deadline_only() {
+        let push = |expire_at_ms| PushCapabilityRequest {
+            options: Some(flare_grpc_proto::access_gateway::PushOptions {
+                expire_at_ms,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert!(!capability_expired(&push(0), 10));
+        assert!(!capability_expired(&push(11), 10));
+        assert!(capability_expired(&push(10), 10));
+        assert!(!capability_expired(&PushCapabilityRequest::default(), 10));
+    }
 
     #[test]
     fn gateway_unavailable_route_errors_are_retryable() {

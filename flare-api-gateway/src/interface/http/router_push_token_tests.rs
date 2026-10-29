@@ -140,6 +140,13 @@ impl PushService for FakePushProxy {
         Err(tonic::Status::unimplemented("not used"))
     }
 
+    async fn push_capability(
+        &self,
+        _: tonic::Request<PushCapabilityRequest>,
+    ) -> Result<tonic::Response<PushCapabilityResponse>, tonic::Status> {
+        Err(tonic::Status::unimplemented("not used"))
+    }
+
     async fn register_device_push_token(
         &self,
         request: tonic::Request<RegisterDevicePushTokenRequest>,

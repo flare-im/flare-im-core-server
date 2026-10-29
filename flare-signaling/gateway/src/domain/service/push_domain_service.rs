@@ -6,7 +6,10 @@ use std::sync::Arc;
 
 use flare_grpc_proto::access_gateway::PushOptions;
 use flare_im_contracts::Ctx;
-use flare_proto::common::{Event, EventEnvelope, EventEnvelopeDeliveryMode, Message, MessagePush};
+use flare_proto::common::{
+    CapabilityPacket, DataPacket, Event, EventEnvelope, EventEnvelopeDeliveryMode, Message,
+    MessagePush, data_packet,
+};
 use flare_server_core::error::{ErrorBuilder, ErrorCode, Result};
 use futures::{StreamExt, stream};
 use prost::Message as ProstMessage;
@@ -814,6 +817,73 @@ impl PushDomainService {
         .await
     }
 
+    /// A plugin realtime packet as `DataPacket.capability` to every connection of each user on
+    /// this node, in the context's tenant. A user without a connection here is skipped quietly:
+    /// the packet is broadcast to every node and most hold none of the recipients.
+    ///
+    /// Returns `(user_id, delivered_connection_count, failed_connection_count)` per user.
+    #[instrument(skip(self, tx, packet), fields(user_count = user_ids.len(), capability_id = %packet.capability_id))]
+    pub async fn push_capability_to_users(
+        &self,
+        tx: &Ctx,
+        user_ids: &[String],
+        packet: CapabilityPacket,
+        options: &PushOptions,
+    ) -> Result<Vec<(String, i32, i32)>> {
+        let tenant_id = tx
+            .tenant_id()
+            .filter(|tenant_id| !tenant_id.trim().is_empty())
+            .map(str::to_string)
+            .ok_or_else(|| {
+                ErrorBuilder::new(
+                    ErrorCode::PermissionDenied,
+                    "tenant required to push to a user",
+                )
+                .build_error()
+            })?;
+        let payload = Arc::new(
+            DataPacket {
+                payload: Some(data_packet::Payload::Capability(packet)),
+            }
+            .encode_to_vec(),
+        );
+        let payload_type = flare_core::common::protocol::payload_command::Type::Data as i32;
+        let results = stream::iter(user_ids.iter().cloned())
+            .map(|user_id| {
+                let payload = Arc::clone(&payload);
+                async move {
+                    let connections = self.get_filtered_connections(tx, &user_id, options).await?;
+                    if connections.is_empty() {
+                        return Ok((user_id, 0, 0));
+                    }
+                    let (ok, fail) = self
+                        .push_payload_to_connections(
+                            tx,
+                            &user_id,
+                            &connections,
+                            payload_type,
+                            payload.as_slice(),
+                        )
+                        .await?;
+                    Ok::<_, flare_server_core::error::FlareError>((user_id, ok, fail))
+                }
+            })
+            .buffer_unordered(USER_PUSH_FANOUT_CONCURRENCY)
+            .collect::<Vec<_>>()
+            .await;
+        let mut rows = Vec::with_capacity(results.len());
+        for result in results {
+            rows.push(result?);
+        }
+        let (ok, fail) = rows
+            .iter()
+            .fold((0, 0), |(ok, fail), (_, o, f)| (ok + o, fail + f));
+        if ok + fail > 0 {
+            self.metrics.record_push_result(&tenant_id, ok, fail);
+        }
+        Ok(rows)
+    }
+
     /// 推送 ACK 字节给用户（payload 为 common::Ack encode_to_vec）
     #[instrument(skip(self, tx, ack_payload), fields(user_id = %user_id))]
     pub async fn push_ack_to_user(
@@ -1457,6 +1527,143 @@ mod tests {
                 .push(delivered);
             Ok((connection_ids.len() as i32, 0))
         }
+    }
+
+    /// Connections keyed by `(tenant, user)`, answered for the context's tenant only.
+    struct TenantConnections(Vec<ConnectionInfo>);
+
+    #[async_trait]
+    impl ConnectionQuery for TenantConnections {
+        async fn query_user_connections(
+            &self,
+            tx: &Ctx,
+            user_id: &str,
+        ) -> Result<Vec<ConnectionInfo>> {
+            Ok(self
+                .0
+                .iter()
+                .filter(|c| Some(c.tenant_id.as_str()) == tx.tenant_id() && c.user_id == user_id)
+                .cloned()
+                .collect())
+        }
+
+        async fn list_user_connections(
+            &self,
+            tx: &Ctx,
+            user_id: &str,
+        ) -> Result<Vec<ConnectionInfo>> {
+            self.query_user_connections(tx, user_id).await
+        }
+
+        async fn connection_exists(&self, _connection_id: &str) -> bool {
+            true
+        }
+    }
+
+    /// The packet reaches every connection of each listed user in the producer's tenant, as one
+    /// `DataPacket.capability`; the same user id in another tenant receives nothing, and a user
+    /// with no connection on this node is skipped.
+    #[tokio::test]
+    async fn capability_push_reaches_the_users_connections_in_its_tenant_only() {
+        let connection = |id: &str, user: &str, tenant: &str| {
+            ConnectionInfo::new(id.into(), user.into(), tenant.into(), format!("dev-{id}"))
+        };
+        let push = Arc::new(RecordingPushPort::default());
+        let service = PushDomainService::new(
+            push.clone(),
+            Arc::new(TenantConnections(vec![
+                connection("c1", "u1", "t1"),
+                connection("c2", "u1", "t1"),
+                connection("x1", "u1", "t2"),
+                connection("x2", "u2", "t2"),
+            ])),
+            Arc::new(crate::domain::service::ConversationSubscriptionRegistry::new()),
+            Arc::new(crate::infrastructure::ports::ConversationReadGrpcPool::new()),
+            Arc::new(flare_im_service_kit::metrics::AccessGatewayMetrics::new()),
+        );
+        let packet = CapabilityPacket {
+            capability_id: "flare.call".into(),
+            packet_type: "call.snapshot".into(),
+            version: "1".into(),
+            payload: br#"{"callId":"c-1"}"#.to_vec(),
+            ..Default::default()
+        };
+        let ctx: Ctx = Arc::new(flare_server_core::Context::root().with_tenant_id("t1"));
+        let rows = service
+            .push_capability_to_users(
+                &ctx,
+                &["u1".to_string(), "u2".to_string()],
+                packet.clone(),
+                &PushOptions::default(),
+            )
+            .await
+            .unwrap();
+        let mut rows = rows;
+        rows.sort();
+        assert_eq!(
+            rows,
+            vec![("u1".to_string(), 2, 0), ("u2".to_string(), 0, 0)]
+        );
+        let deliveries = push.deliveries.lock().unwrap().clone();
+        assert_eq!(deliveries, vec![vec!["c1".to_string(), "c2".to_string()]]);
+
+        // No tenant: refused before any connection is looked up.
+        let bare: Ctx = Arc::new(flare_server_core::Context::root());
+        assert!(
+            service
+                .push_capability_to_users(
+                    &bare,
+                    &["u1".to_string()],
+                    packet,
+                    &PushOptions::default()
+                )
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn capability_push_writes_one_data_packet() {
+        let push = Arc::new(CapturingPushPort::default());
+        let service = PushDomainService::new(
+            push.clone(),
+            Arc::new(TenantConnections(vec![ConnectionInfo::new(
+                "c1".into(),
+                "u1".into(),
+                "t1".into(),
+                "dev-1".into(),
+            )])),
+            Arc::new(crate::domain::service::ConversationSubscriptionRegistry::new()),
+            Arc::new(crate::infrastructure::ports::ConversationReadGrpcPool::new()),
+            Arc::new(flare_im_service_kit::metrics::AccessGatewayMetrics::new()),
+        );
+        let packet = CapabilityPacket {
+            capability_id: "flare.call".into(),
+            packet_type: "call.snapshot".into(),
+            ..Default::default()
+        };
+        let ctx: Ctx = Arc::new(flare_server_core::Context::root().with_tenant_id("t1"));
+        service
+            .push_capability_to_users(
+                &ctx,
+                &["u1".to_string()],
+                packet.clone(),
+                &PushOptions::default(),
+            )
+            .await
+            .unwrap();
+        let payloads = push.payloads.lock().unwrap().clone();
+        assert_eq!(payloads.len(), 1);
+        assert_eq!(
+            payloads[0].0,
+            flare_core::common::protocol::payload_command::Type::Data as i32
+        );
+        assert_eq!(
+            DataPacket::decode(payloads[0].1.as_slice())
+                .unwrap()
+                .payload,
+            Some(data_packet::Payload::Capability(packet))
+        );
     }
 
     struct MemberHarness {

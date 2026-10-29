@@ -5,7 +5,8 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use flare_grpc_proto::push::{
-    PushCustomRequest, PushMessageRequest, PushNotificationRequest, PushOptions as GrpcPushOptions,
+    PushCapabilityRequest, PushCustomRequest, PushMessageRequest, PushNotificationRequest,
+    PushOptions as GrpcPushOptions,
 };
 use flare_im_contracts::Ctx;
 use flare_im_contracts::event::mq_envelope_for_main_queue_message_with_headers;
@@ -115,6 +116,18 @@ impl PushProxyMqPublisher {
         self.publish_push_envelope(ctx, &envelope).await
     }
 
+    /// A plugin realtime packet as a `PushEnvelope` (`payload_kind = CAPABILITY`) on the
+    /// push-envelope topic; Push Server turns it into online tasks only.
+    #[instrument(skip(self, ctx, req), fields(user_count = req.user_ids.len()))]
+    pub async fn publish_push_capability(
+        &self,
+        ctx: &Ctx,
+        req: &PushCapabilityRequest,
+    ) -> Result<()> {
+        let envelope = Self::capability_envelope_from_request(ctx, req)?;
+        self.publish_push_envelope(ctx, &envelope).await
+    }
+
     async fn publish_push_envelope(&self, ctx: &Ctx, envelope: &PushEnvelope) -> Result<()> {
         let payload = envelope.encode_to_vec();
         ensure_payload_size(payload.len(), "push envelope too large")?;
@@ -199,6 +212,41 @@ impl PushProxyMqPublisher {
             req.options.as_ref(),
             Some(push_envelope::Payload::Custom(payload)),
         )
+    }
+}
+
+impl PushProxyMqPublisher {
+    fn capability_envelope_from_request(
+        ctx: &Ctx,
+        req: &PushCapabilityRequest,
+    ) -> Result<PushEnvelope> {
+        let packet = req.packet.clone().ok_or_else(|| {
+            ErrorBuilder::new(
+                ErrorCode::InvalidParameter,
+                "push capability packet missing",
+            )
+            .build_error()
+        })?;
+        let envelope_id = Uuid::new_v4().to_string();
+        let created_at = current_time_ms();
+        let mut envelope = base_envelope(
+            ctx,
+            envelope_id,
+            created_at,
+            req.user_ids.clone(),
+            PushPayloadKind::Capability,
+            None,
+            Some(push_envelope::Payload::Capability(packet)),
+        )?;
+        envelope.options = Some(PushOptions {
+            priority: 9,
+            expire_at: (req.expire_at_ms > 0).then_some(req.expire_at_ms),
+            require_ack: false,
+            retry_count: 0,
+            retry_delay_ms: 0,
+            attributes: HashMap::new(),
+        });
+        Ok(envelope)
     }
 }
 
@@ -444,6 +492,45 @@ mod tests {
             payload.attributes.get("option").map(String::as_str),
             Some("value")
         );
+    }
+
+    #[test]
+    fn capability_request_maps_to_an_expiring_capability_envelope() {
+        let ctx = Arc::new(Context::with_request_id("req-3").with_tenant_id("tenant-3"));
+        let packet = flare_proto::common::CapabilityPacket {
+            capability_id: "flare.call".to_string(),
+            packet_type: "call.snapshot".to_string(),
+            version: "1".to_string(),
+            payload: br#"{"callId":"c1"}"#.to_vec(),
+            attributes: HashMap::from([("delivery_id".to_string(), "d-1".to_string())]),
+            correlation_id: Some("d-1".to_string()),
+        };
+        let req = PushCapabilityRequest {
+            user_ids: vec!["user-1".to_string(), "user-2".to_string()],
+            packet: Some(packet.clone()),
+            expire_at_ms: 1_730_000_060_000,
+        };
+
+        let envelope = PushProxyMqPublisher::capability_envelope_from_request(&ctx, &req).unwrap();
+
+        assert_eq!(envelope.tenant_id, "tenant-3");
+        assert_eq!(envelope.payload_kind, PushPayloadKind::Capability as i32);
+        assert_eq!(envelope.target_type, PushTargetType::Users as i32);
+        assert_eq!(envelope.target_user_ids, vec!["user-1", "user-2"]);
+        assert_eq!(
+            envelope.options.as_ref().and_then(|o| o.expire_at),
+            Some(1_730_000_060_000)
+        );
+        assert_eq!(
+            envelope.payload,
+            Some(push_envelope::Payload::Capability(packet))
+        );
+
+        let missing = PushCapabilityRequest {
+            packet: None,
+            ..req
+        };
+        assert!(PushProxyMqPublisher::capability_envelope_from_request(&ctx, &missing).is_err());
     }
 
     #[test]
