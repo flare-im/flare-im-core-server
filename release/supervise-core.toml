@@ -74,7 +74,8 @@ inherit_env_prefixes = ["CAPABILITY_", "FLARE_CAPABILITY_", "PLUGIN_"]
 # card's route before a card post, and the plugin resource bridge's conversation and group reads
 # for the invoking user (with FLARE_PLUGIN_RESOURCE_CONVERSATION_URL set, Capability does not
 # start without it), and the im.realtime.deliver pushes to FLARE_PLUGIN_REALTIME_PUSH_URL (Push
-# Proxy).
+# Proxy). FLARE_CAPABILITY_NOTICE_REDIS_URL (prefix) names the Redis of the tenant notice channel
+# when the token_store profile is not configured.
 inherit_env = [
   "FLARE_INTERNAL_CTX_PUBLIC_KEY", "FLARE_INTERNAL_CTX_PUBLIC_KEYS", "FLARE_PLATFORM_PUBLIC_KEY",
   "CONFIG_CENTER_ENDPOINT", "TENANT_ID",

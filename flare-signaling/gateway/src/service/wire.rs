@@ -172,6 +172,19 @@ pub async fn initialize(
     let push_port: Arc<dyn crate::domain::ports::IPushPort> =
         Arc::new(PushRepository::new(push_handle_slot.clone()));
 
+    // 7b. 租户通知：与 kick 同一个 token_store Redis，`{namespace}:notice` 上的插件目录变更转给本节点该租户的连接。
+    if let Some(redis_url) = access_config.token_store_redis_url.clone() {
+        crate::service::notice_subscriber::spawn_notice_subscriber(
+            redis_url,
+            access_config
+                .token_store_namespace
+                .clone()
+                .unwrap_or_else(|| "flare".to_string()),
+            connection_manager.clone() as Arc<dyn ConnectionManagerTrait>,
+            push_port.clone(),
+        );
+    }
+
     // 8. gRPC 连接池
     let route_grpc_pool = Arc::new(SignalingRouteGrpcPool::new());
     let storage_sync_pool = Arc::new(StorageSyncGrpcPool::new());

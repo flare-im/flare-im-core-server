@@ -17,6 +17,7 @@ Flare IM **capability service**: the **Hook engine** (configuration and gRPC dis
 | Variable | Description |
 |------|------|
 | `FLARE_PLUGIN_REALTIME_PUSH_URL` | Push Proxy `PushService` (`http(s)://` or `discovery://`) for the host capability `im.realtime.deliver`: a plugin's non-durable packet to the online connections of conversation members (unset: deliveries answer unavailable) |
+| `FLARE_CAPABILITY_NOTICE_REDIS_URL` | Redis of the tenant notice channel `{namespace}:notice` (unset: the `token_store` profile, whose namespace also names the channel); after a newer plugin projection is committed Capability publishes `{"tenantId","kind":"plugin.catalog.changed","version"}` there and the gateways tell the tenant's connections |
 
 ### Capability gRPC (`CapabilityService`)
 

@@ -385,6 +385,11 @@ pub const REGISTERED_ENV_VARS: &[EnvVarSpec] = &[
         EnvPurpose::Auth,
     ),
     env(
+        "FLARE_CAPABILITY_NOTICE_REDIS_URL",
+        EnvOwner::Capability,
+        EnvPurpose::Redis,
+    ),
+    env(
         "FLARE_PLUGIN_CARD_INGEST_URL",
         EnvOwner::Capability,
         EnvPurpose::ServiceEndpoint,

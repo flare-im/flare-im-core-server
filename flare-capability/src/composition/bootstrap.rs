@@ -337,6 +337,18 @@ fn capability_config_from_env(
         .ok()
         .map(std::path::PathBuf::from)
         .or_else(|| Some(std::path::PathBuf::from("config/services/capability.toml")));
+    // The tenant notice channel lives next to the gateway kick channel `{namespace}:kick`.
+    let token_store = app_config.redis_profile("token_store");
+    let notice_redis_url = std::env::var("FLARE_CAPABILITY_NOTICE_REDIS_URL")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .or_else(|| token_store.map(|profile| profile.url.clone()));
+    let notice_channel = flare_im_service_kit::tenant_notice::notice_channel(
+        token_store
+            .and_then(|profile| profile.namespace.as_deref())
+            .unwrap_or("flare"),
+    );
 
     Ok(CapabilityServiceConfig {
         config_file,
@@ -351,6 +363,8 @@ fn capability_config_from_env(
         tenant_id,
         execution_mode: ExecutionMode::Sequential,
         refresh_interval_secs: 60,
+        notice_redis_url,
+        notice_channel,
     })
 }
 

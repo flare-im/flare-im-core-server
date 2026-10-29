@@ -60,6 +60,7 @@ rand = { workspace = true }
 etcd-client = { workspace = true }
 
 dashmap = "6.0"
+redis = { workspace = true }
 [dev-dependencies]
 flare-plugin-host = { path = "../../flare-plugin/flare-plugin-host" }
 # Plugin shared state end to end on PostgreSQL (plugin_state_pg_tests): Orchestrator, Writer, Reader.

@@ -4,6 +4,9 @@
 //! - `GetVersions`：对账；核不消费功能开关投影，`features_version` 恒为 0。
 //! - `UpsertFeatureFlags`：核只有能力开关（`CapabilityService.SetTenantCapabilitySwitch`），返回 `Unimplemented`。
 //!
+//! - `UpsertPlugins`：按 version 幂等替换插件授权投影；接受更新的版本后发租户通知
+//!   `plugin.catalog.changed`，在线客户端据此刷新插件目录。
+//!
 //! 所有投影 RPC 均验证平台公钥（`FLARE_PLATFORM_PUBLIC_KEY`）签的 worker 控制断言并绑定租户；
 //! 内网监听不构成授权。员工不经这里：他们的 Staff 上下文只到 admin-gateway 与管理 RPC。
 
@@ -28,6 +31,7 @@ use crate::application::commands::apply_tenant_projection;
 use crate::application::queries::tenant_projection_versions;
 use crate::domain::model::TenantProjectionRecord;
 use crate::domain::repository::TenantProjectionRepository;
+use crate::domain::repository::tenant_notice::TenantNotices;
 
 fn credentials_snapshot(req: CredentialsProjectionUpsert) -> Result<CredentialSnapshot, Status> {
     let invalid = || Status::invalid_argument("invalid credential projection");
@@ -61,6 +65,7 @@ fn credentials_snapshot(req: CredentialsProjectionUpsert) -> Result<CredentialSn
 pub struct TenantProjectionGrpcServer<R: TenantProjectionRepository + 'static> {
     repository: Arc<R>,
     control_verifier: Option<PlatformAssertionVerifier>,
+    notices: Option<Arc<dyn TenantNotices>>,
 }
 
 impl<R: TenantProjectionRepository + 'static> TenantProjectionGrpcServer<R> {
@@ -68,7 +73,14 @@ impl<R: TenantProjectionRepository + 'static> TenantProjectionGrpcServer<R> {
         Self {
             repository,
             control_verifier,
+            notices: None,
         }
+    }
+
+    /// Where accepted plugin projections are announced (none: clients refresh on their own).
+    pub fn with_notices(mut self, notices: Option<Arc<dyn TenantNotices>>) -> Self {
+        self.notices = notices;
+        self
     }
 }
 
@@ -77,6 +89,7 @@ impl<R: TenantProjectionRepository + 'static> Clone for TenantProjectionGrpcServ
         Self {
             repository: Arc::clone(&self.repository),
             control_verifier: self.control_verifier.clone(),
+            notices: self.notices.clone(),
         }
     }
 }
@@ -107,6 +120,14 @@ impl<R: TenantProjectionRepository + 'static> TenantProjection for TenantProject
             .replace_plugins(&snapshot)
             .await
             .into_grpc()?;
+        // Committed above; an older or equal version changes nothing and says nothing.
+        if outcome.accepted
+            && let Some(notices) = &self.notices
+        {
+            notices
+                .plugin_catalog_changed(&snapshot.tenant_id, snapshot.version)
+                .await;
+        }
         Ok(Response::new(ProjectionAck {
             accepted: outcome.accepted,
             current_version: outcome.current_version,
@@ -376,6 +397,57 @@ mod tests {
             flare_im_service_kit::control_auth::PROJECTION_WORKER_SUBJECT,
             flare_im_service_kit::control_auth::CORE_PROJECTION_AUDIENCE,
         )
+    }
+
+    #[derive(Default)]
+    struct RecordedNotices(Mutex<Vec<(String, u64)>>);
+
+    #[async_trait::async_trait]
+    impl TenantNotices for RecordedNotices {
+        async fn plugin_catalog_changed(&self, tenant_id: &str, version: u64) {
+            self.0.lock().unwrap().push((tenant_id.into(), version));
+        }
+    }
+
+    /// Only a projection that was accepted (a newer version) is announced, once, after the
+    /// repository committed it; a replay or a refused projection says nothing.
+    #[tokio::test]
+    async fn an_accepted_plugin_projection_announces_the_catalog_change() {
+        use flare_grpc_proto::control::PluginsProjectionUpsert;
+        use flare_im_capability_core::plugin::runtime::PluginRuntimeSnapshot;
+        let (repo, server) = server();
+        let notices = Arc::new(RecordedNotices::default());
+        let server = server.with_notices(Some(notices.clone() as Arc<dyn TenantNotices>));
+        let now = chrono::Utc::now().timestamp_millis();
+        let body = |version: u64| PluginsProjectionUpsert {
+            app_id: "app-a".into(),
+            version,
+            snapshot_json: serde_json::to_vec(&PluginRuntimeSnapshot {
+                tenant_id: "app-a".into(),
+                version,
+                issued_at_ms: now,
+                valid_until_ms: now + 60000,
+                plugins: vec![],
+            })
+            .unwrap(),
+        };
+        for version in [5, 5, 4, 6] {
+            server
+                .upsert_plugins(authed(body(version), "app-a"))
+                .await
+                .unwrap();
+        }
+        assert!(
+            server
+                .upsert_plugins(authed(body(7), "other"))
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            *notices.0.lock().unwrap(),
+            vec![("app-a".to_string(), 5), ("app-a".to_string(), 6)]
+        );
+        assert_eq!(repo.plugins.lock().unwrap()["app-a"].version, 6);
     }
 
     #[tokio::test]

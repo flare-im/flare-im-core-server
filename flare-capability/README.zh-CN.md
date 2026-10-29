@@ -17,6 +17,7 @@ Flare IM **能力服务**：**Hook 引擎**（配置与 gRPC 调度）+ **能力
 | 变量 | 说明 |
 |------|------|
 | `FLARE_PLUGIN_REALTIME_PUSH_URL` | 宿主能力 `im.realtime.deliver` 用的 Push Proxy `PushService`（`http(s)://` 或 `discovery://`）：插件向会话成员在线连接投递的非持久实时包（未配置时投递回不可用） |
+| `FLARE_CAPABILITY_NOTICE_REDIS_URL` | 租户通知频道 `{namespace}:notice` 所在 Redis（未配置时用 `token_store` 档，频道名也取它的 namespace）；插件授权投影的新版本提交后，Capability 在此发布 `{"tenantId","kind":"plugin.catalog.changed","version"}`，网关转告该租户的连接 |
 
 ### 能力 gRPC（`CapabilityService`）
 

@@ -29,6 +29,11 @@ pub struct CapabilityServiceConfig {
     pub execution_mode: crate::domain::model::ExecutionMode,
     /// 配置刷新间隔（秒）
     pub refresh_interval_secs: u64,
+    /// Redis of the tenant notice channel: `FLARE_CAPABILITY_NOTICE_REDIS_URL`, else the
+    /// `token_store` profile (the one the gateways subscribe to). None: no notices.
+    pub notice_redis_url: Option<String>,
+    /// `{token_store namespace}:notice`.
+    pub notice_channel: String,
 }
 
 impl Default for CapabilityServiceConfig {
@@ -46,6 +51,8 @@ impl Default for CapabilityServiceConfig {
             tenant_id: None,
             execution_mode: crate::domain::model::ExecutionMode::Sequential,
             refresh_interval_secs: 60,
+            notice_redis_url: None,
+            notice_channel: flare_im_service_kit::tenant_notice::notice_channel("flare"),
         }
     }
 }

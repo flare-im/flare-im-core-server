@@ -78,8 +78,10 @@ pub(crate) async fn initialize(config: CapabilityServiceConfig) -> Result<Applic
     let tenant_projection_repository = db_pool
         .as_ref()
         .map(|pool| Arc::new(PostgresTenantProjectionRepository::new(Arc::clone(pool))));
+    let notices = tenant_notices(&config)?;
     let tenant_projection = tenant_projection_repository.as_ref().map(|repository| {
         TenantProjectionGrpcServer::new(Arc::clone(repository), platform_verifier.clone())
+            .with_notices(notices.clone())
     });
     // 管理员只读与投影接收端读同一张 `tenants` 表；开关读同一个策略后端。只认 admin-gateway
     // 转发的 Staff 上下文（Cell 公钥集，Staff 钉死 kid=gateway）。
@@ -137,4 +139,25 @@ pub(crate) async fn initialize(config: CapabilityServiceConfig) -> Result<Applic
         hook_execution_background: hook.execution_background,
         entity_lifecycle_worker,
     })
+}
+
+/// The tenant notice channel, from the notice Redis URL. Absent: accepted plugin projections are
+/// not announced and online clients pick them up when they next refresh their catalog.
+fn tenant_notices(
+    config: &CapabilityServiceConfig,
+) -> Result<Option<Arc<dyn crate::domain::repository::tenant_notice::TenantNotices>>> {
+    use crate::infrastructure::adapters::redis_tenant_notices::RedisTenantNotices;
+    let Some(url) = config.notice_redis_url.as_deref() else {
+        tracing::warn!(
+            "no notice Redis (token_store profile or FLARE_CAPABILITY_NOTICE_REDIS_URL); plugin catalog changes are not announced"
+        );
+        return Ok(None);
+    };
+    let client = redis::Client::open(url).map_err(|_| {
+        flare_server_core::error::FlareError::system("invalid tenant notice Redis URL")
+    })?;
+    Ok(Some(Arc::new(RedisTenantNotices::new(
+        client,
+        config.notice_channel.clone(),
+    ))))
 }
