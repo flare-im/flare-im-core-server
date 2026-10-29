@@ -20,6 +20,14 @@ NC='\033[0m' # No Color
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+# 与 cargo build 相同的 target 目录（上层 .cargo/config.toml 可能把它指到仓库根的 target/）。
+CARGO_TARGET_ROOT="${CARGO_TARGET_DIR:-}"
+if [ -z "$CARGO_TARGET_ROOT" ]; then
+    CARGO_TARGET_ROOT=$(cd "$PROJECT_ROOT" && cargo metadata --format-version=1 --no-deps 2>/dev/null \
+        | grep -o '"target_directory":"[^"]*"' | head -1 | sed 's/"target_directory":"//;s/"$//')
+fi
+CARGO_TARGET_ROOT="${CARGO_TARGET_ROOT:-$PROJECT_ROOT/target}"
+CARGO_TARGET_ROOT="${CARGO_TARGET_ROOT%/}"
 LOGS_DIR="$PROJECT_ROOT/logs"
 
 cleanup_launchctl_dev_labels() {
@@ -136,26 +144,16 @@ stop_service() {
         fi
     fi
 
-    # 如果没有 PID 文件或 PID 已失效，继续按二进制名兜底清理。
-    if pgrep -f "target/debug/${bin}" > /dev/null 2>&1 || \
-       pgrep -f "/target/debug/${bin}" > /dev/null 2>&1 || \
-       pgrep -f "target/release/${bin}" > /dev/null 2>&1 || \
-       pgrep -f "/target/release/${bin}" > /dev/null 2>&1; then
+    # 如果没有 PID 文件或 PID 已失效，继续按二进制名兜底清理。只认本仓 target 目录下的产物：
+    # 同机其它栈（别的 worktree / target 目录）的同名进程不受影响。
+    local pattern="^${CARGO_TARGET_ROOT}/(debug|release)/${bin}( |$)"
+    if pgrep -f "$pattern" > /dev/null 2>&1; then
         echo -e "${YELLOW}   通过进程名停止 $service (${bin})...${NC}"
-        pkill -f "target/debug/${bin}" 2>/dev/null || true
-        pkill -f "/target/debug/${bin}" 2>/dev/null || true
-        pkill -f "target/release/${bin}" 2>/dev/null || true
-        pkill -f "/target/release/${bin}" 2>/dev/null || true
+        pkill -f "$pattern" 2>/dev/null || true
         sleep 1
         # 如果仍在运行，强制终止
-        if pgrep -f "target/debug/${bin}" > /dev/null 2>&1 || \
-           pgrep -f "/target/debug/${bin}" > /dev/null 2>&1 || \
-           pgrep -f "target/release/${bin}" > /dev/null 2>&1 || \
-           pgrep -f "/target/release/${bin}" > /dev/null 2>&1; then
-            pkill -9 -f "target/debug/${bin}" 2>/dev/null || true
-            pkill -9 -f "/target/debug/${bin}" 2>/dev/null || true
-            pkill -9 -f "target/release/${bin}" 2>/dev/null || true
-            pkill -9 -f "/target/release/${bin}" 2>/dev/null || true
+        if pgrep -f "$pattern" > /dev/null 2>&1; then
+            pkill -9 -f "$pattern" 2>/dev/null || true
         fi
         echo -e "${GREEN}      ✓ $service 已停止${NC}"
         return 0

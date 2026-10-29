@@ -321,6 +321,7 @@ resolve_cargo_target_profile() {
     printf '%s/target/%s\n' "$PROJECT_ROOT" "$profile"
 }
 CARGO_TARGET_BIN_DIR="$(resolve_cargo_target_profile "$FLARE_BUILD_PROFILE")"
+CARGO_TARGET_ROOT="${CARGO_TARGET_BIN_DIR%/*}"
 CARGO_BUILD_ARGS=(build --all)
 if [ "$FLARE_BUILD_PROFILE" = "release" ]; then
     CARGO_BUILD_ARGS+=(--release)
@@ -544,12 +545,11 @@ for service in "${CORE_STOP_SERVICES[@]}"; do
             rm -f "$pid_file"
         fi
     fi
-    # 额外检查：按实际二进制名停止（message-orchestrator -> flare-orchestrator）
+    # 额外检查：按实际二进制名停止（message-orchestrator -> flare-orchestrator）。只认本启动器
+    # 自己 target 目录下的产物：同机其它栈（别的 worktree / target 目录）的同名进程不受影响，
+    # 本栈端口上的其它残留由下面按端口释放。
     bin=$(service_binary_name "$service")
-    pkill -f "target/debug/${bin}" 2>/dev/null || true
-    pkill -f "/target/debug/${bin}" 2>/dev/null || true
-    pkill -f "target/release/${bin}" 2>/dev/null || true
-    pkill -f "/target/release/${bin}" 2>/dev/null || true
+    pkill -f "^${CARGO_TARGET_ROOT}/(debug|release)/${bin}( |$)" 2>/dev/null || true
 done
 
 # 清理已知本地服务监听端口，避免 release/debug 切换或异常退出留下旧进程。
