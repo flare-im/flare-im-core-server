@@ -59,7 +59,37 @@ pub const DISCOVERY_CHANNEL_TIMEOUT: Duration = Duration::from_secs(10);
 
 static DISCOVERY_CLIENT_CACHE: Lazy<DashMap<String, Arc<Mutex<ServiceClient>>>> =
     Lazy::new(DashMap::new);
-static STATIC_CHANNEL_CACHE: Lazy<DashMap<String, Channel>> = Lazy::new(DashMap::new);
+static STATIC_CHANNEL_CACHE: Lazy<DashMap<String, CachedStaticChannel>> = Lazy::new(DashMap::new);
+
+/// 缓存里的静态通道，连同建它的那个运行时上的一个标记任务。
+///
+/// tonic 通道的连接由建通道时所在运行时上的 worker 任务驱动。那个运行时关闭后，经这条通道的每次
+/// 调用都在发出前失败（`Service was not ready`，状态不带传输层 source，
+/// [`invalidate_static_channel_on_transport_failure`] 不会丢弃它），缓存却一直把它交出去。标记任务与
+/// worker 同在那个运行时上、随它一起被丢弃：查缓存时标记已不在，就在调用方的运行时上为该地址新建
+/// 通道。条目被移除或替换时标记任务随之结束。
+struct CachedStaticChannel {
+    channel: Channel,
+    runtime_alive: tokio::sync::oneshot::Sender<()>,
+}
+
+impl CachedStaticChannel {
+    /// 须在运行时内调用（同 [`connect_static_channel_lazy`]）。
+    fn new(channel: Channel) -> Self {
+        let (runtime_alive, marker) = tokio::sync::oneshot::channel::<()>();
+        tokio::spawn(async move {
+            let _ = marker.await;
+        });
+        Self {
+            channel,
+            runtime_alive,
+        }
+    }
+
+    fn usable(&self) -> bool {
+        !self.runtime_alive.is_closed()
+    }
+}
 
 /// `discovery://flare-social-hook` → `flare-social-hook`
 pub fn discovery_route_authority(service_name: &str) -> String {
@@ -188,12 +218,17 @@ pub fn is_transport_failure(status: &tonic::Status) -> bool {
 }
 
 fn resolve_static_channel(grpc_authority: &str) -> Result<Channel, String> {
-    if let Some(ch) = STATIC_CHANNEL_CACHE.get(grpc_authority) {
-        return Ok(ch.clone());
+    if let Some(cached) = STATIC_CHANNEL_CACHE.get(grpc_authority)
+        && cached.usable()
+    {
+        return Ok(cached.channel.clone());
     }
     let endpoint = normalize_static_authority(grpc_authority)?;
     let channel = connect_static_channel_lazy(&endpoint)?;
-    STATIC_CHANNEL_CACHE.insert(grpc_authority.to_string(), channel.clone());
+    STATIC_CHANNEL_CACHE.insert(
+        grpc_authority.to_string(),
+        CachedStaticChannel::new(channel.clone()),
+    );
     Ok(channel)
 }
 
@@ -352,6 +387,73 @@ mod static_route_tests {
                 .await
                 .is_err()
         );
+    }
+
+    struct Echo;
+
+    #[tonic::async_trait]
+    impl flare_grpc_proto::capability::hook_plugin_server::HookPlugin for Echo {
+        async fn call(
+            &self,
+            request: tonic::Request<flare_grpc_proto::capability::GenericRequest>,
+        ) -> Result<tonic::Response<flare_grpc_proto::capability::GenericResponse>, tonic::Status>
+        {
+            Ok(tonic::Response::new(
+                flare_grpc_proto::capability::GenericResponse {
+                    ok: true,
+                    request_id: request.into_inner().request_id,
+                    ..Default::default()
+                },
+            ))
+        }
+    }
+
+    fn runtime() -> tokio::runtime::Runtime {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+    }
+
+    /// 缓存的静态通道由建它的运行时上的任务驱动。之后另一个运行时上的调用方（同一进程里的另一个测试，
+    /// 它的服务恰好拿到同一个临时端口）拿到自己的新通道，而不是 worker 已随前一个运行时结束的那条：
+    /// 经那条通道的调用都在发出前失败（`Service was not ready`，不带传输层 source，从来不被丢弃）。
+    #[test]
+    fn a_channel_cached_on_a_finished_runtime_is_rebuilt() {
+        use flare_grpc_proto::capability::GenericRequest;
+        use flare_grpc_proto::capability::hook_plugin_client::HookPluginClient;
+        use flare_grpc_proto::capability::hook_plugin_server::HookPluginServer;
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let authority = format!("http://{}", listener.local_addr().unwrap());
+        runtime().block_on(async {
+            resolve_grpc_channel(&authority)
+                .await
+                .expect("lazy static channel");
+        });
+        assert!(is_static_channel_cached(&authority));
+
+        runtime().block_on(async {
+            listener.set_nonblocking(true).unwrap();
+            let listener = tokio::net::TcpListener::from_std(listener).unwrap();
+            tokio::spawn(
+                tonic::transport::Server::builder()
+                    .add_service(HookPluginServer::new(Echo))
+                    .serve_with_incoming(tonic::transport::server::TcpIncoming::from(listener)),
+            );
+            let channel = resolve_grpc_channel(&authority).await.unwrap();
+            let answer = tokio::time::timeout(
+                Duration::from_secs(10),
+                HookPluginClient::new(channel).call(GenericRequest {
+                    request_id: "r1".into(),
+                    ..Default::default()
+                }),
+            )
+            .await
+            .expect("the call returns")
+            .expect("the server answers through the address's channel");
+            assert_eq!(answer.into_inner().request_id, "r1");
+        });
     }
 
     #[test]
