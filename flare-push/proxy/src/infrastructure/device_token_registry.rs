@@ -72,19 +72,26 @@ if ARGV[2]~='' then
 elseif own~='' then state='active' end
 return {version,own,state}
 "#;
-#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BindingError {
-    #[error("binding version conflict")]
     Conflict,
-    #[error("binding revoked")]
     Revoked,
-    #[error("binding command expired or invalid")]
     Invalid,
-    #[error("device registration limit")]
     Limit,
-    #[error("device registry unavailable")]
     Unavailable,
 }
+impl std::fmt::Display for BindingError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Conflict => "binding version conflict",
+            Self::Revoked => "binding revoked",
+            Self::Invalid => "binding command expired or invalid",
+            Self::Limit => "device registration limit",
+            Self::Unavailable => "device registry unavailable",
+        })
+    }
+}
+impl std::error::Error for BindingError {}
 pub struct BindingView {
     pub version: String,
     pub current_binding_id: String,

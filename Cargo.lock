@@ -1632,7 +1632,6 @@ dependencies = [
 name = "flare-api-gateway"
 version = "1.0.3"
 dependencies = [
- "anyhow",
  "async-trait",
  "axum 0.8.6",
  "base64",
@@ -1654,7 +1653,6 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
- "thiserror 2.0.18",
  "tokio",
  "tokio-stream",
  "tonic",
@@ -2306,7 +2304,6 @@ dependencies = [
 name = "flare-push-proxy"
 version = "1.0.3"
 dependencies = [
- "anyhow",
  "async-trait",
  "chrono",
  "flare-core-runtime",
@@ -2320,7 +2317,6 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
- "thiserror 2.0.18",
  "tokio",
  "toml",
  "tonic",

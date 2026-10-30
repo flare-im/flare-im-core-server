@@ -17,6 +17,7 @@ use flare_im_service_kit::{
     credential_projection::{PostgresCredentialReader, connect_readonly_credential_pool},
     tenant_runtime::{TenantLookup, TenantRuntimeCache},
 };
+use flare_server_core::error::FlareError;
 use flare_server_core::{
     SignedActorType, SignedContextIdentity, SignedContextSigner,
     auth::{
@@ -33,6 +34,9 @@ use std::{net::IpAddr, sync::Arc, time::Duration};
 use tokio::time::timeout;
 use tonic::transport::{Channel, Endpoint};
 
+/// Startup and configuration errors; callers map them to one opaque startup failure.
+type ConfigResult<T> = flare_server_core::error::Result<T>;
+
 const SCOPE: &str = "platform.conversations.read";
 const RPC_TIMEOUT: Duration = Duration::from_secs(2);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
@@ -44,12 +48,14 @@ pub struct PlatformConfig {
     signer: Arc<SignedContextSigner>,
 }
 impl PlatformConfig {
-    pub fn from_env() -> anyhow::Result<Option<Self>> {
-        fn optional(name: &str) -> anyhow::Result<Option<String>> {
+    pub fn from_env() -> ConfigResult<Option<Self>> {
+        fn optional(name: &str) -> ConfigResult<Option<String>> {
             match std::env::var(name) {
                 Ok(value) => Ok(Some(value)),
                 Err(std::env::VarError::NotPresent) => Ok(None),
-                Err(_) => anyhow::bail!("invalid Platform environment configuration"),
+                Err(_) => Err(FlareError::system(
+                    "invalid Platform environment configuration",
+                )),
             }
         }
         let config = Self::parse(
@@ -63,12 +69,12 @@ impl PlatformConfig {
         // A Platform machine request must never borrow the Staff Gateway or
         // client/Cell signing identity. Validate before opening any PG pool.
         let material = optional("FLARE_API_GATEWAY_CTX_PRIVATE_KEY")?
-            .ok_or_else(|| anyhow::anyhow!("missing Platform API signing key"))?;
+            .ok_or_else(|| FlareError::system("missing Platform API signing key"))?;
         let signer = SignedContextSigner::from_private_key(&material)
             .and_then(|signer| {
                 signer.with_kid(flare_im_service_kit::platform_send::PLATFORM_API_KID)
             })
-            .map_err(|_| anyhow::anyhow!("invalid Platform API signing key"))?;
+            .map_err(|_| FlareError::system("invalid Platform API signing key"))?;
         Ok(Some(Self {
             pepper,
             proxies,
@@ -79,21 +85,21 @@ impl PlatformConfig {
         enabled: &str,
         pepper: Option<&str>,
         proxies: &str,
-    ) -> anyhow::Result<Option<(ApiKeyPepper, TrustedProxyChain)>> {
+    ) -> ConfigResult<Option<(ApiKeyPepper, TrustedProxyChain)>> {
         match enabled {
             "false" => return Ok(None),
             "true" => {}
-            _ => anyhow::bail!("invalid FLARE_PLATFORM_API_ENABLED"),
+            _ => return Err(FlareError::system("invalid FLARE_PLATFORM_API_ENABLED")),
         }
         let pepper = ApiKeyPepper::from_base64url(pepper.unwrap_or(""))
-            .map_err(|_| anyhow::anyhow!("invalid or missing FLARE_API_KEY_PEPPER"))?;
+            .map_err(|_| FlareError::system("invalid or missing FLARE_API_KEY_PEPPER"))?;
         let cidrs = if proxies.is_empty() {
             vec![]
         } else {
             proxies.split(',').map(|v| v.trim().to_owned()).collect()
         };
         let proxies = TrustedProxyChain::new(&cidrs)
-            .map_err(|_| anyhow::anyhow!("invalid FLARE_PLATFORM_TRUSTED_PROXY_CIDRS"))?;
+            .map_err(|_| FlareError::system("invalid FLARE_PLATFORM_TRUSTED_PROXY_CIDRS"))?;
         Ok(Some((pepper, proxies)))
     }
     pub async fn router(
@@ -101,11 +107,11 @@ impl PlatformConfig {
         primary_url: &str,
         conversation_url: &str,
         ingest_url: &str,
-    ) -> anyhow::Result<Router> {
+    ) -> ConfigResult<Router> {
         // Independent from client pools/channels/circuit/rate limits. Never a replica.
         let pool = connect_readonly_credential_pool(primary_url)
             .await
-            .map_err(anyhow::Error::msg)?;
+            .map_err(|error| FlareError::system(error.to_string()))?;
         let state = Arc::new(PlatformState {
             verifier: CachedApiKeyVerifier::new(Arc::new(PostgresCredentialReader::new(
                 pool.clone(),
@@ -117,7 +123,7 @@ impl PlatformConfig {
             ingest: channel(ingest_url)?,
             signer: self.signer,
             origin_verifier: flare_server_core::SignedContextVerifier::from_env_optional()
-                .map_err(|_| anyhow::anyhow!("invalid Platform origin public key set"))?,
+                .map_err(|_| FlareError::system("invalid Platform origin public key set"))?,
             budget: CredentialRequestBudget::new(32),
             breaker: CircuitBreaker::new(
                 "Platform Core",
@@ -130,10 +136,10 @@ impl PlatformConfig {
     }
 }
 
-fn channel(url: &str) -> anyhow::Result<Channel> {
+fn channel(url: &str) -> ConfigResult<Channel> {
     let uri = url
         .parse::<axum::http::Uri>()
-        .map_err(|_| anyhow::anyhow!("invalid Platform conversation endpoint"))?;
+        .map_err(|_| FlareError::system("invalid Platform conversation endpoint"))?;
     if !matches!(uri.scheme_str(), Some("http" | "https"))
         || uri
             .authority()
@@ -142,10 +148,12 @@ fn channel(url: &str) -> anyhow::Result<Channel> {
             .path_and_query()
             .is_some_and(|path| path.as_str() != "/")
     {
-        anyhow::bail!("Platform conversation endpoint must be a direct private HTTP(S) authority");
+        return Err(FlareError::system(
+            "Platform conversation endpoint must be a direct private HTTP(S) authority",
+        ));
     }
     Ok(Endpoint::from_shared(url.to_owned())
-        .map_err(|_| anyhow::anyhow!("invalid Platform conversation endpoint"))?
+        .map_err(|_| FlareError::system("invalid Platform conversation endpoint"))?
         .connect_timeout(Duration::from_millis(250))
         .timeout(RPC_TIMEOUT)
         .concurrency_limit(32)
