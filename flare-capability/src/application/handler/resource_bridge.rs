@@ -10,12 +10,16 @@
 //! - `im.realtime.deliver`: a user call ticket, for the conversation it is bound to, or the
 //!   runtime credential, for any conversation of its tenant. Only members of the conversation
 //!   receive the packet; the others are listed as skipped.
+//! - `plugin.service.dispatch`: the runtime credential only; the request goes to the plugin
+//!   service router ([`PluginServiceDispatch`]), which authorizes it against the local projection
+//!   and forwards it to the providing plugin. Without a router every such request is refused.
 use crate::domain::capability::{CapabilityError, CapabilityPolicyBackend, Result};
 use crate::domain::repository::PluginAuthorizationReader;
 use crate::domain::repository::realtime_delivery::{RealtimePacket, RealtimePacketDelivery};
 use crate::domain::repository::resource_access::{
     ResourceAccessBackend, ResourceActor, ResourceCallBudget,
 };
+use crate::domain::repository::service_dispatch::{PluginServiceDispatch, ServiceDispatchError};
 use flare_im_capability_core::plugin::{
     authorization::PluginInvocation,
     invocation::{PluginCallVerifier, PluginRuntimeVerifier},
@@ -51,6 +55,7 @@ pub struct ResourceBridge {
     publisher: Option<Arc<PluginStatePublisher>>,
     runtime_verifier: Option<PluginRuntimeVerifier>,
     realtime: Option<Arc<dyn RealtimePacketDelivery>>,
+    service_dispatch: Option<Arc<dyn PluginServiceDispatch>>,
 }
 fn denied() -> CapabilityError {
     CapabilityError::PolicyDenied("plugin resource access denied".into())
@@ -73,6 +78,7 @@ impl ResourceBridge {
             publisher: None,
             runtime_verifier: None,
             realtime: None,
+            service_dispatch: None,
         }
     }
     /// Enables the write capability: `publisher` stores and fans out shared state,
@@ -89,6 +95,11 @@ impl ResourceBridge {
     /// Enables `im.realtime.deliver` (none: deliveries answer unavailable).
     pub fn with_realtime(mut self, realtime: Option<Arc<dyn RealtimePacketDelivery>>) -> Self {
         self.realtime = realtime;
+        self
+    }
+    /// Enables `plugin.service.dispatch` through `router`; `None` keeps it refused.
+    pub fn with_service_dispatch(mut self, router: Option<Arc<dyn PluginServiceDispatch>>) -> Self {
+        self.service_dispatch = router;
         self
     }
     /// A request carrying the ticket of the call in flight.
@@ -114,6 +125,29 @@ impl ResourceBridge {
             .try_acquire()
             .map_err(|_| CapabilityError::System("resource bridge capacity exhausted".into()))?;
         tokio::time::timeout(Duration::from_secs(2), async {
+            if operation == HostCapability::ServiceDispatch.id() {
+                if bytes.len()
+                    > flare_im_capability_core::plugin::service::MAX_SERVICE_REQUEST_BYTES
+                {
+                    return Err(denied());
+                }
+                let BridgeCredential::Runtime(token) = credential else {
+                    return Err(denied());
+                };
+                let reply = self
+                    .service_dispatch
+                    .as_ref()
+                    .ok_or_else(denied)?
+                    .dispatch(token, request_id, bytes)
+                    .await
+                    .map_err(|error| match error {
+                        ServiceDispatchError::OutcomeUnknown => {
+                            CapabilityError::System("plugin service outcome unknown".into())
+                        }
+                        ServiceDispatchError::Refused => denied(),
+                    })?;
+                return serde_json::to_value(reply).map_err(|_| denied());
+            }
             if bytes.len() > MAX_RESOURCE_REQUEST_BYTES {
                 return Err(denied());
             }
@@ -314,6 +348,8 @@ impl ResourceBridge {
             ResourceWriteRequest::RealtimeDeliver(delivery) => {
                 self.deliver(writer, request_id, delivery, now).await
             }
+            // Dispatched by the service router before any resource handling.
+            ResourceWriteRequest::ServiceDispatch(_) => Err(denied()),
         }
     }
 
@@ -561,6 +597,12 @@ impl ResourceBridge {
         }
         let snapshot = self.snapshot(&claims.tenant_id, now).await?;
         let projected = grant_of(&snapshot, &claims.grant_id)?;
+        // Runtime and Core projection leases are renewed independently. A
+        // valid deployment credential is usable only within their intersection;
+        // it must never extend the installation's authority. Requiring its
+        // original expiry to fit the shorter lease would reject every publish
+        // near a projection refresh even though both are valid right now.
+        let expires_at_ms = claims.expires_at_ms.min(projected.grant.valid_until_ms);
         require_identity(
             projected,
             &claims.plugin_id,
@@ -568,7 +610,7 @@ impl ResourceBridge {
             &claims.manifest_digest,
             &claims.deployment_id,
             claims.grant_revision,
-            claims.expires_at_ms,
+            expires_at_ms,
         )?;
         // The deployment holds the capability only through an approved operation that declares it.
         let manifest = projected.manifest().map_err(|_| denied())?;
@@ -602,7 +644,7 @@ impl ResourceBridge {
             actor: format!("runtime:{}", claims.deployment_id),
             user_id: None,
             conversation_id: None,
-            expires_at_ms: claims.expires_at_ms,
+            expires_at_ms,
         })
     }
 }

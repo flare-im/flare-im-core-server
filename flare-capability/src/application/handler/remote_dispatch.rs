@@ -85,6 +85,7 @@ pub(crate) fn restricted_operations(
     manifest: &flare_im_capability_core::plugin::PluginManifest,
 ) -> std::collections::BTreeSet<String> {
     let mut restricted = manifest.admin_operations();
+    restricted.extend(manifest.service_operation_ids());
     restricted.extend(
         manifest
             .client_extensions
@@ -895,21 +896,6 @@ async fn client_ui_catalog(
                     .iter()
                     .all(|p| permissions.contains(p))
             });
-            let pages = extensions
-                .contributions
-                .iter()
-                .filter(|c| {
-                    c.kind == flare_im_capability_core::plugin::manifest::UiContributionKind::Page
-                })
-                .map(|c| c.id.clone())
-                .collect::<std::collections::BTreeSet<_>>();
-            for contribution in &mut extensions.contributions {
-                contribution.retain_targets(|target| match target {
-                    UiActionTarget::Operation { operation } => operations.contains(operation),
-                    UiActionTarget::Page { page } => pages.contains(page),
-                    UiActionTarget::Native { .. } => true,
-                });
-            }
             if extensions.contributions.is_empty() {
                 if declared_client_surfaces {
                     note(
@@ -932,6 +918,35 @@ async fn client_ui_catalog(
                 extensions,
                 operations,
                 configuration,
+            });
+        }
+    }
+    // Resolve page navigation only after every destination's installed grant,
+    // operation permissions and emergency switches have been checked. A source
+    // contribution cannot make an unavailable peer page visible.
+    let pages: std::collections::BTreeSet<(String, String)> = result
+        .plugins
+        .iter()
+        .flat_map(|plugin| {
+            plugin
+                .extensions
+                .contributions
+                .iter()
+                .filter(|c| {
+                    c.kind == flare_im_capability_core::plugin::manifest::UiContributionKind::Page
+                })
+                .map(|c| (plugin.plugin_id.clone(), c.id.clone()))
+        })
+        .collect();
+    for plugin in &mut result.plugins {
+        for contribution in &mut plugin.extensions.contributions {
+            contribution.retain_targets(|target| match target {
+                UiActionTarget::Operation { operation } => plugin.operations.contains(operation),
+                UiActionTarget::Page { plugin_id, page } => pages.contains(&(
+                    plugin_id.as_ref().unwrap_or(&plugin.plugin_id).clone(),
+                    page.clone(),
+                )),
+                UiActionTarget::Native { .. } => true,
             });
         }
     }

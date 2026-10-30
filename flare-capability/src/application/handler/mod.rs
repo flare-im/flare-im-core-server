@@ -25,3 +25,4 @@ mod resource_bridge_realtime_tests;
 mod resource_bridge_tests;
 #[cfg(test)]
 mod resource_bridge_write_tests;
+pub mod service_directory;

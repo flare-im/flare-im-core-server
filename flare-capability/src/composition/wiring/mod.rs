@@ -26,7 +26,10 @@ use crate::interface::grpc::hooks::ImHookPluginServer;
 pub use capability_extension::init_capability_extension_stack;
 
 /// 构建完整 [`ApplicationContext`]（配置 → Hook → Capability）。
-pub(crate) async fn initialize(config: CapabilityServiceConfig) -> Result<ApplicationContext> {
+pub(crate) async fn initialize(
+    config: CapabilityServiceConfig,
+    extensions: crate::composition::extensions::CapabilityExtensions,
+) -> Result<ApplicationContext> {
     let mut sources = config_sources::prepare_config_sources(&config).await?;
     let runtime_config_file = config
         .runtime_config_file
@@ -105,8 +108,13 @@ pub(crate) async fn initialize(config: CapabilityServiceConfig) -> Result<Applic
     )
     .with_execution_guard(hook.execution_guard);
 
-    let plugin_resource_bridge =
-        resource_bridge::compose(&plugin_routes, &capability_policy, db_pool.as_ref()).await?;
+    let plugin_resource_bridge = resource_bridge::compose(
+        &plugin_routes,
+        &capability_policy,
+        db_pool.as_ref(),
+        extensions.service_dispatch.as_ref(),
+    )
+    .await?;
     let audit_delivery = if let Some(pool) = db_pool {
         let publisher =
             flare_im_service_kit::audit_effects::AuditEffects::from_env("flare-capability").await?;

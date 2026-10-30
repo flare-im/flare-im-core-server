@@ -1,7 +1,9 @@
-//! The bridge write `im.plugin.entity_state.publish` under its three credentials.
+//! The bridge write `im.plugin.entity_state.publish` under its three credentials, and the
+//! routed `plugin.service.dispatch` with and without a router.
 use super::plugin_state::tests::{MemoryBindings, RecordingSink, poll_snapshot, publisher};
 use super::resource_bridge::*;
 use crate::domain::capability::{CapabilityError, Result};
+use crate::domain::repository::service_dispatch::{PluginServiceDispatch, ServiceDispatchError};
 use crate::domain::repository::{PluginAuthorizationReader, resource_access::*};
 use crate::infrastructure::capability::InMemoryCapabilityGrants;
 use flare_im_capability_core::plugin::invocation::{
@@ -10,6 +12,7 @@ use flare_im_capability_core::plugin::invocation::{
 };
 use flare_im_capability_core::plugin::resource::{HostCapability, ResourceRequest};
 use flare_im_capability_core::plugin::runtime::{PluginRuntimeSnapshot, digest_bytes};
+use flare_im_capability_core::plugin::service::PluginServiceResponse;
 use serde_json::{Value, json};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -288,6 +291,45 @@ async fn a_user_ticket_of_a_publishing_operation_writes_its_conversation_card() 
 }
 
 #[tokio::test(start_paused = true)]
+async fn runtime_publish_intersects_independently_renewed_projection_lease() {
+    let f = fixture();
+    {
+        let mut snapshot = f.projection.0.lock().unwrap();
+        snapshot.valid_until_ms = now() + 60_000;
+        snapshot.plugins[0].grant.valid_until_ms = now() + 15_000;
+    }
+    let bytes = body(1, "poll-1");
+    // The deployment's independently renewed lease permits a 30 s credential;
+    // Core's current installation lease has only 15 s left.
+    let token = runtime_token(&f, &bytes, None);
+    let result = f
+        .bridge
+        .call_with(
+            BridgeCredential::Runtime(&token),
+            OPERATION,
+            "req-1",
+            &bytes,
+        )
+        .await;
+    assert_eq!(result.unwrap()["outcome"], "published");
+    f.projection.0.lock().unwrap().plugins[0]
+        .grant
+        .valid_until_ms = now() - 1;
+    assert!(
+        f.bridge
+            .call_with(
+                BridgeCredential::Runtime(&token),
+                OPERATION,
+                "req-1",
+                &bytes
+            )
+            .await
+            .is_err(),
+        "a live credential cannot extend an expired installation"
+    );
+}
+
+#[tokio::test(start_paused = true)]
 async fn staff_and_runtime_credentials_write_tenant_wide_for_their_plugin_only() {
     let f = fixture();
     let staff = f
@@ -428,5 +470,142 @@ async fn the_request_limit_is_twelve_kib_and_recalled_cards_take_no_writes() {
             .call(&staff, OPERATION, "req-1", &body(2, "poll-1"))
             .await
             .is_err()
+    );
+}
+
+const SERVICE: &str = "plugin.service.dispatch";
+
+fn refused(result: &Result<Value>) -> bool {
+    matches!(result, Err(CapabilityError::PolicyDenied(m)) if m == "plugin resource access denied")
+}
+
+/// Records what reaches the router and answers with the configured outcome.
+struct RecordingRouter {
+    seen: Mutex<Vec<(String, String, Vec<u8>)>>,
+    answer: std::result::Result<(), ServiceDispatchError>,
+}
+#[async_trait::async_trait]
+impl PluginServiceDispatch for RecordingRouter {
+    async fn dispatch(
+        &self,
+        runtime_token: &str,
+        request_id: &str,
+        bytes: &[u8],
+    ) -> std::result::Result<PluginServiceResponse, ServiceDispatchError> {
+        self.seen
+            .lock()
+            .unwrap()
+            .push((runtime_token.into(), request_id.into(), bytes.to_vec()));
+        self.answer.map(|()| PluginServiceResponse {
+            ok: true,
+            error_code: None,
+            data: Some(json!({"balance": "10.00"})),
+        })
+    }
+}
+fn routed(
+    answer: std::result::Result<(), ServiceDispatchError>,
+) -> (ResourceBridge, Arc<RecordingRouter>) {
+    let router = Arc::new(RecordingRouter {
+        seen: Mutex::new(vec![]),
+        answer,
+    });
+    let bridge = fixture()
+        .bridge
+        .with_service_dispatch(Some(router.clone() as Arc<dyn PluginServiceDispatch>));
+    (bridge, router)
+}
+
+#[tokio::test]
+async fn service_dispatch_without_a_router_is_refused_like_any_denied_request() {
+    let f = fixture();
+    let result = f
+        .bridge
+        .call_with(
+            BridgeCredential::Runtime("runtime-token"),
+            SERVICE,
+            "req-1",
+            br#"{"operation":"wallet.balance"}"#,
+        )
+        .await;
+    assert!(refused(&result), "{result:?}");
+}
+
+#[tokio::test]
+async fn service_dispatch_hands_the_runtime_request_to_the_router() {
+    let (bridge, router) = routed(Ok(()));
+    let bytes = br#"{"operation":"wallet.balance"}"#;
+    let reply = bridge
+        .call_with(
+            BridgeCredential::Runtime("runtime-token"),
+            SERVICE,
+            "req-1",
+            bytes,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        reply,
+        json!({"ok": true, "errorCode": null, "data": {"balance": "10.00"}})
+    );
+    assert_eq!(
+        *router.seen.lock().unwrap(),
+        vec![("runtime-token".into(), "req-1".into(), bytes.to_vec())]
+    );
+}
+
+#[tokio::test]
+async fn service_dispatch_takes_only_runtime_credentials_within_the_size_limit() {
+    let (bridge, router) = routed(Ok(()));
+    let ticket = bridge
+        .call_with(
+            BridgeCredential::Call("call-ticket"),
+            SERVICE,
+            "req-1",
+            b"{}",
+        )
+        .await;
+    assert!(refused(&ticket), "{ticket:?}");
+    let oversized =
+        vec![b' '; flare_im_capability_core::plugin::service::MAX_SERVICE_REQUEST_BYTES + 1];
+    let large = bridge
+        .call_with(
+            BridgeCredential::Runtime("runtime-token"),
+            SERVICE,
+            "req-1",
+            &oversized,
+        )
+        .await;
+    assert!(refused(&large), "{large:?}");
+    assert!(
+        router.seen.lock().unwrap().is_empty(),
+        "neither reached the router"
+    );
+}
+
+#[tokio::test]
+async fn service_dispatch_refusals_and_unknown_outcomes_stay_distinct() {
+    let (bridge, _) = routed(Err(ServiceDispatchError::Refused));
+    let result = bridge
+        .call_with(
+            BridgeCredential::Runtime("runtime-token"),
+            SERVICE,
+            "req-1",
+            b"{}",
+        )
+        .await;
+    assert!(refused(&result), "{result:?}");
+    let (bridge, _) = routed(Err(ServiceDispatchError::OutcomeUnknown));
+    let result = bridge
+        .call_with(
+            BridgeCredential::Runtime("runtime-token"),
+            SERVICE,
+            "req-1",
+            b"{}",
+        )
+        .await;
+    assert!(
+        matches!(&result, Err(CapabilityError::System(m)) if m == "plugin service outcome unknown"),
+        "{result:?}"
     );
 }

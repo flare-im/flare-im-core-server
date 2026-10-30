@@ -153,4 +153,5 @@ pub mod plugin_card;
 pub mod plugin_state;
 pub mod realtime_delivery;
 pub mod resource_access;
+pub mod service_dispatch;
 pub mod tenant_notice;

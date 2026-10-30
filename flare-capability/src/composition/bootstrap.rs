@@ -8,6 +8,7 @@ use tracing::info;
 
 use crate::domain::model::ExecutionMode;
 
+use super::extensions::CapabilityExtensions;
 use super::process_config::CapabilityServiceConfig;
 use super::runtime_context::ApplicationContext;
 use super::wiring;
@@ -17,6 +18,11 @@ pub struct ApplicationBootstrap;
 
 impl ApplicationBootstrap {
     pub async fn run_from_env() -> Result<()> {
+        Self::run_from_env_with(CapabilityExtensions::default()).await
+    }
+
+    /// [`Self::run_from_env`] with what the binary adds, such as a plugin service router.
+    pub async fn run_from_env_with(extensions: CapabilityExtensions) -> Result<()> {
         let app_config = flare_im_service_kit::load_app_config_from_env();
         let _tracing =
             flare_im_service_kit::tracing::init_tracing_from_config(Some(app_config.logging()))?;
@@ -30,10 +36,17 @@ impl ApplicationBootstrap {
             "Starting Flare Capability service"
         );
 
-        Self::run(config).await
+        Self::run_with(config, extensions).await
     }
 
     pub async fn run(config: CapabilityServiceConfig) -> Result<()> {
+        Self::run_with(config, CapabilityExtensions::default()).await
+    }
+
+    pub async fn run_with(
+        config: CapabilityServiceConfig,
+        extensions: CapabilityExtensions,
+    ) -> Result<()> {
         let app_config = flare_im_service_kit::load_app_config_from_env();
         let cap_service = app_config.capability_service();
         let runtime_plan = flare_im_service_kit::build_service_runtime_plan(
@@ -45,7 +58,7 @@ impl ApplicationBootstrap {
         )?;
         info!(address = %runtime_plan.address, "Server address parsed successfully");
 
-        let context = wiring::initialize(config).await?;
+        let context = wiring::initialize(config, extensions).await?;
         info!("ApplicationBootstrap created successfully");
 
         Self::run_with_context(context, runtime_plan).await

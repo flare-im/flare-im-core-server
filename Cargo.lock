@@ -1687,7 +1687,6 @@ dependencies = [
  "flare-im-message-pipeline",
  "flare-im-service-kit",
  "flare-orchestrator",
- "flare-plugin-host",
  "flare-proto",
  "flare-server-core",
  "flare-storage-reader",
@@ -2277,25 +2276,6 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "uuid",
-]
-
-[[package]]
-name = "flare-plugin-host"
-version = "0.1.1"
-dependencies = [
- "base64",
- "flare-grpc-proto",
- "flare-plugin-protocol",
- "flare-server-core",
- "prost-types",
- "reqwest",
- "serde",
- "serde_json",
- "sqlx",
- "thiserror 2.0.18",
- "tokio",
- "tonic",
- "tracing",
 ]
 
 [[package]]

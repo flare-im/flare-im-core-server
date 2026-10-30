@@ -380,6 +380,109 @@ async fn ui_catalog_uses_local_projection_and_strips_runtime_details() {
     }
 }
 
+#[tokio::test]
+async fn catalog_cross_plugin_pages_require_an_enabled_approved_destination() {
+    fn projected(id: &str, actions: Value) -> ProjectedPlugin {
+        let mut p = snapshot("http://127.0.0.1:1".into()).plugins.remove(0);
+        let mut raw: Value =
+            serde_json::from_str(&p.manifest_json.replace("example.echo", id)).unwrap();
+        raw["clientExtensions"] = serde_json::json!({"platforms":["web"], "nativeCapabilities":[],
+            "contributions":[{"kind":"page","id":format!("{id}.home"),"schemaVersion":1,
+                "requiredPermissions":[format!("{id}.run")],
+                "schema":{"title":"Home","fields":[],"actions":actions}}]});
+        p.manifest_json = serde_json::to_string(&raw).unwrap();
+        p.grant.plugin_id = id.into();
+        p.grant.grant_id = format!("grant-{id}");
+        p.grant.approved_operations = [format!("{id}.run")].into();
+        p.grant.approved_permissions = [format!("{id}.run")].into();
+        p.grant.manifest_digest = digest_bytes(p.manifest_json.as_bytes());
+        p.deployment.plugin_id = id.into();
+        p.deployment.deployment_id = format!("deployment-{id}");
+        p.deployment.manifest_digest = p.grant.manifest_digest.clone();
+        p.manifest().unwrap();
+        p
+    }
+    let source = projected(
+        "example.echo",
+        serde_json::json!([
+            {"id":"local","label":"Local","target":{"kind":"page","page":"example.echo.home"}},
+            {"id":"peer","label":"Peer","target":{"kind":"page","pluginId":"example.peer","page":"example.peer.home"}},
+            {"id":"absent","label":"Absent","target":{"kind":"page","pluginId":"example.peer","page":"example.peer.missing"}}
+        ]),
+    );
+    let peer = projected("example.peer", serde_json::json!([]));
+    let (ctx, _, _) = identity(SignedActorType::User);
+    let mut request = command();
+    request.capability_id = flare_im_capability_core::plugin::ui::UI_CATALOG_OPERATION.into();
+    for reversed in [false, true] {
+        for blocked in [
+            "none",
+            "absent",
+            "disabled",
+            "revoked",
+            "permission",
+            "operation",
+            "switch",
+        ] {
+            let mut peer = peer.clone();
+            match blocked {
+                "disabled" => peer.grant.enabled = false,
+                "revoked" => peer.grant.revoked = true,
+                "permission" => peer.grant.approved_permissions.clear(),
+                "operation" => peer.grant.approved_operations.clear(),
+                _ => {}
+            }
+            let mut projected = snapshot("http://127.0.0.1:1".into());
+            projected.plugins = vec![source.clone()];
+            if blocked != "absent" {
+                projected.plugins.push(peer);
+            }
+            if reversed {
+                projected.plugins.reverse();
+            }
+            for plugin in &mut projected.plugins {
+                plugin.grant.valid_from_ms = projected.issued_at_ms;
+                plugin.grant.valid_until_ms = projected.valid_until_ms;
+            }
+            projected
+                .validate(chrono::Utc::now().timestamp_millis())
+                .unwrap();
+            let reader = Arc::new(Projection(Mutex::new(Some(projected))));
+            let routes = Arc::new(PluginRouteBook::new().with_runtime_authorization(reader, None));
+            let backend = policy();
+            if blocked == "switch" {
+                backend.set_tenant_capability("app-a", "example.peer.run", false);
+            }
+            let backend: Arc<dyn CapabilityPolicyBackend> = backend;
+            let response =
+                dispatch_remote(&ctx, &request, &routes, &backend, Duration::from_secs(1))
+                    .await
+                    .unwrap();
+            let catalog: flare_im_capability_core::plugin::ui::UiCatalog =
+                serde_json::from_value(response.data).unwrap();
+            let actions = &catalog
+                .plugins
+                .iter()
+                .find(|p| p.plugin_id == "example.echo")
+                .unwrap()
+                .extensions
+                .contributions[0]
+                .schema
+                .actions;
+            let ids: Vec<_> = actions.iter().map(|a| a.id.as_str()).collect();
+            assert_eq!(
+                ids,
+                if blocked == "none" {
+                    vec!["local", "peer"]
+                } else {
+                    vec!["local"]
+                },
+                "destination {blocked}, reversed={reversed}"
+            );
+        }
+    }
+}
+
 mod plugin_state_and_catalog {
     use super::*;
     use crate::application::handler::plugin_card::PluginCardPoster;

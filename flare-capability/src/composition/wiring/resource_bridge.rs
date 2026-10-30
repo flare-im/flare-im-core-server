@@ -1,5 +1,6 @@
 use crate::{
-    application::handler::resource_bridge::ResourceBridge,
+    application::handler::{resource_bridge::ResourceBridge, service_directory::ServiceDirectory},
+    composition::extensions::{ServiceDispatchFactory, ServiceDispatchParts},
     domain::capability::CapabilityPolicyBackend,
     domain::repository::realtime_delivery::RealtimePacketDelivery,
     infrastructure::{
@@ -16,6 +17,7 @@ pub async fn compose(
     routes: &Arc<PluginRouteBook>,
     policy: &Arc<dyn CapabilityPolicyBackend>,
     pool: Option<&Arc<sqlx::PgPool>>,
+    service_dispatch: Option<&Arc<dyn ServiceDispatchFactory>>,
 ) -> Result<Option<PluginHostBridgeGrpc>> {
     let invalid =
         || FlareError::system("invalid or incomplete plugin resource bridge configuration");
@@ -70,6 +72,28 @@ pub async fn compose(
     };
     let budget = Arc::new(PostgresResourceBudget(pool.cloned().ok_or_else(invalid)?));
     budget.check_schema().await.map_err(|_| invalid())?;
+    // Service calls need both a router linked into this binary and the runtime credentials
+    // they are signed with; without either, the bridge refuses them.
+    let service_dispatch = match (service_dispatch, runtime_verifier.clone()) {
+        (Some(factory), Some(runtimes)) => Some(factory.build(ServiceDispatchParts {
+            directory: Arc::new(ServiceDirectory::new(
+                authorization.clone(),
+                policy.clone(),
+                budget.clone(),
+            )),
+            calls: verifier.clone(),
+            runtimes,
+            signer: signer.clone(),
+        })),
+        (None, Some(_)) => {
+            tracing::warn!(
+                "this capability build has no plugin service router; plugin.service.dispatch is refused"
+            );
+            None
+        }
+        (_, None) => None,
+    };
+
     Ok(Some(PluginHostBridgeGrpc(Arc::new(
         ResourceBridge::new(
             authorization,
@@ -83,6 +107,7 @@ pub async fn compose(
             budget,
         )
         .with_writes(routes.state_publisher.clone(), runtime_verifier)
+        .with_service_dispatch(service_dispatch)
         .with_realtime(realtime),
     ))))
 }
