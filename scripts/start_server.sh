@@ -282,8 +282,11 @@ load_write_proof_keys() {
                 return 1
             }
         fi
-        CORE_WRITE_PROOF_PRIVATE_KEY="$(openssl pkey -in "$private_file" -outform DER 2>/dev/null | openssl base64 -A)"
-        CORE_WRITE_PROOF_PUBLIC_KEY="$(openssl pkey -in "$private_file" -pubout -outform DER 2>/dev/null | openssl base64 -A)"
+        # A PEM body is the Base64 of its DER (PKCS8 for the private key, SPKI for the
+        # public one): drop the armour lines and join the rest into the single-line,
+        # canonical Base64 the services read.
+        CORE_WRITE_PROOF_PRIVATE_KEY="$(sed '/^-----/d' "$private_file" | tr -d '\r\n')"
+        CORE_WRITE_PROOF_PUBLIC_KEY="$(openssl pkey -in "$private_file" -pubout 2>/dev/null | sed '/^-----/d' | tr -d '\r\n')"
         if [ -z "$CORE_WRITE_PROOF_PRIVATE_KEY" ] || [ -z "$CORE_WRITE_PROOF_PUBLIC_KEY" ]; then
             echo "本地写入证明密钥无法读取" >&2
             return 1
