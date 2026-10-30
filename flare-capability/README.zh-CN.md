@@ -46,6 +46,12 @@ Flare IM **能力服务**：**Hook 引擎**（配置与 gRPC 调度）+ **能力
 
 超出范围的值被忽略，使用缺省值。
 
+### 插件服务调用（`plugin.service.dispatch`）
+
+插件部署经资源桥、凭自己的运行时凭据（`x-flare-plugin-runtime`）调用另一个已安装插件提供的服务。Core 按本地投影、租户操作开关和共享请求预算准入；校验服务票据并转发调用的路由器在 `flare-plugin-host` 里，不属于这个开源工作区。所以这里编出的 `flare-capability` 对所有服务调用都按被拒的资源请求拒绝（配置了插件运行时公钥时，启动日志会说明）。
+
+发布镜像、开发脚本和插件实验台改编 `with-plugin-host/`：一个链接路由器的独立 Cargo 工作区，产出同名的 `flare-capability`（`cargo build --manifest-path flare-capability/with-plugin-host/Cargo.toml`）。检出了 `../flare-plugin` 时 `scripts/start_server.sh` 自动这样编；`FLARE_CAPABILITY_PLUGIN_HOST=0` 保持开源版，`=1` 要求必须带路由器。
+
 ### `ExtensionPlugin` 的身份
 
 `ExtensionPlugin` 路由器（`flare.capability.v1.ExtensionPlugin/Call`）挂在允许匿名准入的签名上下文层后面。验过的 `x-flare-ctx` 是唯一身份：`GenericRequest.metadata`、`x-tenant-id`、`x-user-id` 等调用方元数据一概不读。

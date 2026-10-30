@@ -53,9 +53,10 @@ certs
 **/.cursor
 
 # ── 本镜像用不到的仓（整仓排除）──
-# 服务端只需要 flare-proto / flare-grpc-proto / flare-core / flare-server-core
-# 与本仓自身。下面这些是客户端 SDK、UI kit、官网、社交业务——一个字节都用不上，
-# 合计约 10GB。
+# 服务端只需要 flare-proto / flare-grpc-proto / flare-core / flare-server-core、
+# flare-plugin 里的 flare-plugin-host（发布版 flare-capability 由
+# flare-capability/with-plugin-host 链接它）与本仓自身。
+# 下面这些是客户端 SDK、UI kit、官网、社交业务——一个字节都用不上，合计约 10GB。
 official
 docs
 flare-im-design
@@ -63,6 +64,8 @@ flare-im-core-client-sdk
 flare-im-core-sdk
 flare-sdk-plugin
 flare-plugin
+!flare-plugin/flare-plugin-host
+flare-plugin/flare-plugin-host/target
 flare-social
 
 # E2E 测试残留数据（实测某次达 4.6GB，COPY 时把服务器磁盘撑爆）。

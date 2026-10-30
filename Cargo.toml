@@ -50,6 +50,9 @@ members = [
     "tools/flare-smoke-grpc",
 ]
 
+# Its own workspace (it links the private flare-plugin-host); built with --manifest-path.
+exclude = ["flare-capability/with-plugin-host"]
+
 resolver = "2"
 
 # 领域层的仓储端口（trait）统一用 `async fn`，不套 #[async_trait] 的装箱开销。

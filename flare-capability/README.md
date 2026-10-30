@@ -46,6 +46,12 @@ Every Capability instance loads the table at startup (a missing table stops star
 
 A value outside the range is ignored and the default applies.
 
+### Plugin service calls (`plugin.service.dispatch`)
+
+A plugin deployment calls a service that another installed plugin provides through the resource bridge, with its runtime credential (`x-flare-plugin-runtime`). Core admits the call against its local projection, the tenant's operation switches and the shared request budget. The router that verifies the service ticket and forwards the call lives in `flare-plugin-host`, which is not part of this open workspace, so the `flare-capability` binary built here refuses every service call like any denied resource request (and logs that at startup when plugin runtime keys are configured).
+
+Release images, the development scripts and the plugin lab build `with-plugin-host/` instead: its own Cargo workspace that links the router and produces the same `flare-capability` binary (`cargo build --manifest-path flare-capability/with-plugin-host/Cargo.toml`). `scripts/start_server.sh` does this when `../flare-plugin` is checked out; `FLARE_CAPABILITY_PLUGIN_HOST=0` keeps the open build and `=1` requires the router.
+
 ### `ExtensionPlugin` identity
 
 The `ExtensionPlugin` router (`flare.capability.v1.ExtensionPlugin/Call`) sits behind the signed-context layer with anonymous admission. The verified `x-flare-ctx` is the only identity: `GenericRequest.metadata`, `x-tenant-id`, `x-user-id` and similar caller metadata are never read.

@@ -120,6 +120,8 @@ free_listen_port() {
 # Keep one launch path: launchctl does not inherit this shell's environment.
 # Old launchctl jobs are still cleaned above, but new services use nohup.
 source "$SCRIPT_DIR/lib/dev_process.sh"
+# shellcheck source=lib/capability_build.sh
+source "$SCRIPT_DIR/lib/capability_build.sh"
 
 generate_local_token_secret() {
     if command -v openssl >/dev/null 2>&1; then
@@ -660,6 +662,22 @@ if [ "${FLARE_SKIP_BUILD:-0}" != "1" ] || ! core_binaries_ready; then
         echo -e "${YELLOW}   或运行: PROTOC=$PROTOC ${cargo_build_cmd[*]}${NC}"
         exit 1
     fi
+    # 有 flare-plugin-host 时，用链接插件服务路由的 flare-capability 覆盖开源版（同名同目录），
+    # 见 scripts/lib/capability_build.sh。
+    capability_build_args=()
+    if [ "$FLARE_BUILD_PROFILE" = "release" ]; then
+        capability_build_args+=(--release)
+    fi
+    if [ -n "${CARGO_BUILD_JOBS:-}" ]; then
+        capability_build_args+=(--jobs "$CARGO_BUILD_JOBS")
+    fi
+    if ! PROTOC="$PROTOC" flare_build_capability_with_plugin_host "$PROJECT_ROOT" "$CARGO_TARGET_ROOT" \
+        ${capability_build_args[@]+"${capability_build_args[@]}"} >> "$BUILD_LOG" 2>&1; then
+        echo -e "${RED}   ✗ flare-capability（with-plugin-host）编译失败，末尾输出:${NC}"
+        tail -n 40 "$BUILD_LOG" || true
+        exit 1
+    fi
+    grep '^flare-capability: ' "$BUILD_LOG" | tail -n 1 | sed 's/^/   /' || true
 fi
 echo -e "${GREEN}   ✓ 编译完成${NC}"
 echo ""

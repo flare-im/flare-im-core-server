@@ -19,7 +19,11 @@ build: ## 编译项目
 
 run: ## 运行 Hook Engine 服务
 	@echo "启动 Hook Engine 服务 (端口: ${HOOK_SERVICE_PORT})..."
-	HOOK_SERVICE_PORT=${HOOK_SERVICE_PORT} cargo run --bin flare-capability
+	@if [ -f ../../flare-plugin/flare-plugin-host/Cargo.toml ] && [ "$${FLARE_CAPABILITY_PLUGIN_HOST:-auto}" != 0 ]; then \
+		HOOK_SERVICE_PORT=${HOOK_SERVICE_PORT} cargo run --manifest-path with-plugin-host/Cargo.toml --bin flare-capability; \
+	else \
+		HOOK_SERVICE_PORT=${HOOK_SERVICE_PORT} cargo run --bin flare-capability; \
+	fi
 
 test: ## 运行所有测试
 	@echo "运行所有测试..."

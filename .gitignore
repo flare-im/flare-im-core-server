@@ -52,3 +52,6 @@ certs/
 
 # Python bytecode from scripts/lib tests
 __pycache__/
+
+# Built separately (own workspace) when CARGO_TARGET_DIR is not shared.
+/flare-capability/with-plugin-host/target/

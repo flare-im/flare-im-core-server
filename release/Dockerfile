@@ -74,6 +74,9 @@ COPY flare-proto ./flare-proto
 COPY flare-grpc-proto ./flare-grpc-proto
 COPY flare-core ./flare-core
 COPY flare-server-core ./flare-server-core
+# The released flare-capability links the plugin service router of flare-plugin-host
+# (flare-capability/with-plugin-host); only that crate of flare-plugin is needed.
+COPY flare-plugin/flare-plugin-host ./flare-plugin/flare-plugin-host
 
 COPY flare-im-core ./flare-im-core
 
@@ -108,9 +111,13 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
         -p flare-push-server \
         -p flare-push-proxy \
         -p flare-push-worker \
-        -p flare-capability \
         -p flare-media \
         -p flare-supervise \
+    # flare-capability comes from its own workspace, which links the plugin service router;
+    # the open workspace's flare-capability (service calls refused) is not shipped.
+    && cargo build --locked --release \
+        --manifest-path flare-capability/with-plugin-host/Cargo.toml \
+        --target-dir target \
     # The cache mount disappears with the layer, so copy the binaries out while it's
     # still mounted. Forgetting this yields an image with an empty /out and a build
     # that "succeeded".

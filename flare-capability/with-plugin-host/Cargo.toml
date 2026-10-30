@@ -1,0 +1,52 @@
+# The Capability service binary with the plugin service router linked in.
+#
+# flare-plugin-host lives in the private flare-plugin repository, so this crate is its own
+# workspace (with its own Cargo.lock) outside the open flare-im-core workspace: the open
+# workspace resolves and builds without that repository, and its `flare-capability` binary
+# refuses `plugin.service.dispatch`. Release images, the development scripts and the plugin
+# lab build this crate instead, with `--manifest-path`; it produces the same `flare-capability`
+# binary name.
+[package]
+name = "flare-capability-with-plugin-host"
+version = "1.0.3"
+edition = "2024"
+rust-version = "1.94.0"
+authors = ["Flare Team"]
+license = "Apache-2.0"
+description = "Flare IM Capability service with the plugin service router (plugin.service.dispatch)"
+publish = false
+
+[lib]
+name = "flare_capability_with_plugin_host"
+path = "src/lib.rs"
+
+[[bin]]
+name = "flare-capability"
+path = "src/main.rs"
+
+[dependencies]
+flare-capability = { path = ".." }
+flare-plugin-host = { path = "../../../flare-plugin/flare-plugin-host" }
+flare-server-core = { version = "1.0.3", path = "../../../flare-server-core", features = ["grpc"] }
+async-trait = "0.1"
+tokio = { version = "1", features = ["full"] }
+tonic = "0.14"
+
+[dev-dependencies]
+flare-grpc-proto = { version = "2.3.0", path = "../../../flare-grpc-proto" }
+ed25519-dalek = { version = "2", features = ["pkcs8", "pem"] }
+tokio-stream = { version = "0.1", features = ["net"] }
+
+[workspace]
+resolver = "2"
+
+# Same as the flare-im-core workspace: profiles are taken only from the workspace root.
+[profile.release]
+strip = true
+codegen-units = 16
+incremental = false
+
+[profile.release-debug]
+inherits = "release"
+strip = false
+debug = 1

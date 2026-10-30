@@ -8,6 +8,8 @@ WORKSPACE_ROOT="$(cd "$PROJECT_ROOT/.." && pwd)"
 
 # shellcheck source=lib/common.sh
 . "$SCRIPT_DIR/lib/common.sh"
+# shellcheck source=../../scripts/lib/capability_build.sh
+. "$PROJECT_ROOT/scripts/lib/capability_build.sh"
 
 profile="release"
 skip_build=0
@@ -153,6 +155,17 @@ else
 fi
 [ -n "$target_dir" ] && [ "$target_dir" != "null" ] || flare_die "could not resolve cargo target directory"
 target_profile_dir="$target_dir/$profile"
+
+if [ "$skip_build" -ne 1 ]; then
+    # With flare-plugin-host checked out, the shipped flare-capability links the plugin service
+    # router and replaces the open one built above (see scripts/lib/capability_build.sh).
+    capability_args=(--jobs "$jobs")
+    if [ "$profile" = "release" ]; then
+        capability_args+=(--release)
+    fi
+    PROTOC="$PROTOC" flare_build_capability_with_plugin_host "$PROJECT_ROOT" "$target_dir" \
+        "${capability_args[@]}" || flare_die "flare-capability (with-plugin-host) build failed"
+fi
 
 if [ -e "$package_dir" ]; then
     [ "$force" -eq 1 ] || flare_die "package dir already exists; pass --force: $package_dir"
