@@ -11,7 +11,12 @@ fn critical_runtime_paths_do_not_use_unwrap_or_expect_in_production_code() {
         "flare-storage/writer/src",
         "flare-message-ingest/src",
     ] {
-        for file in rust_sources(&root.join(source_root)) {
+        let files = rust_sources(&root.join(source_root));
+        let test_only = test_only_path_modules(&files);
+        for file in files {
+            if test_only.contains(&file) {
+                continue;
+            }
             let relative = file.strip_prefix(&root).unwrap_or(&file);
             let content = fs::read_to_string(&file).expect("read rust source");
             let production_content = strip_inline_test_modules(&content);
@@ -75,6 +80,47 @@ fn strip_inline_test_modules(content: &str) -> String {
     }
 
     output
+}
+
+/// Files that a `#[cfg(test)] #[path = "..."] mod name;` declaration pulls in. They sit
+/// under `src/` next to production code, but they only ever compile as test code.
+fn test_only_path_modules(files: &[PathBuf]) -> Vec<PathBuf> {
+    let mut test_only = Vec::new();
+    for file in files {
+        let Ok(content) = fs::read_to_string(file) else {
+            continue;
+        };
+        let Some(dir) = file.parent() else {
+            continue;
+        };
+        let mut cfg_test = false;
+        let mut path_attr: Option<&str> = None;
+        for line in content.lines() {
+            let trimmed = line.trim();
+            if trimmed.starts_with("#[cfg(test)]") {
+                cfg_test = true;
+                continue;
+            }
+            if let Some(path) = trimmed
+                .strip_prefix("#[path = \"")
+                .and_then(|rest| rest.strip_suffix("\"]"))
+            {
+                path_attr = Some(path);
+                continue;
+            }
+            let declares_module = (trimmed.starts_with("mod ") || trimmed.starts_with("pub mod "))
+                && trimmed.ends_with(';');
+            if declares_module
+                && cfg_test
+                && let Some(path) = path_attr
+            {
+                test_only.push(dir.join(path));
+            }
+            cfg_test = false;
+            path_attr = None;
+        }
+    }
+    test_only
 }
 
 fn brace_delta(line: &str) -> isize {
