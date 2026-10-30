@@ -292,6 +292,15 @@ load_write_proof_keys() {
             return 1
         fi
     fi
+    # Refuse here, with a message, what Message Ingest and Storage Writer would refuse at
+    # startup: canonical single-line Base64 of a PKCS8 / SPKI Ed25519 DER.
+    if ! printf '%s' "$CORE_WRITE_PROOF_PRIVATE_KEY" | openssl base64 -d -A 2>/dev/null |
+            openssl pkey -inform DER -noout 2>/dev/null ||
+       ! printf '%s' "$CORE_WRITE_PROOF_PUBLIC_KEY" | openssl base64 -d -A 2>/dev/null |
+            openssl pkey -pubin -inform DER -noout 2>/dev/null; then
+        echo "写入证明密钥不是 Base64 的 Ed25519 DER（私钥 ${#CORE_WRITE_PROOF_PRIVATE_KEY} 字符，公钥 ${#CORE_WRITE_PROOF_PUBLIC_KEY} 字符；$(openssl version 2>/dev/null)）" >&2
+        return 1
+    fi
     export -n CORE_WRITE_PROOF_PRIVATE_KEY CORE_WRITE_PROOF_PUBLIC_KEY
 }
 
