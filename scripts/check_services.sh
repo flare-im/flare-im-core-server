@@ -147,6 +147,12 @@ FAILED_SERVICES=()
 
 for service_port in "${SERVICES[@]}"; do
     IFS=':' read -r service port <<< "$service_port"
+    # start_server.sh starts the Push consumers only once PUSH_*_DELIVERY_READY is set.
+    if { [ "$service" = "push-server" ] && [ -z "${PUSH_SERVER_DELIVERY_READY:-}" ]; } ||
+       { [ "$service" = "push-worker" ] && [ -z "${PUSH_WORKER_DELIVERY_READY:-}" ]; }; then
+        echo -e "${YELLOW}   · $service 未启用（未设置 $(echo "$service" | tr 'a-z-' 'A-Z_')_DELIVERY_READY）${NC}"
+        continue
+    fi
     if ! check_service "$service" "$port"; then
         ALL_RUNNING=false
         FAILED_SERVICES+=("$service")

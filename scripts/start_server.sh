@@ -254,6 +254,57 @@ load_platform_public_key() {
     export -n CORE_USAGE_NATS_URL CORE_USAGE_WINDOW_SECS
 }
 
+# Message Ingest stamps a write proof on the messages that need one and Storage Writer
+# refuses to start without the key that verifies it (release/supervise-core.toml gives the
+# pair to Ingest and the public half to the Writer). Supply both as base64 DER, or let this
+# launcher keep a local Ed25519 pair under logs/.dev-write-proof.
+load_write_proof_keys() {
+    CORE_WRITE_PROOF_PRIVATE_KEY="${FLARE_WRITE_PROOF_PRIVATE_KEY:-}"
+    CORE_WRITE_PROOF_PUBLIC_KEY="${FLARE_WRITE_PROOF_PUBLIC_KEY:-}"
+    unset FLARE_WRITE_PROOF_PRIVATE_KEY FLARE_WRITE_PROOF_PUBLIC_KEY
+    if [ -n "$CORE_WRITE_PROOF_PRIVATE_KEY" ] || [ -n "$CORE_WRITE_PROOF_PUBLIC_KEY" ]; then
+        if [ -z "$CORE_WRITE_PROOF_PRIVATE_KEY" ] || [ -z "$CORE_WRITE_PROOF_PUBLIC_KEY" ]; then
+            echo "写入证明的私钥与公钥要同时提供" >&2
+            return 1
+        fi
+    else
+        local key_dir="$LOGS_DIR/.dev-write-proof"
+        local private_file="$key_dir/private.pem"
+        mkdir -p "$key_dir"
+        chmod 700 "$key_dir"
+        if [ -L "$private_file" ]; then
+            echo "写入证明密钥文件无效" >&2
+            return 1
+        fi
+        if [ ! -e "$private_file" ]; then
+            (umask 077; openssl genpkey -algorithm Ed25519 -out "$private_file" >/dev/null 2>&1) || {
+                echo "无法生成本地写入证明密钥" >&2
+                return 1
+            }
+        fi
+        CORE_WRITE_PROOF_PRIVATE_KEY="$(openssl pkey -in "$private_file" -outform DER 2>/dev/null | openssl base64 -A)"
+        CORE_WRITE_PROOF_PUBLIC_KEY="$(openssl pkey -in "$private_file" -pubout -outform DER 2>/dev/null | openssl base64 -A)"
+        if [ -z "$CORE_WRITE_PROOF_PRIVATE_KEY" ] || [ -z "$CORE_WRITE_PROOF_PUBLIC_KEY" ]; then
+            echo "本地写入证明密钥无法读取" >&2
+            return 1
+        fi
+    fi
+    export -n CORE_WRITE_PROOF_PRIVATE_KEY CORE_WRITE_PROOF_PUBLIC_KEY
+}
+
+# Push Server and Push Worker refuse to start until the deployment states how broker
+# records are protected (flare_im_service_kit::push_delivery), and broker-isolated needs a
+# NATS URL with credentials. Like release/supervise-core.toml, start them only when
+# PUSH_SERVER_DELIVERY_READY / PUSH_WORKER_DELIVERY_READY say the deployment is ready;
+# otherwise the launcher would stop at a paused consumer.
+push_service_enabled() {
+    case "$1" in
+        push-server) [ -n "${PUSH_SERVER_DELIVERY_READY:-}" ] ;;
+        push-worker) [ -n "${PUSH_WORKER_DELIVERY_READY:-}" ] ;;
+        *) return 0 ;;
+    esac
+}
+
 # Capability's own context key (kid=capability) and its plugin endpoints and keys: only
 # Capability reads them, and release/supervise-core.toml gives them to capability alone. They
 # leave the inherited environment here and go to the capability process only, so no other
@@ -408,6 +459,7 @@ unset FLARE_API_GATEWAY_TOKEN_SECRET ACCESS_GATEWAY_TOKEN_SECRET FLARE_API_GATEW
 export -n CORE_API_TOKEN_SECRET CORE_ACCESS_TOKEN_SECRET CORE_API_APP_CREDENTIALS
 load_internal_context_keys
 load_platform_public_key
+load_write_proof_keys
 load_capability_env
 echo -e "${BLUE}🔐 本地网关 token secret 已准备: logs/.dev-token-secret（内容不会打印；本地客户端可将该文件内容作为 TOKEN_SECRET）${NC}"
 echo ""
@@ -530,6 +582,15 @@ CORE_STOP_SERVICES=("${CORE_SERVICES[@]}" "admin-gateway")
 if [ -n "$CORE_ADMIN_GATEWAY_ENABLED" ]; then
     CORE_SERVICES+=("admin-gateway")
 fi
+ENABLED_CORE_SERVICES=()
+for service in "${CORE_SERVICES[@]}"; do
+    if push_service_enabled "$service"; then
+        ENABLED_CORE_SERVICES+=("$service")
+    else
+        echo -e "${YELLOW}   跳过 $service：未设置 $(echo "$service" | tr 'a-z-' 'A-Z_')_DELIVERY_READY（Push 消费者在声明 broker 来源保护前不启动）${NC}"
+    fi
+done
+CORE_SERVICES=("${ENABLED_CORE_SERVICES[@]}")
 
 # 停止所有核心服务
 for service in "${CORE_STOP_SERVICES[@]}"; do
@@ -888,6 +949,13 @@ for service in "${CORE_SERVICES[@]}"; do
             # Verifies the gateway-signed staff context and re-signs it for Media.
             env_args+=("FLARE_INTERNAL_CTX_PUBLIC_KEY=$CORE_INTERNAL_PUBLIC_KEY")
             env_args+=("FLARE_INTERNAL_CTX_PRIVATE_KEY=$CORE_INTERNAL_PRIVATE_KEY") ;;
+    esac
+    case "$service" in
+        message-ingest)
+            env_args+=("FLARE_WRITE_PROOF_PRIVATE_KEY=$CORE_WRITE_PROOF_PRIVATE_KEY")
+            env_args+=("FLARE_WRITE_PROOF_PUBLIC_KEY=$CORE_WRITE_PROOF_PUBLIC_KEY") ;;
+        storage-writer)
+            env_args+=("FLARE_WRITE_PROOF_PUBLIC_KEY=$CORE_WRITE_PROOF_PUBLIC_KEY") ;;
     esac
     case "$service" in
         capability)
