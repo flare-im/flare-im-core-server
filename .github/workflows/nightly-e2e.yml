@@ -43,11 +43,6 @@ jobs:
           ref: dev
 
       - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: |
-            flare-im-core
-            flare-im-core-sdk
 
       # 本仓无法单独构建：examples 等成员按**同级目录**依赖 flare-core / flare-proto
       # 等仓（path 依赖）。ci.yml 早有这一步，nightly 漏了 —— 表现为
@@ -71,6 +66,14 @@ jobs:
           # RTC 由那个插件提供，因此不属于开源侧的自足证明；示例里那一步会明确
           # 跳过并说明，不再让整例变红。
 
+      # rust-cache 要在同级仓就位之后：它先跑 `cargo metadata` 算缓存键，
+      # 放在前面时两个工作区都因缺 ../flare-core 解析失败，缓存整段失效。
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            flare-im-core
+            flare-im-core-sdk
+
       # 与 ci.yml 同一套：契约由 .proto 生成，构建期需要 protobuf 编译器；
       # rdkafka-sys 会现场编译 librdkafka（C），需要 curl/sasl/ssl/zlib 开发头文件。
       # 这条此前只写在 ci.yml 里，nightly 漏了 —— 表现为「未找到 protoc 编译器」。
@@ -86,8 +89,9 @@ jobs:
           # --wait 会等健康检查转绿，并在任一容器退出时直接失败。
           # 只用「端口能连上」判定是不够的：崩溃循环的容器会在重启窗口里
           # 接受一次连接，探测就绿了，然后下一步才发现服务其实不在。
-          docker compose -f deploy/docker-compose.yml up -d --wait \
-            consul redis postgres nats rustfs
+          # NATS 在独立的 MQ 变体文件里（与 Kafka 二选一），基础文件只有公共中间件。
+          docker compose -f deploy/docker-compose.yml -f deploy/docker-compose.nats.yml \
+            up -d --wait consul redis postgres nats rustfs
 
           # 第二道：健康检查是容器自己的视角，这里验从宿主机能否真的连上
           # （端口映射写错时容器照样健康）。
@@ -108,7 +112,7 @@ jobs:
         if: failure()
         working-directory: flare-im-core
         run: |
-          docker compose -f deploy/docker-compose.yml ps -a
+          docker compose -f deploy/docker-compose.yml -f deploy/docker-compose.nats.yml ps -a
           for c in flare-consul flare-redis flare-postgres flare-nats flare-rustfs; do
             echo "===== $c ====="
             docker logs --tail 60 "$c" 2>&1 || echo "(容器不存在)"
@@ -155,7 +159,8 @@ jobs:
           mkdir -p artifacts
           cp -r flare-im-core/logs artifacts/server-logs 2>/dev/null || true
           cp /tmp/flare-smoke-*.log artifacts/ 2>/dev/null || true
-          docker compose -f flare-im-core/deploy/docker-compose.yml logs \
+          docker compose -f flare-im-core/deploy/docker-compose.yml \
+            -f flare-im-core/deploy/docker-compose.nats.yml logs \
             --tail 200 > artifacts/infra.log 2>&1 || true
 
       - name: 上传日志
@@ -171,4 +176,4 @@ jobs:
         working-directory: flare-im-core
         run: |
           ./scripts/stop_server.sh || true
-          docker compose -f deploy/docker-compose.yml down -v || true
+          docker compose -f deploy/docker-compose.yml -f deploy/docker-compose.nats.yml down -v || true

@@ -484,7 +484,7 @@ check_required_service "Consul" "28500"
 
 echo ""
 echo -e "${YELLOW}💡 提示: 如需启动基础设施服务，请运行:${NC}"
-echo "   ${BLUE}cd deploy && docker compose up -d consul redis postgres nats rustfs${NC}"
+echo "   ${BLUE}cd deploy && docker compose -f docker-compose.yml -f docker-compose.nats.yml up -d consul redis postgres nats rustfs${NC}"
 echo ""
 
 if [ "$MISSING_INFRA" -ne 0 ]; then
