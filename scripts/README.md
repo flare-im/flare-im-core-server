@@ -102,6 +102,24 @@ SMOKE_GRPC_DB_PASSWORD_FILE=<600 文件：该角色口令> \
 - 运行位置：gRPC 端口只在 compose 内网可达，在一次性网内探针容器里运行，探针的创建方式与 linux/aarch64 二进制的离线构建见 flare-deploy `tests/stack/grpc_smoke_probe.py`。`--dry-run` 只校验设置、加载私钥试签、检查口令策略并打印计划，不建任何连接。
 - 自检：`cargo test -p flare-smoke-grpc`（含与 Ingest 同样验签的本地假服务；去掉签名时这些用例失败），带 Core 迁移的一次性库上另有 `--ignored` 的只读回读用例。
 
+### 能力插件生命周期冒烟
+
+`smoke_plugin_lifecycle.sh` 用开源插件样例 `examples/capability_link_preview` 走完一个能力插件的生命周期：带平台签的注册凭据自登记 → 没有授权投影时调用被拒 → 控制面下发授权投影（另一把密钥签的被拒）→ 经核心 Dispatch 调通（插件验过核心签的调用票据）→ 撤销后被拒 → 短租约到期后被拒 → 退出即从路由簿摘除，共 7 项。Nightly E2E 每天跑一次。
+
+核心的远程插件调用只认控制面下发、平台签名、带租约的插件授权投影；开源栈没有控制面，由 `examples/capability_dev_control` 在本机扮演它（注册凭据交换、授权投影），并用 Cell 私钥签调用方身份。Core 只按已有配置项信任夹具现生成的密钥，没有开发开关，也不跳过任何校验：
+
+```bash
+./scripts/smoke_plugin_lifecycle.sh --prepare /tmp/plugin-smoke   # 空目录；现生成平台密钥与调用票据密钥
+set -a; . /tmp/plugin-smoke/core.env; set +a                     # FLARE_PLATFORM_PUBLIC_KEY、FLARE_PLUGIN_CALL_KEY_ID / _SIGNING_KEY
+./scripts/start_server.sh
+PLUGIN_SMOKE_DIR=/tmp/plugin-smoke ./scripts/smoke_plugin_lifecycle.sh
+```
+
+- 只需要带库运行的 capability（默认 `127.0.0.1:50110`）；Cell 私钥取 `start_server.sh` 用的那把（`FLARE_INTERNAL_CTX_KEY_DIR`，缺省 `logs/.dev-internal-context`）。
+- 每次运行用新租户 `plugin-smoke-<随机>`，不受上一次留下的登记与投影影响；插件与凭据交换的日志在 `logs/plugin-smoke/`。
+- 缺夹具目录、Cell 私钥或 capability 未监听时直接失败，不跳过。
+- 样例单测：`cargo test -p flare-im-core-examples --example capability_link_preview --example capability_dev_control`（票据校验、清单、注册凭据绑定请求体、投影租约）。
+
 ---
 
 ## 脚本说明
@@ -125,6 +143,7 @@ SMOKE_GRPC_DB_PASSWORD_FILE=<600 文件：该角色口令> \
 | `dev_reset_db.sh` | 显式开发重置 | 删除 Core 数据；仅 make dev-reset + FLARE_ALLOW_DEV_RESET=1 |
 | `backfill_conversation_last_message_seq.sql` | 会话 `last_message_seq` 存量回填 | 按租户对齐、只升不降、可重复执行；用法与不覆盖的范围见文件头 |
 | `smoke_message_flow.sh` | 消息流烟测 | 经 Edge 发送一条消息，检查会话回读、落库与 ledger；`--mode grpc` 带签名直连 Message Ingest，只读数据库回读 |
+| `smoke_plugin_lifecycle.sh` | 能力插件生命周期冒烟 | 登记、授权投影、调用票据、撤销、租约到期、注销共 7 项；`--prepare DIR` 先现生成夹具密钥 |
 | `check_memory_budget.sh` | 校验容器内存预算现状 | 每容器都设 `mem_limit`、上限之和不超过物理内存 |
 | `plan_mem_budget.py` | 计算最优内存预算 | 按物理内存/核数推算最优 `mem_limit` 与 PostgreSQL 内存参数（`shared_buffers`/`effective_cache_size` 等），经 `.env` 覆盖 `release/docker-compose.infra.yml` 默认值 |
 

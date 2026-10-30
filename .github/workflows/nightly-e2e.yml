@@ -120,7 +120,13 @@ jobs:
 
       - name: 起 Flare IM Core
         working-directory: flare-im-core
+        env:
+          PLUGIN_SMOKE_DIR: ${{ runner.temp }}/plugin-smoke
         run: |
+          # 能力插件冒烟要扮演控制面（开源栈没有）：先现生成一把平台密钥与一把调用票据密钥，
+          # Core 只信任这把平台公钥、用这把密钥签调用票据——都是 Core 已有的配置项。
+          ./scripts/smoke_plugin_lifecycle.sh --prepare "$PLUGIN_SMOKE_DIR"
+          set -a; . "$PLUGIN_SMOKE_DIR/core.env"; set +a
           ./scripts/start_server.sh
           ./scripts/check_services.sh
 
@@ -132,23 +138,22 @@ jobs:
           FLARE_SDK_ROOT: ${{ github.workspace }}/flare-im-core-sdk
         run: ./scripts/smoke_opensource.sh
 
-      # 能力插件是「装上就能用」这条承诺的全部内容：注册、权限、转发、注销
-      # 四处任意一处坏掉都不会有信号——单测覆盖不到跨进程链路。
-      # 需要 grpcurl，装它比重写一个 gRPC 客户端便宜。
-      - name: 安装 grpcurl
-        run: |
-          curl -sSL https://github.com/fullstorydev/grpcurl/releases/download/v1.9.1/grpcurl_1.9.1_linux_x86_64.tar.gz \
-            | tar -xz -C /usr/local/bin grpcurl
-
-      # 先编好插件再跑冒烟。不预编的话脚本会回退到 cargo run，而那要现场编译
-      # 一个 gRPC 服务端——首次实测 60 秒内没编完，冒烟报「插件未注册」，
-      # 指向的却是一个不存在的问题。
+      # 能力插件是「装上就能用」这条承诺的全部内容：登记、授权投影、调用票据、转发、撤销、
+      # 注销任意一处坏掉都不会有信号——单测覆盖不到跨进程链路。控制面由
+      # examples/capability_dev_control 在本机扮演（见上一步生成的夹具密钥）。
+      #
+      # 先编好两个样例再跑冒烟：要在冒烟里现场编译的话，首次实测 60 秒内没编完，
+      # 冒烟报「插件未注册」，指向的却是一个不存在的问题。
       - name: 构建插件样例
         working-directory: flare-im-core
-        run: cargo build --manifest-path examples/Cargo.toml --example capability_link_preview
+        run: >-
+          cargo build --manifest-path examples/Cargo.toml
+          --example capability_link_preview --example capability_dev_control
 
-      - name: 能力插件生命周期（5 项）
+      - name: 能力插件生命周期（7 项）
         working-directory: flare-im-core
+        env:
+          PLUGIN_SMOKE_DIR: ${{ runner.temp }}/plugin-smoke
         run: ./scripts/smoke_plugin_lifecycle.sh
 
       # 失败时把日志带出来。端到端失败最耗时的部分是「不知道哪一环断了」，
