@@ -10,7 +10,7 @@
 name = "flare-capability-with-plugin-host"
 version = "1.0.3"
 edition = "2024"
-rust-version = "1.94.0"
+rust-version = "1.94.1"
 authors = ["Flare Team"]
 license = "Apache-2.0"
 description = "Flare IM Capability service with the plugin service router (plugin.service.dispatch)"

@@ -3,7 +3,7 @@ name = "flare-im-core-examples"
 license.workspace = true
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.94.0"
+rust-version = "1.94.1"
 publish = false
 description = "flare-im-core 的可运行示例客户端"
 

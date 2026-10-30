@@ -59,7 +59,7 @@ cd flare-im-core/deploy
 docker compose -f docker-compose.yml -f docker-compose.nats.yml up -d
 ```
 
-再按 `../scripts/start_server.sh` 起服务。这条需要 Rust 1.94+。
+再按 `../scripts/start_server.sh` 起服务。这条需要 Rust 1.94.1+。
 
 Kafka 版本：
 

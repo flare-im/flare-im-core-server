@@ -46,7 +46,7 @@
 
 ## 技术栈
 
-- **语言**: Rust 2024 Edition (1.94.0)
+- **语言**: Rust 2024 Edition (1.94.1)
 - **HTTP 框架**: Axum
 - **gRPC 客户端**: Tonic
 - **异步运行时**: Tokio

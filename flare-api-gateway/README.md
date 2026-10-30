@@ -46,7 +46,7 @@ A high-performance HTTP → gRPC gateway for exposing the IM system's RESTful AP
 
 ## Tech Stack
 
-- **Language**: Rust 2024 Edition (1.94.0)
+- **Language**: Rust 2024 Edition (1.94.1)
 - **HTTP framework**: Axum
 - **gRPC client**: Tonic
 - **Async runtime**: Tokio

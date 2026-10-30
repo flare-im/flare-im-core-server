@@ -26,7 +26,7 @@ re-verified daily.
 
 [![Nightly E2E](https://github.com/flare-im/flare-im-core/actions/workflows/nightly-e2e.yml/badge.svg)](https://github.com/flare-im/flare-im-core/actions/workflows/nightly-e2e.yml)
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache--2.0-blue.svg)](LICENSE)
-[![Rust](https://img.shields.io/badge/rust-1.94%2B-orange.svg)](https://www.rust-lang.org/)
+[![Rust](https://img.shields.io/badge/rust-1.94.1%2B-orange.svg)](https://www.rust-lang.org/)
 
 ![DDD/CQRS](https://img.shields.io/badge/Pattern-DDD%20%2B%20CQRS-9C27B0)
 ![Event Driven](https://img.shields.io/badge/Event%20Driven-JetStream%20%7C%20Kafka-2196F3)
