@@ -114,6 +114,11 @@ Once connected the log shows `收到 CONNECT_ACK` (from the SDK) followed by `�
 `examples/` also has `integration_client.rs` (business integration) and
 `perf_message_send.rs` (load test); same invocation.
 
+`capability_link_preview.rs` is a capability plugin. Core only routes plugin calls a
+control plane has authorized (a platform-signed, leased projection), so on the open-source
+stack it runs together with `capability_dev_control.rs`, which plays that control plane
+locally. `scripts/smoke_plugin_lifecycle.sh` runs the whole sequence (see `scripts/README.md`).
+
 ---
 
 ## From demo to production

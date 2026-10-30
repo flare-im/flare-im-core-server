@@ -2009,11 +2009,13 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
+ "axum 0.8.6",
  "chrono",
  "flare-core",
  "flare-core-base",
  "flare-grpc-proto",
  "flare-im-ack",
+ "flare-im-capability-core",
  "flare-proto",
  "flare-server-core",
  "hex",

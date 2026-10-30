@@ -1,0 +1,48 @@
+{
+  "manifestVersion": 1,
+  "pluginId": "flare-link-preview",
+  "version": "0.1.0",
+  "apiVersion": "1.0",
+  "displayName": "Link preview",
+  "description": "Fetches the title, description and site name of a public http(s) page.",
+  "publisher": {
+    "publisherId": "flare-examples",
+    "displayName": "Flare IM examples"
+  },
+  "runtime": {
+    "kind": "grpc",
+    "service": "flare.capability.v1.ExtensionPlugin",
+    "protocol": "flare.capability.v1"
+  },
+  "capabilities": [
+    {
+      "id": "link.preview",
+      "operations": [
+        {
+          "id": "v1",
+          "inputSchema": {
+            "type": "object",
+            "required": ["url"],
+            "properties": { "url": { "type": "string" } }
+          },
+          "outputSchema": { "type": "object" },
+          "permissionIds": ["link.preview.fetch"],
+          "idempotent": true,
+          "timeoutMs": 10000
+        }
+      ]
+    }
+  ],
+  "permissions": [
+    {
+      "id": "link.preview.fetch",
+      "description": "Fetch the public page a user asks to preview.",
+      "dataScopes": [],
+      "riskLevel": "low"
+    }
+  ],
+  "artifact": {
+    "digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+    "signatureRef": "unsigned:local-example"
+  }
+}

@@ -106,6 +106,10 @@ NEGOTIATION_HOST=localhost:60051 \
 `examples/` 下还有 `integration_client.rs`（业务集成）与
 `perf_message_send.rs`（压测），跑法相同。
 
+`capability_link_preview.rs` 是一个能力插件。核心只转发控制面授权过的插件调用（平台签名、
+带租约的投影），所以在开源栈上要和 `capability_dev_control.rs` 一起跑——它在本机扮演控制面。
+完整步骤就是 `scripts/smoke_plugin_lifecycle.sh`（说明见 `scripts/README.md`）。
+
 ---
 
 ## 从 demo 走向生产
