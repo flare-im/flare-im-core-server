@@ -282,14 +282,21 @@ load_write_proof_keys() {
                 return 1
             }
         fi
-        # A PEM body is the Base64 of its DER (PKCS8 for the private key, SPKI for the
-        # public one): drop the armour lines and join the rest into the single-line,
-        # canonical Base64 the services read.
-        CORE_WRITE_PROOF_PRIVATE_KEY="$(sed '/^-----/d' "$private_file" | tr -d '\r\n')"
-        CORE_WRITE_PROOF_PUBLIC_KEY="$(openssl pkey -in "$private_file" -pubout 2>/dev/null | sed '/^-----/d' | tr -d '\r\n')"
-        if [ -z "$CORE_WRITE_PROOF_PRIVATE_KEY" ] || [ -z "$CORE_WRITE_PROOF_PUBLIC_KEY" ]; then
+        # The services read the RFC 8410 encodings exactly (PKCS8 v1 without parameters,
+        # SPKI). How a given OpenSSL writes DER varies, so take the raw 32-byte seed and
+        # public key from its text dump and encode them here.
+        local dump seed public
+        dump="$(openssl pkey -in "$private_file" -noout -text 2>/dev/null)"
+        seed="$(printf '%s\n' "$dump" | awk '/^priv:/{on=1;next} /^[a-z]+:/{on=0} on{gsub(/[ :]/,"");printf "%s",$0}')"
+        public="$(printf '%s\n' "$dump" | awk '/^pub:/{on=1;next} /^[a-z]+:/{on=0} on{gsub(/[ :]/,"");printf "%s",$0}')"
+        if [ "${#seed}" -ne 64 ] || [ "${#public}" -ne 64 ]; then
             echo "本地写入证明密钥无法读取" >&2
             return 1
+        fi
+        CORE_WRITE_PROOF_PRIVATE_KEY="$("$LOG_PYTHON" -c 'import base64,sys; print(base64.b64encode(bytes.fromhex(sys.argv[1])).decode())' "302e020100300506032b657004220420$seed")"
+        CORE_WRITE_PROOF_PUBLIC_KEY="$("$LOG_PYTHON" -c 'import base64,sys; print(base64.b64encode(bytes.fromhex(sys.argv[1])).decode())' "302a300506032b6570032100$public")"
+        if [ "$(sed '/^-----/d' "$private_file" | tr -d '\r\n')" != "$CORE_WRITE_PROOF_PRIVATE_KEY" ]; then
+            echo "   ℹ 本机 OpenSSL（$(openssl version 2>/dev/null)）写出的私钥不是 RFC 8410 的 PKCS8 v1 编码，已按 RFC 8410 重新编码"
         fi
     fi
     # Refuse here, with a message, what Message Ingest and Storage Writer would refuse at
