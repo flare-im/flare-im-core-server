@@ -28,7 +28,9 @@ fi
 # 平台 SDK：packages/ 下的目录，排除非平台的共享包。
 # 这个排除清单本身是约定——新增一个共享目录时要记得加进来，
 # 否则平台数会莫名其妙多一。
-NON_PLATFORM="shared dart"
+# flare-core-flutter-storage 是 Flutter SDK 的凭据存储附加包，flare-core-plugin-vue-ui
+# 是 Vue 宿主的插件页面层：都依附某个平台 SDK，本身不是平台。
+NON_PLATFORM="shared dart flare-core-flutter-storage flare-core-plugin-vue-ui"
 platform_count=0
 for d in "$CLIENT_SDK"/packages/*/; do
   name="$(basename "$d")"
