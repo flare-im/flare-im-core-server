@@ -509,6 +509,10 @@ mod tests {
         }
     }
 
+    #[allow(
+        deprecated,
+        reason = "fetch_update is renamed try_update on newer toolchains, and try_update is unstable at the declared MSRV"
+    )]
     #[async_trait::async_trait]
     impl Producer for RecordingProducer {
         async fn send(

@@ -29,6 +29,10 @@ impl PluginAuthorizationReader for Projection {
     }
 }
 struct Budget(AtomicUsize);
+#[allow(
+    deprecated,
+    reason = "fetch_update is renamed try_update on newer toolchains, and try_update is unstable at the declared MSRV"
+)]
 #[async_trait::async_trait]
 impl ResourceCallBudget for Budget {
     async fn reserve(&self, _: &str, _: &str, _: &str, _: &str, _: i64) -> Result<bool> {
