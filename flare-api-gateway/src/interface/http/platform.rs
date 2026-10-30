@@ -330,36 +330,40 @@ async fn authorize(
     app: &str,
     ip: IpAddr,
     scope: &'static str,
-) -> Result<AuthorizedApiKey, Response> {
+) -> Result<AuthorizedApiKey, Box<Response>> {
     let encoded = single_header(headers, "authorization")
         .ok()
         .flatten()
         .and_then(|v| v.strip_prefix("Bearer "))
         .filter(|token| token.len() <= 256)
-        .ok_or_else(|| failure(StatusCode::UNAUTHORIZED, "API_KEY_UNAUTHENTICATED"))?;
+        .ok_or_else(|| Box::new(failure(StatusCode::UNAUTHORIZED, "API_KEY_UNAUTHENTICATED")))?;
     let key = state
         .verifier
         .verify(encoded, &state.pepper, Some(app), scope, ip)
         .await
-        .map_err(|e| match e {
-            CredentialAuthError::Unauthenticated => {
-                failure(StatusCode::UNAUTHORIZED, "API_KEY_UNAUTHENTICATED")
-            }
-            CredentialAuthError::Forbidden => failure(StatusCode::FORBIDDEN, "API_KEY_FORBIDDEN"),
-            CredentialAuthError::Unavailable => unavailable(),
+        .map_err(|e| {
+            Box::new(match e {
+                CredentialAuthError::Unauthenticated => {
+                    failure(StatusCode::UNAUTHORIZED, "API_KEY_UNAUTHENTICATED")
+                }
+                CredentialAuthError::Forbidden => {
+                    failure(StatusCode::FORBIDDEN, "API_KEY_FORBIDDEN")
+                }
+                CredentialAuthError::Unavailable => unavailable(),
+            })
         })?;
     if !state.budget.take_key(&key.key_id) {
-        return Err(failure(
+        return Err(Box::new(failure(
             StatusCode::TOO_MANY_REQUESTS,
             "PLATFORM_RATE_LIMITED",
-        ));
+        )));
     }
     match timeout(Duration::from_millis(250), state.gate.lookup(&key.app_id)).await {
         Ok(TenantLookup::Known(snapshot)) if snapshot.status.admits_connections() => Ok(key),
         Ok(TenantLookup::Known(_) | TenantLookup::Unknown) => {
-            Err(failure(StatusCode::FORBIDDEN, "TENANT_INACTIVE"))
+            Err(Box::new(failure(StatusCode::FORBIDDEN, "TENANT_INACTIVE")))
         }
-        _ => Err(unavailable()),
+        _ => Err(Box::new(unavailable())),
     }
 }
 #[derive(Serialize)]
@@ -408,7 +412,7 @@ async fn participants(
     }
     let key = match authorize(&state, &headers, &app, ip, SCOPE).await {
         Ok(key) => key,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
     let ticket = match state.breaker.try_admit() {
         Ok(ticket) => ticket,

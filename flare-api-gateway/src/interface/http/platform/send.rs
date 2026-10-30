@@ -57,7 +57,7 @@ pub(super) async fn send(
     }
     let key = match authorize(&state, &headers, &app, ip, SYSTEM_MESSAGE_SCOPE).await {
         Ok(key) => key,
-        Err(r) => return r,
+        Err(r) => return *r,
     };
     let ticket = match state.breaker.try_admit() {
         Ok(t) => t,
