@@ -26,7 +26,7 @@ use tokio::sync::RwLock;
 
 use crate::domain::offline_delivery::DeviceTokenRepository;
 use crate::infrastructure::push_display::notification_display;
-use crate::infrastructure::vendor_http;
+use crate::infrastructure::{vendor_http, vendor_jwt};
 
 /// 注册表中标识 FCM 通道的 provider 名。
 pub const FCM_PROVIDER: &str = "fcm";
@@ -191,7 +191,9 @@ impl FcmOfflinePushExecutor {
             .map_err(|_| {
                 FlareError::localized(ErrorCode::InvalidParameter, "FCM RSA private key rejected")
             })?;
-        jsonwebtoken::encode(
+        // 只签 RS256，走 aws-lc（vendor_jwt），不经进程级默认 JWT provider。
+        vendor_jwt::sign_vendor_jwt(
+            jsonwebtoken::Algorithm::RS256,
             &jsonwebtoken::Header::new(jsonwebtoken::Algorithm::RS256),
             &claims,
             &key,

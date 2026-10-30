@@ -6,6 +6,7 @@
 //! ## 认证：provider token（JWT）
 //!
 //! 用 p8 私钥以 ES256 签发，header 带 `kid`（Key ID），claims 带 `iss`（Team ID）。
+//! 签名只走 aws-lc 的 ES256（[`vendor_jwt`]），不经进程级默认 JWT provider。
 //! **Apple 要求 token 有效期在 20–60 分钟之间，且刷新间隔不得短于 20 分钟** ——
 //! 刷得太勤会被判定为滥用并拒绝（403 TooManyProviderTokenUpdates）。
 //! 这里按 50 分钟刷新，两侧都留足余量。
@@ -26,7 +27,7 @@ use tokio::sync::RwLock;
 
 use crate::domain::offline_delivery::DeviceTokenRepository;
 use crate::infrastructure::push_display::notification_display;
-use crate::infrastructure::vendor_http;
+use crate::infrastructure::{vendor_http, vendor_jwt};
 
 /// 注册表中标识 APNs 通道的 provider 名。
 pub const APNS_PROVIDER: &str = "apns";
@@ -147,9 +148,11 @@ impl ApnsOfflinePushExecutor {
             .map_err(|_| {
                 FlareError::localized(ErrorCode::InvalidParameter, "APNs EC private key rejected")
             })?;
-        let jwt = jsonwebtoken::encode(&header, &claims, &key).map_err(|_| {
-            FlareError::localized(ErrorCode::InternalError, "APNs JWT signing failed")
-        })?;
+        let jwt =
+            vendor_jwt::sign_vendor_jwt(jsonwebtoken::Algorithm::ES256, &header, &claims, &key)
+                .map_err(|_| {
+                    FlareError::localized(ErrorCode::InternalError, "APNs JWT signing failed")
+                })?;
 
         *cached_slot = Some(CachedToken {
             value: jwt.clone(),

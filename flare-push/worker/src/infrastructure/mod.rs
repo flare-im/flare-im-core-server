@@ -9,3 +9,4 @@ pub mod push_display;
 pub(crate) mod push_test_support;
 pub mod rpc;
 pub(crate) mod vendor_http;
+pub mod vendor_jwt;

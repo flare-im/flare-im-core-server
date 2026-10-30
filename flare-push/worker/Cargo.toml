@@ -47,6 +47,10 @@ deadpool-redis = { workspace = true }
 [dev-dependencies]
 # 测试里为模拟的 broker 记录签发认证上下文（与 flare-im-service-kit 同一版本与特性）
 ed25519-dalek = { version = "2", features = ["pkcs8", "pem"] }
+# 厂商令牌测试现生成 APNs（P-256）与 FCM（RSA）测试密钥；aws-lc 已随 rustls 在依赖树里
+aws-lc-rs = "1"
+# JWT 后端互验：flare-server-core 的令牌服务（HS256 接入令牌、EdDSA 内部上下文）
+flare-server-core = { workspace = true, features = ["auth"] }
 
 [lints]
 workspace = true

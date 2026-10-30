@@ -101,13 +101,13 @@ deadpool-redis = "0.18"
 # 消息队列
 
 # 认证
-# 只开实际用到的算法，不用 rust_crypto 聚合特性——后者还会拉进
-# ed25519-dalek / p384 / rand，全是用不上的攻击面。
-# 用到的两处：APNs 走 ES256（p256），FCM 的服务账号 OAuth JWT 走 RS256（rsa）。
+# jsonwebtoken 10 的算法实现在后端里：只开 p256 / rsa 这类依赖特性不会编进任何签名实现
+# （签名时找不到 CryptoProvider 而 panic）。后端用 aws_lc_rs：aws-lc 已经随 rustls 进了每个
+# 二进制，不再编 RustCrypto 的 rsa（RUSTSEC-2023-0071）与 p256 / crypto-bigint 0.5。
+# 本仓直接签的只有厂商令牌，见 flare-push-worker 的 vendor_jwt（APNs ES256、FCM RS256）；
+# 接入令牌与内部上下文由 flare-server-core 签验，它装自己的进程级 provider（HS256/384/512、EdDSA）。
 jsonwebtoken = { version = "10.2", default-features = false, features = [
-    "p256",
-    "rsa",
-    "sha2",
+    "aws_lc_rs",
 ] }
 
 # 工具
