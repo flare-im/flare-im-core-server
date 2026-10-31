@@ -29,15 +29,9 @@ allow = [
 ]
 confidence-threshold = 0.8
 
-# 例外按 crate 逐个开，不整体放行某个协议——这样将来**新**引入一个 MPL 依赖
-# 仍会让门禁变红，而不是被这条悄悄带过。
-[[licenses.exceptions]]
-# option-ext（MPL-2.0，文件级弱 copyleft）只出现在编译期：
-#   option-ext ← dirs ← shellexpand ← rust-embed-impl（proc-macro）
-# 过程宏不进入分发的二进制，而 MPL 的义务附着于分发物，故与分发无关。
-# 即便进了二进制，MPL-2.0 的义务也只及于对 MPL 文件本身的修改，不传染自有代码。
-name = "option-ext"
-allow = ["MPL-2.0"]
+# 例外按 crate 逐个开（[[licenses.exceptions]]），不整体放行某个协议——这样将来**新**引入一个
+# MPL 依赖仍会让门禁变红，而不是被这条悄悄带过。目前没有例外：以前唯一的一条 option-ext（MPL-2.0）
+# 来自 utoipa-swagger-ui 的 rust-embed，那个闲置依赖已删除。
 
 [bans]
 # 重复版本先给 warn。收紧成 deny 之前要先把现存的重复依赖清理干净，
@@ -64,8 +58,8 @@ ignore = [
     #
     # 它是**编译期**的过程宏辅助库（utoipa 4 的 derive 用），不进任何二进制，
     # 没有运行时攻击面。链路：proc-macro-error ← utoipa-gen 4.3.1 ← utoipa 4.2.3。
-    # 真正的解法是升 utoipa 5（5.x 已不依赖它），但那是跨 14 个文件 97 处引用、
-    # 还牵动 utoipa-swagger-ui 的框架级迁移，已记入 docs/roadmap/open-items.md。
+    # 真正的解法是升 utoipa 5（5.x 已不依赖它），但那是跨 14 个文件 97 处引用的
+    # 框架级迁移，已记入工作区的 docs/roadmap/open-items.md（TECH-5b）。
     #
     # 撤销条件：utoipa 升到 5.x 之后。
     "RUSTSEC-2024-0370",

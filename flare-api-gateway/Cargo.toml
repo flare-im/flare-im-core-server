@@ -56,9 +56,9 @@ reqwest = { workspace = true }
 # 配置
 dotenvy = "0.15"
 
-# OpenAPI 文档
+# OpenAPI 文档。Swagger UI 页面不靠 utoipa-swagger-ui：静态资源内嵌自
+# flare-admin-gateway/assets/swagger-ui/（见 src/interface/http/router.rs）。
 utoipa = "4"
-utoipa-swagger-ui = { version = "4", features = ["axum"] }
 
 # 验证
 
