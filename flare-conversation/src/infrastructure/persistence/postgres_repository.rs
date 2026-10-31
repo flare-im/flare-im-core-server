@@ -68,6 +68,21 @@ fn last_message_preview_from_content(bytes: Option<&[u8]>) -> (Option<String>, O
     (preview, Some(kind.to_string()))
 }
 
+/// 把解析出的对端写进单聊摘要的 `channel_id`（路由用）。对端账号不是名字，
+/// `display_name` 保持原样：没有会话名就留空，由端上按对端取名字。
+fn fill_single_chat_peers(
+    summaries: &mut [ConversationSummary],
+    peer_by_cid: &HashMap<String, String>,
+) {
+    for s in summaries.iter_mut() {
+        if s.channel_id.is_empty()
+            && let Some(peer) = peer_by_cid.get(&s.conversation_id)
+        {
+            s.channel_id.clone_from(peer);
+        }
+    }
+}
+
 /// 会话查询行结构（与 init_v2 一致：visibility 为 INT）
 #[derive(sqlx::FromRow)]
 #[allow(dead_code)]
@@ -158,22 +173,7 @@ impl PostgresConversationRepository {
             peer_by_cid.entry(cid).or_insert(uid);
         }
 
-        for s in summaries.iter_mut() {
-            if s.channel_id.is_empty()
-                && let Some(peer) = peer_by_cid.get(&s.conversation_id)
-            {
-                s.channel_id.clone_from(peer);
-                if s.display_name
-                    .as_deref()
-                    .unwrap_or_default()
-                    .trim()
-                    .is_empty()
-                {
-                    s.display_name = Some(peer.clone());
-                }
-            }
-        }
-
+        fill_single_chat_peers(summaries, &peer_by_cid);
         Ok(())
     }
 
@@ -2983,6 +2983,74 @@ mod participant_page_limit_tests {
         assert_eq!(
             clamp_participant_page_limit(99_999),
             MAX_PARTICIPANT_PAGE_LIMIT
+        );
+    }
+}
+
+#[cfg(test)]
+mod single_chat_peer_tests {
+    use super::fill_single_chat_peers;
+    use crate::domain::model::{ConversationSummary, ConversationType};
+    use std::collections::HashMap;
+
+    fn summary(conversation_id: &str, display_name: Option<&str>) -> ConversationSummary {
+        ConversationSummary {
+            conversation_id: conversation_id.to_string(),
+            conversation_type: ConversationType::Single,
+            business_type: None,
+            last_message_id: None,
+            last_message_time: None,
+            last_sender_id: None,
+            last_message_type: None,
+            last_content_type: None,
+            last_message_preview: None,
+            unread_count: 0,
+            last_read_seq: 0,
+            metadata: HashMap::new(),
+            server_cursor_ts: None,
+            display_name: display_name.map(str::to_string),
+            last_message_seq: None,
+            channel_id: String::new(),
+            participant_version: 0,
+            member_preview: Vec::new(),
+            is_muted: false,
+            is_pinned: false,
+            is_archived: false,
+            settings_version: 0,
+            draft: None,
+            visible_after_seq: 0,
+        }
+    }
+
+    /// 对端只进 `channel_id`；没有会话名的单聊名字仍为空，账号不当名字。
+    #[test]
+    fn peer_fills_channel_id_but_never_the_display_name() {
+        let peers = HashMap::from([
+            ("1A-unnamed".to_string(), "u-peer".to_string()),
+            ("1A-blank".to_string(), "u-blank".to_string()),
+            ("1A-named".to_string(), "u-named".to_string()),
+        ]);
+        let mut summaries = vec![
+            summary("1A-unnamed", None),
+            summary("1A-blank", Some("  ")),
+            summary("1A-named", Some("Alice")),
+            summary("1A-no-peer", None),
+        ];
+
+        fill_single_chat_peers(&mut summaries, &peers);
+
+        let got: Vec<(&str, Option<&str>)> = summaries
+            .iter()
+            .map(|s| (s.channel_id.as_str(), s.display_name.as_deref()))
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                ("u-peer", None),
+                ("u-blank", Some("  ")),
+                ("u-named", Some("Alice")),
+                ("", None),
+            ]
         );
     }
 }

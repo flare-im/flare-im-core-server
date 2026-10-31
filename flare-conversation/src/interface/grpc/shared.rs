@@ -47,19 +47,12 @@ pub fn proto_summary(summary: ConversationSummary) -> ProtoConversationSummary {
     } else {
         summary.unread_count as u32
     };
+    // 名字字段只放名字。单聊没有会话名时下发空串：`channel_id` 是对端账号，不是名字，
+    // 端上按 member_preview 解析出对端后再取对方的名字。
     let display_name = summary
         .display_name
         .clone()
         .filter(|name| !name.trim().is_empty())
-        .or_else(|| {
-            if summary.conversation_type == crate::domain::model::ConversationType::Single
-                && !summary.channel_id.trim().is_empty()
-            {
-                Some(summary.channel_id.clone())
-            } else {
-                None
-            }
-        })
         .unwrap_or_default();
 
     ProtoConversationSummary {
@@ -298,6 +291,31 @@ mod tests {
             vec!["351004571536982016", "351004578893791232"],
             "单聊 member_preview 被清空，客户端将无法解析对端"
         );
+    }
+
+    /// 单聊没有会话名时 `display_name` 下发空串，不拿 `channel_id`（对端账号）顶替名字；
+    /// 只有空白的名字同样不是名字。
+    #[test]
+    fn proto_summary_single_without_name_emits_empty_display_name() {
+        for stored in [None, Some(String::new()), Some("  ".to_string())] {
+            let proto = proto_summary(ConversationSummary {
+                conversation_id: "1ACMMFNV3ETSP55A4X".to_string(),
+                conversation_type: ConversationType::Single,
+                channel_id: "351004578893791232".to_string(),
+                display_name: stored.clone(),
+                ..test_summary()
+            });
+            assert_eq!(proto.display_name, "", "stored display_name {stored:?}");
+            assert_eq!(proto.channel_id, "351004578893791232");
+        }
+
+        let named = proto_summary(ConversationSummary {
+            conversation_type: ConversationType::Single,
+            channel_id: "351004578893791232".to_string(),
+            display_name: Some("Alice".to_string()),
+            ..test_summary()
+        });
+        assert_eq!(named.display_name, "Alice");
     }
 
     #[test]
