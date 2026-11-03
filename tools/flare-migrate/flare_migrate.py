@@ -314,10 +314,10 @@ def execute_migration(db, sql):
 
 
 # Reviewed logical shapes a Core database may have before `run`: the frozen 0001 snapshot (0002..0007
-# change nothing on it), the shapes after 0008, 0009 and 0010, and the current latest. When a migration
+# change nothing on it), the shapes after 0008 through 0011, and the current latest. When a migration
 # changes the shape, keep the previous latest as `v<NNNN>` so ledgered databases at that version still
 # pass the pre-check.
-REVIEWED_SHAPES = ("baseline", "v0008", "v0009", "v0010", "latest")
+REVIEWED_SHAPES = ("baseline", "v0008", "v0009", "v0010", "v0011", "latest")
 
 
 def assert_reviewed_baseline(actual):
@@ -480,10 +480,17 @@ def run(db, migrations, admission=None):
         assert_reviewed_baseline(snapshot(db))
         db.query("LOCK TABLE public.tenants,public.capability_service_settings,public.capability_user_grants IN SHARE MODE;")
         preserved_seeds = seed_state(db)
-    for migration in migrations[applied:]:
+    pending = migrations[applied:]
+    expected_seeds = preserved_seeds
+    if preserved_seeds is not None and any(migration.version == 19 for migration in pending):
+        # 0019 retires the bootstrap RTC grant. An operator-issued grant still has to survive.
+        rtc_grant = preserved_seeds["rtc_tenant_0_wildcard"]
+        if rtc_grant is not None and rtc_grant["source"] == "init_bootstrap":
+            expected_seeds = {**preserved_seeds, "rtc_tenant_0_wildcard": None}
+    for migration in pending:
         execute_migration(db, migration.sql)
         insert_ledger(db, migration)
-    if preserved_seeds is not None and canonical(seed_state(db)) != canonical(preserved_seeds):
+    if expected_seeds is not None and canonical(seed_state(db)) != canonical(expected_seeds):
         raise MigrationError("pending migrations would change approved/current seed intent; audited corrective migration required")
     actual = snapshot(db)
     assert_schema(actual, read_profile("latest", actual["environment"]))

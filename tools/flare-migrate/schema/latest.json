@@ -76,6 +76,17 @@
       "generated": "",
       "identity": "",
       "kind": "column",
+      "name": "actor_id",
+      "not_null": true,
+      "table": "capability_plugin_resource_calls",
+      "type": "text"
+    },
+    {
+      "collation": "default",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "kind": "column",
       "name": "alert_id",
       "not_null": true,
       "table": "alert_history",
@@ -148,6 +159,39 @@
       "type": "character varying(32)"
     },
     {
+      "collation": "default",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "kind": "column",
+      "name": "app_id",
+      "not_null": true,
+      "table": "core_audit_outbox",
+      "type": "text"
+    },
+    {
+      "collation": "default",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "kind": "column",
+      "name": "app_id",
+      "not_null": true,
+      "table": "online_kick_commands",
+      "type": "text"
+    },
+    {
+      "collation": "default",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "kind": "column",
+      "name": "app_id",
+      "not_null": true,
+      "table": "plugin_authorization_snapshots",
+      "type": "text"
+    },
+    {
       "collation": null,
       "default": null,
       "generated": "",
@@ -168,6 +212,39 @@
       "not_null": true,
       "table": "ack_archive_records",
       "type": "bigint"
+    },
+    {
+      "collation": null,
+      "default": "0",
+      "generated": "",
+      "identity": "",
+      "kind": "column",
+      "name": "attempts",
+      "not_null": true,
+      "table": "core_audit_outbox",
+      "type": "integer"
+    },
+    {
+      "collation": null,
+      "default": "0",
+      "generated": "",
+      "identity": "",
+      "kind": "column",
+      "name": "attempts",
+      "not_null": true,
+      "table": "online_kick_commands",
+      "type": "integer"
+    },
+    {
+      "collation": null,
+      "default": "0",
+      "generated": "",
+      "identity": "",
+      "kind": "column",
+      "name": "attempts",
+      "not_null": true,
+      "table": "plugin_entity_lifecycle_outbox",
+      "type": "integer"
     },
     {
       "collation": null,
@@ -291,6 +368,17 @@
       "type": "text"
     },
     {
+      "collation": null,
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "kind": "column",
+      "name": "calls",
+      "not_null": true,
+      "table": "capability_plugin_resource_calls",
+      "type": "integer"
+    },
+    {
       "collation": "default",
       "default": null,
       "generated": "",
@@ -412,6 +500,17 @@
       "type": "timestamp with time zone"
     },
     {
+      "collation": null,
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "kind": "column",
+      "name": "completed_at",
+      "not_null": false,
+      "table": "online_kick_commands",
+      "type": "timestamp with time zone"
+    },
+    {
       "collation": "default",
       "default": null,
       "generated": "",
@@ -454,6 +553,28 @@
       "not_null": false,
       "table": "messages",
       "type": "bytea"
+    },
+    {
+      "collation": "default",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "kind": "column",
+      "name": "contribution_id",
+      "not_null": true,
+      "table": "plugin_entity_bindings",
+      "type": "text"
+    },
+    {
+      "collation": "default",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "kind": "column",
+      "name": "contribution_id",
+      "not_null": true,
+      "table": "plugin_entity_lifecycle_outbox",
+      "type": "text"
     },
     {
       "collation": "default",
@@ -529,6 +650,17 @@
       "kind": "column",
       "name": "conversation_id",
       "not_null": true,
+      "table": "message_plugin_states",
+      "type": "text"
+    },
+    {
+      "collation": "default",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "kind": "column",
+      "name": "conversation_id",
+      "not_null": true,
       "table": "message_write_ledger",
       "type": "text"
     },
@@ -552,6 +684,17 @@
       "name": "conversation_id",
       "not_null": true,
       "table": "pinned_messages",
+      "type": "text"
+    },
+    {
+      "collation": "default",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "kind": "column",
+      "name": "conversation_id",
+      "not_null": true,
+      "table": "plugin_entity_bindings",
       "type": "text"
     },
     {
@@ -726,6 +869,28 @@
       "identity": "",
       "kind": "column",
       "name": "created_at",
+      "not_null": true,
+      "table": "plugin_entity_bindings",
+      "type": "timestamp with time zone"
+    },
+    {
+      "collation": null,
+      "default": "CURRENT_TIMESTAMP",
+      "generated": "",
+      "identity": "",
+      "kind": "column",
+      "name": "created_at",
+      "not_null": true,
+      "table": "plugin_entity_lifecycle_outbox",
+      "type": "timestamp with time zone"
+    },
+    {
+      "collation": null,
+      "default": "CURRENT_TIMESTAMP",
+      "generated": "",
+      "identity": "",
+      "kind": "column",
+      "name": "created_at",
       "not_null": false,
       "table": "tenants",
       "type": "timestamp with time zone"
@@ -795,6 +960,17 @@
       "not_null": true,
       "table": "capability_plugin_endpoints",
       "type": "text[]"
+    },
+    {
+      "collation": null,
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "kind": "column",
+      "name": "delivered_at",
+      "not_null": false,
+      "table": "core_audit_outbox",
+      "type": "timestamp with time zone"
     },
     {
       "collation": null,
@@ -989,6 +1165,39 @@
       "generated": "",
       "identity": "",
       "kind": "column",
+      "name": "entity",
+      "not_null": true,
+      "table": "message_plugin_states",
+      "type": "text"
+    },
+    {
+      "collation": "default",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "kind": "column",
+      "name": "entity",
+      "not_null": true,
+      "table": "plugin_entity_bindings",
+      "type": "text"
+    },
+    {
+      "collation": "default",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "kind": "column",
+      "name": "entity",
+      "not_null": true,
+      "table": "plugin_entity_lifecycle_outbox",
+      "type": "text"
+    },
+    {
+      "collation": "default",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "kind": "column",
       "name": "error_code",
       "not_null": false,
       "table": "hook_executions",
@@ -1033,6 +1242,17 @@
       "generated": "",
       "identity": "",
       "kind": "column",
+      "name": "event_id",
+      "not_null": true,
+      "table": "core_audit_outbox",
+      "type": "uuid"
+    },
+    {
+      "collation": null,
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "kind": "column",
       "name": "event_seq",
       "not_null": false,
       "table": "events",
@@ -1048,6 +1268,17 @@
       "not_null": true,
       "table": "events",
       "type": "integer"
+    },
+    {
+      "collation": null,
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "kind": "column",
+      "name": "evidence",
+      "not_null": true,
+      "table": "online_kick_commands",
+      "type": "jsonb"
     },
     {
       "collation": null,
@@ -1106,6 +1337,17 @@
     },
     {
       "collation": null,
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "kind": "column",
+      "name": "expires_at_ms",
+      "not_null": true,
+      "table": "capability_plugin_resource_calls",
+      "type": "bigint"
+    },
+    {
+      "collation": null,
       "default": "'{}'::jsonb",
       "generated": "",
       "identity": "",
@@ -1157,6 +1399,17 @@
       "name": "file_id",
       "not_null": true,
       "table": "media_assets",
+      "type": "text"
+    },
+    {
+      "collation": "default",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "kind": "column",
+      "name": "file_id",
+      "not_null": true,
+      "table": "media_read_grants",
       "type": "text"
     },
     {
@@ -1336,6 +1589,17 @@
       "type": "text"
     },
     {
+      "collation": "default",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "kind": "column",
+      "name": "hook_version",
+      "not_null": false,
+      "table": "hook_executions",
+      "type": "text"
+    },
+    {
       "collation": null,
       "default": "nextval('ack_archive_records_id_seq'::regclass)",
       "generated": "",
@@ -1447,6 +1711,17 @@
     },
     {
       "collation": null,
+      "default": "nextval('plugin_entity_lifecycle_outbox_id_seq'::regclass)",
+      "generated": "",
+      "identity": "",
+      "kind": "column",
+      "name": "id",
+      "not_null": true,
+      "table": "plugin_entity_lifecycle_outbox",
+      "type": "bigint"
+    },
+    {
+      "collation": null,
       "default": null,
       "generated": "",
       "identity": "",
@@ -1466,6 +1741,17 @@
       "not_null": true,
       "table": "threads",
       "type": "text"
+    },
+    {
+      "collation": null,
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "kind": "column",
+      "name": "id",
+      "not_null": true,
+      "table": "online_kick_commands",
+      "type": "uuid"
     },
     {
       "collation": null,
@@ -1586,6 +1872,17 @@
       "name": "last_error",
       "not_null": false,
       "table": "message_write_ledger",
+      "type": "text"
+    },
+    {
+      "collation": "default",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "kind": "column",
+      "name": "last_error",
+      "not_null": false,
+      "table": "plugin_entity_lifecycle_outbox",
       "type": "text"
     },
     {
@@ -2073,6 +2370,39 @@
       "type": "text"
     },
     {
+      "collation": null,
+      "default": "clock_timestamp()",
+      "generated": "",
+      "identity": "",
+      "kind": "column",
+      "name": "next_at",
+      "not_null": true,
+      "table": "core_audit_outbox",
+      "type": "timestamp with time zone"
+    },
+    {
+      "collation": null,
+      "default": "clock_timestamp()",
+      "generated": "",
+      "identity": "",
+      "kind": "column",
+      "name": "next_at",
+      "not_null": true,
+      "table": "online_kick_commands",
+      "type": "timestamp with time zone"
+    },
+    {
+      "collation": null,
+      "default": "CURRENT_TIMESTAMP",
+      "generated": "",
+      "identity": "",
+      "kind": "column",
+      "name": "next_attempt_at",
+      "not_null": true,
+      "table": "plugin_entity_lifecycle_outbox",
+      "type": "timestamp with time zone"
+    },
+    {
       "collation": "default",
       "default": null,
       "generated": "",
@@ -2234,6 +2564,17 @@
       "kind": "column",
       "name": "payload",
       "not_null": true,
+      "table": "core_audit_outbox",
+      "type": "jsonb"
+    },
+    {
+      "collation": null,
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "kind": "column",
+      "name": "payload",
+      "not_null": true,
       "table": "credential_keys",
       "type": "jsonb"
     },
@@ -2247,6 +2588,17 @@
       "not_null": false,
       "table": "messages",
       "type": "timestamp with time zone"
+    },
+    {
+      "collation": "default",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "kind": "column",
+      "name": "physical_id",
+      "not_null": true,
+      "table": "online_kick_commands",
+      "type": "text"
     },
     {
       "collation": null,
@@ -2301,6 +2653,50 @@
       "name": "plugin_id",
       "not_null": true,
       "table": "capability_plugin_endpoints",
+      "type": "text"
+    },
+    {
+      "collation": "default",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "kind": "column",
+      "name": "plugin_id",
+      "not_null": true,
+      "table": "capability_plugin_resource_calls",
+      "type": "text"
+    },
+    {
+      "collation": "default",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "kind": "column",
+      "name": "plugin_id",
+      "not_null": true,
+      "table": "message_plugin_states",
+      "type": "text"
+    },
+    {
+      "collation": "default",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "kind": "column",
+      "name": "plugin_id",
+      "not_null": true,
+      "table": "plugin_entity_bindings",
+      "type": "text"
+    },
+    {
+      "collation": "default",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "kind": "column",
+      "name": "plugin_id",
+      "not_null": true,
+      "table": "plugin_entity_lifecycle_outbox",
       "type": "text"
     },
     {
@@ -2360,6 +2756,17 @@
     },
     {
       "collation": null,
+      "default": "0",
+      "generated": "",
+      "identity": "",
+      "kind": "column",
+      "name": "published_version",
+      "not_null": true,
+      "table": "plugin_entity_bindings",
+      "type": "bigint"
+    },
+    {
+      "collation": null,
       "default": null,
       "generated": "",
       "identity": "",
@@ -2412,6 +2819,28 @@
       "not_null": false,
       "table": "pinned_messages",
       "type": "text"
+    },
+    {
+      "collation": "default",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "kind": "column",
+      "name": "reason",
+      "not_null": true,
+      "table": "plugin_entity_lifecycle_outbox",
+      "type": "text"
+    },
+    {
+      "collation": null,
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "kind": "column",
+      "name": "recalled_at",
+      "not_null": false,
+      "table": "plugin_entity_bindings",
+      "type": "timestamp with time zone"
     },
     {
       "collation": null,
@@ -2475,6 +2904,17 @@
       "identity": "",
       "kind": "column",
       "name": "request_id",
+      "not_null": true,
+      "table": "capability_plugin_resource_calls",
+      "type": "text"
+    },
+    {
+      "collation": "default",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "kind": "column",
+      "name": "request_id",
       "not_null": false,
       "table": "events",
       "type": "text"
@@ -2499,6 +2939,17 @@
       "name": "request_id",
       "not_null": false,
       "table": "message_export_tasks",
+      "type": "text"
+    },
+    {
+      "collation": "default",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "kind": "column",
+      "name": "request_id",
+      "not_null": true,
+      "table": "online_kick_commands",
       "type": "text"
     },
     {
@@ -2588,6 +3039,17 @@
       "not_null": true,
       "table": "alert_rules",
       "type": "text"
+    },
+    {
+      "collation": null,
+      "default": "1",
+      "generated": "",
+      "identity": "",
+      "kind": "column",
+      "name": "sample_weight",
+      "not_null": true,
+      "table": "hook_executions",
+      "type": "integer"
     },
     {
       "collation": null,
@@ -2733,6 +3195,39 @@
       "type": "text"
     },
     {
+      "collation": "default",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "kind": "column",
+      "name": "server_msg_id",
+      "not_null": true,
+      "table": "message_plugin_states",
+      "type": "text"
+    },
+    {
+      "collation": "default",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "kind": "column",
+      "name": "server_msg_id",
+      "not_null": true,
+      "table": "plugin_entity_bindings",
+      "type": "text"
+    },
+    {
+      "collation": "default",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "kind": "column",
+      "name": "server_msg_id",
+      "not_null": false,
+      "table": "plugin_entity_lifecycle_outbox",
+      "type": "text"
+    },
+    {
       "collation": null,
       "default": "0",
       "generated": "",
@@ -2775,6 +3270,17 @@
       "not_null": false,
       "table": "message_edit_history",
       "type": "boolean"
+    },
+    {
+      "collation": null,
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "kind": "column",
+      "name": "snapshot",
+      "not_null": true,
+      "table": "plugin_authorization_snapshots",
+      "type": "jsonb"
     },
     {
       "collation": null,
@@ -2844,6 +3350,17 @@
     },
     {
       "collation": "default",
+      "default": "'pending'::text",
+      "generated": "",
+      "identity": "",
+      "kind": "column",
+      "name": "status",
+      "not_null": true,
+      "table": "plugin_entity_lifecycle_outbox",
+      "type": "text"
+    },
+    {
+      "collation": "default",
       "default": "'active'::text",
       "generated": "",
       "identity": "",
@@ -2874,6 +3391,17 @@
       "not_null": true,
       "table": "hook_executions",
       "type": "boolean"
+    },
+    {
+      "collation": null,
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "kind": "column",
+      "name": "target",
+      "not_null": true,
+      "table": "online_kick_commands",
+      "type": "jsonb"
     },
     {
       "collation": "default",
@@ -2939,6 +3467,17 @@
       "name": "tenant_id",
       "not_null": true,
       "table": "capability_plugin_endpoints",
+      "type": "text"
+    },
+    {
+      "collation": "default",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "kind": "column",
+      "name": "tenant_id",
+      "not_null": true,
+      "table": "capability_plugin_resource_calls",
       "type": "text"
     },
     {
@@ -3048,6 +3587,17 @@
       "kind": "column",
       "name": "tenant_id",
       "not_null": true,
+      "table": "media_read_grants",
+      "type": "text"
+    },
+    {
+      "collation": "default",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "kind": "column",
+      "name": "tenant_id",
+      "not_null": true,
       "table": "media_references",
       "type": "text"
     },
@@ -3082,6 +3632,17 @@
       "name": "tenant_id",
       "not_null": true,
       "table": "message_operation_history",
+      "type": "text"
+    },
+    {
+      "collation": "default",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "kind": "column",
+      "name": "tenant_id",
+      "not_null": true,
+      "table": "message_plugin_states",
       "type": "text"
     },
     {
@@ -3148,6 +3709,28 @@
       "name": "tenant_id",
       "not_null": true,
       "table": "pinned_messages",
+      "type": "text"
+    },
+    {
+      "collation": "default",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "kind": "column",
+      "name": "tenant_id",
+      "not_null": true,
+      "table": "plugin_entity_bindings",
+      "type": "text"
+    },
+    {
+      "collation": "default",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "kind": "column",
+      "name": "tenant_id",
+      "not_null": true,
+      "table": "plugin_entity_lifecycle_outbox",
       "type": "text"
     },
     {
@@ -3350,6 +3933,17 @@
     },
     {
       "collation": null,
+      "default": "false",
+      "generated": "",
+      "identity": "",
+      "kind": "column",
+      "name": "unconfirmed",
+      "not_null": true,
+      "table": "plugin_entity_lifecycle_outbox",
+      "type": "boolean"
+    },
+    {
+      "collation": null,
       "default": "0",
       "generated": "",
       "identity": "",
@@ -3466,7 +4060,29 @@
       "kind": "column",
       "name": "updated_at",
       "not_null": true,
+      "table": "message_plugin_states",
+      "type": "timestamp with time zone"
+    },
+    {
+      "collation": null,
+      "default": "CURRENT_TIMESTAMP",
+      "generated": "",
+      "identity": "",
+      "kind": "column",
+      "name": "updated_at",
+      "not_null": true,
       "table": "message_write_ledger",
+      "type": "timestamp with time zone"
+    },
+    {
+      "collation": null,
+      "default": "CURRENT_TIMESTAMP",
+      "generated": "",
+      "identity": "",
+      "kind": "column",
+      "name": "updated_at",
+      "not_null": true,
+      "table": "plugin_entity_lifecycle_outbox",
       "type": "timestamp with time zone"
     },
     {
@@ -3587,6 +4203,17 @@
       "kind": "column",
       "name": "user_id",
       "not_null": true,
+      "table": "media_read_grants",
+      "type": "text"
+    },
+    {
+      "collation": "default",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "kind": "column",
+      "name": "user_id",
+      "not_null": true,
       "table": "message_read_records",
       "type": "text"
     },
@@ -3640,9 +4267,53 @@
       "generated": "",
       "identity": "",
       "kind": "column",
+      "name": "valid_until_ms",
+      "not_null": true,
+      "table": "plugin_authorization_snapshots",
+      "type": "bigint"
+    },
+    {
+      "collation": "default",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "kind": "column",
+      "name": "values_json",
+      "not_null": true,
+      "table": "message_plugin_states",
+      "type": "text"
+    },
+    {
+      "collation": null,
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "kind": "column",
       "name": "version",
       "not_null": true,
       "table": "credential_projection_versions",
+      "type": "bigint"
+    },
+    {
+      "collation": null,
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "kind": "column",
+      "name": "version",
+      "not_null": true,
+      "table": "message_plugin_states",
+      "type": "bigint"
+    },
+    {
+      "collation": null,
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "kind": "column",
+      "name": "version",
+      "not_null": true,
+      "table": "plugin_authorization_snapshots",
       "type": "bigint"
     },
     {
@@ -3876,6 +4547,76 @@
     {
       "deferrable": false,
       "deferred": false,
+      "definition": "CHECK (((char_length(actor_id) >= 1) AND (char_length(actor_id) <= 192)))",
+      "kind": "constraint",
+      "name": "capability_plugin_resource_calls_actor_id_check",
+      "table": "capability_plugin_resource_calls",
+      "type": "c",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "deferred": false,
+      "definition": "CHECK (((calls >= 1) AND (calls <= 8)))",
+      "kind": "constraint",
+      "name": "capability_plugin_resource_calls_calls_check",
+      "table": "capability_plugin_resource_calls",
+      "type": "c",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "deferred": false,
+      "definition": "CHECK ((expires_at_ms > 0))",
+      "kind": "constraint",
+      "name": "capability_plugin_resource_calls_expires_at_ms_check",
+      "table": "capability_plugin_resource_calls",
+      "type": "c",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "deferred": false,
+      "definition": "PRIMARY KEY (tenant_id, plugin_id, actor_id, request_id)",
+      "kind": "constraint",
+      "name": "capability_plugin_resource_calls_pkey",
+      "table": "capability_plugin_resource_calls",
+      "type": "p",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "deferred": false,
+      "definition": "CHECK (((char_length(plugin_id) >= 1) AND (char_length(plugin_id) <= 128)))",
+      "kind": "constraint",
+      "name": "capability_plugin_resource_calls_plugin_id_check",
+      "table": "capability_plugin_resource_calls",
+      "type": "c",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "deferred": false,
+      "definition": "CHECK (((char_length(request_id) >= 1) AND (char_length(request_id) <= 192)))",
+      "kind": "constraint",
+      "name": "capability_plugin_resource_calls_request_id_check",
+      "table": "capability_plugin_resource_calls",
+      "type": "c",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "deferred": false,
+      "definition": "CHECK ((tenant_id ~ '^[0-9A-Za-z_-]{1,32}$'::text))",
+      "kind": "constraint",
+      "name": "capability_plugin_resource_calls_tenant_id_check",
+      "table": "capability_plugin_resource_calls",
+      "type": "c",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "deferred": false,
       "definition": "CHECK ((id = 1))",
       "kind": "constraint",
       "name": "capability_service_settings_id_check",
@@ -3940,6 +4681,46 @@
       "kind": "constraint",
       "name": "conversations_pkey",
       "table": "conversations",
+      "type": "p",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "deferred": false,
+      "definition": "CHECK (((app_id <> ''::text) AND (app_id <> '*'::text)))",
+      "kind": "constraint",
+      "name": "core_audit_outbox_app_id_check",
+      "table": "core_audit_outbox",
+      "type": "c",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "deferred": false,
+      "definition": "CHECK ((attempts >= 0))",
+      "kind": "constraint",
+      "name": "core_audit_outbox_attempts_check",
+      "table": "core_audit_outbox",
+      "type": "c",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "deferred": false,
+      "definition": "CHECK ((jsonb_typeof(payload) = 'object'::text))",
+      "kind": "constraint",
+      "name": "core_audit_outbox_payload_check",
+      "table": "core_audit_outbox",
+      "type": "c",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "deferred": false,
+      "definition": "PRIMARY KEY (event_id)",
+      "kind": "constraint",
+      "name": "core_audit_outbox_pkey",
+      "table": "core_audit_outbox",
       "type": "p",
       "validated": true
     },
@@ -4066,6 +4847,16 @@
     {
       "deferrable": false,
       "deferred": false,
+      "definition": "CHECK ((sample_weight >= 1))",
+      "kind": "constraint",
+      "name": "hook_executions_sample_weight_check",
+      "table": "hook_executions",
+      "type": "c",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "deferred": false,
       "definition": "PRIMARY KEY (id)",
       "kind": "constraint",
       "name": "marked_messages_pkey",
@@ -4091,6 +4882,36 @@
       "name": "media_assets_pkey",
       "table": "media_assets",
       "type": "p",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "deferred": false,
+      "definition": "PRIMARY KEY (tenant_id, file_id, user_id)",
+      "kind": "constraint",
+      "name": "media_read_grants_pkey",
+      "table": "media_read_grants",
+      "type": "p",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "deferred": false,
+      "definition": "FOREIGN KEY (tenant_id, file_id) REFERENCES media_assets(tenant_id, file_id) ON DELETE CASCADE",
+      "kind": "constraint",
+      "name": "media_read_grants_tenant_id_file_id_fkey",
+      "table": "media_read_grants",
+      "type": "f",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "deferred": false,
+      "definition": "CHECK (((length(user_id) >= 1) AND (length(user_id) <= 256)))",
+      "kind": "constraint",
+      "name": "media_read_grants_user_id_check",
+      "table": "media_read_grants",
+      "type": "c",
       "validated": true
     },
     {
@@ -4151,6 +4972,36 @@
       "name": "message_operation_history_pkey",
       "table": "message_operation_history",
       "type": "p",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "deferred": false,
+      "definition": "PRIMARY KEY (tenant_id, server_msg_id)",
+      "kind": "constraint",
+      "name": "message_plugin_states_pkey",
+      "table": "message_plugin_states",
+      "type": "p",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "deferred": false,
+      "definition": "CHECK ((octet_length(values_json) <= 8192))",
+      "kind": "constraint",
+      "name": "message_plugin_states_values_check",
+      "table": "message_plugin_states",
+      "type": "c",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "deferred": false,
+      "definition": "CHECK ((version > 0))",
+      "kind": "constraint",
+      "name": "message_plugin_states_version_check",
+      "table": "message_plugin_states",
+      "type": "c",
       "validated": true
     },
     {
@@ -4246,6 +5097,26 @@
     {
       "deferrable": false,
       "deferred": false,
+      "definition": "UNIQUE (app_id, request_id, physical_id)",
+      "kind": "constraint",
+      "name": "online_kick_commands_app_id_request_id_physical_id_key",
+      "table": "online_kick_commands",
+      "type": "u",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "deferred": false,
+      "definition": "PRIMARY KEY (id)",
+      "kind": "constraint",
+      "name": "online_kick_commands_pkey",
+      "table": "online_kick_commands",
+      "type": "p",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "deferred": false,
       "definition": "PRIMARY KEY (id)",
       "kind": "constraint",
       "name": "pinned_messages_pkey",
@@ -4261,6 +5132,246 @@
       "name": "pinned_messages_tenant_id_conversation_id_message_id_scope__key",
       "table": "pinned_messages",
       "type": "u",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "deferred": false,
+      "definition": "CHECK ((app_id ~ '^[0-9A-Za-z_-]{1,32}$'::text))",
+      "kind": "constraint",
+      "name": "plugin_authorization_snapshots_app_id_check",
+      "table": "plugin_authorization_snapshots",
+      "type": "c",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "deferred": false,
+      "definition": "CHECK (((snapshot ->> 'tenantId'::text) = app_id))",
+      "kind": "constraint",
+      "name": "plugin_authorization_snapshots_check",
+      "table": "plugin_authorization_snapshots",
+      "type": "c",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "deferred": false,
+      "definition": "CHECK ((((snapshot ->> 'version'::text))::bigint = version))",
+      "kind": "constraint",
+      "name": "plugin_authorization_snapshots_check1",
+      "table": "plugin_authorization_snapshots",
+      "type": "c",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "deferred": false,
+      "definition": "CHECK ((((snapshot ->> 'validUntilMs'::text))::bigint = valid_until_ms))",
+      "kind": "constraint",
+      "name": "plugin_authorization_snapshots_check2",
+      "table": "plugin_authorization_snapshots",
+      "type": "c",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "deferred": false,
+      "definition": "PRIMARY KEY (app_id)",
+      "kind": "constraint",
+      "name": "plugin_authorization_snapshots_pkey",
+      "table": "plugin_authorization_snapshots",
+      "type": "p",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "deferred": false,
+      "definition": "CHECK (((jsonb_typeof(snapshot) = 'object'::text) AND (octet_length((snapshot)::text) <= 4194304)))",
+      "kind": "constraint",
+      "name": "plugin_authorization_snapshots_snapshot_check",
+      "table": "plugin_authorization_snapshots",
+      "type": "c",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "deferred": false,
+      "definition": "CHECK ((valid_until_ms > 0))",
+      "kind": "constraint",
+      "name": "plugin_authorization_snapshots_valid_until_ms_check",
+      "table": "plugin_authorization_snapshots",
+      "type": "c",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "deferred": false,
+      "definition": "CHECK ((version > 0))",
+      "kind": "constraint",
+      "name": "plugin_authorization_snapshots_version_check",
+      "table": "plugin_authorization_snapshots",
+      "type": "c",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "deferred": false,
+      "definition": "CHECK ((entity ~ '^[A-Za-z0-9._:-]{1,128}$'::text))",
+      "kind": "constraint",
+      "name": "plugin_entity_bindings_entity_check",
+      "table": "plugin_entity_bindings",
+      "type": "c",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "deferred": false,
+      "definition": "CHECK ((((char_length(server_msg_id) >= 1) AND (char_length(server_msg_id) <= 256)) AND ((char_length(conversation_id) >= 1) AND (char_length(conversation_id) <= 256))))",
+      "kind": "constraint",
+      "name": "plugin_entity_bindings_message_check",
+      "table": "plugin_entity_bindings",
+      "type": "c",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "deferred": false,
+      "definition": "PRIMARY KEY (tenant_id, plugin_id, entity, server_msg_id)",
+      "kind": "constraint",
+      "name": "plugin_entity_bindings_pkey",
+      "table": "plugin_entity_bindings",
+      "type": "p",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "deferred": false,
+      "definition": "CHECK ((((char_length(plugin_id) >= 1) AND (char_length(plugin_id) <= 128)) AND ((char_length(contribution_id) >= 1) AND (char_length(contribution_id) <= 160))))",
+      "kind": "constraint",
+      "name": "plugin_entity_bindings_plugin_check",
+      "table": "plugin_entity_bindings",
+      "type": "c",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "deferred": false,
+      "definition": "CHECK ((((char_length(tenant_id) >= 1) AND (char_length(tenant_id) <= 256)) AND (tenant_id <> '*'::text)))",
+      "kind": "constraint",
+      "name": "plugin_entity_bindings_tenant_check",
+      "table": "plugin_entity_bindings",
+      "type": "c",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "deferred": false,
+      "definition": "CHECK ((published_version >= 0))",
+      "kind": "constraint",
+      "name": "plugin_entity_bindings_version_check",
+      "table": "plugin_entity_bindings",
+      "type": "c",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "deferred": false,
+      "definition": "CHECK ((entity ~ '^[A-Za-z0-9._:-]{1,128}$'::text))",
+      "kind": "constraint",
+      "name": "plugin_entity_lifecycle_outbox_entity_check",
+      "table": "plugin_entity_lifecycle_outbox",
+      "type": "c",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "deferred": false,
+      "definition": "UNIQUE (tenant_id, plugin_id, entity, reason)",
+      "kind": "constraint",
+      "name": "plugin_entity_lifecycle_outbox_entity_key",
+      "table": "plugin_entity_lifecycle_outbox",
+      "type": "u",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "deferred": false,
+      "definition": "CHECK (((last_error IS NULL) OR (char_length(last_error) <= 512)))",
+      "kind": "constraint",
+      "name": "plugin_entity_lifecycle_outbox_error_check",
+      "table": "plugin_entity_lifecycle_outbox",
+      "type": "c",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "deferred": false,
+      "definition": "CHECK (((server_msg_id IS NULL) OR ((char_length(server_msg_id) >= 1) AND (char_length(server_msg_id) <= 256))))",
+      "kind": "constraint",
+      "name": "plugin_entity_lifecycle_outbox_message_check",
+      "table": "plugin_entity_lifecycle_outbox",
+      "type": "c",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "deferred": false,
+      "definition": "PRIMARY KEY (id)",
+      "kind": "constraint",
+      "name": "plugin_entity_lifecycle_outbox_pkey",
+      "table": "plugin_entity_lifecycle_outbox",
+      "type": "p",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "deferred": false,
+      "definition": "CHECK ((((char_length(plugin_id) >= 1) AND (char_length(plugin_id) <= 128)) AND ((char_length(contribution_id) >= 1) AND (char_length(contribution_id) <= 160))))",
+      "kind": "constraint",
+      "name": "plugin_entity_lifecycle_outbox_plugin_check",
+      "table": "plugin_entity_lifecycle_outbox",
+      "type": "c",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "deferred": false,
+      "definition": "CHECK ((reason = ANY (ARRAY['recalled'::text, 'post_failed'::text])))",
+      "kind": "constraint",
+      "name": "plugin_entity_lifecycle_outbox_reason_check",
+      "table": "plugin_entity_lifecycle_outbox",
+      "type": "c",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "deferred": false,
+      "definition": "CHECK ((status = ANY (ARRAY['pending'::text, 'delivered'::text, 'skipped'::text, 'abandoned'::text])))",
+      "kind": "constraint",
+      "name": "plugin_entity_lifecycle_outbox_status_check",
+      "table": "plugin_entity_lifecycle_outbox",
+      "type": "c",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "deferred": false,
+      "definition": "CHECK ((((char_length(tenant_id) >= 1) AND (char_length(tenant_id) <= 256)) AND (tenant_id <> '*'::text)))",
+      "kind": "constraint",
+      "name": "plugin_entity_lifecycle_outbox_tenant_check",
+      "table": "plugin_entity_lifecycle_outbox",
+      "type": "c",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "deferred": false,
+      "definition": "CHECK (((NOT unconfirmed) OR (reason = 'post_failed'::text)))",
+      "kind": "constraint",
+      "name": "plugin_entity_lifecycle_outbox_unconfirmed_check",
+      "table": "plugin_entity_lifecycle_outbox",
+      "type": "c",
       "validated": true
     },
     {
@@ -4371,6 +5482,36 @@
     },
     {
       "clustered": false,
+      "definition": "CREATE INDEX capability_plugin_resource_calls_expiry ON public.capability_plugin_resource_calls USING btree (tenant_id, expires_at_ms)",
+      "kind": "index",
+      "name": "capability_plugin_resource_calls_expiry",
+      "ready": true,
+      "replica_identity": false,
+      "table": "capability_plugin_resource_calls",
+      "valid": true
+    },
+    {
+      "clustered": false,
+      "definition": "CREATE INDEX capability_plugin_resource_calls_global_expiry ON public.capability_plugin_resource_calls USING btree (expires_at_ms)",
+      "kind": "index",
+      "name": "capability_plugin_resource_calls_global_expiry",
+      "ready": true,
+      "replica_identity": false,
+      "table": "capability_plugin_resource_calls",
+      "valid": true
+    },
+    {
+      "clustered": false,
+      "definition": "CREATE UNIQUE INDEX capability_plugin_resource_calls_pkey ON public.capability_plugin_resource_calls USING btree (tenant_id, plugin_id, actor_id, request_id)",
+      "kind": "index",
+      "name": "capability_plugin_resource_calls_pkey",
+      "ready": true,
+      "replica_identity": false,
+      "table": "capability_plugin_resource_calls",
+      "valid": true
+    },
+    {
+      "clustered": false,
       "definition": "CREATE UNIQUE INDEX capability_service_settings_pkey ON public.capability_service_settings USING btree (id)",
       "kind": "index",
       "name": "capability_service_settings_pkey",
@@ -4417,6 +5558,36 @@
       "ready": true,
       "replica_identity": false,
       "table": "conversations",
+      "valid": true
+    },
+    {
+      "clustered": false,
+      "definition": "CREATE INDEX core_audit_outbox_delivered ON public.core_audit_outbox USING btree (delivered_at) WHERE (delivered_at IS NOT NULL)",
+      "kind": "index",
+      "name": "core_audit_outbox_delivered",
+      "ready": true,
+      "replica_identity": false,
+      "table": "core_audit_outbox",
+      "valid": true
+    },
+    {
+      "clustered": false,
+      "definition": "CREATE INDEX core_audit_outbox_pending ON public.core_audit_outbox USING btree (next_at, event_id) WHERE (delivered_at IS NULL)",
+      "kind": "index",
+      "name": "core_audit_outbox_pending",
+      "ready": true,
+      "replica_identity": false,
+      "table": "core_audit_outbox",
+      "valid": true
+    },
+    {
+      "clustered": false,
+      "definition": "CREATE UNIQUE INDEX core_audit_outbox_pkey ON public.core_audit_outbox USING btree (event_id)",
+      "kind": "index",
+      "name": "core_audit_outbox_pkey",
+      "ready": true,
+      "replica_identity": false,
+      "table": "core_audit_outbox",
       "valid": true
     },
     {
@@ -4681,9 +5852,29 @@
     },
     {
       "clustered": false,
+      "definition": "CREATE INDEX idx_hook_executions_executed_at ON public.hook_executions USING btree (executed_at)",
+      "kind": "index",
+      "name": "idx_hook_executions_executed_at",
+      "ready": true,
+      "replica_identity": false,
+      "table": "hook_executions",
+      "valid": true
+    },
+    {
+      "clustered": false,
       "definition": "CREATE INDEX idx_hook_executions_tenant_executed ON public.hook_executions USING btree (tenant_id, executed_at DESC)",
       "kind": "index",
       "name": "idx_hook_executions_tenant_executed",
+      "ready": true,
+      "replica_identity": false,
+      "table": "hook_executions",
+      "valid": true
+    },
+    {
+      "clustered": false,
+      "definition": "CREATE INDEX idx_hook_executions_tenant_hook_executed ON public.hook_executions USING btree (tenant_id, hook_type, hook_name, executed_at DESC)",
+      "kind": "index",
+      "name": "idx_hook_executions_tenant_hook_executed",
       "ready": true,
       "replica_identity": false,
       "table": "hook_executions",
@@ -5031,6 +6222,26 @@
     },
     {
       "clustered": false,
+      "definition": "CREATE INDEX idx_plugin_entity_bindings_message ON public.plugin_entity_bindings USING btree (tenant_id, server_msg_id)",
+      "kind": "index",
+      "name": "idx_plugin_entity_bindings_message",
+      "ready": true,
+      "replica_identity": false,
+      "table": "plugin_entity_bindings",
+      "valid": true
+    },
+    {
+      "clustered": false,
+      "definition": "CREATE INDEX idx_plugin_entity_lifecycle_outbox_due ON public.plugin_entity_lifecycle_outbox USING btree (next_attempt_at) WHERE (status = 'pending'::text)",
+      "kind": "index",
+      "name": "idx_plugin_entity_lifecycle_outbox_due",
+      "ready": true,
+      "replica_identity": false,
+      "table": "plugin_entity_lifecycle_outbox",
+      "valid": true
+    },
+    {
+      "clustered": false,
       "definition": "CREATE INDEX idx_tenants_status ON public.tenants USING btree (status)",
       "kind": "index",
       "name": "idx_tenants_status",
@@ -5161,6 +6372,16 @@
     },
     {
       "clustered": false,
+      "definition": "CREATE UNIQUE INDEX media_read_grants_pkey ON public.media_read_grants USING btree (tenant_id, file_id, user_id)",
+      "kind": "index",
+      "name": "media_read_grants_pkey",
+      "ready": true,
+      "replica_identity": false,
+      "table": "media_read_grants",
+      "valid": true
+    },
+    {
+      "clustered": false,
       "definition": "CREATE UNIQUE INDEX media_references_pkey ON public.media_references USING btree (tenant_id, reference_id)",
       "kind": "index",
       "name": "media_references_pkey",
@@ -5207,6 +6428,16 @@
       "ready": true,
       "replica_identity": false,
       "table": "message_operation_history",
+      "valid": true
+    },
+    {
+      "clustered": false,
+      "definition": "CREATE UNIQUE INDEX message_plugin_states_pkey ON public.message_plugin_states USING btree (tenant_id, server_msg_id)",
+      "kind": "index",
+      "name": "message_plugin_states_pkey",
+      "ready": true,
+      "replica_identity": false,
+      "table": "message_plugin_states",
       "valid": true
     },
     {
@@ -5301,6 +6532,36 @@
     },
     {
       "clustered": false,
+      "definition": "CREATE UNIQUE INDEX online_kick_commands_app_id_request_id_physical_id_key ON public.online_kick_commands USING btree (app_id, request_id, physical_id)",
+      "kind": "index",
+      "name": "online_kick_commands_app_id_request_id_physical_id_key",
+      "ready": true,
+      "replica_identity": false,
+      "table": "online_kick_commands",
+      "valid": true
+    },
+    {
+      "clustered": false,
+      "definition": "CREATE UNIQUE INDEX online_kick_commands_pkey ON public.online_kick_commands USING btree (id)",
+      "kind": "index",
+      "name": "online_kick_commands_pkey",
+      "ready": true,
+      "replica_identity": false,
+      "table": "online_kick_commands",
+      "valid": true
+    },
+    {
+      "clustered": false,
+      "definition": "CREATE INDEX online_kick_due ON public.online_kick_commands USING btree (next_at) WHERE (completed_at IS NULL)",
+      "kind": "index",
+      "name": "online_kick_due",
+      "ready": true,
+      "replica_identity": false,
+      "table": "online_kick_commands",
+      "valid": true
+    },
+    {
+      "clustered": false,
       "definition": "CREATE UNIQUE INDEX pinned_messages_pkey ON public.pinned_messages USING btree (id)",
       "kind": "index",
       "name": "pinned_messages_pkey",
@@ -5317,6 +6578,46 @@
       "ready": true,
       "replica_identity": false,
       "table": "pinned_messages",
+      "valid": true
+    },
+    {
+      "clustered": false,
+      "definition": "CREATE UNIQUE INDEX plugin_authorization_snapshots_pkey ON public.plugin_authorization_snapshots USING btree (app_id)",
+      "kind": "index",
+      "name": "plugin_authorization_snapshots_pkey",
+      "ready": true,
+      "replica_identity": false,
+      "table": "plugin_authorization_snapshots",
+      "valid": true
+    },
+    {
+      "clustered": false,
+      "definition": "CREATE UNIQUE INDEX plugin_entity_bindings_pkey ON public.plugin_entity_bindings USING btree (tenant_id, plugin_id, entity, server_msg_id)",
+      "kind": "index",
+      "name": "plugin_entity_bindings_pkey",
+      "ready": true,
+      "replica_identity": false,
+      "table": "plugin_entity_bindings",
+      "valid": true
+    },
+    {
+      "clustered": false,
+      "definition": "CREATE UNIQUE INDEX plugin_entity_lifecycle_outbox_entity_key ON public.plugin_entity_lifecycle_outbox USING btree (tenant_id, plugin_id, entity, reason)",
+      "kind": "index",
+      "name": "plugin_entity_lifecycle_outbox_entity_key",
+      "ready": true,
+      "replica_identity": false,
+      "table": "plugin_entity_lifecycle_outbox",
+      "valid": true
+    },
+    {
+      "clustered": false,
+      "definition": "CREATE UNIQUE INDEX plugin_entity_lifecycle_outbox_pkey ON public.plugin_entity_lifecycle_outbox USING btree (id)",
+      "kind": "index",
+      "name": "plugin_entity_lifecycle_outbox_pkey",
+      "ready": true,
+      "replica_identity": false,
+      "table": "plugin_entity_lifecycle_outbox",
       "valid": true
     },
     {
@@ -5417,6 +6718,17 @@
     {
       "force_row_security": false,
       "kind": "relation",
+      "name": "capability_plugin_resource_calls",
+      "options": null,
+      "partition": null,
+      "persistence": "p",
+      "replica_identity": "d",
+      "row_security": false,
+      "type": "r"
+    },
+    {
+      "force_row_security": false,
+      "kind": "relation",
       "name": "capability_service_settings",
       "options": null,
       "partition": null,
@@ -5462,6 +6774,17 @@
       "force_row_security": false,
       "kind": "relation",
       "name": "conversations",
+      "options": null,
+      "partition": null,
+      "persistence": "p",
+      "replica_identity": "d",
+      "row_security": false,
+      "type": "r"
+    },
+    {
+      "force_row_security": false,
+      "kind": "relation",
+      "name": "core_audit_outbox",
       "options": null,
       "partition": null,
       "persistence": "p",
@@ -5549,6 +6872,17 @@
     {
       "force_row_security": false,
       "kind": "relation",
+      "name": "media_read_grants",
+      "options": null,
+      "partition": null,
+      "persistence": "p",
+      "replica_identity": "d",
+      "row_security": false,
+      "type": "r"
+    },
+    {
+      "force_row_security": false,
+      "kind": "relation",
       "name": "media_references",
       "options": null,
       "partition": null,
@@ -5583,6 +6917,17 @@
       "force_row_security": false,
       "kind": "relation",
       "name": "message_operation_history",
+      "options": null,
+      "partition": null,
+      "persistence": "p",
+      "replica_identity": "d",
+      "row_security": false,
+      "type": "r"
+    },
+    {
+      "force_row_security": false,
+      "kind": "relation",
+      "name": "message_plugin_states",
       "options": null,
       "partition": null,
       "persistence": "p",
@@ -5648,7 +6993,51 @@
     {
       "force_row_security": false,
       "kind": "relation",
+      "name": "online_kick_commands",
+      "options": null,
+      "partition": null,
+      "persistence": "p",
+      "replica_identity": "d",
+      "row_security": false,
+      "type": "r"
+    },
+    {
+      "force_row_security": false,
+      "kind": "relation",
       "name": "pinned_messages",
+      "options": null,
+      "partition": null,
+      "persistence": "p",
+      "replica_identity": "d",
+      "row_security": false,
+      "type": "r"
+    },
+    {
+      "force_row_security": false,
+      "kind": "relation",
+      "name": "plugin_authorization_snapshots",
+      "options": null,
+      "partition": null,
+      "persistence": "p",
+      "replica_identity": "d",
+      "row_security": false,
+      "type": "r"
+    },
+    {
+      "force_row_security": false,
+      "kind": "relation",
+      "name": "plugin_entity_bindings",
+      "options": null,
+      "partition": null,
+      "persistence": "p",
+      "replica_identity": "d",
+      "row_security": false,
+      "type": "r"
+    },
+    {
+      "force_row_security": false,
+      "kind": "relation",
+      "name": "plugin_entity_lifecycle_outbox",
       "options": null,
       "partition": null,
       "persistence": "p",
@@ -5873,6 +7262,18 @@
       "min": 1,
       "name": "pinned_messages_id_seq",
       "owned_by": "pinned_messages.id",
+      "start": 1,
+      "type": "bigint"
+    },
+    {
+      "cache": 1,
+      "cycle": false,
+      "increment": 1,
+      "kind": "sequence",
+      "max": 9223372036854775807,
+      "min": 1,
+      "name": "plugin_entity_lifecycle_outbox_id_seq",
+      "owned_by": "plugin_entity_lifecycle_outbox.id",
       "start": 1,
       "type": "bigint"
     }

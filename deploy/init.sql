@@ -1134,6 +1134,7 @@ CREATE TABLE capability_plugin_endpoints (
     plugin_version TEXT NOT NULL DEFAULT '',
     api_version TEXT NOT NULL DEFAULT '',
     manifest_sha256 TEXT NOT NULL DEFAULT '',
+    seat_model TEXT NOT NULL DEFAULT '',
     declared_operations TEXT[] NOT NULL DEFAULT '{}',
     unverified BOOLEAN NOT NULL,
     registered_at TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -1152,7 +1153,7 @@ CREATE TABLE capability_plugin_endpoints (
         CHECK (jsonb_typeof(labels) = 'object' AND octet_length(labels::text) <= 16384),
     CONSTRAINT capability_plugin_endpoints_manifest_check
         CHECK (char_length(plugin_version) <= 64 AND char_length(api_version) <= 64
-               AND char_length(manifest_sha256) <= 128),
+               AND char_length(manifest_sha256) <= 128 AND char_length(seat_model) <= 32),
     CONSTRAINT capability_plugin_endpoints_operations_check
         CHECK (cardinality(declared_operations) <= 256
                AND array_position(declared_operations, NULL) IS NULL),

@@ -40,7 +40,7 @@ SOCIAL_TABLES = (
     "flare_social_outbox_aggregate_seq", "flare_tenant_counters", "flare_tenants",
     "flare_user_credentials", "flare_user_groups", "flare_user_login_keys", "flare_user_privacy",
     "flare_user_profiles", "flare_user_qr_tokens", "flare_user_referrals", "flare_users",
-    "flare_verification_codes",
+    "flare_verification_codes", "social_notification_policy",
 )
 # The Social schema's only BIGSERIAL keys; their sequences are separate pg_dump objects.
 SOCIAL_SERIAL_KEYS = {"flare_group_directory_member_events": "id", "flare_social_outbox": "outbox_id"}
@@ -177,7 +177,7 @@ class PostgresMigrationTests(unittest.TestCase):
             migrate.assert_schema(actual,migrate.read_profile("v0009",actual["environment"]))
             db.query("INSERT INTO tenants(tenant_id,name) VALUES('retained','retained');")
             self.run_tool(db)
-            self.assertEqual(len(migrate.ledger(db,self.migrations)),11)
+            self.assertEqual(len(migrate.ledger(db,self.migrations)),len(self.migrations))
             self.assertEqual(db.query("SELECT name FROM tenants WHERE tenant_id='retained';"),"retained")
             self.assertEqual(db.query("SELECT count(*) FROM credential_keys;"),"0")
             db.query("INSERT INTO credential_projection_versions(app_id,version) VALUES('app-a',777);")
@@ -211,6 +211,30 @@ class PostgresMigrationTests(unittest.TestCase):
             self.assertEqual(db.query("SELECT plugin_id FROM capability_plugin_endpoints;"), "p1")
             actual = migrate.snapshot(db)
             migrate.assert_schema(actual, migrate.read_profile("latest", actual["environment"]))
+
+    def test_0019_upgrades_0011_and_retires_only_the_bootstrap_rtc_grant(self):
+        for source in ("init_bootstrap", "operator"):
+            with self.subTest(source=source), self.fixture() as name, self.connect(name) as db:
+                db.query("BEGIN;")
+                db.query(migrate.LEDGER_DDL)
+                for migration in self.migrations[:11]:
+                    migrate.execute_migration(db, migration.sql)
+                    migrate.insert_ledger(db, migration)
+                db.query("COMMIT;")
+                if source == "operator":
+                    db.query("UPDATE capability_user_grants SET source='operator' WHERE tenant_id='0' AND user_id='*' AND capability_id='rtc.*';")
+                db.query("INSERT INTO credential_projection_versions(app_id,version) VALUES('app-a',777);")
+                before = migrate.seed_state(db)
+                self.assertEqual(before["rtc_tenant_0_wildcard"]["source"], source)
+
+                self.run_tool(db)
+
+                expected = dict(before)
+                if source == "init_bootstrap":
+                    expected["rtc_tenant_0_wildcard"] = None
+                self.assertEqual(migrate.seed_state(db), expected)
+                self.assertEqual(db.query("SELECT version FROM credential_projection_versions WHERE app_id='app-a';"), "777")
+                self.assertEqual(len(migrate.ledger(db, self.migrations)), len(self.migrations))
 
     def ledgered_0008(self, db):
         """A database migrated to 0008 by the previous release: ledger rows 1..8, previous latest shape."""
@@ -428,7 +452,12 @@ class PostgresMigrationTests(unittest.TestCase):
             db.query("SET search_path=public,pg_temp;")
             db.query((migrate.ROOT / "deploy/init.sql").read_text())
             db.query(f"SET search_path={migrate.SAFE_SEARCH_PATH};")
-            self.run_tool(db, admission=self.approved_fixture(db))
+            dev_snapshot = migrate.snapshot(db)
+            self.assertIsNone(migrate.ledger(db, self.migrations))
+
+        with self.fixture() as name, self.connect(name) as db:
+            self.run_tool(db)
+            migrate.assert_schema(migrate.snapshot(db), dev_snapshot)
             before = migrate.ledger(db, self.migrations)
             env = dict(os.environ, PGDATABASE=name)
             result = subprocess.run(["bash", str(migrate.ROOT / "scripts/check_schema_parity.sh")], env=env, cwd="/", text=True, capture_output=True, timeout=30)

@@ -123,14 +123,14 @@ class MigrationUnitTests(unittest.TestCase):
 
     def test_every_reviewed_shape_has_a_profile_per_environment(self):
         # A ledgered database at 0008 still has the previous latest shape; refusing it would block the
-        # upgrade. Each environment keeps baseline, v0008, v0009, v0010 and latest profiles.
+        # upgrade. Each environment keeps the previous ledgered shapes and the current shape.
         environments = {json.dumps(json.loads(path.read_text())["environment"], sort_keys=True)
                         for path in (migrate.HERE / "schema").glob("latest*.json")}
         self.assertEqual(len(environments), 2)
         for environment in map(json.loads, environments):
             shapes = {name: migrate.read_profile(name, environment) for name in migrate.REVIEWED_SHAPES}
-            self.assertEqual(set(shapes), {"baseline", "v0008", "v0009", "v0010", "latest"})
-            self.assertEqual(len({migrate.canonical(shape) for shape in shapes.values()}), 5)
+            self.assertEqual(set(shapes), {"baseline", "v0008", "v0009", "v0010", "v0011", "latest"})
+            self.assertEqual(len({migrate.canonical(shape) for shape in shapes.values()}), 6)
             for name, shape in shapes.items():
                 with self.subTest(environment=environment, shape=name):
                     migrate.assert_reviewed_baseline(shape)
@@ -168,7 +168,7 @@ class MigrationUnitTests(unittest.TestCase):
         for timescale in ("2.30.0", "2.29.1"):
             env = {"postgres_major": 16, "timescaledb": timescale}
             before = migrate.read_profile("v0010", env)
-            after = migrate.read_profile("latest", env)
+            after = migrate.read_profile("v0011", env)
             self.assertEqual(before["timescale"], after["timescale"], timescale)
             old = {migrate.canonical(o) for o in before["objects"]}
             new = {migrate.canonical(o): o for o in after["objects"]}
