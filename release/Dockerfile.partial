@@ -61,7 +61,7 @@ COPY flare-protocol ./flare-protocol
 COPY flare-protocol-grpc ./flare-protocol-grpc
 COPY flare-transport ./flare-transport
 COPY flare-server-runtime ./flare-server-runtime
-COPY flare-plugins-commercial/flare-plugin-host ./flare-plugins-commercial/flare-plugin-host
+COPY flare-plugin-devkit/flare-plugin-host ./flare-plugin-devkit/flare-plugin-host
 COPY flare-core-server ./flare-core-server
 
 WORKDIR /build/flare-core-server

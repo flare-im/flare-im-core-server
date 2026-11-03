@@ -62,17 +62,15 @@ jobs:
           clone https://github.com/flare-im/flare-protocol.git "flare-protocol"
           clone https://github.com/flare-im/flare-protocol-grpc.git "flare-protocol-grpc"
           clone https://github.com/flare-im/flare-server-runtime.git "flare-server-runtime"
-          # 不克隆 flare-plugin：它是私有仓，而这条流水线验的是**开源栈**能否自足。
-          # RTC 由那个插件提供，因此不属于开源侧的自足证明；示例里那一步会明确
-          # 跳过并说明，不再让整例变红。
+          clone https://github.com/flare-im/flare-plugin-devkit.git "flare-plugin-devkit"
 
       # rust-cache 要在同级仓就位之后：它先跑 `cargo metadata` 算缓存键，
       # 放在前面时两个工作区都因缺 ../flare-transport 解析失败，缓存整段失效。
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: |
-            flare-im-core
-            flare-im-core-sdk
+            flare-core-server
+            flare-core-sdk-engine
 
       # 与 ci.yml 同一套：契约由 .proto 生成，构建期需要 protobuf 编译器；
       # rdkafka-sys 会现场编译 librdkafka（C），需要 curl/sasl/ssl/zlib 开发头文件。
@@ -135,7 +133,7 @@ jobs:
         env:
           # 两个仓在 CI 里是并排的兄弟目录，路径与本地开发一致；
           # 显式传入而不是靠默认推断，免得目录布局一改就静默走错。
-          FLARE_SDK_ROOT: ${{ github.workspace }}/flare-im-core-sdk
+          FLARE_SDK_ROOT: ${{ github.workspace }}/flare-core-sdk-engine
         run: ./scripts/smoke_opensource.sh
 
       # 能力插件是「装上就能用」这条承诺的全部内容：登记、授权投影、调用票据、转发、撤销、

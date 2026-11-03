@@ -76,7 +76,7 @@ COPY flare-transport ./flare-transport
 COPY flare-server-runtime ./flare-server-runtime
 # The released flare-capability links the plugin service router of flare-plugin-host
 # (flare-capability/with-plugin-host); only that crate of flare-plugin is needed.
-COPY flare-plugins-commercial/flare-plugin-host ./flare-plugins-commercial/flare-plugin-host
+COPY flare-plugin-devkit/flare-plugin-host ./flare-plugin-devkit/flare-plugin-host
 
 COPY flare-core-server ./flare-core-server
 
