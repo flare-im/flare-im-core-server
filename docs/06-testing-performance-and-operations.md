@@ -137,7 +137,7 @@ cargo test -p flare-media --lib -- --ignored
 | SDK 核心 | `cd flare-im-core-sdk && rtk cargo test`；`rtk cargo test --features storage-sqlite` | 可靠发送、SQLite 本地存储、sync lifecycle 不回退。 |
 | SDK codegen | `cd flare-im-core-sdk && rtk cargo xtask codegen-check` | sdk-spec、native ABI、生成模板和平台包保持一致。 |
 | 六端一期示例 | Android `assembleDebug`；Flutter `flutter analyze && flutter build apk --debug`；iOS `swift test` + simulator `xcodebuild`；Web typecheck/test/build/Playwright；Tauri typecheck/test/build/cargo check/tauri build；Uni typecheck/test | 一期客户端至少能构建、运行核心业务流，并暴露 SDK 事件/诊断。 |
-| 插件基线 | `cd flare-plugins-commercial/flare-strom-sfu && rtk cargo test`；`cd flare-sdk-plugin/flare-sdk-plugin-call && rtk cargo test` | 现有 SFU/server plugin 与 client plugin helper 不被 core/SDK 协议变更拖坏。 |
+| 插件基线 | `(cd flare-plugin-call/server && rtk cargo test)`；`(cd flare-plugin-call/sdk && rtk cargo test)` | 现有 SFU/server plugin 与 client plugin helper 不被 core/SDK 协议变更拖坏。 |
 
 当前已验证的 live 端到端基线：
 
