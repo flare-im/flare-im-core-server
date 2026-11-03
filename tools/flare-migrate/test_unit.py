@@ -67,7 +67,7 @@ class MigrationUnitTests(unittest.TestCase):
 
     def test_all_patches_are_accounted_for_and_baseline_has_no_drop(self):
         migrations = migrate.load_migrations()
-        self.assertEqual(len(migrations), 11)
+        self.assertEqual([m.version for m in migrations], list(range(1, 20)))
         self.assertNotIn("\nDROP ", migrations[0].sql)
         for patch in (migrate.ROOT / "deploy/patches").glob("*.sql"):
             self.assertTrue(any(patch.name in migration.name for migration in migrations[1:]), patch.name)

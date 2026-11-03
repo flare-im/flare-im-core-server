@@ -142,7 +142,7 @@ class PostgresMigrationTests(unittest.TestCase):
             before = migrate.ledger(db, self.migrations)
             self.run_tool(db)
             self.assertEqual(migrate.ledger(db, self.migrations), before)
-            self.assertEqual(len(before), 11)
+            self.assertEqual(len(before), len(self.migrations))
             actual = migrate.snapshot(db)
             migrate.assert_schema(actual, migrate.read_profile("latest", actual["environment"]))
 
@@ -155,7 +155,7 @@ class PostgresMigrationTests(unittest.TestCase):
             self.assertEqual(db.query("SELECT name FROM tenants WHERE tenant_id='retained';"), "retained")
             self.assertEqual(db.query("SELECT owner_id IS NULL FROM media_assets WHERE tenant_id='retained' AND file_id='legacy';"), "t")
             self.assertEqual(db.query("SELECT status FROM messages WHERE server_id='safe-status';"), "1")
-            self.assertEqual(len(migrate.ledger(db, self.migrations)), 11)
+            self.assertEqual(len(migrate.ledger(db, self.migrations)), len(self.migrations))
 
     def test_existing_core_timescale_2291_version_is_supported(self):
         with self.fixture() as name, self.connect(name) as db:
@@ -197,7 +197,7 @@ class PostgresMigrationTests(unittest.TestCase):
             migrate.assert_schema(actual, migrate.read_profile("v0010", actual["environment"]))
             db.query("INSERT INTO credential_projection_versions(app_id,version) VALUES('app-a',777);")
             self.run_tool(db)
-            self.assertEqual(len(migrate.ledger(db, self.migrations)), 11)
+            self.assertEqual(len(migrate.ledger(db, self.migrations)), len(self.migrations))
             self.assertEqual(db.query("SELECT version FROM credential_projection_versions WHERE app_id='app-a';"), "777")
             self.assertEqual(db.query("SELECT count(*) FROM capability_plugin_endpoints;"), "0")
             db.query("INSERT INTO capability_plugin_endpoints(tenant_id,plugin_id,capability_id,grpc_authority,declared_operations,unverified) VALUES('t1','p1','rtc.call','http://p1:9',ARRAY['rtc.call'],FALSE);")
@@ -232,7 +232,7 @@ class PostgresMigrationTests(unittest.TestCase):
                 self.ledgered_0008(db)
                 db.query(history + history)
                 self.run_tool(db)
-                self.assertEqual(len(migrate.ledger(db, self.migrations)), 11)
+                self.assertEqual(len(migrate.ledger(db, self.migrations)), len(self.migrations))
                 self.assertEqual(db.query("SELECT count(*) FROM message_operation_history WHERE tenant_id='retained' AND seq IS NULL;"), "2")
                 actual = migrate.snapshot(db)
                 migrate.assert_schema(actual, migrate.read_profile("latest", actual["environment"]))
@@ -241,7 +241,7 @@ class PostgresMigrationTests(unittest.TestCase):
                     db.query(identified + " ON CONFLICT (tenant_id,conversation_id,seq,message_id) WHERE seq IS NOT NULL DO NOTHING;")
                 self.assertEqual(db.query("SELECT count(*) FROM message_operation_history WHERE seq=7;"), "1")
                 self.run_tool(db)
-                self.assertEqual(len(migrate.ledger(db, self.migrations)), 11)
+                self.assertEqual(len(migrate.ledger(db, self.migrations)), len(self.migrations))
             with self.connect(name) as db:
                 # A plain insert of the same identity is refused by the unique index (psql stops on the error).
                 with self.assertRaises(migrate.MigrationError):
@@ -283,7 +283,7 @@ class PostgresMigrationTests(unittest.TestCase):
                 db.query(index)
                 self.assertEqual(db.query(valid), "t")
                 self.run_tool(db)
-                self.assertEqual(len(migrate.ledger(db, self.migrations)), 11)
+                self.assertEqual(len(migrate.ledger(db, self.migrations)), len(self.migrations))
                 actual = migrate.snapshot(db)
                 migrate.assert_schema(actual, migrate.read_profile("latest", actual["environment"]))
 
@@ -295,7 +295,7 @@ class PostgresMigrationTests(unittest.TestCase):
             db.query("COMMIT;")
             self.run_tool(db, admission=self.approved_fixture(db))
             ledger = migrate.ledger(db, self.migrations)
-            self.assertEqual(len(ledger), 11)
+            self.assertEqual(len(ledger), len(self.migrations))
             self.assertIsNotNone(ledger[0]["baseline_admission"])
             actual = migrate.snapshot(db)
             migrate.assert_schema(actual, migrate.read_profile("latest", actual["environment"]))
@@ -352,7 +352,7 @@ class PostgresMigrationTests(unittest.TestCase):
             with self.connect(core_only) as db:
                 self.assertEqual(db.query(absent), "t")
                 self.run_tool(db, admission=self.approved_fixture(db))
-                self.assertEqual(len(migrate.ledger(db, self.migrations)), 11)
+                self.assertEqual(len(migrate.ledger(db, self.migrations)), len(self.migrations))
                 self.assertEqual(db.query("SELECT name FROM tenants WHERE tenant_id='retained';"), "retained")
                 self.assertEqual(db.query("SELECT status FROM messages WHERE server_id='kept';"), "1")
             with self.connect(mixed) as db:
