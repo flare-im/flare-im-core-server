@@ -83,7 +83,7 @@ impl PostgresCapabilityPolicy {
 
         Err(flare_server_core::error::FlareError::system(format!(
             "missing table public.capability_service_settings on database {:?} (search_path={:?}). \
-             Run flare-im-core/deploy/init.sql Hook+Capability section on **this** database. \
+             Run flare-core-server/deploy/init.sql Hook+Capability section on **this** database. \
              If you already ran init elsewhere, align DATABASE_URL host/port/dbname with that instance; \
              unset DATABASE_URL defaults to postgresql://*:*@localhost:25432/flare2 (see config base.toml [postgres.media]) in flare-capability cmd.",
             row.0, row.1

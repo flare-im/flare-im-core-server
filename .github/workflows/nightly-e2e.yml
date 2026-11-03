@@ -31,22 +31,22 @@ jobs:
       - name: 检出 flare-im-core
         uses: actions/checkout@v4
         with:
-          path: flare-im-core
+          path: flare-core-server
 
       # 用例住在客户端 SDK 仓：冒烟脚本跑的是「SDK 连真实服务端」，
       # 只有服务端这一半的话，验的就只是它自己能不能启动。
       - name: 检出 flare-im-core-sdk
         uses: actions/checkout@v4
         with:
-          repository: flare-im/flare-im-core-sdk
-          path: flare-im-core-sdk
+          repository: flare-im/flare-core-sdk-engine
+          path: flare-core-sdk-engine
           ref: dev
 
       - uses: dtolnay/rust-toolchain@stable
 
       # 本仓无法单独构建：examples 等成员按**同级目录**依赖 flare-core / flare-proto
       # 等仓（path 依赖）。ci.yml 早有这一步，nightly 漏了 —— 表现为
-      # `failed to read ../flare-core/Cargo.toml: No such file or directory`。
+      # `failed to read ../flare-transport/Cargo.toml: No such file or directory`。
       #
       # 注意路径：本工作流把主仓检出到 flare-im-core/ 子目录，所以同级仓要落在
       # 工作区根（即 flare-im-core 的上一级），与本地开发的布局一致。
@@ -58,16 +58,16 @@ jobs:
             git clone --depth 1 -b "$BR" "$1" "$2" 2>/dev/null \
               || git clone --depth 1 "$1" "$2"
           }
-          clone https://github.com/flare-im/flare-core.git "flare-core"
-          clone https://github.com/flare-im/flare-proto.git "flare-proto"
-          clone https://github.com/flare-im/flare-grpc-proto.git "flare-grpc-proto"
-          clone https://github.com/flare152/flare-server-core.git "flare-server-core"
+          clone https://github.com/flare-im/flare-transport.git "flare-transport"
+          clone https://github.com/flare-im/flare-protocol.git "flare-protocol"
+          clone https://github.com/flare-im/flare-protocol-grpc.git "flare-protocol-grpc"
+          clone https://github.com/flare-im/flare-server-runtime.git "flare-server-runtime"
           # 不克隆 flare-plugin：它是私有仓，而这条流水线验的是**开源栈**能否自足。
           # RTC 由那个插件提供，因此不属于开源侧的自足证明；示例里那一步会明确
           # 跳过并说明，不再让整例变红。
 
       # rust-cache 要在同级仓就位之后：它先跑 `cargo metadata` 算缓存键，
-      # 放在前面时两个工作区都因缺 ../flare-core 解析失败，缓存整段失效。
+      # 放在前面时两个工作区都因缺 ../flare-transport 解析失败，缓存整段失效。
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: |
@@ -84,7 +84,7 @@ jobs:
             libcurl4-openssl-dev libsasl2-dev libssl-dev zlib1g-dev
 
       - name: 起基础设施
-        working-directory: flare-im-core
+        working-directory: flare-core-server
         run: |
           # --wait 会等健康检查转绿，并在任一容器退出时直接失败。
           # 只用「端口能连上」判定是不够的：崩溃循环的容器会在重启窗口里
@@ -110,7 +110,7 @@ jobs:
       # 「某个端口不通」，而真正的原因（镜像启动即退、配置文件缺失）在容器日志里。
       - name: 基础设施诊断（仅失败时）
         if: failure()
-        working-directory: flare-im-core
+        working-directory: flare-core-server
         run: |
           docker compose -f deploy/docker-compose.yml -f deploy/docker-compose.nats.yml ps -a
           for c in flare-consul flare-redis flare-postgres flare-nats flare-rustfs; do
@@ -119,7 +119,7 @@ jobs:
           done
 
       - name: 起 Flare IM Core
-        working-directory: flare-im-core
+        working-directory: flare-core-server
         env:
           PLUGIN_SMOKE_DIR: ${{ runner.temp }}/plugin-smoke
         run: |
@@ -131,7 +131,7 @@ jobs:
           ./scripts/check_services.sh
 
       - name: 开源栈冒烟（6 项）
-        working-directory: flare-im-core
+        working-directory: flare-core-server
         env:
           # 两个仓在 CI 里是并排的兄弟目录，路径与本地开发一致；
           # 显式传入而不是靠默认推断，免得目录布局一改就静默走错。
@@ -145,13 +145,13 @@ jobs:
       # 先编好两个样例再跑冒烟：要在冒烟里现场编译的话，首次实测 60 秒内没编完，
       # 冒烟报「插件未注册」，指向的却是一个不存在的问题。
       - name: 构建插件样例
-        working-directory: flare-im-core
+        working-directory: flare-core-server
         run: >-
           cargo build --manifest-path examples/Cargo.toml
           --example capability_link_preview --example capability_dev_control
 
       - name: 能力插件生命周期（7 项）
-        working-directory: flare-im-core
+        working-directory: flare-core-server
         env:
           PLUGIN_SMOKE_DIR: ${{ runner.temp }}/plugin-smoke
         run: ./scripts/smoke_plugin_lifecycle.sh
@@ -162,10 +162,10 @@ jobs:
         if: failure()
         run: |
           mkdir -p artifacts
-          cp -r flare-im-core/logs artifacts/server-logs 2>/dev/null || true
+          cp -r flare-core-server/logs artifacts/server-logs 2>/dev/null || true
           cp /tmp/flare-smoke-*.log artifacts/ 2>/dev/null || true
-          docker compose -f flare-im-core/deploy/docker-compose.yml \
-            -f flare-im-core/deploy/docker-compose.nats.yml logs \
+          docker compose -f flare-core-server/deploy/docker-compose.yml \
+            -f flare-core-server/deploy/docker-compose.nats.yml logs \
             --tail 200 > artifacts/infra.log 2>&1 || true
 
       - name: 上传日志
@@ -178,7 +178,7 @@ jobs:
 
       - name: 停机
         if: always()
-        working-directory: flare-im-core
+        working-directory: flare-core-server
         run: |
           ./scripts/stop_server.sh || true
           docker compose -f deploy/docker-compose.yml -f deploy/docker-compose.nats.yml down -v || true

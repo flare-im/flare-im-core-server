@@ -81,7 +81,7 @@ dropped and counted, never queued without limit.
 The Platform worker now routes Core windows beside Social snapshots into Commerce-owned
 immutable event fences, window readings and unique daily user hashes. Its authorized application
 usage/workspace includes `core.series` in the same read snapshot; fixed decimals are strings.
-Source DDL is `flare-social/platform/crates/platform-commerce/resources/core-usage.sql`,
+Source DDL is `flare-social-server/platform/crates/platform-commerce/resources/core-usage.sql`,
 not an executed change to the old development stack. See Social `docs/platform-metering-and-id-leases.md`.
 
 The platform metering consumer (Cell Agent or `platform-commerce` usage) must:

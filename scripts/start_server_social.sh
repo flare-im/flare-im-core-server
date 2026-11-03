@@ -8,7 +8,7 @@
 # Hook 配置：config/hooks.social.toml
 #
 # 前置：需另启 Social 栈（至少 flare-social-hook）：
-#   cd ../flare-social && ./scripts/start_social.sh
+#   cd ../flare-social-server && ./scripts/start_social.sh
 #
 # 可选：本脚本启动前检查 Consul 中 flare-social-hook
 #   START_SOCIAL_HOOK_CHECK=0 ./scripts/start_server_social.sh  # 跳过检查
@@ -31,7 +31,7 @@ if [ "${START_SOCIAL_HOOK_CHECK:-1}" != "0" ]; then
             svc_json=$(curl -sf "${consul_url}/v1/catalog/service/flare-social-hook" 2>/dev/null || true)
             if [ -z "$svc_json" ] || [ "$svc_json" = "[]" ] || [ "$svc_json" = "null" ]; then
                 echo -e "${YELLOW}⚠ 未在 Consul 发现 flare-social-hook${NC}" >&2
-                echo -e "${YELLOW}  请先启动: cd ../flare-social && ./scripts/start_social.sh${NC}" >&2
+                echo -e "${YELLOW}  请先启动: cd ../flare-social-server && ./scripts/start_social.sh${NC}" >&2
                 echo -e "${YELLOW}  或跳过检查: START_SOCIAL_HOOK_CHECK=0 $0 $*${NC}" >&2
             fi
         fi

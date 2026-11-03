@@ -5,7 +5,7 @@
 //! - `Event`（forward_event）→ flare-orchestrator（`MessageEventService.ExecuteEvent`）
 //!
 //! 下行（JetStream → Push Worker → Online 选端 → GatewayRouter → Access Gateway → Client）不经本 Route 的 gRPC。
-//! 详见 `flare-im-core/docs/message_event_flow.md`。
+//! 详见 `flare-core-server/docs/message_event_flow.md`。
 
 pub mod application;
 pub mod config;

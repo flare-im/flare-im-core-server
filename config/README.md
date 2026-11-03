@@ -5,7 +5,7 @@ The project is still deployed as separate microservice binaries; this directory 
 
 ## Load Order
 
-`load_app_config_from_env()` resolves the root from `FLARE_CONFIG_PATH`, then falls back to `config`, `config.toml`, and `flare-im-core/config`.
+`load_app_config_from_env()` resolves the root from `FLARE_CONFIG_PATH`, then falls back to `config`, `config.toml`, and `flare-core-server/config`.
 
 For a directory root, TOML fragments are merged in this order:
 

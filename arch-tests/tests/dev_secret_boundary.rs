@@ -6,14 +6,14 @@ fn development_tls_material_is_not_checked_in() {
     let forbidden = [
         "certs/server.key",
         "certs/server.crt",
-        "flare-core/certs/server.key",
-        "flare-core/certs/server.crt",
-        "flare-core/examples/certs/server.key",
-        "flare-core/examples/certs/server.crt",
-        "flare-im-core-sdk/certs/server.key",
-        "flare-im-core-sdk/certs/server.crt",
-        "flare-im-core-sdk/examples/certs/server.key",
-        "flare-im-core-sdk/examples/certs/server.crt",
+        "flare-transport/certs/server.key",
+        "flare-transport/certs/server.crt",
+        "flare-transport/examples/certs/server.key",
+        "flare-transport/examples/certs/server.crt",
+        "flare-core-sdk-engine/certs/server.key",
+        "flare-core-sdk-engine/certs/server.crt",
+        "flare-core-sdk-engine/examples/certs/server.key",
+        "flare-core-sdk-engine/examples/certs/server.crt",
     ];
 
     let leaked = forbidden

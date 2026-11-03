@@ -353,7 +353,7 @@ case "$FLARE_BUILD_PROFILE" in
 esac
 
 # 解析 Cargo 实际产物目录：上层仓库 `.cargo/config.toml` 可能将 `target-dir` 指到仓库根的 `target/`，
-# 与 `flare-im-core/target` 不一致；启动与停止脚本必须使用与 `cargo build` 相同的 profile 目录。
+# 与 `flare-core-server/target` 不一致；启动与停止脚本必须使用与 `cargo build` 相同的 profile 目录。
 resolve_cargo_target_profile() {
     local profile="$1"
     if [ -n "${CARGO_TARGET_DIR:-}" ]; then

@@ -19,7 +19,7 @@ fn mq_envelope_is_the_only_message_and_event_mq_envelope() {
         violations.join("\n")
     );
 
-    let proto_path = repo_root.join("flare-proto/proto/topic_envelope.proto");
+    let proto_path = repo_root.join("flare-protocol/proto/topic_envelope.proto");
     let proto = fs::read_to_string(&proto_path).expect("read topic envelope proto");
     for pattern in forbidden {
         assert!(

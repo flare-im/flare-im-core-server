@@ -1,7 +1,7 @@
 """check_dashboard_metrics.sh 的回归测试：真实面板必须通过，各类错误必须被拦下。
 
 每个用例把 deploy 下的面板与告警规则复制到临时目录再改坏，经环境变量指给门禁，
-不改仓库里的文件。依赖同级仓库 ../flare-server-core 与 ../flare-core（与门禁本身一致）。
+不改仓库里的文件。依赖同级仓库 ../flare-server-runtime 与 ../flare-transport（与门禁本身一致）。
 """
 
 import json
@@ -112,7 +112,7 @@ class DashboardMetricsGateTest(unittest.TestCase):
         self.assert_rejected(self.run_gate(), "uid flare-im-release-gates 与 flare-im/push-server.json 重复")
 
     def test_names_in_comments_or_test_modules_do_not_count_as_registered(self):
-        fake_core = self.tmp / "flare-core"
+        fake_core = self.tmp / "flare-transport"
         (fake_core / "src").mkdir(parents=True)
         (fake_core / "src/lib.rs").write_text(
             "fn real() {\n"
@@ -145,7 +145,7 @@ class DashboardMetricsGateTest(unittest.TestCase):
     def test_missing_sibling_repository_is_an_error_not_a_pass(self):
         result = self.run_gate(FLARE_SERVER_CORE_DIR=str(self.tmp / "missing"))
         self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
-        self.assertIn("flare-server-core", result.stderr)
+        self.assertIn("flare-server-runtime", result.stderr)
 
 
 if __name__ == "__main__":

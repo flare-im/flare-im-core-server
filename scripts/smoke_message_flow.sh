@@ -44,7 +44,7 @@ Required:
   SMOKE_BASE_URL           Public origin, e.g. https://im.example.test:18443
                            (https only; plain http is accepted for loopback hosts).
   SMOKE_TENANT_ID          Isolated fixture tenant e2e-<20 lowercase hex>, e.g. one
-                           created by flare-social/scripts/prepare_e2e_fixture.py.
+                           created by flare-social-server/scripts/prepare_e2e_fixture.py.
                            The default tenant "0" is never accepted.
   SMOKE_PG_CONTAINER       PostgreSQL container used for the read-only check,
                            unless SMOKE_SKIP_DB_CHECK=1.

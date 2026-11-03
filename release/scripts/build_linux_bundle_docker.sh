@@ -197,7 +197,7 @@ EOF
 chmod +x /tmp/flare-rustc-wrapper
 export RUSTC_WRAPPER=/tmp/flare-rustc-wrapper
 export CARGO_BUILD_RUSTC_WRAPPER=/tmp/flare-rustc-wrapper
-/workspace/flare-im/flare-im-core/release/scripts/build_release_bundle.sh "$@"
+/workspace/flare-im/flare-core-server/release/scripts/build_release_bundle.sh "$@"
 if [ "$(id -u)" = "0" ]; then
     chown -R "${HOST_UID}:${HOST_GID}" "${PACKAGE_DIR}"
 fi

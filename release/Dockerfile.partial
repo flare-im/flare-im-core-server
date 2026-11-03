@@ -6,7 +6,7 @@
 # 40G 盘扣掉生产数据/镜像/源码后只剩 4~5GB——实测会在编译中途撞上磁盘熔断。
 # 绝大多数改动只影响少数服务，没必要每次都付全量的代价。
 #
-#   docker build -f flare-im-core/release/Dockerfile.partial \
+#   docker build -f flare-core-server/release/Dockerfile.partial \
 #     --build-arg BASE_IMAGE=flare-im-core:r6 \
 #     --build-arg BUILD_PACKAGES="-p flare-signaling-gateway -p flare-storage-writer" \
 #     -t flare-im-core:r7 .
@@ -57,14 +57,14 @@ ARG CARGO_BUILD_JOBS=default
 ENV CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS}
 
 WORKDIR /build
-COPY flare-proto ./flare-proto
-COPY flare-grpc-proto ./flare-grpc-proto
-COPY flare-core ./flare-core
-COPY flare-server-core ./flare-server-core
-COPY flare-plugin/flare-plugin-host ./flare-plugin/flare-plugin-host
-COPY flare-im-core ./flare-im-core
+COPY flare-protocol ./flare-protocol
+COPY flare-protocol-grpc ./flare-protocol-grpc
+COPY flare-transport ./flare-transport
+COPY flare-server-runtime ./flare-server-runtime
+COPY flare-plugins-commercial/flare-plugin-host ./flare-plugins-commercial/flare-plugin-host
+COPY flare-core-server ./flare-core-server
 
-WORKDIR /build/flare-im-core
+WORKDIR /build/flare-core-server
 
 # 只编指定的包。缓存挂载与全量构建共用，两者能互相复用依赖编译结果。
 ARG BUILD_PACKAGES
@@ -77,7 +77,7 @@ ARG CARGO_PROFILE=release
 # flare-capability 不在开源工作区里编：发布版来自 flare-capability/with-plugin-host
 # （链接插件服务路由的独立工作区），产物同名，所以 `-p flare-capability` 单独走 --manifest-path。
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
-    --mount=type=cache,target=/build/flare-im-core/target \
+    --mount=type=cache,target=/build/flare-core-server/target \
     test -n "$BUILD_PACKAGES" || { echo "必须指定 BUILD_PACKAGES"; exit 1; } \
     && workspace_packages="$(echo "$BUILD_PACKAGES" | sed -E 's/(^|[[:space:]])-p[[:space:]]+flare-capability([[:space:]]|$)/ /g')" \
     && if echo "$workspace_packages" | grep -q -- '-p'; then \

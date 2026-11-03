@@ -259,4 +259,4 @@ Consul endpoint；正式模板仍须提供完整静态地址并跑真实消息 s
 
 ## 相关文档
 
-- [flare-server-core 服务发现文档](https://github.com/flare152/flare-server-core/blob/main/flare-core-transport/src/discovery/README.md)
+- [flare-server-core 服务发现文档](https://github.com/flare-im/flare-server-runtime/blob/main/flare-core-transport/src/discovery/README.md)

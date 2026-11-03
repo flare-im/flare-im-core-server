@@ -21,7 +21,7 @@
 x-flare-build: &flare-build
   build:
     context: ../..
-    dockerfile: flare-im-core/release/Dockerfile
+    dockerfile: flare-core-server/release/Dockerfile
   # 15 个服务共用一个镜像（它们只差跑哪个二进制）。写同一个 tag，
   # BuildKit 第一次真构建、其余 14 次命中缓存，不会编 15 遍。
   image: flare-im-core:local

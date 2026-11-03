@@ -155,7 +155,7 @@ with the bridge, WASM and storage already wired — copy it first, then swap in 
 runtime.
 
 Other platform packages live in
-[`flare-im-core-client-sdk`](../../flare-im-core-client-sdk): Swift (iOS), Kotlin (Android),
+[`flare-im-core-client-sdk`](../../flare-core-sdk): Swift (iOS), Kotlin (Android),
 Dart (Flutter), ArkTS/Cangjie (HarmonyOS). Same contract, naming idiomatic per language.
 
 ### Ready-made UI
@@ -199,7 +199,7 @@ control plane (or your own admin system) is. The core only holds a **projection*
 enforces three things from it.
 
 **Projection protocol.** The capability service implements
-`flare.control.v1.TenantProjection` (`flare-grpc-proto/proto/control_plane.proto`):
+`flare.control.v1.TenantProjection` (`flare-protocol-grpc/proto/control_plane.proto`):
 
 | RPC | Core behaviour |
 |---|---|
@@ -307,7 +307,7 @@ The open-source part ships the E2EE pipeline plus a reference implementation:
 
 ```bash
 # The example lives in the sibling repo — the client SDK owns the E2EE surface.
-cd ../flare-im-core-sdk
+cd ../flare-core-sdk-engine
 cargo run --example e2ee_demo --features "lifecycle-sqlite e2ee"
 ```
 

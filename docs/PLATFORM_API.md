@@ -29,7 +29,7 @@ Platform的只读PG4连接/250ms获取、独立Channel（32并发、32缓冲、2
 
 构建 `cargo build --locked -p flare-api-gateway -p flare-conversation --bins`；测试
 环境安装同级Social `scripts/requirements-contract.txt`，运行
-`python scripts/test_platform_conversation.py --contract ../flare-social/contracts/platform/platform-v1.openapi.json`。
+`python scripts/test_platform_conversation.py --contract ../flare-social-server/contracts/platform/platform-v1.openapi.json`。
 只允许本机PG，随机独占库/回环端口/Cell与pepper，秘密留在0600临时配置和进程
 内存，finally清理本轮库、进程组与临时目录。采用基线三张相关表的原样DDL+
 0010；不是完整Core/Timescale迁移验收。Projection与业务数据是明确SQL夹具。

@@ -139,13 +139,13 @@ axum = "0.8"
 etcd-client = "0.17"
 
 # Flare Core
-flare-core = { version = "1.0.3", path = "../flare-core" }
+flare-core = { version = "1.0.3", path = "../flare-transport" }
 
 # Flare Server Core (启用 proto feature 以使用错误转换函数)
-flare-server-core = { version = "1.0.3", path = "../flare-server-core", features = ["proto", "grpc", "http"] }
-flare-core-base = { version = "1.0.3", path = "../flare-server-core/flare-core-base" }
-flare-core-messaging = { version = "1.0.3", path = "../flare-server-core/flare-core-messaging" }
-flare-core-runtime = { version = "1.0.3", path = "../flare-server-core/flare-core-runtime" }
+flare-server-core = { version = "1.0.3", path = "../flare-server-runtime", features = ["proto", "grpc", "http"] }
+flare-core-base = { version = "1.0.3", path = "../flare-server-runtime/flare-core-base" }
+flare-core-messaging = { version = "1.0.3", path = "../flare-server-runtime/flare-core-messaging" }
+flare-core-runtime = { version = "1.0.3", path = "../flare-server-runtime/flare-core-runtime" }
 
 # Flare IM shared crates
 flare-im-contracts = { version = "1.0.3", path = "crates/flare-im-contracts" }
@@ -158,12 +158,12 @@ flare-im-capability-core = { version = "1.0.3", path = "crates/flare-im-capabili
 flare-im-usage = { version = "1.0.3", path = "crates/flare-im-usage" }
 
 # Flare Proto
-flare-proto = { version = "2.0.0", path = "../flare-proto" }
+flare-proto = { version = "2.0.0", path = "../flare-protocol" }
 # 2.2.0 起 RegisterPluginEndpointRequest / RegisteredPluginInstance 带上了
 # 注册契约 v2 字段（版本、清单摘要、声明的 operation）。本仓的注册与分发
 # 直接用这些字段，所以约束必须是 2.2 而不是 2.0——否则 published 构建会
 # 从 registry 拿到没有这些字段的旧版本，编译期才炸。
-flare-grpc-proto = { version = "2.3.0", path = "../flare-grpc-proto" }
+flare-grpc-proto = { version = "2.3.0", path = "../flare-protocol-grpc" }
 
 # Prometheus 指标收集
 prometheus = "0.14"

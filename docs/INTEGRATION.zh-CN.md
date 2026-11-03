@@ -146,7 +146,7 @@ await client.login({ userId, token });   // token 同样来自你的登录接口
 把 bridge / WASM / 存储都装好了，直接拿到可用的 client —— 可以先照着它抄，
 再按自己的运行时替换。
 
-其他平台包见 [`flare-im-core-client-sdk`](../../flare-im-core-client-sdk)：
+其他平台包见 [`flare-im-core-client-sdk`](../../flare-core-sdk)：
 iOS(Swift) / Android(Kotlin) / Flutter(Dart) / 鸿蒙(ArkTS)。
 契约一致，命名按各语言习惯。
 
@@ -220,7 +220,7 @@ WebHook、本地插件。契约与配置方式见 [`flare-capability/README.md`]
 
 ```bash
 # 例子在同级仓：端到端加密的接口面归客户端 SDK。
-cd ../flare-im-core-sdk
+cd ../flare-core-sdk-engine
 cargo run --example e2ee_demo --features "lifecycle-sqlite e2ee"
 ```
 

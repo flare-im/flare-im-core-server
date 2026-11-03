@@ -235,7 +235,7 @@ impl PostgresBaseStorage {
             return Err(flare_server_core::flare_err!(
                 ErrorCode::ConfigurationError,
                 format!(
-                    "PostgreSQL schema mismatch: required table `{table_name}` is missing; re-run flare-im-core/deploy/init.sql"
+                    "PostgreSQL schema mismatch: required table `{table_name}` is missing; re-run flare-core-server/deploy/init.sql"
                 )
             ));
         }
@@ -270,7 +270,7 @@ impl PostgresBaseStorage {
             return Err(flare_server_core::flare_err!(
                 ErrorCode::ConfigurationError,
                 format!(
-                    "PostgreSQL schema mismatch: table `{table_name}` missing columns [{}]; re-run flare-im-core/deploy/init.sql",
+                    "PostgreSQL schema mismatch: table `{table_name}` missing columns [{}]; re-run flare-core-server/deploy/init.sql",
                     missing.join(", ")
                 )
             ));

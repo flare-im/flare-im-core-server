@@ -22,7 +22,7 @@
 启动：
 
 ```bash
-cd flare-im-core/deploy
+cd flare-core-server/deploy
 docker compose -f docker-compose.yml -f docker-compose.nats.yml up -d
 ```
 
@@ -137,7 +137,7 @@ cargo test -p flare-media --lib -- --ignored
 | SDK 核心 | `cd flare-im-core-sdk && rtk cargo test`；`rtk cargo test --features storage-sqlite` | 可靠发送、SQLite 本地存储、sync lifecycle 不回退。 |
 | SDK codegen | `cd flare-im-core-sdk && rtk cargo xtask codegen-check` | sdk-spec、native ABI、生成模板和平台包保持一致。 |
 | 六端一期示例 | Android `assembleDebug`；Flutter `flutter analyze && flutter build apk --debug`；iOS `swift test` + simulator `xcodebuild`；Web typecheck/test/build/Playwright；Tauri typecheck/test/build/cargo check/tauri build；Uni typecheck/test | 一期客户端至少能构建、运行核心业务流，并暴露 SDK 事件/诊断。 |
-| 插件基线 | `cd flare-plugin/flare-strom-sfu && rtk cargo test`；`cd flare-sdk-plugin/flare-sdk-plugin-call && rtk cargo test` | 现有 SFU/server plugin 与 client plugin helper 不被 core/SDK 协议变更拖坏。 |
+| 插件基线 | `cd flare-plugins-commercial/flare-strom-sfu && rtk cargo test`；`cd flare-sdk-plugin/flare-sdk-plugin-call && rtk cargo test` | 现有 SFU/server plugin 与 client plugin helper 不被 core/SDK 协议变更拖坏。 |
 
 当前已验证的 live 端到端基线：
 
@@ -150,7 +150,7 @@ cargo test -p flare-media --lib -- --ignored
 
 ## 消息收发读链路烟测
 
-Edge + Core + Social 全栈起来、并用 `flare-social/scripts/prepare_e2e_fixture.py` 建好隔离租户后执行（参数见 `./scripts/smoke_message_flow.sh --help`）。该脚本验证的是单条消息收发读链路，不是容量压测。它覆盖：
+Edge + Core + Social 全栈起来、并用 `flare-social-server/scripts/prepare_e2e_fixture.py` 建好隔离租户后执行（参数见 `./scripts/smoke_message_flow.sh --help`）。该脚本验证的是单条消息收发读链路，不是容量压测。它覆盖：
 
 - 经 Edge 的 Social 注册、登录、加好友（满足 social 档 PreSend 的好友判定）。
 - 用 Social 登录返回的 IM 令牌经 Edge 调 Core `/api/v1/messages/send`，返回成功及正的会话序号。

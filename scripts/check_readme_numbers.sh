@@ -13,7 +13,7 @@ GREEN='\033[0;32m'; RED='\033[0;31m'; YELLOW='\033[1;33m'; NC='\033[0m'
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 WORKSPACE="$(cd "$ROOT/.." && pwd)"
-CLIENT_SDK="$WORKSPACE/flare-im-core-client-sdk"
+CLIENT_SDK="$WORKSPACE/flare-core-sdk"
 DESIGN="$WORKSPACE/flare-im-design"
 
 missing=""

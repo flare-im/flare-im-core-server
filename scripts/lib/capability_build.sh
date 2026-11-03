@@ -4,7 +4,7 @@
 # produces the same `flare-capability` binary as the open workspace and replaces it there.
 #
 # FLARE_CAPABILITY_PLUGIN_HOST:
-#   auto (default)  build it when ../flare-plugin/flare-plugin-host is checked out, otherwise keep
+#   auto (default)  build it when ../flare-plugins-commercial/flare-plugin-host is checked out, otherwise keep
 #                   the open binary, which refuses plugin.service.dispatch;
 #   1               require it (fail when flare-plugin-host is missing);
 #   0               keep the open binary.
@@ -14,7 +14,7 @@ flare_build_capability_with_plugin_host() {
     local root="$1" target_dir="$2"
     shift 2
     local mode="${FLARE_CAPABILITY_PLUGIN_HOST:-auto}"
-    local host="$root/../flare-plugin/flare-plugin-host/Cargo.toml"
+    local host="$root/../flare-plugins-commercial/flare-plugin-host/Cargo.toml"
     case "$mode" in
         0)
             echo "flare-capability: open build (FLARE_CAPABILITY_PLUGIN_HOST=0), plugin.service.dispatch is refused" >&2

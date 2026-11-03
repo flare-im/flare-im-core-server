@@ -25,7 +25,7 @@ REQUIRED_ENV = ["RUST_MIN_STACK"]
 
 # 按工作区顶层目录名整目录排除的冻结仓。只按「扫描根下的第一级目录名」精确匹配，
 # 同名前缀的新仓（如 flare-im-console-next）与更深层的同名目录照常扫描。
-# flare-im-console：后端已迁到 flare-social/platform/control，本仓只留旧后端树
+# flare-im-console：后端已迁到 flare-social-server/platform/control，本仓只留旧后端树
 # 供 MIG-06 对照，验收后归档只读；不再从它构建镜像，也不改冻结仓。
 FROZEN_REPOS = {"flare-im-console"}
 

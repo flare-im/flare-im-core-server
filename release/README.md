@@ -71,7 +71,7 @@ export FLARE_DOCKER_CARGO_REGISTRY_MIRROR='sparse+https://mirrors.ustc.edu.cn/cr
 ```bash
 # 1) 在开发机构建（跨架构时加 --platform linux/amd64）
 podman build --platform linux/amd64 --build-arg CARGO_BUILD_JOBS=4 \
-  -f flare-im-core/release/Dockerfile -t flare-im-core:<tag> .
+  -f flare-core-server/release/Dockerfile -t flare-im-core:<tag> .
 
 # 2) 导出并推送（631MB 镜像压缩后约 200MB）
 podman save flare-im-core:<tag> | gzip | \
@@ -99,7 +99,7 @@ docker build \
   --build-arg APT_MIRROR=mirrors.aliyun.com \
   --build-arg CARGO_REGISTRY_MIRROR=https://mirrors.aliyun.com/crates.io-index/ \
   --build-arg CARGO_BUILD_JOBS=2 \
-  -f flare-im-core/release/Dockerfile.partial -t flare-im-core:<新tag> .
+  -f flare-core-server/release/Dockerfile.partial -t flare-im-core:<新tag> .
 ```
 
 ⚠️ `BASE_IMAGE` 必须是**同一份源码基线**产出的完整镜像。基线不确定时
@@ -132,7 +132,7 @@ docker build \
   --build-arg APT_MIRROR=mirrors.aliyun.com \
   --build-arg CARGO_REGISTRY_MIRROR=https://mirrors.aliyun.com/crates.io-index/ \
   --build-arg CARGO_BUILD_JOBS=2 \
-  -f flare-im-core/release/Dockerfile -t flare-im-core:dev .
+  -f flare-core-server/release/Dockerfile -t flare-im-core:dev .
 ```
 
 ⚠️ **改了源码却发现镜像里还是旧二进制**：builder 阶段可能整段命中缓存。

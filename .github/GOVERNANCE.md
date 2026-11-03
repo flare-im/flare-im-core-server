@@ -78,7 +78,7 @@ Flare IM 采用**开放核心（Open Core）**模式：**通信开源，身份�
 - `HttpHookTokenValidator` —— 把 token POST 到你自己的接口。**接入自有用户体系
   的入口。**
 
-业务规则同理，`flare-im-core/crates/flare-im-hooks` 提供 9 个扩展点
+业务规则同理，`flare-core-server/crates/flare-im-hooks` 提供 9 个扩展点
 （PreSend / PostSend / Delivery / Recall / MessageRead / MessageReaction /
 ConversationLifecycle / ConversationMember / GetConversationParticipants）。
 

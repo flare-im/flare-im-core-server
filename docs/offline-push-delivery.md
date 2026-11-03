@@ -70,7 +70,7 @@ policy exists. End-to-end product acceptance must verify the policy is installed
 actually denies unauthorized sends. Static route validation still runs before delegation.
 
 The conditional lifecycle is now implemented in Rust and generated bindings; see
-`../../flare-im-core-sdk/docs/native-push-lifecycle.md`. Token/permission callbacks and
+`../../flare-core-sdk-engine/docs/native-push-lifecycle.md`. Token/permission callbacks and
 resume/network recovery have a thin Flutter bridge. No Firebase/APNs plugin or device is
 automatically initialized, and OS channels/background display/badges still need host/device
 integration. Platform's encrypted self-service source and leased publisher are implemented

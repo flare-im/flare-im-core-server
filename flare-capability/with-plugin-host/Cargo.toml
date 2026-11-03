@@ -26,14 +26,14 @@ path = "src/main.rs"
 
 [dependencies]
 flare-capability = { path = ".." }
-flare-plugin-host = { path = "../../../flare-plugin/flare-plugin-host" }
-flare-server-core = { version = "1.0.3", path = "../../../flare-server-core", features = ["grpc"] }
+flare-plugin-host = { path = "../../../flare-plugins-commercial/flare-plugin-host" }
+flare-server-core = { version = "1.0.3", path = "../../../flare-server-runtime", features = ["grpc"] }
 async-trait = "0.1"
 tokio = { version = "1", features = ["full"] }
 tonic = "0.14"
 
 [dev-dependencies]
-flare-grpc-proto = { version = "2.3.0", path = "../../../flare-grpc-proto" }
+flare-grpc-proto = { version = "2.3.0", path = "../../../flare-protocol-grpc" }
 ed25519-dalek = { version = "2", features = ["pkcs8", "pem"] }
 tokio-stream = { version = "0.1", features = ["net"] }
 

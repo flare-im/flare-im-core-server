@@ -313,7 +313,7 @@ def main():
     parser.add_argument('--runtime', choices=['podman'], default='podman')
     parser.add_argument('--core-image', default=IMAGES['core'])
     parser.add_argument('--migrate-image', default=IMAGES['migrate'])
-    parser.add_argument('--sdk-root', type=Path, default=ROOT.parent / 'flare-im-core-sdk')
+    parser.add_argument('--sdk-root', type=Path, default=ROOT.parent / 'flare-core-sdk-engine')
     parser.add_argument('--dry-run', action='store_true')
     args = parser.parse_args()
     images = dict(IMAGES, core=args.core_image, migrate=args.migrate_image)

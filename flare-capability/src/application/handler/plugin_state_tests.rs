@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 
 pub(crate) const POLL_MANIFEST: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
-    "/../../flare-proto/flare-plugin-protocol/tests/fixtures/plugin-ui-v2-manifest.json"
+    "/../../flare-protocol/flare-plugin-protocol/tests/fixtures/plugin-ui-v2-manifest.json"
 ));
 
 /// Bindings with the store's compare-and-set semantics, in memory.

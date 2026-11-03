@@ -25,4 +25,4 @@ ENV CARGO_TARGET_DIR=/cargo-target \
     PROTOC=/usr/bin/protoc \
     PATH=/usr/local/cargo/bin:$PATH
 
-WORKDIR /workspace/flare-im/flare-im-core
+WORKDIR /workspace/flare-im/flare-core-server

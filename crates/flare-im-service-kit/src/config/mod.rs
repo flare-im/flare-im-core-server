@@ -1690,20 +1690,20 @@ fn config_candidates(path: Option<&str>, env_config_path: Option<&str>) -> Vec<P
             .chain([
                 PathBuf::from("config"),
                 PathBuf::from("config.toml"),
-                PathBuf::from("flare-im-core/config"),
+                PathBuf::from("flare-core-server/config"),
             ])
             .collect(),
         Some("./config") => vec![
             PathBuf::from("./config"),
             PathBuf::from("config"),
-            PathBuf::from("flare-im-core/config"),
+            PathBuf::from("flare-core-server/config"),
         ],
         Some(p) => vec![PathBuf::from(p)],
     }
 }
 
 pub fn load_config(path: Option<&str>) -> &'static FlareAppConfig {
-    // 确定配置文件候选路径：优先使用传入路径，再尝试 config / flare-im-core/config（便于从 workspace 根目录运行）
+    // 确定配置文件候选路径：优先使用传入路径，再尝试 config / flare-core-server/config（便于从 workspace 根目录运行）
     //
     // 没传路径时**也要认 FLARE_CONFIG_PATH**。这里曾经只看相对 CWD 的那几个候选，
     // 于是配置有了两个入口、两种行为：
@@ -2545,7 +2545,7 @@ mod tests {
             vec![
                 PathBuf::from("config"),
                 PathBuf::from("config.toml"),
-                PathBuf::from("flare-im-core/config"),
+                PathBuf::from("flare-core-server/config"),
             ]
         );
     }

@@ -2,7 +2,7 @@
 //!
 //! 根据gateway_id路由到对应的Access Gateway，支持单地区/多地区自适应部署。
 //!
-//! 位于 `flare-im-core/src/gateway/router.rs`（IM 核心共享库），
+//! 位于 `flare-core-server/src/gateway/router.rs`（IM 核心共享库），
 //! 被 Push Server、Push Worker 和 API Gateway 复用。
 //!
 //! ## 使用流程

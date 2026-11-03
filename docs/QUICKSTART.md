@@ -48,7 +48,7 @@ it into the gateways, so read it from there:
 ```bash
 export FLARE_TOKEN_SECRET="$(cat logs/.dev-token-secret)"
 
-cd ../flare-server-core
+cd ../flare-server-runtime
 TOKEN=$(cargo run -q --example mint_token -- alice)
 echo "$TOKEN"
 ```

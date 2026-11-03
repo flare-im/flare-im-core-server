@@ -6,10 +6,10 @@ fn event_delivery_primitive_uses_typed_watermark_fields() {
     let root = workspace_root();
     let repo_root = root.parent().expect("flare-im repo root");
 
-    let event_proto = fs::read_to_string(repo_root.join("flare-proto/proto/event.proto"))
+    let event_proto = fs::read_to_string(repo_root.join("flare-protocol/proto/event.proto"))
         .expect("read event proto");
     let access_gateway_proto =
-        fs::read_to_string(repo_root.join("flare-grpc-proto/proto/access_gateway.proto"))
+        fs::read_to_string(repo_root.join("flare-protocol-grpc/proto/access_gateway.proto"))
             .expect("read access gateway proto");
 
     for required in [

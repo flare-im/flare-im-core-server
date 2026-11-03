@@ -68,7 +68,7 @@ def listening(number):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--contract', type=Path, default=ROOT.parent / 'flare-social/contracts/platform/platform-v1.openapi.json')
+    parser.add_argument('--contract', type=Path, default=ROOT.parent / 'flare-social-server/contracts/platform/platform-v1.openapi.json')
     parser.add_argument('--via-social', action='store_true', help='real Social Gateway -> real Core Gateway -> real Conversation, separate owned PG databases')
     args = parser.parse_args()
     spec = json.loads(args.contract.read_text())
@@ -87,7 +87,7 @@ def main():
     for name in ('flare-api-gateway', 'flare-conversation'):
         if not (BIN / name).is_file():
             raise RuntimeError(f'build production binary first: {name}')
-    # The Social gateway: package flare-gateway in flare-social/gateway/flare-gateway.
+    # The Social gateway: package flare-gateway in flare-social-server/gateway/flare-gateway.
     if args.via_social and not (BIN / 'flare-gateway').is_file():
         raise RuntimeError('build production Social Gateway first: flare-gateway')
     db = 'flare_platform_core_test_' + secrets.token_hex(6)
@@ -120,7 +120,7 @@ def main():
         if args.via_social:
             checked(['createdb', *address, social_db])
             social_created = True
-            for migration in sorted((ROOT.parent / 'flare-social/social/migrations').glob('*.sql')):
+            for migration in sorted((ROOT.parent / 'flare-social-server/social/migrations').glob('*.sql')):
                 checked(['psql', *address, '-X', '-d', social_db, '-v', 'ON_ERROR_STOP=1', '-1', '-f', str(migration)])
             social_sql("INSERT INTO flare_tenants(tenant_id,name,status,version) VALUES('app-a','native-a',1,1),('app-b','native-b',1,1); INSERT INTO flare_credential_projection_versions(app_id,version) VALUES('app-a',1),('app-b',1);")
         sql("""

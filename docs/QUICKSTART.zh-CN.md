@@ -44,7 +44,7 @@ Tempo 在 `docker-compose.observability.yml`——真正跑起来之后它们有
 ```bash
 export FLARE_TOKEN_SECRET="$(cat logs/.dev-token-secret)"
 
-cd ../flare-server-core
+cd ../flare-server-runtime
 TOKEN=$(cargo run -q --example mint_token -- alice)
 echo "$TOKEN"
 ```

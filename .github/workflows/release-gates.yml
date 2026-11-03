@@ -47,7 +47,7 @@ jobs:
       # 这一步是补上的（2026-08-20）。这两个 workflow **从建好那天起就没跑过**：
       # 触发条件只有 pull_request，而本项目是直接推 main/dev、不走 PR。
       # 手动 dispatch 一次才发现它们连 `cargo check` 都到不了——
-      # 全部失败在 `failed to read ../flare-core/Cargo.toml`。
+      # 全部失败在 `failed to read ../flare-transport/Cargo.toml`。
       - name: 拉取同级仓库
         working-directory: .
         run: |
@@ -56,10 +56,10 @@ jobs:
             git clone --depth 1 -b "$BR" "$1" "$2" 2>/dev/null \
               || git clone --depth 1 "$1" "$2"
           }
-          clone https://github.com/flare-im/flare-core.git "../flare-core"
-          clone https://github.com/flare-im/flare-proto.git "../flare-proto"
-          clone https://github.com/flare-im/flare-grpc-proto.git "../flare-grpc-proto"
-          clone https://github.com/flare152/flare-server-core.git "../flare-server-core"
+          clone https://github.com/flare-im/flare-transport.git "../flare-transport"
+          clone https://github.com/flare-im/flare-protocol.git "../flare-protocol"
+          clone https://github.com/flare-im/flare-protocol-grpc.git "../flare-protocol-grpc"
+          clone https://github.com/flare-im/flare-server-runtime.git "../flare-server-runtime"
 
       # 与 ci.yml 的「安装构建依赖」保持同一份清单：rdkafka-sys 会现编 librdkafka，
       # 缺 curl / ssl / zlib / sasl 的开发头就挂在 `#include <curl/curl.h>`。

@@ -27,9 +27,9 @@
 
 ### Broker 元数据不是身份
 
-`flare-server-core/flare-core-messaging/src/mq/kafka/consumer.rs::decode_message` 的 topic/key 来自 Kafka record（key 缺失时仍会回退 header），而 NATS `mq/nats/consumer.rs::decode_message` 的 subject 来自 broker、`MessageContext.key` **仅由生产者可写的 `x-message-key` header 重建**。因此 NATS 上不能把 `MessageContext.key` 描述成 broker 强制的分区键；签名可以覆盖该 header 的值并验证一致性，但真正的发布者限制仍必须依赖 NATS 账户/subject ACL 和生产者私钥隔离。Kafka v1 记录必须拒绝真实 key 缺失，不能借 header fallback 冒充 broker key；需要在 MQ 适配层暴露可区分的 broker key 或专用已核验投递元数据。
+`flare-server-runtime/flare-core-messaging/src/mq/kafka/consumer.rs::decode_message` 的 topic/key 来自 Kafka record（key 缺失时仍会回退 header），而 NATS `mq/nats/consumer.rs::decode_message` 的 subject 来自 broker、`MessageContext.key` **仅由生产者可写的 `x-message-key` header 重建**。因此 NATS 上不能把 `MessageContext.key` 描述成 broker 强制的分区键；签名可以覆盖该 header 的值并验证一致性，但真正的发布者限制仍必须依赖 NATS 账户/subject ACL 和生产者私钥隔离。Kafka v1 记录必须拒绝真实 key 缺失，不能借 header fallback 冒充 broker key；需要在 MQ 适配层暴露可区分的 broker key 或专用已核验投递元数据。
 
-`flare-server-core/flare-core-messaging/src/mq/nats/config.rs::default_stream_specs` 的 Push subject 是 `flare.im.push.*`，**不匹配** `flare.im.push.messages.v1` 等五段 subject；`flare-im-core/deploy/kafka-topics.sh` 也只创建旧 topic。`.v1` 命名、stream/topic、retention、容量和 ACL 尚未落地。现有 `flare.im.push.*` 与 `.v1` 不能混用同一 consumer，也不得给裸 backlog 事后补签。
+`flare-server-runtime/flare-core-messaging/src/mq/nats/config.rs::default_stream_specs` 的 Push subject 是 `flare.im.push.*`，**不匹配** `flare.im.push.messages.v1` 等五段 subject；`flare-core-server/deploy/kafka-topics.sh` 也只创建旧 topic。`.v1` 命名、stream/topic、retention、容量和 ACL 尚未落地。现有 `flare.im.push.*` 与 `.v1` 不能混用同一 consumer，也不得给裸 backlog 事后补签。
 
 ## 2. 建议实施顺序（每一步均保持 Push 暂停）
 

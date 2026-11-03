@@ -21,9 +21,9 @@ from unittest.mock import patch
 import flare_migrate as migrate
 
 # Legacy Social tables that shared Core's public schema before the Social database split.
-# Mirrors flare-social/deploy/db/social-tables.json (sorted there, in Social init.sql order here);
+# Mirrors flare-social-server/deploy/db/social-tables.json (sorted there, in Social init.sql order here);
 # the same set is checked below when that sibling exists.
-SOCIAL_TABLE_LIST = migrate.ROOT.parent / "flare-social/deploy/db/social-tables.json"
+SOCIAL_TABLE_LIST = migrate.ROOT.parent / "flare-social-server/deploy/db/social-tables.json"
 SOCIAL_TABLES = (
     "flare_credential_keys", "flare_credential_projection_versions",
     "flare_blocks", "flare_blocks_changes", "flare_blocks_sync", "flare_contact_meta",

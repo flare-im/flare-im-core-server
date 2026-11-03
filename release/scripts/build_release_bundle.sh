@@ -263,8 +263,8 @@ cp "$PROJECT_ROOT/deploy/init.sql" "$package_dir/sql/init.sql"
 # 不打进包，已有部署升级后就永远缺列（曾导致线上 list_conversations 整体 500）。
 mkdir -p "$package_dir/sql/patches"
 cp "$PROJECT_ROOT"/deploy/patches/*.sql "$package_dir/sql/patches/"
-cp -R "$WORKSPACE_ROOT/flare-grpc-proto/proto" "$package_dir/proto/flare-grpc-proto/proto"
-cp -R "$WORKSPACE_ROOT/flare-proto/proto" "$package_dir/proto/flare-proto/proto"
+cp -R "$WORKSPACE_ROOT/flare-protocol-grpc/proto" "$package_dir/proto/flare-grpc-proto/proto"
+cp -R "$WORKSPACE_ROOT/flare-protocol/proto" "$package_dir/proto/flare-proto/proto"
 
 while IFS= read -r bin; do
     src="$target_profile_dir/$bin"

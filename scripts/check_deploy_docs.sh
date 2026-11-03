@@ -56,7 +56,7 @@ OPTIONAL_DOCS=("../README.md" "../README.zh-CN.md")
 declare -a referenced=()
 for d in "${REQUIRED_DOCS[@]}"; do
   [ -f "$d" ] || { note_fail "缺本仓的部署文档：$d"; continue; }
-  # 要连 `../flare-social/` 这样的前缀一起抓：只抓 `deploy/...` 会把业务栈的路径
+  # 要连 `../flare-social-server/` 这样的前缀一起抓：只抓 `deploy/...` 会把业务栈的路径
   # 截成本仓下不存在的路径，然后报一个假的「文件缺失」。
   while IFS= read -r f; do referenced+=("$f"); done < <(
     grep -oE '(\.\./[A-Za-z0-9_-]+/)?deploy/docker-compose[a-z.-]*\.yml' "$d" 2>/dev/null | sort -u
@@ -113,11 +113,11 @@ check_combo "NATS 中间件 + 服务栈 + 本地构建" \
   -f deploy/docker-compose.stack.yml -f deploy/docker-compose.build.yml
 
 # 业务栈是同级仓，缺席时不判红（开源使用者可能只拿了 IM 核）
-if [ -f ../flare-social/deploy/docker-compose.social.yml ]; then
+if [ -f ../flare-social-server/deploy/docker-compose.social.yml ]; then
   check_combo "基础设施 + 服务栈 + 业务服务端" \
     -f deploy/docker-compose.yml -f deploy/docker-compose.nats.yml \
     -f deploy/docker-compose.stack.yml \
-    -f ../flare-social/deploy/docker-compose.social.yml
+    -f ../flare-social-server/deploy/docker-compose.social.yml
 else
   echo "  · 跳过业务栈组合（同级仓 flare-social 不在）"
 fi

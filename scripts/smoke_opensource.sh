@@ -30,7 +30,7 @@ GREEN='\033[0;32m'; RED='\033[0;31m'; YELLOW='\033[1;33m'; NC='\033[0m'
 #
 # 这里不用 `cd ... && pwd`：目录不存在时 cd 失败，SDK_ROOT 会悄悄变成当前目录，
 # 然后 cargo 报一句风马牛不相及的错。宁可当场说清楚缺的是什么。
-SDK_ROOT="${FLARE_SDK_ROOT:-$CORE_ROOT/../flare-im-core-sdk}"
+SDK_ROOT="${FLARE_SDK_ROOT:-$CORE_ROOT/../flare-core-sdk-engine}"
 if [ ! -f "$SDK_ROOT/Cargo.toml" ]; then
   echo -e "${RED}✗ client SDK repo not found: $SDK_ROOT${NC}" >&2
   echo "  The cases live in flare-im-core-sdk. Clone it next to this repo," >&2

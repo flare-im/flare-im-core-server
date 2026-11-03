@@ -44,7 +44,7 @@ docker compose up -d
 # 先启动业务系统 gRPC Hook 服务，并确保它可通过服务发现或固定 endpoint 访问
 
 # 再启动 IM Core（业务系统 Hook 模式）
-cd ../flare-im-core && ./scripts/start_server.sh
+cd ../flare-core-server && ./scripts/start_server.sh
 ```
 
 Hook 配置文件：
@@ -82,7 +82,7 @@ SMOKE_PG_CONTAINER=<postgres 容器名> \
 - 回读：收发双方 `GET {Edge}/api/api/v1/conversations` 中该会话的 `max_seq` 不低于发送序号
 - 持久化：`messages` 有该条记录，`message_write_ledger.write_state` 至少达到 `archive_persisted`
 
-约束：租户只接受 `e2e-<20 位小写十六进制>`（可用 `flare-social/scripts/prepare_e2e_fixture.py` 创建），不接受默认租户 `0`；口令只从 `SMOKE_PASSWORD_FILE`（600 权限）读取或在私有临时目录生成，令牌与口令不进命令行参数、不回显。全部参数见 `./scripts/smoke_message_flow.sh --help`，脚本自检为 `python3 scripts/test_smoke_message_flow.py`。
+约束：租户只接受 `e2e-<20 位小写十六进制>`（可用 `flare-social-server/scripts/prepare_e2e_fixture.py` 创建），不接受默认租户 `0`；口令只从 `SMOKE_PASSWORD_FILE`（600 权限）读取或在私有临时目录生成，令牌与口令不进命令行参数、不回显。全部参数见 `./scripts/smoke_message_flow.sh --help`，脚本自检为 `python3 scripts/test_smoke_message_flow.py`。
 
 带签名的 gRPC 模式（`--mode grpc`，DEP-06）直连单容器 Core 的 Message Ingest，由 `tools/flare-smoke-grpc` 执行：
 
@@ -547,7 +547,7 @@ tail -f /tmp/flare-access-gateway.log | grep -E "(connect|disconnect|login)"
 cd deploy && docker compose up -d
 
 # 2. 启动所有核心服务（包括多网关实例）
-cd ../flare-im-core
+cd ../flare-core-server
 ./scripts/start_multi_gateway.sh
 
 # 3. 等待服务启动（约15秒）
@@ -567,7 +567,7 @@ cargo run --example chatroom_client -- user2
 cd deploy && docker compose up -d
 
 # 2. 启动所有核心服务（包括多网关实例）
-cd ../flare-im-core
+cd ../flare-core-server
 ./scripts/start_multi_gateway.sh
 
 # 3. 等待服务启动（约15秒）

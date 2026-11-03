@@ -6,7 +6,7 @@
 #   FLARE_HOOKS_PROFILE=social ./scripts/start_server.sh
 #
 # 前置条件：flare-social-hook 已启动并在 Consul 注册为 flare-social-hook
-#   ../flare-social/scripts/start_social.sh
+#   ../flare-social-server/scripts/start_social.sh
 
 [[pre_send]]
 name = "social-policy-pre-send"

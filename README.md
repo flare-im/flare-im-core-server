@@ -7,7 +7,7 @@ sync, offline push, end-to-end encryption — the parts you would rather not wri
 again, already written and auditable.
 
 ```bash
-git clone … && cd flare-im-core
+git clone … && cd flare-core-server
 docker compose -f deploy/docker-compose.yml -f deploy/docker-compose.nats.yml up -d
 ./scripts/start_server.sh && ./scripts/smoke_opensource.sh
 ```
@@ -24,7 +24,7 @@ The same suite runs against a full stack every night in CI (the Nightly E2E badg
 So "6/6 passed" is not a screenshot from one lucky run; it is a claim that gets
 re-verified daily.
 
-[![Nightly E2E](https://github.com/flare-im/flare-im-core/actions/workflows/nightly-e2e.yml/badge.svg)](https://github.com/flare-im/flare-im-core/actions/workflows/nightly-e2e.yml)
+[![Nightly E2E](https://github.com/flare-im/flare-core-server/actions/workflows/nightly-e2e.yml/badge.svg)](https://github.com/flare-im/flare-core-server/actions/workflows/nightly-e2e.yml)
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache--2.0-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-1.94.1%2B-orange.svg)](https://www.rust-lang.org/)
 

@@ -1,7 +1,7 @@
 //! 接入 token 签发与刷新（`/api/v1/auth/tokens`）。
 //!
 //! 生命周期实现在 `flare_server_core::auth::issuer`，这里只做：入站鉴权（app 凭据 / 联调开关 /
-//! bearer）、参数校验、错误映射。见 `flare-im-core/docs/AUTH-TOKEN-ISSUANCE.zh-CN.md`。
+//! bearer）、参数校验、错误映射。见 `flare-core-server/docs/AUTH-TOKEN-ISSUANCE.zh-CN.md`。
 
 use std::sync::Arc;
 

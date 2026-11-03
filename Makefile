@@ -149,7 +149,7 @@ run-media:
 # With flare-plugin-host checked out, run the build that links the plugin service router
 # (flare-capability/with-plugin-host); FLARE_CAPABILITY_PLUGIN_HOST=0 or no checkout runs the open one.
 run-flare-capability:
-	@if [ -f ../flare-plugin/flare-plugin-host/Cargo.toml ] && [ "$${FLARE_CAPABILITY_PLUGIN_HOST:-auto}" != 0 ]; then \
+	@if [ -f ../flare-plugins-commercial/flare-plugin-host/Cargo.toml ] && [ "$${FLARE_CAPABILITY_PLUGIN_HOST:-auto}" != 0 ]; then \
 		$(CARGO) run --manifest-path flare-capability/with-plugin-host/Cargo.toml --bin flare-capability; \
 	else \
 		$(CARGO) run -p flare-capability --bin flare-capability; \
