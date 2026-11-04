@@ -114,6 +114,33 @@ pub async fn build_gateway_router_from_app_config(
     access_gateway_service_name: &str,
     static_fallback: Option<String>,
 ) -> Result<Arc<GatewayRouter>, Box<dyn std::error::Error + Send + Sync>> {
+    let router = build_gateway_router_without_lease(
+        app_config,
+        access_gateway_service_name,
+        static_fallback,
+    )
+    .await?;
+    // 网关租约与 Online 会话同在一个 Redis；找得到就挂探针，宕机网关上的设备按离线处理。
+    // 找不到（没配会话 Redis）就不查租约，路由行为与以前一致。
+    let Some(url) = crate::gateway::lease::session_redis_url(app_config) else {
+        tracing::info!("Online session redis not configured; gateway lease checks disabled");
+        return Ok(router);
+    };
+    match crate::gateway::lease::GatewayLeaseProbe::from_redis_url(&url) {
+        Ok(probe) => router.attach_lease_probe(Arc::new(probe)),
+        Err(error) => tracing::warn!(
+            %error,
+            "invalid Online session redis url; gateway lease checks disabled"
+        ),
+    }
+    Ok(router)
+}
+
+async fn build_gateway_router_without_lease(
+    app_config: &FlareAppConfig,
+    access_gateway_service_name: &str,
+    static_fallback: Option<String>,
+) -> Result<Arc<GatewayRouter>, Box<dyn std::error::Error + Send + Sync>> {
     match create_discover_from_config(app_config, access_gateway_service_name).await? {
         Some(discover_lb) => {
             let discover_filter =

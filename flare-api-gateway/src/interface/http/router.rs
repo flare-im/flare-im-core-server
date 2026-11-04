@@ -409,6 +409,15 @@ async fn route_not_found() -> HttpApiError {
     HttpApiError::not_found("route not found")
 }
 
+/// 挂上就绪探针 `GET /readyz`：启动装配完成且依赖检查通过才 200，进入停机就 503
+/// （`/health` 只说明进程活着）。挂在全部中间件之外：探针不计限流、不走鉴权。
+pub(crate) fn with_readiness_probe(
+    router: Router,
+    readiness: Arc<flare_im_service_kit::health::Readiness>,
+) -> Router {
+    router.merge(flare_im_service_kit::health::readyz_router(readiness))
+}
+
 #[cfg(test)]
 #[path = "router_media_tests.rs"]
 mod media_tests;
@@ -546,5 +555,31 @@ mod api_docs_tests {
         let (status, _, body) = get_path("/health").await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(body, b"OK");
+    }
+
+    /// `/readyz`：启动完成才 200，进入停机转 503；`/health` 不受影响。
+    #[tokio::test]
+    async fn readyz_is_ready_after_startup_and_503_once_draining() {
+        let readiness = Arc::new(flare_im_service_kit::health::Readiness::default());
+        let app = with_readiness_probe(
+            compose_router(Router::new().route("/api/v1/presence/stub", get(|| async { "stub" }))),
+            readiness.clone(),
+        );
+        let status = |path: &'static str| {
+            let app = app.clone();
+            async move {
+                app.oneshot(Request::get(path).body(Body::empty()).unwrap())
+                    .await
+                    .unwrap()
+                    .status()
+            }
+        };
+
+        assert_eq!(status("/readyz").await, StatusCode::SERVICE_UNAVAILABLE);
+        readiness.mark_ready();
+        assert_eq!(status("/readyz").await, StatusCode::OK);
+        readiness.mark_draining();
+        assert_eq!(status("/readyz").await, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(status("/health").await, StatusCode::OK);
     }
 }

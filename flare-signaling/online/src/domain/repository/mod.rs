@@ -136,6 +136,46 @@ pub trait ConversationRepository: Send + Sync {
     ) -> Result<()>;
 }
 
+/// 网关连接索引里一条会话当前的归属（读自 `session:{tenant}:{user}` 的那个字段）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionOwner {
+    pub gateway_id: String,
+    /// 会话登记时刻（毫秒）。
+    pub created_at_ms: i64,
+}
+
+/// 网关宕机清扫所需的存储操作：单例锁、已知网关与租约、网关连接索引
+/// （约定见 `flare_im_service_kit::gateway::lease`）。
+pub trait GatewaySweepRepository: Send + Sync {
+    /// 抢占或续期清扫器单例锁（`SET NX PX` + 持有者续期）；返回本实例是否持有。
+    async fn hold_sweeper_lock(&self, token: &str, ttl: std::time::Duration) -> Result<bool>;
+    /// 释放自己持有的锁（停机时），别人的锁不动。
+    async fn release_sweeper_lock(&self, token: &str) -> Result<()>;
+    /// `gw:known` 里的全部网关（含重启遗留的孤儿网关）。
+    async fn known_gateways(&self) -> Result<Vec<String>>;
+    /// 逐个网关的租约是否存在，顺序与入参一致。
+    async fn leases_present(&self, gateway_ids: &[String]) -> Result<Vec<bool>>;
+    /// 分批读取网关连接索引：`(next_cursor, members)`，`next_cursor == 0` 表示读完。
+    async fn scan_gateway_connections(
+        &self,
+        gateway_id: &str,
+        cursor: u64,
+        count: usize,
+    ) -> Result<(u64, Vec<String>)>;
+    /// 成员指向的会话现在归谁；会话已不存在返回 `None`。
+    async fn session_owner(
+        &self,
+        tenant_id: &str,
+        user_id: &str,
+        session_field: &str,
+    ) -> Result<Option<SessionOwner>>;
+    /// 从网关连接索引里去掉一个已无对应会话（或无法解析）的成员。
+    async fn forget_gateway_connection(&self, gateway_id: &str, member: &str) -> Result<()>;
+    /// 租约仍缺失时删除网关连接索引并移出 `gw:known`（同一脚本内判定）；网关已带着同一 ID
+    /// 回来时不动，返回 `false`。
+    async fn retire_gateway(&self, gateway_id: &str) -> Result<bool>;
+}
+
 /// `tenant:sessions:{tenant}` 的 v2 成员编码：`v2:{user-byte-length}:{user}:{device}`。
 /// User/device IDs may contain `:`, so splitting on the first delimiter is unsafe.
 pub fn tenant_session_member_prefix(user_id: &str) -> String {

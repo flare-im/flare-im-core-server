@@ -95,10 +95,12 @@ impl RedisConversationRepository {
                 let _: Option<String> = redis::Script::new(REMOVE_FOR_KICK)
                     .key(Self::connection_key(&t.app, &t.user))
                     .key(Self::tenant_sessions_key(&t.app))
+                    .key(gateway_conns_key(&t.record.gateway_id))
                     .arg(&t.record.conversation_id)
                     .arg(&t.app)
                     .arg(tenant_session_member_prefix(&t.user))
                     .arg(&t.record.connection_id)
+                    .arg(gateway_member(&t.app, &t.user, &t.record.conversation_id))
                     .invoke_async(&mut conn)
                     .await?;
                 return Ok(());

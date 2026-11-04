@@ -263,6 +263,28 @@ GROUP BY write_state;
 - WAL pending 不持续增长。
 - MQ DLQ 没有新增不可恢复消息。
 
+## 网关节点故障与摘流
+
+- **网关 ID**：`GATEWAY_ID`（或 `services.access_gateway.gateway_id`）是服务发现实例 ID、Online 会话里的
+  `gateway_id` 与网关租约的键。`FLARE_ENV=production` 时缺失拒绝启动，取主机名或 Pod 名；其余环境缺省为
+  `gateway-{主机名}-{WS 端口}`，重启不变。`GATEWAY_REGION` / `GATEWAY_ZONE` 写进服务发现实例元数据（Consul 为
+  `Meta`）与租约。
+- **租约**：网关每 5s 在 Online 会话所在的 Redis 写 `gw:lease:{gateway_id}`（TTL 15s）并登记 `gw:known`；Online
+  的准入与断开脚本在同一事务里维护 `gw:conns:{gateway_id}`。没配 Online 会话 Redis（`SIGNALING_ONLINE_REDIS_URL`
+  或 `services.signaling_online.redis`）时不启用，行为与以前一致。
+- **清扫**：signaling-online 持单例锁（`gw:sweeper:lock`）的实例每 5s 检查租约，缺失持续 6s 即按正常断开移除该
+  网关的连接（presence 原因 `gateway_lost`），计入 `flare_online_sweeper_removed_total{gateway_id}`。网关宕机到
+  在线状态正确不超过 30s；会话 TTL（600s）是第二道保险。网关重启时把上一个进程遗留的连接集合改名为
+  `{gateway_id}#orphan-{启动串}` 交给清扫器。
+- **推送**：push-worker 与网关间广播投递前查租约（本地缓存 2s），租约缺失的网关上的设备不再投递、不再 Nack 重投；
+  Redis 读不到时照常投递。在清扫完成前的窗口里，这些设备不会改走离线推送（离线与否由 push-server 依据 Online
+  在线状态决定）。
+- **就绪探针**：api-gateway 在业务端口、signaling-gateway 在指标端口提供 `GET /readyz`：启动完成且
+  `<SERVICE>_HEALTH_TARGETS` 声明的依赖可达才 200，收到停机信号即 503；signaling-gateway 的指标端口保持到长连接
+  关完再停，负载均衡在排空期间探测到的是 503 而不是连接被拒。`/health` 仍只说明进程活着。
+- **服务发现**：Consul 发现默认只返回健康检查通过的实例（`CONSUL_PASSING_ONLY` 未设即 `true`，排查时可设
+  `false`）。
+
 ## 观测指标
 
 | 指标 | 说明 |
@@ -275,6 +297,7 @@ GROUP BY write_state;
 | push online/offline backlog | 推送堆积。 |
 | WAL pending count | 恢复压力。 |
 | `message_write_ledger` | durable write 状态事实表。 |
+| `flare_online_sweeper_removed_total` | 因所在网关租约缺失被清扫器移除的连接数（按 `gateway_id`）。 |
 
 低基数要求：
 
@@ -341,6 +364,7 @@ exporter，目前不在面板和告警里。
 | Broker outage | 暂停 NATS/Kafka 或阻断 publish ACK。 | WAL/pending handoff 生效，send ACK durability 不虚报，恢复后 storage 收敛。 |
 | Storage outage | 暂停 PostgreSQL 或耗尽连接池。 | storage writer retry/DLQ 生效，ledger 不进入错误成功态，客户端可见失败或等待语义明确。 |
 | Redis/seq outage | 暂停 Redis 或 seq allocator 依赖。 | 发送被明确拒绝或进入可恢复路径，不产生重复 seq。 |
+| Gateway crash | `kill -9` 一台 signaling-gateway。 | 30s 内该网关用户的 presence 转离线、`flare_online_sweeper_removed_total` 增长、`gw:known` 移除该网关；push-worker 不对它反复 Nack。 |
 | Gateway reconnect storm | 让 1k+ SDK 客户端同时断线重连。 | heartbeat timeout、route refresh、auth retry 不放大 broker/storage 压力。 |
 | Duplicate send retry | 固定 `clientMsgId` 重放同一发送。 | ingest 和 storage writer 均返回同一 durable outcome，不产生第二条消息。 |
 | Out-of-order push | 人为延迟/重排 push events。 | SDK 通过 conversation seq 和 sync repair 收敛，UI 不显示不可去重重复消息。 |

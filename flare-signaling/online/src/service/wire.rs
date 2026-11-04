@@ -7,14 +7,15 @@ use std::sync::Arc;
 use redis::Client;
 
 use crate::application::handlers::{
-    OnlineCommandHandler, OnlinePresenceWatcherHandler, OnlineQueryHandler, OnlineUserHandler,
+    GatewaySweeper, OnlineCommandHandler, OnlinePresenceWatcherHandler, OnlineQueryHandler,
+    OnlineUserHandler,
 };
 use crate::config::OnlineConfig;
 use crate::domain::connection_event_publisher::NoopConnectionEventPublisher;
 use crate::domain::service::{OnlineStatusService, SubscriptionService, UserService};
 use crate::infrastructure::persistence::redis::{
-    RedisConversationRepository, RedisPresencePublisher, RedisPresenceWatcher,
-    RedisSubscriptionRepository,
+    RedisConversationRepository, RedisGatewaySweepRepository, RedisPresencePublisher,
+    RedisPresenceWatcher, RedisSubscriptionRepository,
 };
 use crate::interface::grpc::OnlineHandler;
 use flare_im_service_kit::tenant_runtime::TenantRuntimeCache;
@@ -29,9 +30,19 @@ pub type WiredOnlineHandler = OnlineHandler<
     RedisPresenceWatcher,
 >;
 
+/// 单态化后的网关宕机清扫器
+pub type WiredGatewaySweeper = GatewaySweeper<
+    RedisGatewaySweepRepository,
+    RedisConversationRepository,
+    RedisSubscriptionRepository,
+    RedisPresencePublisher,
+>;
+
 /// 应用上下文 - 包含所有已初始化的服务
 pub struct ApplicationContext {
     pub online_handler: WiredOnlineHandler,
+    /// 网关宕机清扫器（单例锁保证多实例只有一个在扫）；bootstrap 把它挂进运行时。
+    pub gateway_sweeper: WiredGatewaySweeper,
     pub command_delivery: Option<(
         Arc<RedisConversationRepository>,
         Arc<sqlx::PgPool>,
@@ -149,6 +160,15 @@ pub async fn initialize(
         subscription_domain_service.clone(),
     ));
 
+    // 网关宕机清扫：与会话同一个 Redis（网关租约与连接索引都在这里），移除走与正常断开同一个命令处理器。
+    let gateway_sweeper = GatewaySweeper::new(
+        Arc::new(RedisGatewaySweepRepository::new(
+            redis_client.as_ref().clone(),
+        )),
+        command_handler.clone(),
+        Arc::new(flare_im_service_kit::metrics::OnlineSweeperMetrics::new()),
+    );
+
     // Query handler: 直接使用基础设施层（查询侧不经过领域层）
     let query_handler = Arc::new(OnlineQueryHandler::new(conversation_repository.clone()));
 
@@ -194,6 +214,7 @@ pub async fn initialize(
 
     Ok(ApplicationContext {
         online_handler,
+        gateway_sweeper,
         command_delivery,
     })
 }

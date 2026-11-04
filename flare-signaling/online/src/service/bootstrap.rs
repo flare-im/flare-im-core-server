@@ -54,7 +54,18 @@ impl ApplicationBootstrap {
         );
 
         let address_clone = address;
-        let mut runtime = runtime_plan.service_runtime();
+        let gateway_sweeper = context.gateway_sweeper;
+        let mut runtime = runtime_plan.service_runtime().add_spawn_with_shutdown(
+            "online-gateway-sweeper",
+            move |shutdown| async move {
+                gateway_sweeper
+                    .run(async {
+                        let _ = shutdown.await;
+                    })
+                    .await;
+                Ok(())
+            },
+        );
         if let Some((repository, pool, publisher)) = context.command_delivery {
             runtime = runtime.add_spawn_with_shutdown(
                 "online-command-delivery",

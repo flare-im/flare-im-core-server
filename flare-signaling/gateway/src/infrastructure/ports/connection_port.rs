@@ -462,6 +462,7 @@ pub(crate) fn core_info_to_domain(
         {
             metadata.insert("model".to_string(), model.clone());
         }
+        merge_client_build_metadata(&mut metadata, &device_info.metadata);
     }
     let tenant_id = core_info
         .metadata
@@ -473,6 +474,40 @@ pub(crate) fn core_info_to_domain(
         info = info.with_platform(p);
     }
     info.with_metadata(metadata)
+}
+
+/// 客户端在 CONNECT 的 `DeviceInfo.metadata` 里带构建号（`app_build`）与分发渠道（`distribution`），
+/// 用于按版本排查连接问题。只取这两个键并校验格式：其余客户端自报的键不进连接元数据（里面还有
+/// 租户等服务端写入的键，不能被客户端覆盖），连接元数据里已有同名键时也不覆盖。
+fn merge_client_build_metadata(
+    metadata: &mut HashMap<String, String>,
+    device_metadata: &HashMap<String, String>,
+) {
+    for (key, valid) in [
+        ("app_build", is_app_build as fn(&str) -> bool),
+        ("distribution", is_distribution),
+    ] {
+        if !metadata.contains_key(key)
+            && let Some(value) = device_metadata.get(key).map(|value| value.trim())
+            && valid(value)
+        {
+            metadata.insert(key.to_string(), value.to_string());
+        }
+    }
+}
+
+/// 构建号：十进制整数字符串（最多 20 位，装得下 u64）。
+fn is_app_build(value: &str) -> bool {
+    (1..=20).contains(&value.len()) && value.bytes().all(|byte| byte.is_ascii_digit())
+}
+
+/// 分发渠道：短标识（如 `appstore`、`testflight`、`enterprise`），只允许字母数字与 `._-`，
+/// 防止客户端往日志里塞换行或超长串。
+fn is_distribution(value: &str) -> bool {
+    (1..=64).contains(&value.len())
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
 }
 
 /// Online 登录失败的网关侧错误。租户闸门的拒绝（PERMISSION_DENIED，`TENANT_UNAVAILABLE`）保留为
@@ -518,6 +553,46 @@ mod static_route_tests {
             assert_eq!(error.code(), Some(ErrorCode::ServiceUnavailable));
             assert_eq!(error.reason(), "signaling login failed");
         }
+    }
+
+    /// 构建号与分发渠道从 DeviceInfo.metadata 带进连接元数据；格式不对的、其他键、以及会覆盖已有
+    /// 键的都不带。
+    #[test]
+    fn client_build_and_distribution_enter_connection_metadata() {
+        let device: HashMap<String, String> = [
+            ("app_build", " 20261104 "),
+            ("distribution", "testflight"),
+            ("tenant_id", "spoofed"),
+        ]
+        .into_iter()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect();
+        let mut metadata = HashMap::from([("tenant_id".to_string(), "acme".to_string())]);
+        merge_client_build_metadata(&mut metadata, &device);
+        assert_eq!(
+            metadata.get("app_build").map(String::as_str),
+            Some("20261104")
+        );
+        assert_eq!(
+            metadata.get("distribution").map(String::as_str),
+            Some("testflight")
+        );
+        assert_eq!(metadata.get("tenant_id").map(String::as_str), Some("acme"));
+
+        let invalid: HashMap<String, String> = [
+            ("app_build", "1.2.3"),
+            ("distribution", "app store\nforged=1"),
+        ]
+        .into_iter()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect();
+        let mut metadata = HashMap::new();
+        merge_client_build_metadata(&mut metadata, &invalid);
+        assert!(metadata.is_empty(), "{metadata:?}");
+
+        let mut existing = HashMap::from([("app_build".to_string(), "7".to_string())]);
+        merge_client_build_metadata(&mut existing, &device);
+        assert_eq!(existing.get("app_build").map(String::as_str), Some("7"));
     }
 
     #[test]

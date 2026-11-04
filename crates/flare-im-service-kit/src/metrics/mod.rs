@@ -290,6 +290,63 @@ pub fn attach_metrics_endpoint(
     })
 }
 
+/// 同一个监听上再挂 `GET /readyz`（见 [`crate::health::Readiness`]）。
+///
+/// 收到停机信号后先把就绪状态转为排空（`/readyz` 回 503），等 `drained` 完成（进程关完连接）
+/// 再停监听：排空期间负载均衡的探测拿到的是 503，而不是连接被拒。没有独立 HTTP 端口的进程
+/// （如信令网关）借指标端口暴露就绪探针。
+pub fn attach_metrics_endpoint_with_readiness<D>(
+    runtime: ServiceRuntime,
+    service_name: &str,
+    config: MetricsEndpointConfig,
+    readiness: std::sync::Arc<crate::health::Readiness>,
+    drained: D,
+) -> ServiceRuntime
+where
+    D: std::future::Future<Output = ()> + Send + 'static,
+{
+    if !config.enabled {
+        return runtime;
+    }
+    record_service_identity(service_name);
+    runtime.add_spawn_with_shutdown(format!("{service_name}-metrics"), move |shutdown_rx| {
+        serve_metrics_and_readiness(config, readiness, shutdown_rx, drained)
+    })
+}
+
+async fn serve_metrics_and_readiness<D>(
+    config: MetricsEndpointConfig,
+    readiness: std::sync::Arc<crate::health::Readiness>,
+    shutdown_rx: oneshot::Receiver<()>,
+    drained: D,
+) -> std::result::Result<(), Box<dyn std::error::Error + Send + Sync>>
+where
+    D: std::future::Future<Output = ()> + Send + 'static,
+{
+    let address = config.socket_addr()?;
+    let path = normalize_metrics_path(config.path);
+    let app = Router::new()
+        .route(&path, get(metrics_handler))
+        .merge(crate::health::readyz_router(readiness.clone()));
+    let listener = TcpListener::bind(address).await?;
+
+    tracing::info!(
+        %address,
+        path = %path,
+        "Prometheus metrics and /readyz endpoint listening"
+    );
+
+    axum::serve(listener, app)
+        .with_graceful_shutdown(async move {
+            let _ = shutdown_rx.await;
+            readiness.mark_draining();
+            drained.await;
+        })
+        .await?;
+
+    Ok(())
+}
+
 /// 存储写入服务指标
 pub struct StorageWriterMetrics {
     /// 消息持久化总数
@@ -492,6 +549,43 @@ pub fn fanout_elapsed_secs(now_ms: i64, ingestion_ts_ms: i64) -> Option<f64> {
     }
     let elapsed = now_ms - ingestion_ts_ms;
     (elapsed >= 0).then(|| elapsed as f64 / 1000.0)
+}
+
+/// Signaling Online 网关清扫器指标。
+///
+/// `gateway_id` 标签是真实网关 ID（重启遗留的孤儿集合也记在原网关名下），基数等于网关节点数。
+pub struct OnlineSweeperMetrics {
+    /// 因所在网关租约缺失而被清掉的连接数。
+    pub removed_total: IntCounterVec,
+}
+
+impl OnlineSweeperMetrics {
+    pub fn new() -> Self {
+        let removed_total = IntCounterVec::new(
+            Opts::new(
+                "flare_online_sweeper_removed_total",
+                "Online connections removed because their access gateway lost its lease",
+            ),
+            &["gateway_id"],
+        )
+        .expect("Failed to create flare_online_sweeper_removed_total metric");
+        let _ = REGISTRY.register(Box::new(removed_total.clone()));
+        Self { removed_total }
+    }
+
+    pub fn record_removed(&self, gateway_id: &str, count: u64) {
+        if count > 0 {
+            self.removed_total
+                .with_label_values(&[gateway_id])
+                .inc_by(count);
+        }
+    }
+}
+
+impl Default for OnlineSweeperMetrics {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 /// Message Orchestrator send-path 指标。

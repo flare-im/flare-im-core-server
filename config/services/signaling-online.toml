@@ -10,7 +10,8 @@
 redis = "conversation_store"
 
 # 在线状态配置
-online_ttl_seconds = 3600
+# 会话 TTL 是网关宕机清扫（网关租约 + 清扫器）之外的第二道保险；活连接由心跳续期（远小于 600s）
+online_ttl_seconds = 600
 presence_prefix = "presence:user"
 
 # 租户在线索引 tenant:sessions:{tenant}（SET of "{user}:{device}"）与 session:{user} 同 TTL 续期；

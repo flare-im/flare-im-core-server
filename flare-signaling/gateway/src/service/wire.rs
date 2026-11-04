@@ -5,7 +5,6 @@
 use std::sync::Arc;
 
 use flare_server_core::error::AnyhowContext;
-use uuid::Uuid;
 
 use crate::application::handlers::{ConnectionHandler, ConnectionQueryHandler, PushHandler};
 use crate::config::{AccessGatewayConfig, PortConfig};
@@ -42,6 +41,9 @@ pub struct ApplicationContext {
     pub push_domain_service: Arc<PushDomainService>,
     pub gateway_id: String,
     pub region: Option<String>,
+    pub zone: Option<String>,
+    /// 网关租约续期器（没配 Online 会话 Redis 时为 `None`）；startup 把续租循环挂进运行时。
+    pub lease: Option<Arc<crate::service::gateway_lease::GatewayLeaseWriter>>,
     /// 指标端点配置。带进上下文是为了让 startup 能真正起 serve_prometheus_metrics
     /// —— 网关此前只注册指标、从不暴露。
     pub metrics_config: flare_im_service_kit::metrics::MetricsEndpointConfig,
@@ -62,16 +64,17 @@ pub async fn initialize(
     // 1. 加载配置
     let access_config = Arc::new(AccessGatewayConfig::from_app_config(app_config)?);
 
-    // 2. 获取 gateway_id 和 region
-    let gateway_id = access_config
-        .gateway_id
-        .clone()
-        .unwrap_or_else(|| format!("gateway-{}", &Uuid::new_v4().to_string()[..8]));
+    // 2. 获取 gateway_id、region 与 zone。ID 必须稳定：生产缺失拒绝启动，其余环境取主机名 + WS 端口。
+    let gateway_id = access_config.resolve_gateway_id(port_config.ws_port)?;
     let region = access_config.region.clone();
+    let zone = access_config.zone.clone();
 
     info!(gateway_id = %gateway_id, "Gateway initialized");
     if let Some(ref r) = region {
         info!(region = %r, "Gateway region configured");
+    }
+    if let Some(ref z) = zone {
+        info!(zone = %z, "Gateway zone configured");
     }
 
     // 3. 初始化指标
@@ -80,6 +83,41 @@ pub async fn initialize(
 
     // 4. 构建连接管理器
     let connection_manager = Arc::new(ConnectionManager::new());
+
+    // 4a. 网关租约：必须在长连接服务器开始接受连接（第 13 步）之前，把上一个进程遗留的连接集合
+    // 交给 Online 清扫器、并写下第一份租约。没配 Online 会话 Redis 时不启用，行为与以前一致。
+    let lease = match flare_im_service_kit::gateway::lease::session_redis_url(app_config) {
+        Some(url) => {
+            let counted = connection_manager.clone();
+            match crate::service::gateway_lease::GatewayLeaseWriter::open(
+                &url,
+                gateway_id.clone(),
+                region.clone(),
+                zone.clone(),
+                Arc::new(move || counted.connection_count() as u64),
+            ) {
+                Ok(writer) => {
+                    if let Err(error) = writer.adopt_previous_incarnation().await {
+                        tracing::warn!(%error, "previous gateway connections not handed to the sweeper; they expire with the session TTL");
+                    }
+                    if let Err(error) = writer.renew().await {
+                        tracing::warn!(%error, "initial gateway lease write failed; renewal keeps retrying");
+                    }
+                    Some(Arc::new(writer))
+                }
+                Err(error) => {
+                    tracing::warn!(%error, "invalid Online session redis url; gateway lease disabled");
+                    None
+                }
+            }
+        }
+        None => {
+            tracing::warn!(
+                "Online session redis not configured; gateway lease disabled (dead-gateway sessions expire with the session TTL)"
+            );
+            None
+        }
+    };
 
     // 4b. 撤销即断：若配了 token_store，订阅 kick 频道，收到撤销的 user_id 就关本地该用户连接。
     if let Some(redis_url) = access_config.token_store_redis_url.clone() {
@@ -335,5 +373,7 @@ pub async fn initialize(
         push_domain_service: push_domain_service.clone(),
         gateway_id,
         region,
+        zone,
+        lease,
     })
 }

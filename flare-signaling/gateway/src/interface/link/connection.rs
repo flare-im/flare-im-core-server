@@ -16,7 +16,7 @@ use crate::application::handlers::{ConnectionHandler, SendHandler};
 use crate::infrastructure::error::server_error_to_core;
 
 /// Minimum interval between presence-refresh RPCs for a single connection.
-/// Presence TTL (signaling-online `online_ttl_seconds`, default 3600s) is far larger, so a
+/// Presence TTL (signaling-online `online_ttl_seconds`, default 600s) is far larger, so a
 /// short throttle keeps presence alive with wide margin while collapsing the per-frame flood.
 const REFRESH_THROTTLE: Duration = Duration::from_secs(10);
 

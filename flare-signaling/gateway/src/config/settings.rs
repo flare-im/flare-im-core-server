@@ -43,6 +43,9 @@ pub struct AccessGatewayConfig {
     // 跨地区网关路由配置
     pub gateway_id: Option<String>,
     pub region: Option<String>,
+    /// 所在可用区（`GATEWAY_ZONE` > `services.access_gateway.zone`），与 region 一起写进服务发现
+    /// 实例元数据与网关租约。
+    pub zone: Option<String>,
     // 压缩和加密配置
     pub compression_algorithm: Option<String>,
     pub enable_encryption: bool,
@@ -169,6 +172,11 @@ impl AccessGatewayConfig {
         let region = std::env::var("GATEWAY_REGION")
             .ok()
             .or_else(|| service.region.clone());
+
+        let zone = std::env::var("GATEWAY_ZONE")
+            .ok()
+            .and_then(non_empty)
+            .or_else(|| service.zone.clone().and_then(non_empty));
 
         // 压缩算法配置（支持环境变量覆盖）
         let compression_algorithm = std::env::var("GATEWAY_COMPRESSION_ALGORITHM")
@@ -303,6 +311,7 @@ impl AccessGatewayConfig {
             use_ack_report,
             gateway_id,
             region,
+            zone,
             compression_algorithm,
             enable_encryption,
             encryption_key,
@@ -334,6 +343,71 @@ impl AccessGatewayConfig {
             tenant_burst: self.sync_pull_tenant_burst,
         }
     }
+
+    /// 本网关的稳定 ID（见 [`resolve_gateway_id`]），环境与主机名取自进程环境。
+    pub fn resolve_gateway_id(&self, ws_port: u16) -> Result<String> {
+        resolve_gateway_id(
+            self.gateway_id.as_deref(),
+            std::env::var("FLARE_ENV").ok().as_deref(),
+            local_hostname().as_deref(),
+            ws_port,
+        )
+    }
+}
+
+/// 网关 ID 是服务发现实例 ID、Online 会话里的 `gateway_id`、网关租约与连接索引的键。以前缺省时
+/// 每次启动随机生成：进程一重启 ID 就变，旧 ID 名下的会话与注册项再也没人认领，只能等 TTL。
+///
+/// - 显式配置（`GATEWAY_ID` / `services.access_gateway.gateway_id`）优先；
+/// - `FLARE_ENV=production` 时必须显式配置，缺失拒绝启动——生产节点的 ID 应由编排给出（主机名 /
+///   Pod 名），不能依赖进程环境碰巧有的主机名；
+/// - 其余环境取 `gateway-{主机名}-{WS 端口}`：同一台机器、同一端口重启 ID 不变，一机多网关靠端口区分。
+pub fn resolve_gateway_id(
+    configured: Option<&str>,
+    environment: Option<&str>,
+    hostname: Option<&str>,
+    ws_port: u16,
+) -> Result<String> {
+    if let Some(configured) = configured.map(str::trim).filter(|id| !id.is_empty()) {
+        return Ok(configured.to_string());
+    }
+    if environment.is_some_and(|env| env.trim().eq_ignore_ascii_case("production")) {
+        return Err(config_error(
+            "GATEWAY_ID (or services.access_gateway.gateway_id) is required when FLARE_ENV=production: \
+             set it to a stable per-node name such as the host or Pod name",
+        ));
+    }
+    let host = hostname
+        .map(sanitize_gateway_id_part)
+        .filter(|host| !host.is_empty())
+        .unwrap_or_else(|| "localhost".to_string());
+    Ok(format!("gateway-{host}-{ws_port}"))
+}
+
+/// 主机名只保留字母数字、`-`、`.`、`_`，其余替换为 `-`：它会进 Redis 键名与服务发现实例 ID。
+fn sanitize_gateway_id_part(raw: &str) -> String {
+    raw.trim()
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '.' | '_') {
+                ch
+            } else {
+                '-'
+            }
+        })
+        .collect()
+}
+
+/// 本机主机名：容器编排会设 `HOSTNAME`；Linux 主机上再读 `/etc/hostname`。都没有返回 `None`。
+fn local_hostname() -> Option<String> {
+    std::env::var("HOSTNAME")
+        .ok()
+        .and_then(non_empty)
+        .or_else(|| {
+            std::fs::read_to_string("/etc/hostname")
+                .ok()
+                .and_then(non_empty)
+        })
 }
 
 fn resolve_auth_provider(service: &AccessGatewayServiceConfig) -> Result<AuthProviderConfig> {
@@ -406,4 +480,53 @@ fn env_u32(key: &str) -> Option<u32> {
 
 fn config_error(reason: impl Into<String>) -> FlareError {
     ErrorBuilder::new(ErrorCode::ConfigurationError, reason).build_error()
+}
+
+#[cfg(test)]
+mod gateway_id_tests {
+    use super::*;
+
+    /// 生产环境缺 GATEWAY_ID 拒绝启动，大小写与空白不影响判定。
+    #[test]
+    fn production_without_gateway_id_refuses_to_start() {
+        for environment in ["production", " Production ", "PRODUCTION"] {
+            let error = resolve_gateway_id(None, Some(environment), Some("node-1"), 60051)
+                .expect_err("production requires an explicit GATEWAY_ID");
+            assert_eq!(error.code(), Some(ErrorCode::ConfigurationError));
+            assert!(error.reason().contains("GATEWAY_ID"), "{error}");
+        }
+        assert!(resolve_gateway_id(Some("  "), Some("production"), None, 60051).is_err());
+    }
+
+    #[test]
+    fn an_explicit_gateway_id_wins_everywhere() {
+        for environment in [None, Some("production"), Some("development")] {
+            assert_eq!(
+                resolve_gateway_id(Some(" gw-bj-1 "), environment, Some("host"), 60051).unwrap(),
+                "gw-bj-1"
+            );
+        }
+    }
+
+    /// 非生产缺省值由主机名与 WS 端口决定：同机同端口重启不变，不再是随机数。
+    #[test]
+    fn non_production_default_is_stable_across_restarts() {
+        let first = resolve_gateway_id(None, Some("development"), Some("dev-box"), 60051).unwrap();
+        let again = resolve_gateway_id(None, None, Some("dev-box"), 60051).unwrap();
+        assert_eq!(first, "gateway-dev-box-60051");
+        assert_eq!(first, again);
+        assert_ne!(
+            first,
+            resolve_gateway_id(None, None, Some("dev-box"), 60061).unwrap(),
+            "two gateways on one host differ by port"
+        );
+        assert_eq!(
+            resolve_gateway_id(None, None, Some("pod/name:1"), 1).unwrap(),
+            "gateway-pod-name-1-1"
+        );
+        assert_eq!(
+            resolve_gateway_id(None, None, None, 60051).unwrap(),
+            "gateway-localhost-60051"
+        );
+    }
 }

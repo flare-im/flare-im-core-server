@@ -28,8 +28,12 @@ use tokio::sync::RwLock;
 use tonic::transport::Channel;
 use tracing::{debug, info, warn};
 
+use super::lease::GatewayLeaseProbe;
 use crate::discovery::{StaticChannelPolicy, is_transport_failure, static_grpc_endpoint};
 use crate::{ServiceClient, ServiceDiscover};
+
+/// 无服务发现时静态单端点在连接池里的键；它不是真实网关，不查租约。
+const STATIC_FALLBACK_GATEWAY_ID: &str = "__static_fallback__";
 
 /// Access Gateway 暂时不可达：连不上、连接被断、调用超时、网关在停机或重启（W6-S2 F4：core
 /// 停机窗口里 `tcp connect error` 被当成不可重试，推送直接进了 DLQ）。按 `ServiceUnavailable`
@@ -146,6 +150,9 @@ pub struct GatewayRouter {
     service_client: Option<Arc<tokio::sync::Mutex<ServiceClient>>>,
     /// ServiceDiscover（用于根据 gateway_id 获取特定实例）
     service_discover: Option<Arc<ServiceDiscover>>,
+    /// 网关租约探针（可选）：租约缺失的网关已宕机，不再往它投递，其上的设备按离线处理。
+    /// 构造后由 [`Self::attach_lease_probe`] 挂上（构造器返回的是 `Arc`）。
+    lease_probe: std::sync::OnceLock<Arc<GatewayLeaseProbe>>,
 }
 
 impl GatewayRouter {
@@ -156,6 +163,7 @@ impl GatewayRouter {
             connection_pool: Arc::new(RwLock::new(HashMap::new())),
             service_client: None,
             service_discover: None,
+            lease_probe: std::sync::OnceLock::new(),
         })
     }
 
@@ -169,6 +177,7 @@ impl GatewayRouter {
             connection_pool: Arc::new(RwLock::new(HashMap::new())),
             service_client: Some(Arc::new(tokio::sync::Mutex::new(service_client))),
             service_discover: None, // 目前不保存 ServiceDiscover，使用 ServiceClient 的负载均衡
+            lease_probe: std::sync::OnceLock::new(),
         })
     }
 
@@ -183,7 +192,59 @@ impl GatewayRouter {
             connection_pool: Arc::new(RwLock::new(HashMap::new())),
             service_client: Some(Arc::new(tokio::sync::Mutex::new(service_client))),
             service_discover: Some(Arc::new(service_discover)),
+            lease_probe: std::sync::OnceLock::new(),
         })
+    }
+
+    /// 挂上网关租约探针（只生效一次）。
+    pub fn attach_lease_probe(&self, probe: Arc<GatewayLeaseProbe>) {
+        if self.lease_probe.set(probe).is_err() {
+            debug!("gateway lease probe already attached; keeping the first one");
+        }
+    }
+
+    /// 能否往这台网关投递：没挂探针、或租约探针认为它还活着。
+    pub async fn is_gateway_routable(&self, gateway_id: &str) -> bool {
+        match self.lease_probe.get() {
+            Some(probe) if gateway_id != STATIC_FALLBACK_GATEWAY_ID => {
+                probe.is_routable(gateway_id).await
+            }
+            _ => true,
+        }
+    }
+
+    /// 路由前的租约闸门：网关已宕机（租约缺失）就不再连它、不再重试，按「用户离线」报出——
+    /// `UserOffline` 不可重试，推送不会对一台不存在的网关反复 Nack 重投，设备转走离线通道。
+    async fn ensure_gateway_routable(&self, gateway_id: &str) -> Result<()> {
+        if self.is_gateway_routable(gateway_id).await {
+            return Ok(());
+        }
+        debug!(
+            gateway_id,
+            "gateway lease missing; treating its devices as offline"
+        );
+        Err(ErrorBuilder::new(
+            ErrorCode::UserOffline,
+            "gateway lease missing; devices on it are offline",
+        )
+        .details(format!("gateway_id={gateway_id}"))
+        .build_error())
+    }
+
+    /// 广播目标去掉租约缺失的网关：宕机节点等到服务发现摘除前，每次广播都要白等一次建连超时。
+    async fn routable_gateway_ids(&self, gateway_ids: Vec<String>) -> Vec<String> {
+        if self.lease_probe.get().is_none() {
+            return gateway_ids;
+        }
+        let mut routable = Vec::with_capacity(gateway_ids.len());
+        for gateway_id in gateway_ids {
+            if self.is_gateway_routable(&gateway_id).await {
+                routable.push(gateway_id);
+            } else {
+                debug!(gateway_id = %gateway_id, "skip broadcast to gateway without lease");
+            }
+        }
+        routable
     }
 
     /// 判断是否为本地网关
@@ -407,6 +468,7 @@ impl GatewayRouter {
             ),
             None => Vec::new(),
         };
+        let gateway_ids = self.routable_gateway_ids(gateway_ids).await;
         // 没有服务发现就是单实例部署：本节点的直转已经覆盖了全部在线订阅者，没有对等节点要广播。
         if gateway_ids.is_empty() {
             return;
@@ -447,7 +509,9 @@ impl GatewayRouter {
         &self,
         request: tonic::Request<DeliverToConversationRequest>,
     ) -> Result<()> {
-        let mut client = self.get_or_create_client("__static_fallback__").await?;
+        let mut client = self
+            .get_or_create_client(STATIC_FALLBACK_GATEWAY_ID)
+            .await?;
         client.deliver_to_conversation(request).await.map_err(|e| {
             gateway_call_failure(format!("deliver_to_conversation failed: {e}"), &e)
         })?;
@@ -479,7 +543,7 @@ impl GatewayRouter {
             return self.deliver_via_static_fallback(request).await;
         }
 
-        for gateway_id in gateway_ids {
+        for gateway_id in self.routable_gateway_ids(gateway_ids).await {
             match self.get_or_create_client(&gateway_id).await {
                 Ok(mut client) => {
                     if let Err(e) = client
@@ -530,13 +594,16 @@ impl GatewayRouter {
             None => Vec::new(),
         };
         if gateway_ids.is_empty() {
-            let mut client = self.get_or_create_client("__static_fallback__").await?;
+            let mut client = self
+                .get_or_create_client(STATIC_FALLBACK_GATEWAY_ID)
+                .await?;
             client
                 .push_capability(first)
                 .await
                 .map_err(|e| gateway_call_failure(format!("push_capability failed: {e}"), &e))?;
             return Ok(());
         }
+        let gateway_ids = self.routable_gateway_ids(gateway_ids).await;
         let calls = gateway_ids.into_iter().map(|gateway_id| {
             let request = request.clone();
             async move {
@@ -580,6 +647,7 @@ impl GatewayRouterTrait for GatewayRouter {
             user_ids = ?request.user_ids,
             "Routing push message to gateway"
         );
+        self.ensure_gateway_routable(gateway_id).await?;
 
         // 判断是否为本地网关
         let is_local = self.is_local_gateway(gateway_id);
@@ -690,6 +758,7 @@ impl GatewayRouterTrait for GatewayRouter {
         gateway_id: &str,
         request: PushEventRequest,
     ) -> Result<PushResponse> {
+        self.ensure_gateway_routable(gateway_id).await?;
         let mut client = self.get_or_create_client(gateway_id).await?;
         let timeout_duration = Duration::from_secs(3);
         match tokio::time::timeout(
@@ -731,6 +800,7 @@ impl GatewayRouterTrait for GatewayRouter {
         gateway_id: &str,
         request: PushNotificationRequest,
     ) -> Result<PushNotificationResponse> {
+        self.ensure_gateway_routable(gateway_id).await?;
         let mut client = self.get_or_create_client(gateway_id).await?;
         let timeout_duration = Duration::from_secs(3);
         match tokio::time::timeout(
@@ -756,6 +826,7 @@ impl GatewayRouterTrait for GatewayRouter {
         gateway_id: &str,
         request: PushAckRequest,
     ) -> Result<PushAckResponse> {
+        self.ensure_gateway_routable(gateway_id).await?;
         let mut client = self.get_or_create_client(gateway_id).await?;
         let timeout_duration = Duration::from_secs(3);
         match tokio::time::timeout(
@@ -778,6 +849,7 @@ impl GatewayRouterTrait for GatewayRouter {
         gateway_id: &str,
         request: PushCustomRequest,
     ) -> Result<PushResponse> {
+        self.ensure_gateway_routable(gateway_id).await?;
         let mut client = self.get_or_create_client(gateway_id).await?;
         let timeout_duration = Duration::from_secs(3);
         match tokio::time::timeout(
@@ -1165,5 +1237,59 @@ mod delivery_retry_tests {
         ] {
             assert!(!is_transient_gateway_status(&status), "{status:?}");
         }
+    }
+
+    /// 只有 `dead` 里的网关「在租约体系里、租约缺失」。
+    struct DeadGateways(&'static [&'static str]);
+
+    #[async_trait::async_trait]
+    impl crate::gateway::lease::GatewayLeaseSource for DeadGateways {
+        async fn lookup(&self, gateway_id: &str) -> redis::RedisResult<(bool, bool)> {
+            Ok((true, !self.0.contains(&gateway_id)))
+        }
+    }
+
+    /// 租约缺失的网关不再连、不再重试：直接按用户离线报出（不可重试，推送转离线而不是 Nack 重投）；
+    /// 租约在的网关照常投递。
+    #[tokio::test]
+    async fn a_gateway_without_lease_is_skipped_as_offline() {
+        let (endpoint, stop, task) = start_gateway().await;
+        let router = static_router(endpoint);
+        router.attach_lease_probe(Arc::new(GatewayLeaseProbe::new(
+            Arc::new(DeadGateways(&["gw-dead"])),
+            crate::gateway::lease::LEASE_PROBE_CACHE_TTL,
+        )));
+
+        let error = router
+            .route_push_notification("gw-dead", PushNotificationRequest::default())
+            .await
+            .expect_err("a gateway without lease is not routed to");
+        assert_eq!(error.code(), Some(ErrorCode::UserOffline), "{error}");
+        assert!(!error.is_retryable(), "{error}");
+        assert!(
+            router.connection_pool.read().await.is_empty(),
+            "no channel is opened to a dead gateway"
+        );
+
+        router
+            .route_push_notification("gw-live", PushNotificationRequest::default())
+            .await
+            .expect("a gateway with lease is routed to");
+        assert!(router.is_gateway_routable("gw-live").await);
+        assert!(!router.is_gateway_routable("gw-dead").await);
+        assert_eq!(
+            router
+                .routable_gateway_ids(vec!["gw-dead".into(), "gw-live".into()])
+                .await,
+            vec!["gw-live".to_string()]
+        );
+        let _ = stop.send(());
+        let _ = task.await;
+    }
+
+    #[tokio::test]
+    async fn without_a_probe_every_gateway_is_routable() {
+        let router = static_router(closed_endpoint().await);
+        assert!(router.is_gateway_routable("gw-any").await);
     }
 }

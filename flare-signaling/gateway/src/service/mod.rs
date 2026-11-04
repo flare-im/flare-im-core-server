@@ -3,6 +3,7 @@
 pub mod bootstrap;
 pub mod builder;
 pub mod display;
+pub(crate) mod gateway_lease;
 pub(crate) mod notice_subscriber;
 pub(crate) mod revoke_subscriber;
 pub mod startup;

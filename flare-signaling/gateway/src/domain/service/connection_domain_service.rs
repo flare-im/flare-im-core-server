@@ -110,6 +110,15 @@ impl ConnectionDomainService {
             }
         }
         let app_version = metadata.get("app_version").cloned().unwrap_or_default();
+        // 构建号与分发渠道只进日志（按客户端版本排查连接问题），不改 Online 登录请求。
+        let client_build = |key: &str| {
+            connection_metadata
+                .and_then(|connection_metadata| connection_metadata.get(key))
+                .cloned()
+                .unwrap_or_default()
+        };
+        let app_build = client_build("app_build");
+        let distribution = client_build("distribution");
 
         let login_request = LoginRequest {
             user_id: user_id.to_string(),
@@ -118,7 +127,7 @@ impl ConnectionDomainService {
             server_id: server_id.clone(),
             metadata,
             device_platform: device_platform.to_string(),
-            app_version,
+            app_version: app_version.clone(),
             desired_conflict_strategy,
             device_priority: 2, // Normal 优先级
             token_version: 0,
@@ -139,6 +148,9 @@ impl ConnectionDomainService {
                     info!(
                         user_id = %user_id,
                         conversation_id = %response.conversation_id,
+                        app_version = %app_version,
+                        app_build = %app_build,
+                        distribution = %distribution,
                         "Connection registered successfully"
                     );
                     Ok(response.conversation_id)

@@ -27,6 +27,11 @@ use crate::interface::http::MessageContextSigner;
 use crate::interface::http::{PushTokenClient, push_proxy_url_from_env, with_request_rate_limit};
 use crate::interface::http::{create_public_router, public_cors_layer};
 
+/// 停机开始后 `/readyz` 回 503、但仍接请求的时长。
+const READINESS_DRAIN_GRACE: Duration = Duration::from_secs(2);
+/// 运行时停机时限：原先的 5s（在途请求收尾）加上就绪排空的时长。
+const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(7);
+
 pub struct ApplicationBootstrap;
 
 impl ApplicationBootstrap {
@@ -288,23 +293,38 @@ impl ApplicationBootstrap {
             Some(platform) => app.merge(platform),
             None => app,
         };
+        // 就绪探针：上面的下游客户端、令牌与租户投影都已装配好，监听建立后即就绪；
+        // `<API_GATEWAY>_HEALTH_TARGETS` 声明的依赖不可达时不就绪。
+        let readiness = Arc::new(flare_im_service_kit::health::Readiness::from_env(
+            API_GATEWAY,
+        ));
+        let app = crate::interface::http::with_readiness_probe(app, readiness.clone());
 
         let runtime = flare_im_service_kit::health::attach_runtime_health_checks(
             ServiceRuntime::new(API_GATEWAY)
                 .with_address(address)
+                .with_config(
+                    flare_core_runtime::RuntimeConfig::default()
+                        .with_shutdown_timeout(SHUTDOWN_TIMEOUT),
+                )
                 .with_health_failure_action(
                     flare_core_runtime::HealthFailureAction::GracefulShutdown,
                 )
                 .add_spawn_with_shutdown("gateway-http", move |shutdown_rx| async move {
                     let listener = TcpListener::bind(address).await?;
                     info!(address = %address, "✅ Gateway HTTP service is listening");
+                    readiness.mark_ready();
 
                     axum::serve(
                         listener,
                         app.into_make_service_with_connect_info::<SocketAddr>(),
                     )
-                    .with_graceful_shutdown(async {
+                    .with_graceful_shutdown(async move {
                         let _ = shutdown_rx.await;
+                        // 先转 503 并继续接一会儿请求，让负载均衡的探测看到「不就绪」后摘流量，
+                        // 再停止接受新连接。
+                        readiness.mark_draining();
+                        tokio::time::sleep(READINESS_DRAIN_GRACE).await;
                     })
                     .await
                     .map_err(|e| e.into())

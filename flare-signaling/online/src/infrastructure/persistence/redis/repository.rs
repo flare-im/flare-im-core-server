@@ -29,7 +29,19 @@ const TENANT_SESSIONS_KEY_PREFIX: &str = "tenant:sessions";
 // PlatformExclusive rule, `device_cap`: over the device cap), which selects
 // the kick reason; publishing the resulting kick is deliberately outside the
 // session Redis transaction because the kick store may be a separate Redis.
+//
+// 同一个脚本里维护网关连接索引 `gw:conns:{gateway_id}`（新连接 SADD、被挤掉的 SREM），网关宕机后
+// 清扫器据此找到它的全部会话。Dragonfly 默认不许脚本访问未声明的键：KEYS[3] 是新连接所在网关的
+// 集合，KEYS[4..] 是调用方预先声明的其他网关集合；要挤掉的记录落在未声明的网关上时，脚本在任何
+// 写入之前返回 `{"retry_with":[...]}`，调用方带上这些键重试。
+//
+// KEYS: 1 会话哈希，2 租户索引，3.. 网关连接集合
+// ARGV: 1 会话字段，2 记录，3 TTL，4 冲突策略，5 设备上限，6 租户索引成员前缀，7 用户 ID，
+//       8 网关连接集合键前缀
 const ADMIT_CONNECTION_SCRIPT: &str = r#"
+local function gateway_member(tenant, field)
+  return 'v1:' .. string.len(tenant) .. ':' .. tenant .. ':' .. string.len(ARGV[7]) .. ':' .. ARGV[7] .. ':' .. field
+end
 local new = cjson.decode(ARGV[2])
 local current = redis.call('HGETALL', KEYS[1])
 local records = {}
@@ -89,11 +101,24 @@ if cap > 0 then
   end
 end
 
+local declared = {}
+for i = 3, #KEYS do declared[KEYS[i]] = true end
+local undeclared = {}
+for _, item in ipairs(records) do
+  local rec = item.value
+  local gateway = tostring(rec.gateway_id or '')
+  if removed_devices[rec.device_id] and not declared[ARGV[8] .. gateway] then
+    table.insert(undeclared, gateway)
+  end
+end
+if #undeclared > 0 then return cjson.encode({ retry_with = undeclared }) end
+
 local evicted = {}
 for _, item in ipairs(records) do
   local rec = item.value
   if removed_devices[rec.device_id] then
     redis.call('HDEL', KEYS[1], item.field)
+    redis.call('SREM', ARGV[8] .. tostring(rec.gateway_id or ''), gateway_member(rec.tenant_id, item.field))
     table.insert(evicted, { conversation_id = rec.conversation_id, device_id = rec.device_id, connection_id = rec.connection_id, cause = removed_devices[rec.device_id] })
   end
 end
@@ -104,6 +129,7 @@ redis.call('HSET', KEYS[1], ARGV[1], ARGV[2])
 redis.call('EXPIRE', KEYS[1], ARGV[3])
 redis.call('SADD', KEYS[2], ARGV[6] .. new.device_id)
 redis.call('EXPIRE', KEYS[2], ARGV[3])
+redis.call('SADD', KEYS[3], gateway_member(new.tenant_id, ARGV[1]))
 if #evicted == 0 then return '[]' end
 return cjson.encode(evicted)
 "#;
@@ -134,6 +160,8 @@ pub struct RedisConversationRepository {
 
 // No split HGET/HDEL/unindex window: a concurrent login may replace the same device.
 // Return the removed record's PHYSICAL connection, not a user/device-wide broadcast.
+// KEYS[3]/ARGV[5]（可选）：该记录所在网关的连接集合与成员，随会话一起移除。调用方按 ARGV[4]
+// 的物理连接读出的记录给出网关；ARGV[4] 不符时脚本不删，集合也不动，两边仍一致。
 const REMOVE_FOR_KICK: &str = r#"
 local raw = redis.call('HGET', KEYS[1], ARGV[1])
 if not raw then return false end
@@ -149,8 +177,31 @@ for _, value in ipairs(redis.call('HVALS', KEYS[1])) do
 end
 redis.call('HDEL', KEYS[1], ARGV[1])
 if not keep then redis.call('SREM', KEYS[2], ARGV[3] .. rec.device_id) end
+if KEYS[3] and ARGV[5] then redis.call('SREM', KEYS[3], ARGV[5]) end
 return rec.connection_id
 "#;
+
+/// 准入脚本要挤掉的记录落在未声明的网关上时，带上这些网关重试的次数上限。一次重试就能补齐
+/// 读到的全部网关；只有并发登录不断把记录换到新网关上时才会用尽。
+const ADMIT_ATTEMPTS: usize = 3;
+
+/// 准入脚本的应答：挤掉的连接，或要求带上更多网关连接集合重试。
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum AdmissionReply {
+    RetryWith { retry_with: Vec<String> },
+    Evicted(Vec<EvictedConnection>),
+}
+
+/// 网关连接集合 `gw:conns:{gateway_id}`（约定见 `flare_im_service_kit::gateway::lease`）。
+fn gateway_conns_key(gateway_id: &str) -> String {
+    flare_im_service_kit::gateway::lease::conns_key(gateway_id)
+}
+
+/// 会话在网关连接集合里的成员：能定位回 `session:{tenant}:{user}` 里的那个字段。
+fn gateway_member(tenant_id: &str, user_id: &str, session_field: &str) -> String {
+    flare_im_service_kit::gateway::lease::connection_member(tenant_id, user_id, session_field)
+}
 
 const UNINDEX_IF_ABSENT: &str = r#"
 for _, raw in ipairs(redis.call('HVALS', KEYS[1])) do
@@ -184,7 +235,7 @@ impl RedisConversationRepository {
         }
     }
 
-    fn connection_key(tenant_id: &str, user_id: &str) -> String {
+    pub(crate) fn connection_key(tenant_id: &str, user_id: &str) -> String {
         format!("{}:{}:{}", CONNECTION_KEY_PREFIX, tenant_id, user_id)
     }
 
@@ -333,6 +384,15 @@ impl ConversationRepository for RedisConversationRepository {
             .ignore()
             .expire(&tenant_key, ttl)
             .ignore()
+            .sadd(
+                gateway_conns_key(&record.gateway_id),
+                gateway_member(
+                    &record.tenant_id,
+                    session.user_id().as_str(),
+                    session.id().as_str(),
+                ),
+            )
+            .ignore()
             .query_async(&mut conn)
             .await
             .map_err(|e| {
@@ -359,28 +419,55 @@ impl ConversationRepository for RedisConversationRepository {
             flare_server_core::error::FlareError::system(format!("serialize session payload: {e}"))
         })?;
         let mut conn = self.connection().await?;
-        let encoded: String = redis::Script::new(ADMIT_CONNECTION_SCRIPT)
-            .key(Self::connection_key(
-                session.tenant_id(),
-                session.user_id().as_str(),
-            ))
-            .key(Self::tenant_sessions_key(session.tenant_id()))
-            .arg(session.id().as_str())
-            .arg(payload)
-            .arg(self.ttl())
-            .arg(strategy as i32)
-            .arg(max_devices)
-            .arg(tenant_session_member_prefix(session.user_id().as_str()))
-            .invoke_async(&mut conn)
-            .await
-            .map_err(|e| {
+        let script = redis::Script::new(ADMIT_CONNECTION_SCRIPT);
+        // 被挤掉的记录可能在别的网关上：第一次只声明新连接所在网关的集合（重连回同一网关是常态），
+        // 脚本报出缺的网关后带上重试。
+        let mut other_gateways: Vec<String> = Vec::new();
+        for _ in 0..ADMIT_ATTEMPTS {
+            let mut invocation = script.prepare_invoke();
+            invocation
+                .key(Self::connection_key(
+                    session.tenant_id(),
+                    session.user_id().as_str(),
+                ))
+                .key(Self::tenant_sessions_key(session.tenant_id()))
+                .key(gateway_conns_key(&record.gateway_id));
+            for gateway in &other_gateways {
+                invocation.key(gateway_conns_key(gateway));
+            }
+            invocation
+                .arg(session.id().as_str())
+                .arg(&payload)
+                .arg(self.ttl())
+                .arg(strategy as i32)
+                .arg(max_devices)
+                .arg(tenant_session_member_prefix(session.user_id().as_str()))
+                .arg(session.user_id().as_str())
+                .arg(flare_im_service_kit::gateway::lease::CONNS_KEY_PREFIX);
+            let encoded: String = invocation.invoke_async(&mut conn).await.map_err(|e| {
                 flare_server_core::error::FlareError::system(format!(
                     "atomic session admission failed: {e}"
                 ))
             })?;
-        serde_json::from_str(&encoded).map_err(|e| {
-            flare_server_core::error::FlareError::system(format!("invalid admission result: {e}"))
-        })
+            let reply: AdmissionReply = serde_json::from_str(&encoded).map_err(|e| {
+                flare_server_core::error::FlareError::system(format!(
+                    "invalid admission result: {e}"
+                ))
+            })?;
+            match reply {
+                AdmissionReply::Evicted(evicted) => return Ok(evicted),
+                AdmissionReply::RetryWith { retry_with } => {
+                    for gateway in retry_with {
+                        if gateway != record.gateway_id && !other_gateways.contains(&gateway) {
+                            other_gateways.push(gateway);
+                        }
+                    }
+                }
+            }
+        }
+        Err(flare_server_core::error::FlareError::system(
+            "atomic session admission kept racing with logins on other gateways",
+        ))
     }
 
     async fn remove_connection(
@@ -401,6 +488,12 @@ impl ConversationRepository for RedisConversationRepository {
             .find(|r| r.conversation_id == conversation_id.as_str())
         {
             Self::unindex_if_last(&mut pipe, user_id.as_str(), &records, removed);
+            // 与会话哈希同一事务移出网关连接集合
+            pipe.srem(
+                gateway_conns_key(&removed.gateway_id),
+                gateway_member(tenant_id, user_id.as_str(), conversation_id.as_str()),
+            )
+            .ignore();
         }
         let _: () = pipe.query_async(&mut conn).await.map_err(|e| {
             flare_server_core::error::FlareError::system(format!("operation failed: {}", e))
@@ -471,10 +564,12 @@ impl ConversationRepository for RedisConversationRepository {
         redis::Script::new(REMOVE_FOR_KICK)
             .key(Self::connection_key(tenant, user.as_str()))
             .key(Self::tenant_sessions_key(tenant))
+            .key(gateway_conns_key(&record.gateway_id))
             .arg(session.as_str())
             .arg(tenant)
             .arg(tenant_session_member_prefix(user.as_str()))
             .arg(&record.connection_id)
+            .arg(gateway_member(tenant, user.as_str(), session.as_str()))
             .invoke_async(&mut conn)
             .await
             .map_err(|_| {
@@ -624,6 +719,11 @@ impl ConversationRepository for RedisConversationRepository {
                     tenant_session_member(user_id.as_str(), &record.device_id),
                 )
                 .ignore();
+                pipe.srem(
+                    gateway_conns_key(&record.gateway_id),
+                    gateway_member(tenant_id, user_id.as_str(), &record.conversation_id),
+                )
+                .ignore();
             }
         } else {
             pipe.del(&key).ignore();
@@ -631,6 +731,11 @@ impl ConversationRepository for RedisConversationRepository {
                 pipe.srem(
                     Self::tenant_sessions_key(&record.tenant_id),
                     tenant_session_member(user_id.as_str(), &record.device_id),
+                )
+                .ignore();
+                pipe.srem(
+                    gateway_conns_key(&record.gateway_id),
+                    gateway_member(tenant_id, user_id.as_str(), &record.conversation_id),
                 )
                 .ignore();
             }
@@ -849,6 +954,8 @@ mod admission_tests {
             .ignore()
             .del(&index)
             .ignore()
+            .del(gateway_conns_key(&test_gateway(&tenant)))
+            .ignore()
             .query_async(&mut conn)
             .await
             .unwrap();
@@ -863,6 +970,10 @@ mod admission_tests {
         record_on(tenant, device, "ios", physical, created_at)
     }
 
+    fn test_gateway(tenant: &str) -> String {
+        format!("{tenant}-gw")
+    }
+
     fn record_on(
         tenant: &str,
         device: &str,
@@ -872,7 +983,8 @@ mod admission_tests {
     ) -> RedisConnectionRecord {
         RedisConnectionRecord {
             conversation_id: format!("session-{physical}"),
-            gateway_id: "test-gateway".into(),
+            // 每个租户一台网关：用例并发跑也不会共用同一个 gw:conns 集合。
+            gateway_id: test_gateway(tenant),
             server_id: "test-server".into(),
             device_id: device.into(),
             device_platform: platform.into(),
@@ -905,16 +1017,126 @@ mod admission_tests {
         let encoded: String = redis::Script::new(ADMIT_CONNECTION_SCRIPT)
             .key(key)
             .key(index)
+            .key(gateway_conns_key(&item.gateway_id))
             .arg(&item.conversation_id)
             .arg(serde_json::to_string(item).unwrap())
             .arg(60)
             .arg(strategy as i32)
             .arg(max_devices)
             .arg(tenant_session_member_prefix("shared-user"))
+            .arg("shared-user")
+            .arg(flare_im_service_kit::gateway::lease::CONNS_KEY_PREFIX)
             .invoke_async(conn)
             .await
             .unwrap();
         serde_json::from_str(&encoded).unwrap()
+    }
+
+    fn test_repository(url: &str) -> RedisConversationRepository {
+        RedisConversationRepository::new(
+            Arc::new(redis::Client::open(url).unwrap()),
+            Arc::new(OnlineConfig {
+                redis_url: url.to_string(),
+                redis_ttl_seconds: 60,
+                presence_prefix: "presence:user".into(),
+                kick_redis_url: url.to_string(),
+                kick_channel: format!("flare-test-{}:kick", uuid::Uuid::new_v4().simple()),
+                tenant_runtime_postgres_url: None,
+                tenant_policy: Default::default(),
+                max_online_devices_per_user: 0,
+            }),
+        )
+    }
+
+    fn connection_on(tenant: &str, user: &str, device: &str, gateway: &str) -> Connection {
+        Connection::create(crate::domain::aggregate::ConnectionCreateParams {
+            user_id: UserId::new(user.to_string()).unwrap(),
+            device_id: DeviceId::new(device.to_string()).unwrap(),
+            tenant_id: tenant.to_string(),
+            device_platform: "ios".to_string(),
+            server_id: gateway.to_string(),
+            gateway_id: gateway.to_string(),
+            device_priority: DevicePriority::from_i32(2),
+            token_version: TokenVersion::from(0),
+            initial_quality: None,
+        })
+    }
+
+    /// 准入与断开在会话哈希的同一事务里维护 `gw:conns:{gateway_id}`：新连接进所在网关的集合，
+    /// 被挤掉（哪怕在另一台网关上，脚本会要求带上那台网关的键重试）与正常断开的连接移出集合。
+    /// Run with `FLARE_TEST_REDIS_URL` pointing at an isolated Redis instance.
+    #[tokio::test]
+    #[ignore = "requires FLARE_TEST_REDIS_URL"]
+    async fn admission_and_removal_maintain_the_gateway_connection_index() {
+        let url = std::env::var("FLARE_TEST_REDIS_URL").expect("FLARE_TEST_REDIS_URL");
+        let repository = test_repository(&url);
+        let mut conn = ConnectionManager::new(redis::Client::open(url.as_str()).unwrap())
+            .await
+            .unwrap();
+        let tenant = format!("gwidx-{}", &uuid::Uuid::new_v4().simple().to_string()[..12]);
+        let gw_a = format!("{tenant}-gw-a");
+        let gw_b = format!("{tenant}-gw-b");
+
+        let first = connection_on(&tenant, "u:1", "phone", &gw_a);
+        assert!(
+            repository
+                .admit_connection(&first, "phys-1", DeviceConflictStrategy::Coexist, 0)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        let first_member = gateway_member(&tenant, "u:1", first.id().as_str());
+        assert!(
+            conn.sismember::<_, _, bool>(gateway_conns_key(&gw_a), &first_member)
+                .await
+                .unwrap()
+        );
+
+        // 同一设备从另一台网关重连：挤掉 gw-a 上的旧会话，旧成员移出 gw-a，新成员进 gw-b。
+        let second = connection_on(&tenant, "u:1", "phone", &gw_b);
+        let evicted = repository
+            .admit_connection(&second, "phys-2", DeviceConflictStrategy::Coexist, 0)
+            .await
+            .unwrap();
+        assert_eq!(evicted.len(), 1);
+        assert_eq!(evicted[0].connection_id, "phys-1");
+        assert!(
+            !conn
+                .sismember::<_, _, bool>(gateway_conns_key(&gw_a), &first_member)
+                .await
+                .unwrap()
+        );
+        let second_member = gateway_member(&tenant, "u:1", second.id().as_str());
+        assert!(
+            conn.sismember::<_, _, bool>(gateway_conns_key(&gw_b), &second_member)
+                .await
+                .unwrap()
+        );
+
+        // 正常断开：成员随会话一起移出。
+        repository
+            .remove_connection(&tenant, second.id(), second.user_id())
+            .await
+            .unwrap();
+        assert!(
+            !conn
+                .exists::<_, bool>(gateway_conns_key(&gw_b))
+                .await
+                .unwrap()
+        );
+
+        let _: () = redis::pipe()
+            .del(RedisConversationRepository::connection_key(&tenant, "u:1"))
+            .ignore()
+            .del(RedisConversationRepository::tenant_sessions_key(&tenant))
+            .ignore()
+            .del(gateway_conns_key(&gw_a))
+            .ignore()
+            .del(gateway_conns_key(&gw_b))
+            .ignore()
+            .query_async(&mut conn)
+            .await
+            .unwrap();
     }
 
     /// `(device_id, connection_id, cause)`，按连接 ID 排序（脚本遍历 HGETALL，顺序不定）。
@@ -1027,6 +1249,8 @@ mod admission_tests {
             .ignore()
             .del(&index)
             .ignore()
+            .del(gateway_conns_key(&test_gateway(&tenant)))
+            .ignore()
             .query_async(&mut conn)
             .await
             .unwrap();
@@ -1105,6 +1329,10 @@ mod admission_tests {
             .del(&other_key)
             .ignore()
             .del(&other_index)
+            .ignore()
+            .del(gateway_conns_key(&test_gateway(&tenant)))
+            .ignore()
+            .del(gateway_conns_key(&test_gateway(&other)))
             .ignore()
             .query_async(&mut first)
             .await

@@ -856,6 +856,17 @@ pub const REGISTERED_ENV_VARS: &[EnvVarSpec] = &[
         EnvPurpose::GatewayRuntime,
     ),
     env(
+        "GATEWAY_ZONE",
+        EnvOwner::AccessGateway,
+        EnvPurpose::GatewayRuntime,
+    ),
+    // 非生产环境缺省网关 ID 取主机名（容器编排设置）。
+    env(
+        "HOSTNAME",
+        EnvOwner::AccessGateway,
+        EnvPurpose::GatewayRuntime,
+    ),
+    env(
         "GATEWAY_RESOLVED_CONVERSATIONS_CAPACITY",
         EnvOwner::AccessGateway,
         EnvPurpose::RuntimeTuning,

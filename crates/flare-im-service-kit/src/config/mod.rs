@@ -388,12 +388,16 @@ pub struct AccessGatewayServiceConfig {
     /// 会话存储过期时间（秒）
     #[serde(default)]
     pub session_store_ttl_seconds: Option<u64>,
-    /// 网关ID（用于跨地区路由，如果不设置则自动生成）
+    /// 网关ID（用于跨地区路由、服务发现实例 ID 与网关租约）。`FLARE_ENV=production` 时必填；
+    /// 其余环境不设置则取「主机名 + WS 端口」，重启不变
     #[serde(default)]
     pub gateway_id: Option<String>,
     /// 网关所在地区（用于跨地区路由）
     #[serde(default)]
     pub region: Option<String>,
+    /// 网关所在可用区：注册进服务发现的实例元数据，供同可用区优先与故障定位使用
+    #[serde(default)]
+    pub zone: Option<String>,
     /// 压缩算法（none/gzip/zstd，默认 none）
     #[serde(default)]
     pub compression_algorithm: Option<String>,

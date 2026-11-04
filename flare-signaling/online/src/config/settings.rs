@@ -37,11 +37,14 @@ impl OnlineConfig {
             })
             .unwrap_or_else(|| "redis://127.0.0.1:6379/0".to_string());
 
+        // 会话 TTL 是网关宕机清扫之外的第二道保险。活连接的续期由客户端心跳触发（网关按连接
+        // 节流至多 10s 一次，心跳间隔又小于网关 90s 的判死时限），远小于 600s，不会误过期；
+        // 网关没了的会话最迟 10 分钟消失。
         let redis_ttl_seconds = env::var("SIGNALING_ONLINE_REDIS_TTL")
             .ok()
             .and_then(|value| value.parse::<u64>().ok())
             .or(service_config.online_ttl_seconds)
-            .unwrap_or(3600);
+            .unwrap_or(600);
 
         let presence_prefix = env::var("SIGNALING_ONLINE_PRESENCE_PREFIX")
             .ok()

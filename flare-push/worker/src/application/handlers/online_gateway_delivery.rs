@@ -18,6 +18,7 @@ use flare_server_core::error::{ErrorCode, FlareError, Result, map_infra_error};
 
 use flare_im_service_kit::gateway::{GatewayRouter, GatewayRouterTrait};
 
+use crate::domain::model::GatewayPushTarget;
 use crate::domain::push_routing::{
     merge_push_ack_for_gateway, merge_push_custom_for_gateway, merge_push_notification_for_gateway,
     partition_targets_by_gateway, select_push_targets,
@@ -251,6 +252,7 @@ impl GatewayPushExecutor {
         let core = ctx.as_ref();
         let devices = self.list_user_devices_cached(core, target_user_id).await?;
         let targets = select_push_targets(&devices, target_user_id, strategy)?;
+        let targets = retain_routable_targets(&self.gateway_router, targets).await;
         let by_gw = partition_targets_by_gateway(&targets);
         let mut success_count = 0usize;
         let mut failure_count = 0usize;
@@ -306,6 +308,7 @@ impl GatewayPushExecutor {
         let core = ctx.as_ref();
         let devices = self.list_user_devices_cached(core, target_user_id).await?;
         let targets = select_push_targets(&devices, target_user_id, strategy)?;
+        let targets = retain_routable_targets(&self.gateway_router, targets).await;
         let by_gw = partition_targets_by_gateway(&targets);
         let mut success_count = 0usize;
         let mut failure_count = 0usize;
@@ -378,6 +381,7 @@ impl GatewayPushExecutor {
         let core = ctx.as_ref();
         let devices = self.list_user_devices_cached(core, target_user_id).await?;
         let targets = select_push_targets(&devices, target_user_id, strategy)?;
+        let targets = retain_routable_targets(&self.gateway_router, targets).await;
         let by_gw = partition_targets_by_gateway(&targets);
         let mut success_count = 0usize;
         let mut failure_count = 0usize;
@@ -418,6 +422,38 @@ impl GatewayPushExecutor {
         }
         Ok(())
     }
+}
+
+/// 去掉所在网关租约缺失（已宕机）的设备：它们按离线处理，不往死网关投递，也不为一台不存在的
+/// 网关 Nack 重投；离线通道由 push-server 依据 Online 在线状态决定（Online 清扫器会在网关宕机后
+/// 移除这些会话）。全部设备都在死网关上时与「没有在线设备」同一结果。
+async fn retain_routable_targets(
+    router: &GatewayRouter,
+    targets: Vec<GatewayPushTarget>,
+) -> Vec<GatewayPushTarget> {
+    let mut verdicts: HashMap<String, bool> = HashMap::new();
+    let mut routable = Vec::with_capacity(targets.len());
+    for target in targets {
+        let alive = match verdicts.get(&target.gateway_id) {
+            Some(alive) => *alive,
+            None => {
+                let alive = router.is_gateway_routable(&target.gateway_id).await;
+                verdicts.insert(target.gateway_id.clone(), alive);
+                alive
+            }
+        };
+        if alive {
+            routable.push(target);
+        } else {
+            tracing::debug!(
+                user_id = %target.user_id,
+                device_id = %target.device_id,
+                gateway_id = %target.gateway_id,
+                "device on a gateway without lease treated as offline"
+            );
+        }
+    }
+    routable
 }
 
 /// `options.expire_at_ms > 0` and already reached.
@@ -463,6 +499,44 @@ mod tests {
 
         assert_eq!(code, ErrorCode::ServiceUnavailable);
         assert!(code.is_retryable());
+    }
+
+    struct DeadGateways(&'static [&'static str]);
+
+    #[async_trait::async_trait]
+    impl flare_im_service_kit::gateway::lease::GatewayLeaseSource for DeadGateways {
+        async fn lookup(&self, gateway_id: &str) -> redis::RedisResult<(bool, bool)> {
+            Ok((true, !self.0.contains(&gateway_id)))
+        }
+    }
+
+    /// 死网关（租约缺失）上的设备不再投递；没挂租约探针时一律照常投递。
+    #[tokio::test]
+    async fn devices_on_gateways_without_lease_are_dropped_from_online_routing() {
+        let target = |device: &str, gateway: &str| GatewayPushTarget {
+            user_id: "u1".into(),
+            device_id: device.into(),
+            gateway_id: gateway.into(),
+        };
+        let targets = vec![
+            target("phone", "gw-dead"),
+            target("pc", "gw-live"),
+            target("pad", "gw-dead"),
+        ];
+
+        let router = GatewayRouter::new(Default::default());
+        let kept = retain_routable_targets(&router, targets.clone()).await;
+        assert_eq!(kept.len(), 3, "no probe: every device stays routable");
+
+        router.attach_lease_probe(Arc::new(
+            flare_im_service_kit::gateway::lease::GatewayLeaseProbe::new(
+                Arc::new(DeadGateways(&["gw-dead"])),
+                flare_im_service_kit::gateway::lease::LEASE_PROBE_CACHE_TTL,
+            ),
+        ));
+        let kept = retain_routable_targets(&router, targets).await;
+        let devices: Vec<&str> = kept.iter().map(|t| t.device_id.as_str()).collect();
+        assert_eq!(devices, vec!["pc"]);
     }
 
     #[test]

@@ -75,6 +75,29 @@ where
         ctx: &Context,
         command: LogoutCommand,
     ) -> Result<LogoutResponse> {
+        self.disconnect(ctx, command, "logout").await
+    }
+
+    /// 连接所在网关已宕机（租约缺失）：由清扫器代替网关注销这条连接。与正常断开同一路径——
+    /// 移除会话、发布 presence 快照（用户没有别的连接时即离线事件），只是原因标为 `gateway_lost`。
+    #[instrument(
+        skip_all,
+        fields(user_id = %command.request.user_id, conversation_id = %command.request.conversation_id)
+    )]
+    pub async fn handle_gateway_lost(
+        &self,
+        ctx: &Context,
+        command: LogoutCommand,
+    ) -> Result<LogoutResponse> {
+        self.disconnect(ctx, command, "gateway_lost").await
+    }
+
+    async fn disconnect(
+        &self,
+        ctx: &Context,
+        command: LogoutCommand,
+        reason: &str,
+    ) -> Result<LogoutResponse> {
         let request = command.request;
         let response = self
             .online_domain_service
@@ -82,7 +105,7 @@ where
             .await
             .map_err(|e| map_infra_error(e, ErrorCode::InternalError, "Failed to logout"))?;
 
-        self.publish_presence_snapshot(ctx, &request.user_id, "logout")
+        self.publish_presence_snapshot(ctx, &request.user_id, reason)
             .await;
         Ok(response)
     }

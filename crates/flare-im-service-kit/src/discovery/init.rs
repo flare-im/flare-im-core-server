@@ -432,6 +432,13 @@ pub async fn register_service_from_registry_config_with_metadata(
     // 添加元数据（如果提供了）
     if let Some(metadata) = metadata {
         for (key, value) in metadata {
+            // region / zone 是实例元数据的一等字段：按可用区选实例、运维查看都读它们，
+            // 只放进 custom 的话后端注册时不会单独登记。
+            match key.as_str() {
+                "region" => instance.metadata.region = Some(value.clone()),
+                "zone" => instance.metadata.zone = Some(value.clone()),
+                _ => {}
+            }
             // 同时添加到 tags 和 metadata.custom
             // tags 用于 Consul/etcd 的标签过滤
             // metadata.custom 用于其他场景（如 Service Mesh）
