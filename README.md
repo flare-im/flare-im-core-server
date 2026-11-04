@@ -1,6 +1,6 @@
 # Flare IM Core
 
-**English** · [中文](./README.zh-CN.md)
+English · [Simplified Chinese](README.zh-CN.md)
 
 **Self-hosted, production-grade IM backend.** Reliable message delivery, multi-device
 sync, offline push, end-to-end encryption — the parts you would rather not write
@@ -165,7 +165,7 @@ flowchart LR
 | [CONTRIBUTING.md](.github/CONTRIBUTING.md) | How to contribute |
 | [SECURITY.md](.github/SECURITY.md) | Reporting vulnerabilities |
 
-中文文档：[README](./README.zh-CN.md) · [QUICKSTART](./docs/QUICKSTART.zh-CN.md) ·
+Chinese documentation for[README](./README.zh-CN.md) · [QUICKSTART](./docs/QUICKSTART.zh-CN.md) ·
 [INTEGRATION](./docs/INTEGRATION.zh-CN.md)
 
 ## When you need identity and social features
@@ -177,3 +177,7 @@ same protocol — the interfaces above do not change. See [GOVERNANCE.md](.githu
 
 Apache-2.0. Commercial use and closed-source distribution are both fine; keep the
 copyright notice.
+
+## Integration Entry Points
+
+Use the [quickstart](docs/QUICKSTART.md) for the local message smoke check and the [integration guide](docs/INTEGRATION.md) when connecting a product. The [hook contract](docs/HOOK-PLUGIN-CONTRACT.md) covers messaging extensions.

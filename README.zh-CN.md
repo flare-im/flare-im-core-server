@@ -1,6 +1,6 @@
 # Flare IM Core
 
-[English](./README.md) · **中文**
+[English](README.md) · 简体中文
 
 **自托管的生产级 IM 服务端。** 消息可靠投递、多端同步、离线推送、端到端加密 ——
 这些你不想再写一遍的东西，它已经写好了，而且可以审计。
@@ -321,3 +321,7 @@ make stop   # 停止全部 Core 服务
 
 > 边界划分与不变承诺见 [GOVERNANCE](https://github.com/flare-im/flare-core-server/blob/main/.github/GOVERNANCE.md)。
 > 简言之：**已开源的不会被收回，鉴权与 hooks 契约永远开源、不会为逼迫付费而阉割。**
+
+## 集成入口
+
+本地消息冒烟见[快速开始](docs/QUICKSTART.zh-CN.md)，业务产品接入见[集成指南](docs/INTEGRATION.zh-CN.md)，消息扩展点见 [Hook 契约](docs/HOOK-PLUGIN-CONTRACT.md)。
