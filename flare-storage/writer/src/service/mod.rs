@@ -65,6 +65,20 @@ impl ApplicationBootstrap {
         runtime = runtime.add_spawn_with_shutdown("storage-writer-usage", move |shutdown_rx| {
             usage.run(shutdown_rx)
         });
+        let (ledger, metrics) = (context.idempotency_ledger, context.metrics);
+        runtime = runtime.add_spawn_with_shutdown(
+            "storage-writer-idempotency-ledger-retention",
+            move |shutdown_rx| async move {
+                crate::infrastructure::persistence::idempotency_ledger_retention::run_retention(
+                    ledger,
+                    Some(metrics),
+                    Default::default(),
+                    shutdown_rx,
+                )
+                .await;
+                Ok(())
+            },
+        );
 
         if context.config.metrics.enabled {
             let metrics_config = context.config.metrics.clone();

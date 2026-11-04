@@ -478,10 +478,227 @@ fn resolve_tenant_id(
         })
 }
 
-impl ArchiveStoreRepository for PostgresMessageStore {
+/// 发送幂等账本里一条消息要认领的键与它的结果。
+struct LedgerClaim {
+    tenant_id: String,
+    sender_id: String,
+    client_msg_id: String,
+    conversation_id: String,
+    server_id: String,
+    seq: i64,
+}
+
+impl LedgerClaim {
+    /// 没有 `client_msg_id` 的消息无从按发送去重，不入账。
+    fn of(
+        tenant_id: &str,
+        sender_id: &str,
+        client_msg_id: Option<&str>,
+        conversation_id: &str,
+        server_id: &str,
+        seq: i64,
+    ) -> Option<Self> {
+        let client_msg_id = client_msg_id.filter(|id| !id.trim().is_empty())?;
+        Some(Self {
+            tenant_id: tenant_id.to_string(),
+            sender_id: sender_id.to_string(),
+            client_msg_id: client_msg_id.to_string(),
+            conversation_id: conversation_id.to_string(),
+            server_id: server_id.to_string(),
+            seq,
+        })
+    }
+}
+
+/// 账本行写入时消息已落库：重发拿回的结果按已持久化回复。
+const LEDGER_DURABILITY: i16 = flare_proto::common::SendAckDurability::Persisted as i16;
+
+/// 在写消息的事务里认领发送幂等账本键，返回账本的结论。
+///
+/// 先 `INSERT … ON CONFLICT DO NOTHING` 认领；没认领到的键另起一条语句读出占用者（READ COMMITTED 下，
+/// 冲突等待期间别的事务提交的行要到新语句才看得见；同一批里先认领的行本事务也看得见）：
+/// - 占用者就是这条消息（重投；或写入台账里已没有它而账本还在）：照常写入；
+/// - 占用者在另一会话：重发不会换会话，这是 `client_msg_id` 被复用，照常写入，账本仍指向先到的那条；
+/// - 占用者是同一会话的另一条消息：同一次发送的第二条，不写入。
+async fn claim_send_idempotency(
+    conn: &mut sqlx::PgConnection,
+    claims: &[LedgerClaim],
+) -> Result<crate::domain::repository::ArchiveOutcome> {
+    use crate::domain::repository::{ArchiveOutcome, LedgerDuplicate};
+    use std::collections::{HashMap, HashSet};
+
+    let mut outcome = ArchiveOutcome::default();
+    if claims.is_empty() {
+        return Ok(outcome);
+    }
+    let column = |pick: fn(&LedgerClaim) -> &String| -> Vec<String> {
+        claims.iter().map(|claim| pick(claim).clone()).collect()
+    };
+    let tenant_ids = column(|claim| &claim.tenant_id);
+    let sender_ids = column(|claim| &claim.sender_id);
+    let client_msg_ids = column(|claim| &claim.client_msg_id);
+    let seqs: Vec<i64> = claims.iter().map(|claim| claim.seq).collect();
+
+    let claimed: Vec<(String,)> = sqlx::query_as(
+        r#"
+        INSERT INTO message_idempotency_ledger (
+            tenant_id, sender_id, client_msg_id, conversation_id, server_id,
+            conversation_seq, durability, created_at
+        )
+        SELECT tenant_id, sender_id, client_msg_id, conversation_id, server_id,
+               conversation_seq, $7, CURRENT_TIMESTAMP
+          FROM UNNEST($1::text[], $2::text[], $3::text[], $4::text[], $5::text[], $6::bigint[])
+               WITH ORDINALITY AS claim(
+                   tenant_id, sender_id, client_msg_id, conversation_id, server_id,
+                   conversation_seq, position
+               )
+         ORDER BY position
+        ON CONFLICT (tenant_id, sender_id, client_msg_id) DO NOTHING
+        RETURNING server_id
+        "#,
+    )
+    .bind(&tenant_ids)
+    .bind(&sender_ids)
+    .bind(&client_msg_ids)
+    .bind(column(|claim| &claim.conversation_id))
+    .bind(column(|claim| &claim.server_id))
+    .bind(&seqs)
+    .bind(LEDGER_DURABILITY)
+    .fetch_all(&mut *conn)
+    .await
+    .map_err(|err| {
+        flare_server_core::error::FlareError::system(format!(
+            "claim message idempotency ledger failed batch_size={}: {err}",
+            claims.len()
+        ))
+    })?;
+    let claimed: HashSet<String> = claimed.into_iter().map(|(server_id,)| server_id).collect();
+    if claimed.len() == claims.len() {
+        return Ok(outcome);
+    }
+
+    let unclaimed: Vec<&LedgerClaim> = claims
+        .iter()
+        .filter(|claim| !claimed.contains(&claim.server_id))
+        .collect();
+    let occupants: Vec<(String, String, String, String, String)> = sqlx::query_as(
+        r#"
+        SELECT ledger.tenant_id, ledger.sender_id, ledger.client_msg_id,
+               ledger.conversation_id, ledger.server_id
+          FROM message_idempotency_ledger AS ledger
+          JOIN UNNEST($1::text[], $2::text[], $3::text[]) AS claim(tenant_id, sender_id, client_msg_id)
+            ON ledger.tenant_id = claim.tenant_id
+           AND ledger.sender_id = claim.sender_id
+           AND ledger.client_msg_id = claim.client_msg_id
+        "#,
+    )
+    .bind(
+        unclaimed
+            .iter()
+            .map(|claim| claim.tenant_id.clone())
+            .collect::<Vec<_>>(),
+    )
+    .bind(
+        unclaimed
+            .iter()
+            .map(|claim| claim.sender_id.clone())
+            .collect::<Vec<_>>(),
+    )
+    .bind(
+        unclaimed
+            .iter()
+            .map(|claim| claim.client_msg_id.clone())
+            .collect::<Vec<_>>(),
+    )
+    .fetch_all(&mut *conn)
+    .await
+    .map_err(|err| {
+        flare_server_core::error::FlareError::system(format!(
+            "read message idempotency ledger occupants failed: {err}"
+        ))
+    })?;
+    let occupants: HashMap<(String, String, String), (String, String)> = occupants
+        .into_iter()
+        .map(
+            |(tenant_id, sender_id, client_msg_id, conversation_id, server_id)| {
+                (
+                    (tenant_id, sender_id, client_msg_id),
+                    (conversation_id, server_id),
+                )
+            },
+        )
+        .collect();
+
+    for claim in unclaimed {
+        let key = (
+            claim.tenant_id.clone(),
+            claim.sender_id.clone(),
+            claim.client_msg_id.clone(),
+        );
+        // 读不到占用者：认领与读取之间已被保留期清理删掉，按新消息写入。
+        let Some((conversation_id, server_id)) = occupants.get(&key) else {
+            continue;
+        };
+        if *server_id == claim.server_id {
+            continue;
+        }
+        if *conversation_id != claim.conversation_id {
+            outcome.reused_client_msg_ids += 1;
+            continue;
+        }
+        outcome.duplicates.push(LedgerDuplicate {
+            server_id: claim.server_id.clone(),
+            original_server_id: server_id.clone(),
+        });
+    }
+    Ok(outcome)
+}
+
+/// 删一批过期账本行：先锁定至多 `$2` 行再按主键删，多个 Writer 实例同时清理时互相跳过已锁的行。
+const DELETE_EXPIRED_LEDGER_SQL: &str = r#"
+WITH batch AS MATERIALIZED (
+    SELECT tenant_id, sender_id, client_msg_id
+      FROM message_idempotency_ledger
+     WHERE created_at < $1
+     ORDER BY created_at
+     LIMIT $2
+       FOR UPDATE SKIP LOCKED
+)
+DELETE FROM message_idempotency_ledger AS ledger
+ USING batch
+ WHERE ledger.tenant_id = batch.tenant_id
+   AND ledger.sender_id = batch.sender_id
+   AND ledger.client_msg_id = batch.client_msg_id
+"#;
+
+impl crate::domain::repository::IdempotencyLedgerRetention for PostgresMessageStore {
+    async fn delete_created_before(
+        &self,
+        cutoff: chrono::DateTime<chrono::Utc>,
+        limit: u32,
+    ) -> Result<u64> {
+        let result = sqlx::query(DELETE_EXPIRED_LEDGER_SQL)
+            .bind(cutoff)
+            .bind(i64::from(limit.max(1)))
+            .execute(&self.pool)
+            .await
+            .map_err(|err| {
+                flare_server_core::error::FlareError::system(format!(
+                    "delete expired message idempotency ledger rows failed: {err}"
+                ))
+            })?;
+        Ok(result.rows_affected())
+    }
+}
+
+impl PostgresMessageStore {
+    /// 单条归档：认领发送幂等账本 → 写入台账 → 消息行，同一事务。判为重复的消息什么也不写。
     #[instrument(skip(self, ctx, message), fields(message_id = %message.server_id, conversation_id = %message.conversation_id))]
-    async fn store_archive(&self, ctx: &Ctx, message: &Message) -> Result<()> {
-        let _ = ctx; // 上下文用于日志追踪
+    async fn archive_one(
+        &self,
+        ctx: &Ctx,
+        message: &Message,
+    ) -> Result<crate::domain::repository::ArchiveOutcome> {
         use crate::infrastructure::persistence::helpers::*;
 
         let proto_msg = convert::message_to_proto(message);
@@ -506,6 +723,23 @@ impl ArchiveStoreRepository for PostgresMessageStore {
             legacy_retention_columns(message);
 
         let mut tx = self.pool.begin().await?;
+        let claims: Vec<LedgerClaim> = LedgerClaim::of(
+            &tenant_id,
+            &proto_msg.sender_id,
+            Some(&proto_msg.client_msg_id),
+            &proto_msg.conversation_id,
+            &proto_msg.server_id,
+            seq,
+        )
+        .into_iter()
+        .collect();
+        let outcome = claim_send_idempotency(&mut tx, &claims).await?;
+        if outcome.is_duplicate(&proto_msg.server_id) {
+            // 什么也没写：先到的那条已经入账。
+            tx.commit().await?;
+            return Ok(outcome);
+        }
+
         let ledger_result = sqlx::query(
             r#"
             INSERT INTO message_write_ledger (
@@ -544,7 +778,7 @@ impl ArchiveStoreRepository for PostgresMessageStore {
                 seq = seq,
                 "Message archive skipped by durable write ledger"
             );
-            return Ok(());
+            return Ok(outcome);
         }
 
         sqlx::query(
@@ -647,7 +881,13 @@ impl ArchiveStoreRepository for PostgresMessageStore {
                 })?;
         }
         tx.commit().await?;
-        Ok(())
+        Ok(outcome)
+    }
+}
+
+impl ArchiveStoreRepository for PostgresMessageStore {
+    async fn store_archive(&self, ctx: &Ctx, message: &Message) -> Result<()> {
+        self.archive_one(ctx, message).await.map(|_| ())
     }
 
     #[instrument(skip(self), fields(tenant_id, message_id, fsm_state))]
@@ -1076,19 +1316,28 @@ impl ArchiveStoreRepository for PostgresMessageStore {
     /// 批量大小自适应：
     /// - 根据消息大小动态调整批量大小
     /// - 避免单次事务过大导致超时或内存问题
-    #[instrument(skip(self, ctx, messages), fields(batch_size = messages.len()))]
     async fn store_archive_batch(&self, ctx: &Ctx, messages: &[Message]) -> Result<()> {
-        let _ = ctx; // 上下文用于日志追踪
+        self.archive_messages(ctx, messages).await.map(|_| ())
+    }
+
+    /// 每个事务都先认领发送幂等账本，判为重复的消息不写入，同批其余消息照常写入；各事务的结论合并返回。
+    #[instrument(skip(self, ctx, messages), fields(batch_size = messages.len()))]
+    async fn archive_messages(
+        &self,
+        ctx: &Ctx,
+        messages: &[Message],
+    ) -> Result<crate::domain::repository::ArchiveOutcome> {
+        let mut outcome = crate::domain::repository::ArchiveOutcome::default();
         if messages.is_empty() {
-            return Ok(());
+            return Ok(outcome);
         }
 
         // 小批量：逐个插入（简单且可靠）
         if messages.len() <= 10 {
             for message in messages {
-                self.store_archive(ctx, message).await?;
+                outcome.merge(self.archive_one(ctx, message).await?);
             }
-            return Ok(());
+            return Ok(outcome);
         }
 
         // 计算平均消息大小（用于自适应批量大小）
@@ -1127,9 +1376,9 @@ impl ArchiveStoreRepository for PostgresMessageStore {
             );
 
             for chunk in chunks {
-                self.store_archive_batch_values(ctx, chunk).await?;
+                outcome.merge(self.store_archive_batch_values(ctx, chunk).await?);
             }
-            return Ok(());
+            return Ok(outcome);
         }
 
         // 中批量：使用 VALUES 多行插入（单事务，性能较好）
@@ -1146,7 +1395,13 @@ impl PostgresMessageStore {
     /// 错误处理和重试：
     /// - 事务失败时自动重试（最多 3 次）
     /// - 使用指数退避策略
-    async fn store_archive_batch_values(&self, ctx: &Ctx, messages: &[Message]) -> Result<()> {
+    ///
+    /// 每次尝试都在同一事务里先认领发送幂等账本，判为重复的行不进写入台账、也不写消息行。
+    async fn store_archive_batch_values(
+        &self,
+        ctx: &Ctx,
+        messages: &[Message],
+    ) -> Result<crate::domain::repository::ArchiveOutcome> {
         use sqlx::QueryBuilder;
         use std::collections::HashSet;
         use std::time::Duration;
@@ -1230,6 +1485,12 @@ impl PostgresMessageStore {
                 ))
             })
             .collect::<Result<Vec<_>>>()?;
+        let claims: Vec<LedgerClaim> = prepared_data
+            .iter()
+            .filter_map(|row| {
+                LedgerClaim::of(&row.0, &row.4, row.3.as_deref(), &row.2, &row.1, row.10)
+            })
+            .collect();
 
         // 重试机制（最多 3 次）
         let max_retries = 3;
@@ -1260,6 +1521,39 @@ impl PostgresMessageStore {
                 }
             };
 
+            let outcome = match claim_send_idempotency(&mut tx, &claims).await {
+                Ok(outcome) => outcome,
+                Err(e) => {
+                    last_error = Some(e);
+                    let _ = tx.rollback().await;
+                    if attempt < max_retries - 1 {
+                        let backoff = Duration::from_millis(1000 * (1 << attempt));
+                        tracing::warn!(
+                            attempt = attempt + 1,
+                            backoff_ms = backoff.as_millis(),
+                            "Failed to claim message idempotency ledger batch, retrying after backoff"
+                        );
+                        tokio::time::sleep(backoff).await;
+                        continue;
+                    }
+                    return Err(last_error.unwrap_or_else(|| {
+                        flare_server_core::error::FlareError::system(
+                            "Failed to claim message idempotency ledger batch after retries"
+                                .to_string(),
+                        )
+                    }));
+                }
+            };
+            // 判为重复的行整行跳过；同批其余行照常写入。
+            let candidates: Vec<_> = prepared_data
+                .iter()
+                .filter(|row| !outcome.is_duplicate(&row.1))
+                .collect();
+            if candidates.is_empty() {
+                tx.commit().await?;
+                return Ok(outcome);
+            }
+
             let mut ledger_builder: QueryBuilder<Postgres> = QueryBuilder::new(
                 r#"
                 INSERT INTO message_write_ledger (
@@ -1267,7 +1561,8 @@ impl PostgresMessageStore {
                 )
                 "#,
             );
-            ledger_builder.push_values(&prepared_data, |mut b, row| {
+            ledger_builder.push_values(&candidates, |mut b, row| {
+                let row = *row;
                 b.push_bind(&row.0); // tenant_id
                 b.push_bind(&row.1); // server_id
                 b.push_bind(&row.2); // conversation_id
@@ -1310,13 +1605,14 @@ impl PostgresMessageStore {
                     batch_size = messages.len(),
                     "All batch messages were skipped by durable write ledger"
                 );
-                return Ok(());
+                return Ok(outcome);
             }
 
             let inserted_keys: HashSet<(String, String)> =
                 inserted_ledger_rows.into_iter().collect();
-            let rows_to_insert: Vec<_> = prepared_data
+            let rows_to_insert: Vec<_> = candidates
                 .iter()
+                .copied()
                 .filter(|row| inserted_keys.contains(&(row.0.clone(), row.1.clone())))
                 .collect();
 
@@ -1404,7 +1700,7 @@ impl PostgresMessageStore {
                                 "Successfully batch inserted {} messages into TimescaleDB using VALUES",
                                 rows_to_insert.len()
                             );
-                            return Ok(());
+                            return Ok(outcome);
                         }
                         Err(e) => {
                             last_error = Some(flare_server_core::error::FlareError::from(e));

@@ -42,6 +42,8 @@ use flare_server_core::grpc::middleware::signed_context::VerifiedContext;
 const MAX_BATCH_SEND_CONCURRENCY: usize = 32;
 const MAX_BATCH_SEND_SIZE: usize = 1024;
 const MAX_BACKGROUND_WAL_CLEANUP_CONCURRENCY: usize = 128;
+/// 一次账本回查（含取连接）的上限：超时按读不了账本处理，回可重试错误。
+const LEDGER_LOOKUP_TIMEOUT: Duration = Duration::from_secs(3);
 
 /// 消息处理器（编排层）
 pub struct MessageIngestHandler {
@@ -57,6 +59,11 @@ pub struct MessageIngestHandler {
     wal_cleanup_permits: Arc<Semaphore>,
     /// 摄入边界幂等存储（可选）：按 client_msg_id 去重重发，闭合丢-ACK 重试导致的重复 echo + seq 空洞。
     idempotency: Option<Arc<dyn crate::domain::repository::IngestIdempotencyStore>>,
+    /// 发送幂等账本回查（可选）：Redis 未命中、且策略判定这是一次过窗重发时，读 Writer 落库时写下的结果。
+    idempotency_ledger: Option<(
+        Arc<dyn crate::domain::repository::IdempotencyLedger>,
+        crate::domain::model::LedgerLookbackPolicy,
+    )>,
     /// 发送入口限流（可选）：按 tenant / tenant+sender / tenant+conversation 保护摄入边界。
     send_rate_limiter: Option<Arc<SendRateLimiter>>,
     /// 租户投影：`quota.core.send_qps` 优先于全局 tenant 阈值（0 = 回落）。
@@ -82,6 +89,7 @@ impl MessageIngestHandler {
             metrics,
             wal_cleanup_permits: Arc::new(Semaphore::new(MAX_BACKGROUND_WAL_CLEANUP_CONCURRENCY)),
             idempotency: None,
+            idempotency_ledger: None,
             send_rate_limiter: None,
             tenant_runtime: TenantRuntimeCache::disabled(),
             tenant_policy: TenantAccessPolicy::Lenient,
@@ -96,6 +104,16 @@ impl MessageIngestHandler {
         store: Arc<dyn crate::domain::repository::IngestIdempotencyStore>,
     ) -> Self {
         self.idempotency = Some(store);
+        self
+    }
+
+    /// 接通发送幂等账本回查。只在 Redis 幂等存储也接通时生效：回查发生在 Redis 未命中之后。
+    pub fn with_idempotency_ledger(
+        mut self,
+        ledger: Arc<dyn crate::domain::repository::IdempotencyLedger>,
+        policy: crate::domain::model::LedgerLookbackPolicy,
+    ) -> Self {
+        self.idempotency_ledger = Some((ledger, policy));
         self
     }
 
@@ -444,11 +462,27 @@ impl MessageIngestHandler {
                         idempotency_start.elapsed(),
                     );
                     // 从这里起每条退出路径都要释放或提交占位，包括被取消（见守卫说明）。
-                    reservation = Some(IdempotencyReservation::new(
-                        Arc::clone(store),
-                        key,
-                        fingerprint.clone(),
-                    ));
+                    let guard =
+                        IdempotencyReservation::new(Arc::clone(store), key, fingerprint.clone());
+                    // Redis 未命中不等于首发：首发结果可能已过 Redis 窗口。只有策略判定为过窗重发时才回查
+                    // 持久账本，命中就与 Redis 命中一样回首发结果，并把它回填进 Redis。平台代发卡不回查：
+                    // 账本不记签名摘要，没法保证"只回放签名的那张卡"；代发卡的重投本就落在 Redis 窗口内。
+                    if fingerprint.is_empty() {
+                        match self.replay_from_ledger(&tenant_id, &cmd.message).await {
+                            Ok(None) => {}
+                            Ok(Some(outcome)) => {
+                                let result = Ok(outcome);
+                                guard.settle(&result).await;
+                                return result;
+                            }
+                            Err(error) => {
+                                let result = Err(error);
+                                guard.settle(&result).await;
+                                return result;
+                            }
+                        }
+                    }
+                    reservation = Some(guard);
                 }
             }
         }
@@ -477,6 +511,91 @@ impl MessageIngestHandler {
         }
 
         result
+    }
+
+    /// 回查发送幂等账本。策略判定不需要时直接返回 `None`，不访问 PG（新消息都走这一支）。
+    ///
+    /// - 命中且会话相同：这是首发的又一次发送，回首发的 `(server_id, conversation_seq, durability)`；
+    /// - 命中但会话不同：重发不会换会话，这是 `client_msg_id` 被复用，按新消息处理（Writer 同样照常落库）；
+    /// - 读不了账本：回可重试的 `SERVICE_UNAVAILABLE`。这时放行就可能再生成一条重复消息，而客户端稍后
+    ///   重发的代价只是这条旧消息晚一点送达。
+    async fn replay_from_ledger(
+        &self,
+        tenant_id: &str,
+        message: &flare_proto::common::Message,
+    ) -> Result<Option<SendMessageOutcome>> {
+        let Some((ledger, policy)) = self.idempotency_ledger.as_ref() else {
+            return Ok(None);
+        };
+        let Some(reason) = policy.reason(
+            message.created_at,
+            flare_im_contracts::utils::current_millis(),
+        ) else {
+            return Ok(None);
+        };
+        let start = Instant::now();
+        // Writer 按归一化后的租户入账（消息头租户经 normalize），这里同样归一。
+        let tenant_id = flare_im_contracts::utils::normalize_tenant_id(tenant_id);
+        let found = tokio::time::timeout(
+            LEDGER_LOOKUP_TIMEOUT,
+            ledger.find(&tenant_id, &message.sender_id, &message.client_msg_id),
+        )
+        .await
+        .unwrap_or_else(|_| {
+            Err(FlareError::system(format!(
+                "idempotency ledger lookup timed out after {}ms",
+                LEDGER_LOOKUP_TIMEOUT.as_millis()
+            )))
+        });
+        match found {
+            Ok(Some(record)) if record.conversation_id == message.conversation_id => {
+                self.metrics
+                    .observe_send_stage("idempotency_ledger", "replay", start.elapsed());
+                tracing::info!(
+                    reason = reason.as_str(),
+                    message_id = %record.server_id,
+                    conversation_seq = record.conversation_seq,
+                    "resend beyond the Redis dedup window replayed from the idempotency ledger"
+                );
+                Ok(Some(SendMessageOutcome {
+                    message_id: record.server_id,
+                    conversation_seq: record.conversation_seq,
+                    durability: record.durability,
+                }))
+            }
+            Ok(Some(record)) => {
+                self.metrics.observe_send_stage(
+                    "idempotency_ledger",
+                    "other_conversation",
+                    start.elapsed(),
+                );
+                tracing::warn!(
+                    reason = reason.as_str(),
+                    ledger_message_id = %record.server_id,
+                    "client_msg_id already used by this sender in another conversation; sending as a new message"
+                );
+                Ok(None)
+            }
+            Ok(None) => {
+                self.metrics
+                    .observe_send_stage("idempotency_ledger", "miss", start.elapsed());
+                Ok(None)
+            }
+            Err(error) => {
+                self.metrics
+                    .observe_send_stage("idempotency_ledger", "error", start.elapsed());
+                tracing::warn!(
+                    reason = reason.as_str(),
+                    error = %error,
+                    "idempotency ledger unavailable for an old resend; asking the client to retry"
+                );
+                Err(ErrorBuilder::new(
+                    ErrorCode::ServiceUnavailable,
+                    "idempotency ledger unavailable; retry shortly",
+                )
+                .build_error())
+            }
+        }
     }
 
     async fn ingest_send_inner(

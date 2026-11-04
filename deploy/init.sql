@@ -269,6 +269,60 @@ CREATE INDEX IF NOT EXISTS idx_message_write_ledger_failed_updated
     ON message_write_ledger(tenant_id, updated_at DESC)
     WHERE failed_at IS NOT NULL;
 
+-- 发送幂等账本（migration 0020）：(tenant_id, sender_id, client_msg_id) 唯一，Storage Writer 与消息同一事务
+-- 认领，Ingest 只为客户端创建时间早于 Redis 去重窗口的重发回查。不放进 Timescale 超表（超表唯一约束必须含
+-- 时间列）；按 (tenant_id, sender_id) 哈希分区，分区键在主键内，唯一性全局成立。保留 7 天，按 created_at 分批删。
+DROP TABLE IF EXISTS message_idempotency_ledger CASCADE;
+CREATE TABLE message_idempotency_ledger (
+    tenant_id TEXT NOT NULL,
+    sender_id TEXT NOT NULL,
+    client_msg_id TEXT NOT NULL,
+    conversation_id TEXT NOT NULL,
+    server_id TEXT NOT NULL,
+    conversation_seq BIGINT NOT NULL,
+    durability SMALLINT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL,
+    PRIMARY KEY (tenant_id, sender_id, client_msg_id)
+) PARTITION BY HASH (tenant_id, sender_id);
+COMMENT ON TABLE message_idempotency_ledger IS '发送幂等账本：(tenant_id, sender_id, client_msg_id) 唯一，覆盖 Redis 去重窗口之外的重发；保留 7 天';
+COMMENT ON COLUMN message_idempotency_ledger.server_id IS '首个占用该 client_msg_id 的消息';
+COMMENT ON COLUMN message_idempotency_ledger.durability IS 'SendAckDurability 枚举值；写入时消息已落库，记 PERSISTED';
+COMMENT ON COLUMN message_idempotency_ledger.created_at IS '入账时间，按它清理过期行';
+CREATE TABLE message_idempotency_ledger_p00 PARTITION OF message_idempotency_ledger FOR VALUES WITH (MODULUS 32, REMAINDER 0);
+CREATE TABLE message_idempotency_ledger_p01 PARTITION OF message_idempotency_ledger FOR VALUES WITH (MODULUS 32, REMAINDER 1);
+CREATE TABLE message_idempotency_ledger_p02 PARTITION OF message_idempotency_ledger FOR VALUES WITH (MODULUS 32, REMAINDER 2);
+CREATE TABLE message_idempotency_ledger_p03 PARTITION OF message_idempotency_ledger FOR VALUES WITH (MODULUS 32, REMAINDER 3);
+CREATE TABLE message_idempotency_ledger_p04 PARTITION OF message_idempotency_ledger FOR VALUES WITH (MODULUS 32, REMAINDER 4);
+CREATE TABLE message_idempotency_ledger_p05 PARTITION OF message_idempotency_ledger FOR VALUES WITH (MODULUS 32, REMAINDER 5);
+CREATE TABLE message_idempotency_ledger_p06 PARTITION OF message_idempotency_ledger FOR VALUES WITH (MODULUS 32, REMAINDER 6);
+CREATE TABLE message_idempotency_ledger_p07 PARTITION OF message_idempotency_ledger FOR VALUES WITH (MODULUS 32, REMAINDER 7);
+CREATE TABLE message_idempotency_ledger_p08 PARTITION OF message_idempotency_ledger FOR VALUES WITH (MODULUS 32, REMAINDER 8);
+CREATE TABLE message_idempotency_ledger_p09 PARTITION OF message_idempotency_ledger FOR VALUES WITH (MODULUS 32, REMAINDER 9);
+CREATE TABLE message_idempotency_ledger_p10 PARTITION OF message_idempotency_ledger FOR VALUES WITH (MODULUS 32, REMAINDER 10);
+CREATE TABLE message_idempotency_ledger_p11 PARTITION OF message_idempotency_ledger FOR VALUES WITH (MODULUS 32, REMAINDER 11);
+CREATE TABLE message_idempotency_ledger_p12 PARTITION OF message_idempotency_ledger FOR VALUES WITH (MODULUS 32, REMAINDER 12);
+CREATE TABLE message_idempotency_ledger_p13 PARTITION OF message_idempotency_ledger FOR VALUES WITH (MODULUS 32, REMAINDER 13);
+CREATE TABLE message_idempotency_ledger_p14 PARTITION OF message_idempotency_ledger FOR VALUES WITH (MODULUS 32, REMAINDER 14);
+CREATE TABLE message_idempotency_ledger_p15 PARTITION OF message_idempotency_ledger FOR VALUES WITH (MODULUS 32, REMAINDER 15);
+CREATE TABLE message_idempotency_ledger_p16 PARTITION OF message_idempotency_ledger FOR VALUES WITH (MODULUS 32, REMAINDER 16);
+CREATE TABLE message_idempotency_ledger_p17 PARTITION OF message_idempotency_ledger FOR VALUES WITH (MODULUS 32, REMAINDER 17);
+CREATE TABLE message_idempotency_ledger_p18 PARTITION OF message_idempotency_ledger FOR VALUES WITH (MODULUS 32, REMAINDER 18);
+CREATE TABLE message_idempotency_ledger_p19 PARTITION OF message_idempotency_ledger FOR VALUES WITH (MODULUS 32, REMAINDER 19);
+CREATE TABLE message_idempotency_ledger_p20 PARTITION OF message_idempotency_ledger FOR VALUES WITH (MODULUS 32, REMAINDER 20);
+CREATE TABLE message_idempotency_ledger_p21 PARTITION OF message_idempotency_ledger FOR VALUES WITH (MODULUS 32, REMAINDER 21);
+CREATE TABLE message_idempotency_ledger_p22 PARTITION OF message_idempotency_ledger FOR VALUES WITH (MODULUS 32, REMAINDER 22);
+CREATE TABLE message_idempotency_ledger_p23 PARTITION OF message_idempotency_ledger FOR VALUES WITH (MODULUS 32, REMAINDER 23);
+CREATE TABLE message_idempotency_ledger_p24 PARTITION OF message_idempotency_ledger FOR VALUES WITH (MODULUS 32, REMAINDER 24);
+CREATE TABLE message_idempotency_ledger_p25 PARTITION OF message_idempotency_ledger FOR VALUES WITH (MODULUS 32, REMAINDER 25);
+CREATE TABLE message_idempotency_ledger_p26 PARTITION OF message_idempotency_ledger FOR VALUES WITH (MODULUS 32, REMAINDER 26);
+CREATE TABLE message_idempotency_ledger_p27 PARTITION OF message_idempotency_ledger FOR VALUES WITH (MODULUS 32, REMAINDER 27);
+CREATE TABLE message_idempotency_ledger_p28 PARTITION OF message_idempotency_ledger FOR VALUES WITH (MODULUS 32, REMAINDER 28);
+CREATE TABLE message_idempotency_ledger_p29 PARTITION OF message_idempotency_ledger FOR VALUES WITH (MODULUS 32, REMAINDER 29);
+CREATE TABLE message_idempotency_ledger_p30 PARTITION OF message_idempotency_ledger FOR VALUES WITH (MODULUS 32, REMAINDER 30);
+CREATE TABLE message_idempotency_ledger_p31 PARTITION OF message_idempotency_ledger FOR VALUES WITH (MODULUS 32, REMAINDER 31);
+CREATE INDEX IF NOT EXISTS idx_message_idempotency_ledger_created_at
+    ON message_idempotency_ledger(created_at);
+
 -- ============================================================================
 -- 3. 事件流（common/event.proto Event, EventType）
 -- ============================================================================

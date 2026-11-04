@@ -20,9 +20,9 @@ use flare_im_contracts::utils::datetime_to_timestamp;
 use crate::domain::events::{AckEvent, AckStatus};
 use crate::domain::model::{Event, EventPayload, EventType, PersistenceResult, PreparedMessage};
 use crate::domain::repository::{
-    AckPublisher, ArchiveStoreRepository, EventStreamRepository, HotCacheRepository,
-    MessageIdempotencyRepository, MessageWriteLedgerRepository, MessageWriteStage,
-    PluginEntityBindingRepository, WalCleanupRepository,
+    AckPublisher, ArchiveOutcome, ArchiveStoreRepository, EventStreamRepository,
+    HotCacheRepository, MessageIdempotencyRepository, MessageWriteLedgerRepository,
+    MessageWriteStage, PluginEntityBindingRepository, WalCleanupRepository,
 };
 
 /// 消息持久化领域服务
@@ -442,15 +442,61 @@ where
         }
     }
 
+    /// 发送幂等账本的结论：判为重复的每条记 WARN 与计数
+    /// （`storage_writer_persist_total{path="idempotency_ledger",result="duplicate_skipped"}`），
+    /// `client_msg_id` 跨会话复用的计 `result="client_msg_id_reused"`。
+    fn observe_ledger_outcome(&self, prepared: &[PreparedMessage], outcome: &ArchiveOutcome) {
+        for duplicate in &outcome.duplicates {
+            let message = prepared
+                .iter()
+                .find(|message| message.message_id == duplicate.server_id);
+            warn!(
+                message_id = %duplicate.server_id,
+                original_message_id = %duplicate.original_server_id,
+                conversation_id = message.map(|m| m.conversation_id.as_str()).unwrap_or_default(),
+                client_msg_id = message.map(|m| m.message.client_msg_id.as_str()).unwrap_or_default(),
+                "duplicate send skipped by the idempotency ledger: the same client message is already stored"
+            );
+            if let Some(metrics) = &self.metrics {
+                metrics.record_storage_persist("idempotency_ledger", "duplicate_skipped");
+            }
+        }
+        if outcome.reused_client_msg_ids > 0 {
+            warn!(
+                count = outcome.reused_client_msg_ids,
+                "client_msg_id reused by the same sender in another conversation; stored as new messages"
+            );
+            if let Some(metrics) = &self.metrics {
+                metrics
+                    .storage_persist_total
+                    .with_label_values(&["idempotency_ledger", "client_msg_id_reused"])
+                    .inc_by(outcome.reused_client_msg_ids as u64);
+            }
+        }
+    }
+
     /// 持久化单条：归档 + 事件流(供 Sync) + 热缓存投影(可选)
+    ///
+    /// 发送幂等账本判为重复的消息（结论里 `is_duplicate`）没有写入，也不进事件流与热缓存：它是已落库
+    /// 那条的又一次发送，Sync 不能再给出第二条。
     #[instrument(skip(self, ctx, prepared), fields(message_id = %prepared.message_id))]
-    pub async fn persist_message(&self, ctx: &Ctx, prepared: PreparedMessage) -> Result<()> {
+    pub async fn persist_message(
+        &self,
+        ctx: &Ctx,
+        prepared: PreparedMessage,
+    ) -> Result<ArchiveOutcome> {
+        let mut outcome = ArchiveOutcome::default();
         if let Some(repo) = &self.archive_repo {
-            repo.store_archive(ctx, &prepared.message)
+            outcome = repo
+                .archive_messages(ctx, std::slice::from_ref(&prepared.message))
                 .await
                 .map_err(|e| {
                     map_infra_error(e, ErrorCode::DatabaseError, "Failed to store archive")
                 })?;
+            self.observe_ledger_outcome(std::slice::from_ref(&prepared), &outcome);
+            if outcome.is_duplicate(&prepared.message_id) {
+                return Ok(outcome);
+            }
             self.register_plugin_entity_bindings(ctx, std::slice::from_ref(&prepared.message))
                 .await;
         }
@@ -482,28 +528,38 @@ where
                 "Hot cache projection failed after durable message write"
             );
         }
-        Ok(())
+        Ok(outcome)
     }
 
     /// 批量持久化
+    ///
+    /// 发送幂等账本判为重复的消息不写入、不进事件流与热缓存；同批其余消息照常持久化。
     #[instrument(skip(self, ctx, prepared), fields(batch_size = prepared.len()))]
-    pub async fn persist_batch(&self, ctx: &Ctx, prepared: Vec<PreparedMessage>) -> Result<()> {
+    pub async fn persist_batch(
+        &self,
+        ctx: &Ctx,
+        prepared: Vec<PreparedMessage>,
+    ) -> Result<ArchiveOutcome> {
         // batch_size 这个指标以前只有声明没有写入路径：注册进了 Prometheus，
         // /metrics 里永远是 0，看的人会以为批量落库从没发生过。
         if let Some(m) = &self.metrics {
             m.observe_batch_size(prepared.len());
         }
+        let mut outcome = ArchiveOutcome::default();
         if prepared.is_empty() {
-            return Ok(());
+            return Ok(outcome);
         }
-        let messages: Vec<crate::domain::model::Message> =
+        let mut messages: Vec<crate::domain::model::Message> =
             prepared.iter().map(|p| p.message.clone()).collect();
         if let Some(repo) = &self.archive_repo {
-            repo.store_archive_batch(ctx, &messages)
-                .await
-                .map_err(|e| {
-                    map_infra_error(e, ErrorCode::DatabaseError, "Failed to store archive batch")
-                })?;
+            outcome = repo.archive_messages(ctx, &messages).await.map_err(|e| {
+                map_infra_error(e, ErrorCode::DatabaseError, "Failed to store archive batch")
+            })?;
+            self.observe_ledger_outcome(&prepared, &outcome);
+            messages.retain(|message| !outcome.is_duplicate(&message.server_id));
+            if messages.is_empty() {
+                return Ok(outcome);
+            }
             self.register_plugin_entity_bindings(ctx, &messages).await;
         }
         let repo = self.event_stream_repo.as_ref().ok_or_else(|| {
@@ -512,9 +568,9 @@ where
                 "Event stream repository not configured"
             )
         })?;
-        let events: Vec<Event> = prepared
+        let events: Vec<Event> = messages
             .iter()
-            .map(|msg| build_event_message(&msg.message))
+            .map(build_event_message)
             .collect::<Result<_>>()?;
         repo.append_events_to_stream(ctx, &events)
             .await
@@ -535,7 +591,7 @@ where
                 "Hot cache batch projection failed after durable message writes"
             );
         }
-        Ok(())
+        Ok(outcome)
     }
 
     #[instrument(skip(self, ctx), fields(message_id = %message_id))]
@@ -628,24 +684,31 @@ where
         let conversation_id = prepared.conversation_id.clone();
         let timeline = prepared.timeline.clone();
 
-        if let Err(err) = self.persist_message(ctx, prepared).await {
-            self.release_idempotency_reservation(ctx, &idempotency.reservation)
-                .await;
-            return Err(err);
+        let outcome = match self.persist_message(ctx, prepared).await {
+            Ok(outcome) => outcome,
+            Err(err) => {
+                self.release_idempotency_reservation(ctx, &idempotency.reservation)
+                    .await;
+                return Err(err);
+            }
+        };
+        // 账本判为重复：没有写入，按去重回 ACK、不计用量；发送侧 WAL 照常清理，免得重放再送来一次。
+        let deduplicated = outcome.is_duplicate(&message_id);
+        if !deduplicated {
+            self.record_write_stage_best_effort(
+                ctx,
+                &tenant_id,
+                &message_id,
+                MessageWriteStage::StoragePersisted,
+            );
+            self.usage.messages_persisted(&tenant_id, 1);
         }
-        self.record_write_stage_best_effort(
-            ctx,
-            &tenant_id,
-            &message_id,
-            MessageWriteStage::StoragePersisted,
-        );
-        self.usage.messages_persisted(&tenant_id, 1);
 
         let result = PersistenceResult {
             message_id,
             conversation_id,
             timeline,
-            deduplicated: false,
+            deduplicated,
         };
         self.publish_ack_and_record(ctx, &tenant_id, &result)
             .await?;
@@ -713,16 +776,22 @@ where
             .iter()
             .map(|(message, _, _)| message.clone())
             .collect();
-        if let Err(err) = self.persist_batch(ctx, messages_to_persist).await {
-            for (_, reservation, _) in &new_messages {
-                self.release_idempotency_reservation(ctx, reservation).await;
+        let outcome = match self.persist_batch(ctx, messages_to_persist).await {
+            Ok(outcome) => outcome,
+            Err(err) => {
+                for (_, reservation, _) in &new_messages {
+                    self.release_idempotency_reservation(ctx, reservation).await;
+                }
+                return Err(err);
             }
-            return Err(err);
-        }
+        };
         // 整批已落库：先把每条都记为已持久化并计入用量，再逐条 ACK。ACK 中途失败会提前
         // 返回，而后面几条的幂等占位已经生效，重投时走去重分支不会再计，所以计数不能放在
-        // ACK 循环里。
+        // ACK 循环里。账本判为重复的那几条没有写入：不记、不计，按去重回 ACK。
         for (msg, _, tenant_id) in &new_messages {
+            if outcome.is_duplicate(&msg.message_id) {
+                continue;
+            }
             self.record_write_stage_best_effort(
                 ctx,
                 tenant_id,
@@ -736,7 +805,7 @@ where
                 message_id: msg.message_id.clone(),
                 conversation_id: msg.conversation_id.clone(),
                 timeline: msg.timeline.clone(),
-                deduplicated: false,
+                deduplicated: outcome.is_duplicate(&msg.message_id),
             };
             self.publish_ack_and_record(ctx, tenant_id, &result).await?;
             results.push(result);
@@ -1996,5 +2065,194 @@ mod tests {
             "unexpected ledger error: {:?}",
             failed.error
         );
+    }
+
+    /// 发送幂等账本的替身：把 `duplicate` 判为 `message-original` 的重复、不写入，其余逐条写入并记下。
+    struct LedgerArchiveRepository {
+        duplicate: &'static str,
+        stored: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl ArchiveStoreRepository for LedgerArchiveRepository {
+        async fn store_archive(&self, _ctx: &Ctx, message: &Message) -> AnyhowResult<()> {
+            self.stored
+                .lock()
+                .expect("stored lock")
+                .push(message.server_id.clone());
+            Ok(())
+        }
+
+        async fn archive_messages(
+            &self,
+            ctx: &Ctx,
+            messages: &[Message],
+        ) -> AnyhowResult<ArchiveOutcome> {
+            let mut outcome = ArchiveOutcome::default();
+            for message in messages {
+                if message.server_id == self.duplicate {
+                    outcome
+                        .duplicates
+                        .push(crate::domain::repository::LedgerDuplicate {
+                            server_id: message.server_id.clone(),
+                            original_server_id: "message-original".to_string(),
+                        });
+                } else {
+                    self.store_archive(ctx, message).await?;
+                }
+            }
+            Ok(outcome)
+        }
+    }
+
+    type LedgerTestService = MessagePersistenceDomainService<
+        NoopRepository,
+        CountingHotCacheRepository,
+        LedgerArchiveRepository,
+        BatchCountingEventStreamRepository,
+        NoopRepository,
+        CountingAckPublisher,
+    >;
+
+    struct LedgerTestFixture {
+        service: LedgerTestService,
+        stored: Arc<Mutex<Vec<String>>>,
+        hot_writes: Arc<AtomicUsize>,
+        event_count: Arc<AtomicUsize>,
+        single_events: Arc<AtomicUsize>,
+        duplicate_acks: Arc<AtomicUsize>,
+        metrics: Arc<StorageWriterMetrics>,
+    }
+
+    fn ledger_fixture(duplicate: &'static str) -> LedgerTestFixture {
+        let stored = Arc::new(Mutex::new(Vec::new()));
+        let hot_writes = Arc::new(AtomicUsize::new(0));
+        let event_count = Arc::new(AtomicUsize::new(0));
+        let single_events = Arc::new(AtomicUsize::new(0));
+        let duplicate_acks = Arc::new(AtomicUsize::new(0));
+        let metrics = Arc::new(StorageWriterMetrics::new());
+        let service = MessagePersistenceDomainService::new(
+            None,
+            Some(Arc::new(CountingHotCacheRepository {
+                writes: hot_writes.clone(),
+            })),
+            Some(Arc::new(LedgerArchiveRepository {
+                duplicate,
+                stored: stored.clone(),
+            })),
+            Some(Arc::new(BatchCountingEventStreamRepository {
+                batch_calls: Arc::new(AtomicUsize::new(0)),
+                event_count: event_count.clone(),
+                single_writes: single_events.clone(),
+            })),
+            Some(Arc::new(NoopRepository)),
+            Some(Arc::new(CountingAckPublisher {
+                duplicate_acks: duplicate_acks.clone(),
+            })),
+        )
+        .with_metrics(Some(metrics.clone()))
+        .with_usage(flare_im_usage::UsageRecorder::unpublished(
+            "storage-writer-test",
+        ));
+        LedgerTestFixture {
+            service,
+            stored,
+            hot_writes,
+            event_count,
+            single_events,
+            duplicate_acks,
+            metrics,
+        }
+    }
+
+    fn persisted_usage(service: &LedgerTestService) -> Vec<(String, u64)> {
+        service
+            .usage
+            .live()
+            .into_iter()
+            .filter(|reading| reading.meter == "messages.persisted")
+            .map(|reading| (reading.app, reading.value))
+            .collect()
+    }
+
+    fn duplicates_skipped(metrics: &StorageWriterMetrics) -> u64 {
+        metrics
+            .storage_persist_total
+            .with_label_values(&["idempotency_ledger", "duplicate_skipped"])
+            .get()
+    }
+
+    /// 批量里有一条被账本判为重复：它不写入、不进事件流与热缓存、按去重回 ACK、不计用量；同批其余消息
+    /// 照常持久化，整批不失败。
+    #[tokio::test]
+    async fn a_ledger_duplicate_in_a_batch_is_skipped_without_failing_the_others() {
+        let fixture = ledger_fixture("message-dup");
+        let before = duplicates_skipped(&fixture.metrics);
+
+        let results = fixture
+            .service
+            .ensure_batch_consistency(
+                &test_ctx(),
+                vec![
+                    prepared_message("message-a", 1),
+                    prepared_message("message-dup", 2),
+                    prepared_message("message-c", 3),
+                ],
+            )
+            .await
+            .expect("the batch succeeds");
+
+        let deduplicated: Vec<(String, bool)> = results
+            .iter()
+            .map(|result| (result.message_id.clone(), result.deduplicated))
+            .collect();
+        assert_eq!(
+            deduplicated,
+            [
+                ("message-a".to_string(), false),
+                ("message-dup".to_string(), true),
+                ("message-c".to_string(), false),
+            ]
+        );
+        assert_eq!(
+            fixture.stored.lock().unwrap().as_slice(),
+            ["message-a".to_string(), "message-c".to_string()]
+        );
+        assert_eq!(fixture.event_count.load(Ordering::SeqCst), 2);
+        assert_eq!(fixture.hot_writes.load(Ordering::SeqCst), 2);
+        assert_eq!(fixture.duplicate_acks.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            persisted_usage(&fixture.service),
+            [("tenant-a".to_string(), 2)]
+        );
+        assert_eq!(duplicates_skipped(&fixture.metrics) - before, 1);
+    }
+
+    /// 单条路径：账本判为重复的消息不进事件流（Sync 不会再给出第二条），按去重回 ACK。
+    #[tokio::test]
+    async fn a_single_ledger_duplicate_is_acknowledged_as_duplicate_and_not_streamed() {
+        let fixture = ledger_fixture("message-dup");
+
+        let result = fixture
+            .service
+            .ensure_consistency(&test_ctx(), prepared_message("message-dup", 2))
+            .await
+            .expect("a duplicate is acknowledged, not failed");
+
+        assert!(result.deduplicated);
+        assert!(fixture.stored.lock().unwrap().is_empty());
+        assert_eq!(fixture.single_events.load(Ordering::SeqCst), 0);
+        assert_eq!(fixture.event_count.load(Ordering::SeqCst), 0);
+        assert_eq!(fixture.hot_writes.load(Ordering::SeqCst), 0);
+        assert_eq!(fixture.duplicate_acks.load(Ordering::SeqCst), 1);
+        assert!(persisted_usage(&fixture.service).is_empty());
+
+        // 同一服务里的下一条新消息照常持久化。
+        let next = fixture
+            .service
+            .ensure_consistency(&test_ctx(), prepared_message("message-b", 3))
+            .await
+            .expect("the next message persists");
+        assert!(!next.deduplicated);
+        assert_eq!(fixture.single_events.load(Ordering::SeqCst), 1);
     }
 }

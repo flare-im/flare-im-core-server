@@ -67,7 +67,7 @@ class MigrationUnitTests(unittest.TestCase):
 
     def test_all_patches_are_accounted_for_and_baseline_has_no_drop(self):
         migrations = migrate.load_migrations()
-        self.assertEqual([m.version for m in migrations], list(range(1, 20)))
+        self.assertEqual([m.version for m in migrations], list(range(1, 21)))
         self.assertNotIn("\nDROP ", migrations[0].sql)
         for patch in (migrate.ROOT / "deploy/patches").glob("*.sql"):
             self.assertTrue(any(patch.name in migration.name for migration in migrations[1:]), patch.name)
@@ -129,8 +129,8 @@ class MigrationUnitTests(unittest.TestCase):
         self.assertEqual(len(environments), 2)
         for environment in map(json.loads, environments):
             shapes = {name: migrate.read_profile(name, environment) for name in migrate.REVIEWED_SHAPES}
-            self.assertEqual(set(shapes), {"baseline", "v0008", "v0009", "v0010", "v0011", "latest"})
-            self.assertEqual(len({migrate.canonical(shape) for shape in shapes.values()}), 6)
+            self.assertEqual(set(shapes), {"baseline", "v0008", "v0009", "v0010", "v0011", "v0019", "latest"})
+            self.assertEqual(len({migrate.canonical(shape) for shape in shapes.values()}), 7)
             for name, shape in shapes.items():
                 with self.subTest(environment=environment, shape=name):
                     migrate.assert_reviewed_baseline(shape)
@@ -181,6 +181,27 @@ class MigrationUnitTests(unittest.TestCase):
             self.assertEqual(kinds.count("column"), 14)
             self.assertEqual(kinds.count("constraint"), 9)
             self.assertEqual(kinds.count("index"), 1)
+
+    def test_0020_adds_only_the_hash_partitioned_idempotency_ledger(self):
+        for timescale in ("2.30.0", "2.29.1"):
+            env = {"postgres_major": 16, "timescaledb": timescale}
+            before = migrate.read_profile("v0019", env)
+            after = migrate.read_profile("latest", env)
+            self.assertEqual(before["timescale"], after["timescale"], timescale)
+            old = {migrate.canonical(o) for o in before["objects"]}
+            new = {migrate.canonical(o): o for o in after["objects"]}
+            self.assertFalse(old - set(new), timescale)
+            added = [new[key] for key in sorted(set(new) - old)]
+            # The parent and its 32 hash partitions: each has 8 columns, the primary key (constraint and
+            # index) and the created_at index.
+            self.assertEqual(len(added), 396, timescale)
+            tables = {o.get("table", o["name"]) for o in added}
+            self.assertIn("message_idempotency_ledger", tables)
+            self.assertEqual(len(tables), 33, timescale)
+            self.assertTrue(all(name.startswith("message_idempotency_ledger") for name in tables), timescale)
+            kinds = sorted(o["kind"] for o in added)
+            self.assertEqual((kinds.count("relation"), kinds.count("column"), kinds.count("constraint"),
+                              kinds.count("index")), (33, 264, 33, 66), timescale)
 
     def test_version_and_definition_drift_are_not_ignored(self):
         old = {"objects": [{"kind": "column", "not_null": True}], "environment": {"timescaledb": "2.29.1"}}

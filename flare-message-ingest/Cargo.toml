@@ -31,6 +31,8 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+# 发送幂等账本回查（只读点查，Redis 去重窗口之外的重发才用到）。
+sqlx = { workspace = true }
 toml = { workspace = true }
 thiserror = { workspace = true }
 uuid = { workspace = true }
@@ -48,7 +50,6 @@ flare-im-usage = { workspace = true }
 # （tests/seq_floor_signed_read.rs）发起 floor 读。
 ed25519-dalek = { version = "2", features = ["pkcs8", "pem"] }
 flare-storage-reader = { path = "../flare-storage/reader" }
-sqlx = { workspace = true }
 
 [features]
 default = []

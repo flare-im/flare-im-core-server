@@ -261,6 +261,22 @@ async fn initialize_with_config(
     message_ingest_handler = message_ingest_handler
         .with_tenant_runtime(tenant_runtime.clone())
         .with_tenant_policy(tenant_policy);
+    // 发送幂等账本与 tenants 表同在 Core 库，复用同一个连接串；池子懒建，只有过 Redis 窗口的重发才会用到。
+    match config.tenant_runtime_postgres_url.as_deref() {
+        Some(url) => {
+            let ledger = crate::infrastructure::persistence::postgres_idempotency_ledger::PostgresIdempotencyLedger::connect_lazy(url)?;
+            message_ingest_handler = message_ingest_handler.with_idempotency_ledger(
+                Arc::new(ledger),
+                // 与 Redis 存储实际使用的结果 TTL 一致（它把 0 抬成 1 秒）。
+                crate::domain::model::LedgerLookbackPolicy::new(std::time::Duration::from_secs(
+                    idem_result_ttl.max(1),
+                )),
+            );
+        }
+        None => tracing::warn!(
+            "Core database not configured for message-ingest: resends beyond the Redis dedup window are not checked against the idempotency ledger"
+        ),
+    }
 
     let send_rate_limit_config = SendRateLimitConfig {
         enabled: config.send_rate_limit_enabled,

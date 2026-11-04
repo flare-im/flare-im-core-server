@@ -9,20 +9,25 @@
 //! - [WalCleanupRepository]：WAL 清理（持久化后移除 WAL 条目）
 //! - [AckPublisher]：回执发布（ack 下发）
 //! - [PluginEntityBindingRepository]：插件卡片落库时登记实体绑定
+//! - [IdempotencyLedgerRetention]：发送幂等账本的保留期清理
 
 mod ack_publisher;
 mod archive_store_repository;
 mod event_stream_repository;
 mod hot_cache_repository;
+mod idempotency_ledger_retention;
 mod message_idempotency_repository;
 mod message_write_ledger_repository;
 mod plugin_entity_binding_repository;
 mod wal_cleanup_repository;
 
 pub use ack_publisher::AckPublisher;
-pub use archive_store_repository::{ArchiveStoreRepository, PluginStateWrite};
+pub use archive_store_repository::{
+    ArchiveOutcome, ArchiveStoreRepository, LedgerDuplicate, PluginStateWrite,
+};
 pub use event_stream_repository::{EventStreamRepository, StoredEventMatch};
 pub use hot_cache_repository::HotCacheRepository;
+pub use idempotency_ledger_retention::IdempotencyLedgerRetention;
 pub use message_idempotency_repository::{
     MessageIdempotencyRepository, scoped_client_idempotency_key,
 };

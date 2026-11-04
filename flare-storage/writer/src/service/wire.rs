@@ -117,6 +117,9 @@ pub struct ApplicationContext {
     pub failure_publishers: ConsumerFailurePublishers,
     /// 用量预聚合（`messages.persisted`）；启动层把它的 flush 循环挂进运行时。
     pub usage: flare_im_usage::UsageReporter,
+    /// 发送幂等账本的保留期清理（与归档同一个连接池）；启动层把清理任务挂进运行时。
+    pub idempotency_ledger: Arc<PostgresMessageStore>,
+    pub metrics: Arc<StorageWriterMetrics>,
 }
 
 pub async fn initialize(
@@ -248,6 +251,8 @@ pub async fn initialize(
         retry_forwarder_dispatcher,
         failure_publishers,
         usage,
+        idempotency_ledger: archive_repo,
+        metrics,
     })
 }
 
