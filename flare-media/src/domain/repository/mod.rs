@@ -23,6 +23,23 @@ pub trait MediaObjectRepository: Send + Sync {
     async fn put_object(&self, context: &UploadContext<'_>) -> Result<String>;
     async fn delete_object(&self, object_path: &str) -> Result<()>;
     async fn presign_object(&self, object_path: &str, expires_in: i64) -> Result<String>;
+    /// Response overrides must be signed together with the object key. A store
+    /// cannot silently drop download headers or return an unsigned URL.
+    async fn presign_object_with_response_headers(
+        &self,
+        object_path: &str,
+        expires_in: i64,
+        headers: &flare_im_contracts::media_response::MediaResponseHeaders,
+    ) -> Result<String> {
+        if headers.is_empty() {
+            return self.presign_object(object_path, expires_in).await;
+        }
+        Err(flare_server_core::flare_err!(
+            flare_server_core::error::ErrorCode::OperationNotSupported,
+            "signed response overrides are unavailable for this object store"
+        ))
+    }
+
     /// 直传单次 PUT 的预签名地址。`content_length` 必须进签名（SigV4 的 signed headers），
     /// 存储据此拒绝长度与声明不符的请求体，调用方不能借这个地址写入超出声明大小的对象。
     async fn presign_put_object(

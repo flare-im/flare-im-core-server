@@ -122,3 +122,5 @@ mod tests;
 mod upload_rejection_tests;
 #[cfg(test)]
 mod upload_url_tests;
+
+mod url_options;

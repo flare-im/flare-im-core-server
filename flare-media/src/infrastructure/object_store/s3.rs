@@ -449,18 +449,28 @@ impl MediaObjectRepository for S3ObjectStore {
     }
 
     async fn presign_object(&self, object_path: &str, expires_in: i64) -> Result<String> {
-        tracing::trace!(
-            key = object_path,
-            bucket = &self.bucket,
-            expires_in = expires_in,
-            "开始生成S3对象的预签名URL"
-        );
+        self.presign_object_with_response_headers(
+            object_path,
+            expires_in,
+            &flare_im_contracts::media_response::MediaResponseHeaders::default(),
+        )
+        .await
+    }
 
+    async fn presign_object_with_response_headers(
+        &self,
+        object_path: &str,
+        expires_in: i64,
+        headers: &flare_im_contracts::media_response::MediaResponseHeaders,
+    ) -> Result<String> {
         let presigned = self
             .presign_client
             .get_object()
             .bucket(&self.bucket)
             .key(object_path)
+            .set_response_content_disposition(headers.content_disposition.clone())
+            .set_response_content_type(headers.content_type.clone())
+            .set_response_cache_control(headers.cache_control.clone())
             .presigned(
                 aws_sdk_s3::presigning::PresigningConfig::expires_in(Duration::from_secs(
                     (expires_in.max(1) as u64).min(7 * 24 * 3600),
@@ -470,17 +480,8 @@ impl MediaObjectRepository for S3ObjectStore {
                 })?,
             )
             .await
-            .map_err(|e| {
-                map_infra_error(
-                    e,
-                    ErrorCode::NetworkError,
-                    format!("failed to presign s3 url, key={}", object_path),
-                )
-            })?;
-
-        let url = presigned.uri().to_string();
-        tracing::trace!(key = object_path, presigned_url = &url, "已生成预签名URL");
-        Ok(url)
+            .map_err(|e| map_infra_error(e, ErrorCode::NetworkError, "failed to presign s3 URL"))?;
+        Ok(presigned.uri().to_string())
     }
 
     async fn presign_put_object(
@@ -923,6 +924,60 @@ mod tenant_key_tests {
         let (url, key) = generated.unwrap();
         assert!(key.starts_with("tenant-a/root/uploads/uploads/"), "{key}");
         assert_eq!(url, format!("/media/{key}"));
+    }
+
+    #[tokio::test]
+    async fn get_presign_binds_download_response_overrides_and_keeps_inline_unchanged() {
+        use flare_im_contracts::media_response::MediaResponseHeaders;
+        let store = store();
+        let inline = store
+            .presign_object("tenant-a/photo.png", 60)
+            .await
+            .unwrap();
+        let inline = url::Url::parse(&inline).unwrap();
+        assert!(
+            !inline
+                .query_pairs()
+                .any(|(key, _)| key.starts_with("response-"))
+        );
+        let headers = MediaResponseHeaders::from_request(&std::collections::HashMap::from([
+            ("Content-Type".into(), "image/png".into()),
+            ("Cache-Control".into(), "private, no-store".into()),
+        ]))
+        .unwrap()
+        .with_download("资料 137.png")
+        .unwrap();
+        let download = store
+            .presign_object_with_response_headers("tenant-a/photo.png", 60, &headers)
+            .await
+            .unwrap();
+        let download = url::Url::parse(&download).unwrap();
+        let query: std::collections::HashMap<String, String> =
+            download.query_pairs().into_owned().collect();
+        assert_eq!(
+            query.get("response-content-disposition"),
+            headers.content_disposition.as_ref()
+        );
+        assert_eq!(
+            query.get("response-content-type").map(String::as_str),
+            Some("image/png")
+        );
+        assert_eq!(
+            query.get("response-cache-control").map(String::as_str),
+            Some("private, no-store")
+        );
+        assert!(
+            query
+                .get("X-Amz-Signature")
+                .is_some_and(|signature| signature.len() == 64)
+        );
+        let inline_signature = inline
+            .query_pairs()
+            .find(|(key, _)| key == "X-Amz-Signature")
+            .unwrap()
+            .1
+            .into_owned();
+        assert_ne!(query.get("X-Amz-Signature"), Some(&inline_signature));
     }
 
     /// 直传单次 PUT 的地址把声明的长度签进去：存储按 signed headers 复算签名，
