@@ -260,7 +260,7 @@ pub(crate) fn ctx(tenant: &str, user: &str) -> Context {
 }
 
 #[tokio::test]
-async fn upload_download_and_presign_enforce_tenant_and_authenticated_owner() {
+async fn upload_and_management_enforce_owner_presentation_reads_enforce_tenant() {
     let f = Fixture::new();
     let a = ctx("tenant-a", "same-user");
     let b = ctx("tenant-b", "same-user");
@@ -302,7 +302,7 @@ async fn upload_download_and_presign_enforce_tenant_and_authenticated_owner() {
         f.service.download_local_file(&a, "file").await.unwrap(),
         data
     );
-    for forbidden in [&b, &other, &Context::root()] {
+    for forbidden in [&b, &Context::root()] {
         assert!(f.service.get_metadata(forbidden, "file").await.is_err());
         assert!(
             f.service
@@ -317,6 +317,24 @@ async fn upload_download_and_presign_enforce_tenant_and_authenticated_owner() {
                 .is_err()
         );
     }
+    assert!(f.service.get_metadata(&other, "file").await.is_err());
+    assert!(
+        f.service
+            .get_readable_metadata(&other, "file")
+            .await
+            .is_ok()
+    );
+    assert!(
+        f.service
+            .create_presigned_url(&other, "file", 60)
+            .await
+            .is_ok()
+    );
+    assert_eq!(
+        f.service.download_local_file(&other, "file").await.unwrap(),
+        data
+    );
+    assert!(f.service.delete_media_file(&other, "file").await.is_err());
     // An old storage key is not rebuilt/prefixed on read.
     let mut legacy = saved;
     legacy.storage_path = Some("old-layout/object.txt".to_string());
@@ -330,10 +348,16 @@ async fn upload_download_and_presign_enforce_tenant_and_authenticated_owner() {
         f.service.download_local_file(&a, "file").await.unwrap(),
         data
     );
-    // Historical private objects with unknown ownership remain unavailable.
+    // Unknown ownership still blocks management; presentation reads use the application policy.
     legacy.owner_id = None;
     f.metadata.save_metadata(&a, &legacy).await.unwrap();
     assert!(f.service.get_metadata(&a, "file").await.is_err());
+    assert!(
+        f.service
+            .get_readable_metadata(&other, "file")
+            .await
+            .is_ok()
+    );
     legacy.access_type = FileAccessType::Public;
     f.metadata.save_metadata(&a, &legacy).await.unwrap();
     assert!(f.service.get_metadata(&other, "file").await.is_ok());
@@ -735,4 +759,293 @@ fn tenant_key_encoding_is_injective_and_cannot_escape_its_segment() {
     assert_eq!(encode("../other"), "%2E%2E%2Fother");
     assert_ne!(encode("a/b"), encode("a%2Fb"));
     assert_ne!(encode("A"), encode("a"));
+}
+
+async fn attachment_fixture(f: &Fixture) {
+    let payload = b"private attachment";
+    f.service
+        .store_media_file(
+            &ctx("tenant-a", "alice"),
+            UploadContext {
+                tenant_id: "tenant-a",
+                file_id: "attachment-file",
+                file_name: "attachment.txt",
+                mime_type: "text/plain",
+                file_size: payload.len() as i64,
+                payload,
+                file_category: "file".into(),
+                user_id: "alice",
+                trace_id: None,
+                namespace: None,
+                business_tag: None,
+                metadata: HashMap::new(),
+            },
+        )
+        .await
+        .expect("owned upload");
+}
+
+#[tokio::test]
+async fn app_user_media_reads_preserve_identity_and_management_boundaries() {
+    let f = Fixture::new();
+    attachment_fixture(&f).await;
+    for denied in [
+        Context::root()
+            .with_tenant_id("tenant-a")
+            .with_user_id("bob"),
+        ctx("tenant-a", "alice").with_user_id("bob"),
+        ctx("", "bob"),
+        ctx("*", "bob"),
+    ] {
+        assert!(
+            f.service
+                .get_readable_metadata(&denied, "attachment-file")
+                .await
+                .is_err()
+        );
+    }
+    let bob = ctx("tenant-a", "bob");
+    // Presentation reads do not grant source-processing, reference management,
+    // or owner mutation access.
+    assert!(
+        f.service
+            .get_metadata(&bob, "attachment-file")
+            .await
+            .is_err()
+    );
+    assert!(
+        f.service
+            .list_references(&bob, "attachment-file")
+            .await
+            .is_err()
+    );
+    assert!(
+        f.service
+            .delete_media_file(&bob, "attachment-file")
+            .await
+            .is_err()
+    );
+    assert!(
+        f.service
+            .add_reference(
+                &bob,
+                "attachment-file",
+                MediaReferenceScope {
+                    namespace: "message".into(),
+                    owner_id: "bob".into(),
+                    business_tag: None,
+                },
+                HashMap::new()
+            )
+            .await
+            .is_err()
+    );
+    assert!(
+        f.service
+            .remove_reference(&bob, "attachment-file", None)
+            .await
+            .is_err()
+    );
+    assert!(
+        f.service
+            .get_readable_metadata(&bob, "attachment-file")
+            .await
+            .is_ok()
+    );
+}
+
+struct DownloadObjects {
+    captured: Mutex<Vec<flare_im_contracts::media_response::MediaResponseHeaders>>,
+}
+#[async_trait::async_trait]
+impl crate::domain::repository::MediaObjectRepository for DownloadObjects {
+    async fn put_object(&self, context: &UploadContext<'_>) -> Result<String> {
+        Ok(format!("{}/{}", context.tenant_id, context.file_id))
+    }
+    async fn delete_object(&self, _: &str) -> Result<()> {
+        Ok(())
+    }
+    async fn presign_object(&self, _: &str, _: i64) -> Result<String> {
+        Ok("https://objects.test/inline".into())
+    }
+    async fn presign_object_with_response_headers(
+        &self,
+        _: &str,
+        _: i64,
+        headers: &flare_im_contracts::media_response::MediaResponseHeaders,
+    ) -> Result<String> {
+        self.captured.lock().unwrap().push(headers.clone());
+        Ok("https://objects.test/download?X-Amz-Signature=unit-test".into())
+    }
+    fn base_url(&self) -> Option<String> {
+        Some("https://unsigned.test".into())
+    }
+    fn cdn_base_url(&self) -> Option<String> {
+        Some("https://cdn.test".into())
+    }
+    fn use_presigned_urls(&self) -> bool {
+        true
+    }
+    fn bucket_name(&self) -> Option<String> {
+        Some("private-test".into())
+    }
+}
+
+#[tokio::test]
+async fn download_options_preserve_application_authority_ttl_usage_and_inline_behavior() {
+    use flare_im_contracts::media_response::MediaResponseHeaders;
+    let mut f = Fixture::new();
+    let objects = Arc::new(DownloadObjects {
+        captured: Mutex::new(Vec::new()),
+    });
+    f.service.object_repo = Some(objects.clone());
+    attachment_fixture(&f).await;
+    let reader = ctx("tenant-a", "bob");
+    let inline = f
+        .service
+        .create_file_url_with_options(
+            &reader,
+            "attachment-file",
+            60,
+            false,
+            &MediaResponseHeaders::default(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(inline.url, "https://objects.test/inline");
+    assert!(objects.captured.lock().unwrap().is_empty());
+    let download = f
+        .service
+        .create_file_url_with_options(
+            &reader,
+            "attachment-file",
+            60,
+            true,
+            &MediaResponseHeaders::default(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        download.url,
+        "https://objects.test/download?X-Amz-Signature=unit-test"
+    );
+    assert!(download.cdn_url.is_empty());
+    assert!(download.expires_at <= Utc::now() + Duration::seconds(60));
+    let captured = objects.captured.lock().unwrap();
+    assert_eq!(captured.len(), 1);
+    assert_eq!(
+        captured[0].content_disposition.as_deref(),
+        Some("attachment; filename=\"attachment.txt\"; filename*=UTF-8''attachment.txt")
+    );
+    drop(captured);
+    let egress = f
+        .usage
+        .live()
+        .into_iter()
+        .find(|reading| reading.meter == "media.bytes_egress")
+        .unwrap();
+    assert_eq!(egress.value, 2 * b"private attachment".len() as u64);
+    for denied in [ctx("tenant-b", "bob"), Context::root()] {
+        assert!(
+            f.service
+                .create_file_url_with_options(
+                    &denied,
+                    "attachment-file",
+                    60,
+                    true,
+                    &MediaResponseHeaders::default()
+                )
+                .await
+                .is_err()
+        );
+    }
+    assert!(
+        f.service
+            .delete_media_file(&reader, "attachment-file")
+            .await
+            .is_err()
+    );
+    assert!(
+        f.service
+            .list_references(&reader, "attachment-file")
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
+async fn local_download_options_keep_the_existing_authenticated_url_and_filename_rules() {
+    use flare_im_contracts::media_response::MediaResponseHeaders;
+    let f = Fixture::new();
+    attachment_fixture(&f).await;
+    let reader = ctx("tenant-a", "bob");
+    let inline = f
+        .service
+        .create_file_url_with_options(
+            &reader,
+            "attachment-file",
+            60,
+            false,
+            &MediaResponseHeaders::default(),
+        )
+        .await
+        .unwrap();
+    let download = f
+        .service
+        .create_file_url_with_options(
+            &reader,
+            "attachment-file",
+            60,
+            true,
+            &MediaResponseHeaders::default(),
+        )
+        .await
+        .unwrap();
+    let original = url::Url::parse(&inline.url).unwrap();
+    let url = url::Url::parse(&download.url).unwrap();
+    assert_eq!(url.scheme(), original.scheme());
+    assert_eq!(url.host_str(), original.host_str());
+    assert_eq!(url.path(), original.path());
+    assert_eq!(
+        url.query_pairs()
+            .find(|(key, _)| key == "download")
+            .unwrap()
+            .1,
+        "true"
+    );
+    assert!(download.cdn_url.is_empty());
+    let mut metadata = f
+        .service
+        .get_readable_metadata(&reader, "attachment-file")
+        .await
+        .unwrap();
+    metadata.file_name = "name.txt\r\nX-Evil: 1".into();
+    f.metadata.save_metadata(&reader, &metadata).await.unwrap();
+    assert_eq!(
+        f.service
+            .create_file_url_with_options(
+                &reader,
+                "attachment-file",
+                60,
+                true,
+                &MediaResponseHeaders::default()
+            )
+            .await
+            .unwrap_err()
+            .code(),
+        Some(ErrorCode::InvalidParameter)
+    );
+    let headers = MediaResponseHeaders::from_request(&HashMap::from([(
+        "Content-Type".into(),
+        "text/html".into(),
+    )]))
+    .unwrap();
+    assert_eq!(
+        f.service
+            .create_file_url_with_options(&reader, "attachment-file", 60, false, &headers)
+            .await
+            .unwrap_err()
+            .code(),
+        Some(ErrorCode::InvalidParameter)
+    );
 }

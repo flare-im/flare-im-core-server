@@ -41,7 +41,9 @@ impl MediaQueryHandler {
         ctx: &Context,
         file_id: &str,
     ) -> Result<MediaFileMetadata> {
-        self.domain_service.get_metadata(ctx, file_id).await
+        self.domain_service
+            .get_readable_metadata(ctx, file_id)
+            .await
     }
 
     /// 获取文件URL（包含默认值处理和URL构建逻辑，使用领域服务）
@@ -71,8 +73,17 @@ impl MediaQueryHandler {
                 300
             };
         }
+        let headers = flare_im_contracts::media_response::MediaResponseHeaders::from_request(
+            &request.response_headers,
+        )?;
         self.domain_service
-            .create_presigned_url(ctx, &request.file_id, expires_in)
+            .create_file_url_with_options(
+                ctx,
+                &request.file_id,
+                expires_in,
+                request.download,
+                &headers,
+            )
             .await
     }
 

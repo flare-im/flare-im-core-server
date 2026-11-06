@@ -336,6 +336,8 @@ fn file_and_reference_operations_document_their_error_responses() {
 /// What the scripted Media endpoint answers to every file RPC.
 #[derive(Clone, Copy)]
 enum MediaVerdict {
+    /// Local bytes served through the authenticated HTTP gateway.
+    LocalFile,
     /// Owner of an object-store file whose persisted cdn_url is a bare object key.
     OwnerWithLegacyCdnKey,
     /// Media looked the file up under the caller's tenant and found nothing.
@@ -444,6 +446,23 @@ impl tower::Service<axum::http::Request<tonic::body::Body>> for ScriptedMedia {
                 ))
                 .into_http()
             }
+            MediaVerdict::LocalFile => match method {
+                "GetFileInfo" => grpc_ok(GetFileInfoResponse {
+                    info: Some(FileInfo {
+                        file_id: FILE_ID.into(),
+                        file_name: "../资料 \"137\".txt".into(),
+                        mime_type: "text/plain".into(),
+                        size: 10,
+                        ..Default::default()
+                    }),
+                    success: true,
+                    ..Default::default()
+                }),
+                "DownloadFile" => grpc_ok(DownloadFileChunk {
+                    chunk_data: b"local-body".to_vec(),
+                }),
+                _ => tonic::Status::unimplemented("not scripted").into_http(),
+            },
             MediaVerdict::OwnerWithLegacyCdnKey => match method {
                 "GetFileInfo" => grpc_ok(GetFileInfoResponse {
                     info: Some(FileInfo {
@@ -1382,4 +1401,62 @@ mod real_media {
         .await;
         assert_eq!(status["upload_id"], upload_id.as_str());
     }
+}
+
+#[tokio::test]
+async fn local_file_download_uses_authoritative_safe_attachment_headers() {
+    use flare_im_contracts::media_response::attachment_content_disposition;
+    let router = scripted_router(MediaVerdict::LocalFile).await;
+    let view = call(
+        &router,
+        "GET",
+        &format!("/api/v1/medias/files/{FILE_ID}"),
+        None,
+    )
+    .await;
+    assert_eq!(view.status(), StatusCode::OK);
+    assert!(view.headers().get("content-disposition").is_none());
+    assert_eq!(
+        axum::body::to_bytes(view.into_body(), 1000)
+            .await
+            .unwrap()
+            .as_ref(),
+        b"local-body"
+    );
+    let download = call(
+        &router,
+        "GET",
+        &format!("/api/v1/medias/files/{FILE_ID}?download=true"),
+        None,
+    )
+    .await;
+    assert_eq!(download.status(), StatusCode::OK);
+    assert_eq!(
+        download
+            .headers()
+            .get("content-disposition")
+            .unwrap()
+            .to_str()
+            .unwrap(),
+        attachment_content_disposition("../资料 \"137\".txt").unwrap()
+    );
+    assert_eq!(
+        download.headers().get("content-type").unwrap(),
+        "text/plain"
+    );
+    assert_eq!(
+        axum::body::to_bytes(download.into_body(), 1000)
+            .await
+            .unwrap()
+            .as_ref(),
+        b"local-body"
+    );
+    let unsafe_mime = call(
+        &router,
+        "GET",
+        &format!("/api/v1/medias/files/{FILE_ID}?download=true&response-content-type=text%2Fhtml"),
+        None,
+    )
+    .await;
+    assert_eq!(unsafe_mime.status(), StatusCode::BAD_REQUEST);
 }

@@ -1,6 +1,6 @@
 use axum::{
     body::{Body, Bytes},
-    extract::{Extension, Json, Path},
+    extract::{Extension, Json, Path, Query},
     http::{HeaderValue, header},
     response::{IntoResponse, Redirect, Response},
 };
@@ -95,9 +95,20 @@ pub async fn get_file_info(
     Ok(Json(ApiResponse::success(FileInfoHttpResponse::from(info))))
 }
 
+#[derive(Debug, Default, serde::Deserialize)]
+pub struct ServeFileQuery {
+    #[serde(default)]
+    download: bool,
+    #[serde(rename = "response-content-type")]
+    content_type: Option<String>,
+    #[serde(rename = "response-cache-control")]
+    cache_control: Option<String>,
+}
+
 pub async fn serve_file(
     MediaIdentity(caller): MediaIdentity,
     Path(file_id): Path<String>,
+    Query(options): Query<ServeFileQuery>,
     Extension(clients): Extension<Arc<GrpcClients>>,
 ) -> Result<Response> {
     let ctx = caller.ctx();
@@ -121,6 +132,25 @@ pub async fn serve_file(
         .info
         .ok_or_else(|| GatewayError::not_found("File info not found"))?;
 
+    let requested_headers: HashMap<String, String> = [
+        ("Content-Type", options.content_type.clone()),
+        ("Cache-Control", options.cache_control.clone()),
+    ]
+    .into_iter()
+    .filter_map(|(name, value)| value.map(|value| (name.to_string(), value)))
+    .collect();
+    let mut response_options =
+        flare_im_contracts::media_response::MediaResponseHeaders::from_request(&requested_headers)
+            .map_err(media_rpc_error)?;
+    response_options
+        .validate_content_type(&info.mime_type)
+        .map_err(media_rpc_error)?;
+    if options.download {
+        response_options = response_options
+            .with_download(&info.file_name)
+            .map_err(media_rpc_error)?;
+    }
+
     if !info.bucket.trim().is_empty() {
         let url_res = clients
             .bounded(async {
@@ -131,8 +161,8 @@ pub async fn serve_file(
                         GetFileUrlRequest {
                             file_id,
                             expires_in: 3600,
-                            download: false,
-                            response_headers: HashMap::new(),
+                            download: options.download,
+                            response_headers: requested_headers.clone(),
                             retention_protected: false,
                             content_visibility: flare_proto::common::ContentVisibility::Available
                                 as i32,
@@ -197,6 +227,28 @@ pub async fn serve_file(
         && let Ok(value) = HeaderValue::from_str(&info.size.to_string())
     {
         response_headers.insert(header::CONTENT_LENGTH, value);
+    }
+
+    if let Some(value) = response_options.content_disposition {
+        response_headers.insert(
+            header::CONTENT_DISPOSITION,
+            HeaderValue::from_str(&value).map_err(|_| {
+                GatewayError::bad_request("BAD_REQUEST", "invalid media response header")
+            })?,
+        );
+    }
+    for (name, value) in [
+        (header::CONTENT_TYPE, response_options.content_type),
+        (header::CACHE_CONTROL, response_options.cache_control),
+    ] {
+        if let Some(value) = value {
+            response_headers.insert(
+                name,
+                HeaderValue::from_str(&value).map_err(|_| {
+                    GatewayError::bad_request("BAD_REQUEST", "invalid media response header")
+                })?,
+            );
+        }
     }
 
     Ok(response)

@@ -186,7 +186,7 @@ async fn unsigned_or_foreign_signed_callers_are_unauthenticated_despite_legacy_m
 }
 
 #[tokio::test]
-async fn signed_caller_of_another_tenant_or_user_cannot_read_even_with_spoofed_metadata() {
+async fn signed_users_read_application_media_but_cannot_cross_tenants_via_metadata() {
     let h = serve().await;
     let file_id = seed_private_file(&h).await;
     let get = || GetFileInfoRequest {
@@ -200,10 +200,7 @@ async fn signed_caller_of_another_tenant_or_user_cannot_read_even_with_spoofed_m
     );
     let other_user = token(&h.signer, SignedActorType::User, "tenant-a", "intruder");
     let code = file_info_code(&h, raw(get(), Some(&other_user), "tenant-a", "owner")).await;
-    assert!(
-        !matches!(code, Code::Ok | Code::Unauthenticated),
-        "{code:?}"
-    );
+    assert_eq!(code, Code::Ok);
 }
 
 /// 签名层给 TenantAdmin 填了 `user_id = actor_id`（员工 id）。员工 id 与 IM 用户 id 同号时，
@@ -438,5 +435,78 @@ fn upload_tenant_never_defaults_to_tenant_zero() {
     for tenant in ["0", "tenant-a"] {
         let ctx: Ctx = Arc::new(Context::with_request_id("req").with_tenant_id(tenant));
         assert_eq!(upload_tenant(&ctx).unwrap(), tenant);
+    }
+}
+
+#[tokio::test]
+async fn app_user_file_urls_require_signed_login_and_tenant_but_not_file_ownership() {
+    let h = serve().await;
+    let file_id = seed_private_file(&h).await;
+    let user = token(&h.signer, SignedActorType::User, "tenant-a", "reader");
+    let response = MediaServiceClient::new(h.channel.clone())
+        .get_file_url(raw(
+            GetFileUrlRequest {
+                file_id: file_id.clone(),
+                expires_in: 60,
+                ..Default::default()
+            },
+            Some(&user),
+            "tenant-b",
+            "wrong-owner",
+        ))
+        .await
+        .expect("same-application signed user read")
+        .into_inner();
+    assert!(response.success);
+    let request = || GetFileUrlRequest {
+        file_id: file_id.clone(),
+        ..Default::default()
+    };
+    let mut client = MediaServiceClient::new(h.channel.clone());
+    assert_eq!(
+        client
+            .get_file_url(raw(request(), None, "tenant-a", "owner"))
+            .await
+            .unwrap_err()
+            .code(),
+        Code::Unauthenticated
+    );
+    let other = token(&h.signer, SignedActorType::User, "tenant-b", "reader");
+    assert_eq!(
+        client
+            .get_file_url(raw(request(), Some(&other), "tenant-a", "owner"))
+            .await
+            .unwrap_err()
+            .code(),
+        Code::NotFound
+    );
+    let staff = staff_token(&h.signer, "tenant-a", "core:medias:read");
+    assert_eq!(
+        client
+            .get_file_url(raw(request(), Some(&staff), "tenant-a", "owner"))
+            .await
+            .unwrap_err()
+            .code(),
+        Code::PermissionDenied
+    );
+    // Existing retention visibility rejection is evaluated before application reads.
+    for visibility in [
+        flare_proto::common::ContentVisibility::Hidden,
+        flare_proto::common::ContentVisibility::Redacted,
+        flare_proto::common::ContentVisibility::Purged,
+    ] {
+        let guarded = GetFileUrlRequest {
+            retention_protected: true,
+            content_visibility: visibility as i32,
+            ..request()
+        };
+        assert_eq!(
+            client
+                .get_file_url(raw(guarded, Some(&user), "tenant-a", "reader"))
+                .await
+                .unwrap_err()
+                .code(),
+            Code::PermissionDenied
+        );
     }
 }

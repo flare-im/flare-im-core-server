@@ -367,18 +367,43 @@ impl MediaService {
     }
 
     pub async fn get_metadata(&self, ctx: &Context, file_id: &str) -> Result<MediaFileMetadata> {
+        let metadata = self.load_scoped_metadata(ctx, file_id).await?;
+        self.authorize_file_read(ctx, &metadata).await?;
+        Ok(metadata)
+    }
+
+    /// Presentation reads: an authenticated IM user may read media in its own
+    /// application. Management/source reads keep `get_metadata`'s owner/grant
+    /// checks, and non-user principals keep their existing read rules.
+    pub async fn get_readable_metadata(
+        &self,
+        ctx: &Context,
+        file_id: &str,
+    ) -> Result<MediaFileMetadata> {
+        let metadata = self.load_scoped_metadata(ctx, file_id).await?;
+        if tenant::authenticated_user(ctx).is_none() {
+            self.authorize_file_read(ctx, &metadata).await?;
+        }
+        Ok(metadata)
+    }
+
+    /// Internal tenant-scoped load. Every caller must independently authorize
+    /// before returning metadata or generating an object URL.
+    pub(super) async fn load_scoped_metadata(
+        &self,
+        ctx: &Context,
+        file_id: &str,
+    ) -> Result<MediaFileMetadata> {
         require_tenant(ctx)?;
         if let Some(cache) = &self.metadata_cache
             && let Some(metadata) = cache.get_cached_metadata(ctx, file_id).await?
         {
-            self.authorize_file_read(ctx, &metadata).await?;
             return Ok(metadata);
         }
 
         if let Some(store) = &self.metadata_store
             && let Some(metadata) = store.load_metadata(ctx, file_id).await?
         {
-            self.authorize_file_read(ctx, &metadata).await?;
             if let Some(cache) = &self.metadata_cache {
                 cache.cache_metadata(ctx, &metadata).await.ok();
             }
@@ -395,7 +420,7 @@ impl MediaService {
     pub async fn download_local_file(&self, ctx: &Context, file_id: &str) -> Result<Vec<u8>> {
         ctx.ensure_not_cancelled().map_err(map_context_error)?;
 
-        let metadata = self.get_metadata(ctx, file_id).await?;
+        let metadata = self.get_readable_metadata(ctx, file_id).await?;
         if metadata.storage_bucket().is_some() {
             return Err(flare_server_core::flare_err!(
                 ErrorCode::ConfigurationError,
@@ -433,7 +458,7 @@ impl MediaService {
         ctx.ensure_not_cancelled().map_err(map_context_error)?;
 
         let tenant = require_tenant(ctx)?;
-        let metadata = self.get_metadata(ctx, file_id).await?;
+        let metadata = self.get_readable_metadata(ctx, file_id).await?;
         let expires_in = if expires_in > 0 {
             expires_in
         } else {
