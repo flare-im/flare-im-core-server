@@ -1,9 +1,13 @@
-//! Port of the tenant-wide notices Core sends after accepting a projection, so online clients of
-//! that tenant refresh what depends on it.
+//! Port of tenant config notices: "topic `T` of tenant `X` moved to version `V`", announced to
+//! that tenant's online clients (every tenant for `*`) at most once per version.
+
+use flare_server_core::error::Result;
+
+use crate::domain::model::NoticeOutcome;
 
 #[async_trait::async_trait]
 pub trait TenantNotices: Send + Sync {
-    /// A newer plugin authorization projection `version` of `tenant_id` was committed. Best
-    /// effort: a failure is logged, never returned, and never undoes the accepted projection.
-    async fn plugin_catalog_changed(&self, tenant_id: &str, version: u64);
+    /// Publishes `version` of `topic` for `tenant_id` when it is above the last published one;
+    /// an equal or older version is not published again and reports the current one.
+    async fn publish(&self, tenant_id: &str, topic: &str, version: u64) -> Result<NoticeOutcome>;
 }

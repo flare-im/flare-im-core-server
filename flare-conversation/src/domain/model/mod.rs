@@ -157,6 +157,8 @@ pub struct ConversationSummary {
     pub member_preview: Vec<ConversationParticipant>,
     /// 当前用户：是否静音
     pub is_muted: bool,
+    /// 当前用户：是否只接收提及提醒
+    pub is_mention_only: bool,
     /// 当前用户：是否置顶
     pub is_pinned: bool,
     /// 当前用户：是否归档
@@ -169,6 +171,9 @@ pub struct ConversationSummary {
     pub visible_after_seq: i64,
 }
 
+// The existing bridge sets this business type when it projects its group into Core.
+pub(crate) const EXTERNAL_GROUP_ROSTER_BUSINESS_TYPE: &str = "social_group";
+
 /// 用户在会话上的偏好设置（读写合一）
 #[derive(Clone, Debug)]
 pub struct ConversationUserSettings {
@@ -180,6 +185,7 @@ pub struct ConversationUserSettings {
     pub is_mention_only: bool,
     pub draft: Option<String>,
     pub settings_version: u64,
+    pub history_cleared_through_seq: u64,
 }
 
 #[derive(Clone, Debug)]
@@ -191,6 +197,7 @@ pub struct UpdateConversationUserSettingsPatch {
     pub is_archived: Option<bool>,
     pub draft: Option<String>,
     pub base_settings_version: u64,
+    pub clear_history_through_seq: Option<u64>,
 }
 
 #[derive(Clone, Debug)]
@@ -483,6 +490,14 @@ impl ConversationLifecycleState {
             ConversationLifecycleState::Deleted => "deleted",
         }
     }
+}
+
+#[derive(Debug, Default)]
+pub struct ConversationUpdate {
+    pub display_name: Option<String>,
+    pub attributes: Option<HashMap<String, String>>,
+    pub visibility: Option<ConversationVisibility>,
+    pub lifecycle_state: Option<ConversationLifecycleState>,
 }
 
 #[derive(Clone, Debug)]

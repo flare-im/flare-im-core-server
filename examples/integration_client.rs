@@ -87,9 +87,7 @@ async fn main() -> Result<()> {
         .with_device_info(device_info)
         .with_user_id(user_id.clone())
         .with_heartbeat(heartbeat)
-        .with_connect_timeout(Duration::from_secs(10))
-        .with_reconnect_interval(Duration::from_secs(3))
-        .with_max_reconnect_attempts(Some(5));
+        .with_connect_timeout(Duration::from_secs(10));
     if !token.is_empty() {
         builder = builder.with_token(token);
     }

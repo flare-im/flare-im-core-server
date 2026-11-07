@@ -105,6 +105,17 @@ impl ConversationCommandHandler {
             .await
     }
 
+    /// Advance the history cutoff after a verified service operation.
+    pub async fn handle_clear_history_for_everyone(
+        &self,
+        ctx: &Context,
+        conversation_id: &str,
+    ) -> Result<u64> {
+        self.domain_service
+            .clear_history_for_everyone(ctx, conversation_id)
+            .await
+    }
+
     /// 处理强制会话同步命令
     pub async fn handle_force_conversation_sync(
         &self,
@@ -222,6 +233,7 @@ impl ConversationCommandHandler {
                     is_archived: command.is_archived,
                     draft: command.draft,
                     base_settings_version: command.base_settings_version,
+                    clear_history_through_seq: command.clear_history_through_seq,
                 },
             )
             .await
@@ -287,16 +299,28 @@ impl ConversationCommandHandler {
 
 /// 会话查询处理器
 pub struct ConversationQueryHandler {
+    conversation_repo: Arc<PostgresConversationRepository>,
     domain_service: Arc<DefaultConversationDomainService>,
 }
 
 impl ConversationQueryHandler {
     pub fn new(
-        _conversation_repo: Arc<PostgresConversationRepository>,
+        conversation_repo: Arc<PostgresConversationRepository>,
         _message_provider: Option<Arc<StorageReaderClient>>,
         domain_service: Arc<DefaultConversationDomainService>,
     ) -> Self {
-        Self { domain_service }
+        Self { conversation_repo, domain_service }
+    }
+
+    pub(crate) async fn external_roster_channel(
+        &self,
+        ctx: &Context,
+        conversation_id: &str,
+        provider_configured: bool,
+    ) -> Result<Option<(String, bool)>> {
+        self.conversation_repo
+            .external_roster_channel(ctx, conversation_id, provider_configured)
+            .await
     }
 
     /// 处理列出会话查询

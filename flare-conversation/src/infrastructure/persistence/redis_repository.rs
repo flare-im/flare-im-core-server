@@ -8,6 +8,7 @@ use crate::config::ConversationConfig;
 use crate::domain::model::{
     Conversation, ConversationBootstrapResult, ConversationFilter, ConversationParticipant,
     ConversationParticipantsPage, ConversationSort, ConversationSummary, ConversationType,
+    ConversationUpdate,
 };
 use crate::domain::repository::ConversationRepository;
 use flare_server_core::error::{ErrorBuilder, ErrorCode, Result, map_infra_error, require_user_id};
@@ -180,6 +181,7 @@ impl ConversationRepository for RedisConversationRepository {
                 participant_version: 0,
                 member_preview: Vec::new(),
                 is_muted: false,
+                is_mention_only: false,
                 is_pinned: false,
                 is_archived: false,
                 settings_version: 0,
@@ -243,7 +245,8 @@ impl ConversationRepository for RedisConversationRepository {
     async fn update_conversation(
         &self,
         _ctx: &flare_server_core::context::Context,
-        _session: &Conversation,
+        _conversation_id: &str,
+        _update: &ConversationUpdate,
     ) -> Result<()> {
         Err(redis_not_supported("update_conversation"))
     }

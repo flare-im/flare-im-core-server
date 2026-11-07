@@ -60,6 +60,19 @@ pub trait TenantProjectionRepository: Send + Sync {
         &self,
         tenant_ids: &[String],
     ) -> flare_server_core::error::Result<Vec<(String, u64)>>;
+
+    /// 仅当来件 `version` 大于本地版本时写入 `tenant_client_policy`，并在同一事务里排队水位前进
+    /// 欠下的租户通知（[`tenant_notice_outbox`]）；水位不回退。
+    async fn upsert_client_policy(
+        &self,
+        record: &crate::domain::model::ClientPolicyRecord,
+    ) -> flare_server_core::error::Result<crate::domain::model::TenantProjectionOutcome>;
+
+    /// 本地持有的客户端策略版本；`app_ids` 为空表示全部。
+    async fn client_policy_versions(
+        &self,
+        app_ids: &[String],
+    ) -> flare_server_core::error::Result<Vec<(String, u64)>>;
 }
 
 /// Local, durable authorization. No Marketplace call is permitted on this port.
@@ -155,3 +168,4 @@ pub mod realtime_delivery;
 pub mod resource_access;
 pub mod service_dispatch;
 pub mod tenant_notice;
+pub mod tenant_notice_outbox;

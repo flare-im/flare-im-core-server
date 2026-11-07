@@ -43,6 +43,8 @@ pub struct ApplicationContext {
     pub capability_runtime: Arc<CapabilityRuntimeConfig>,
     /// 控制面租户投影接收端（`flare.control.v1.TenantProjection`）；仅当配置了 PostgreSQL。
     pub tenant_projection: Option<TenantProjectionGrpcServer<PostgresTenantProjectionRepository>>,
+    /// 业务服务发布租户配置通知（`TenantNoticeService`）；没有通知通道或验签器时 fail closed。
+    pub tenant_notice: crate::interface::grpc::TenantNoticeGrpcServer,
     /// 管理员只读（`CapabilityAdminService`）：租户开关与本地租户投影，只认转发的 Staff 上下文。
     pub capability_admin: CapabilityAdminGrpcServer<PostgresTenantProjectionRepository>,
     /// Hook 配置跨实例失效通知的监听任务（有库时）；进程停机时停掉。
@@ -52,4 +54,7 @@ pub struct ApplicationContext {
     /// 插件实体生命周期 outbox 的投递任务（有库且配置了插件调用签名器时）；随进程停机结束。
     pub(crate) entity_lifecycle_worker:
         Option<crate::application::handler::entity_lifecycle::EntityLifecycleWorker>,
+    /// 租户通知 outbox 的发布任务（有库且有通知通道时）；随进程停机结束。
+    pub(crate) tenant_notice_relay:
+        Option<crate::application::handler::tenant_notice_relay::TenantNoticeRelay>,
 }

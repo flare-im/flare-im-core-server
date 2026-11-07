@@ -1,5 +1,6 @@
 use async_trait::async_trait;
 use flare_core::common::DeviceInfo;
+use flare_core::common::constants::metadata_keys;
 use flare_core::server::{AuthResult, Authenticator};
 use flare_im_contracts::utils::{normalize_optional_tenant_id, normalize_tenant_id};
 use flare_im_service_kit::tenant_runtime::{TenantAccessPolicy, TenantLookup, TenantRuntimeCache};
@@ -44,6 +45,7 @@ pub struct AuthHandler {
     /// 租户投影：token 合法后再看租户能不能接入。
     tenant_runtime: TenantRuntimeCache,
     tenant_policy: TenantAccessPolicy,
+    metrics: Option<Arc<flare_im_service_kit::metrics::AccessGatewayMetrics>>,
 }
 
 impl AuthHandler {
@@ -71,7 +73,30 @@ impl AuthHandler {
             default_tenant_id: default_tenant_id.into(),
             tenant_runtime,
             tenant_policy,
+            metrics: None,
         }
+    }
+
+    /// 每次放行时记录客户端上报的接入清单 serial 与投影的差距。
+    #[must_use]
+    pub fn with_metrics(
+        mut self,
+        metrics: Arc<flare_im_service_kit::metrics::AccessGatewayMetrics>,
+    ) -> Self {
+        self.metrics = Some(metrics);
+        self
+    }
+
+    /// 这条连接的 CONNECT_ACK 要报的接入清单 serial：应用投影的最新值，读不到是 0。
+    async fn latest_access_serial(&self, tenant_id: &str, device_info: Option<&DeviceInfo>) -> u64 {
+        let latest = self.tenant_runtime.access_serial(tenant_id).await;
+        if let Some(metrics) = &self.metrics {
+            let reported = device_info
+                .and_then(|device| device.metadata.get(metadata_keys::ACCESS_SERIAL))
+                .and_then(|serial| serial.trim().parse().ok());
+            metrics.record_connect_access_serial(tenant_id, reported, latest);
+        }
+        latest
     }
 
     /// 租户闸门：`suspended` / `deleting` 一律拒；未投影或投影库不可用按策略（宽松放行、严格拒绝）。
@@ -250,12 +275,14 @@ impl Authenticator for AuthHandler {
                     user_metadata.insert(METADATA_KEY_DEVICE_ID.to_string(), device_id);
                 }
 
+                let access_serial = self.latest_access_serial(&tenant_id, device_info).await;
                 debug!( connection_id = %connection_id,user_id = %user_id,tenant_id = %tenant_id,"Token 验证成功，租户ID已设置");
                 // 关键：已验证的租户总是存在（令牌没带就用默认租户）。flare-core 用它给设备冲突
                 // 按（租户，用户）分桶，并写进连接元数据；两个租户里 user_id 相同的用户不会互踢。
                 Ok(
                     AuthResult::success_with_metadata(Some(user_id), user_metadata)
-                        .with_tenant_id(tenant_id),
+                        .with_tenant_id(tenant_id)
+                        .with_access_serial(access_serial),
                 )
             }
             TokenVerdict::Rejected => {
@@ -290,7 +317,9 @@ mod tests {
     use super::*;
     use crate::constants::METADATA_KEY_TENANT_ID;
     use flare_core::common::DevicePlatform;
-    use flare_im_contracts::domain::tenant::{TenantRuntimeSnapshot, TenantStatus};
+    use flare_im_contracts::domain::tenant::{
+        TenantClientPolicy, TenantRuntimeSnapshot, TenantStatus,
+    };
     use flare_im_service_kit::tenant_runtime::{TenantRuntimeCacheOptions, TenantRuntimeSource};
     use flare_server_core::auth::{AuthError, AuthenticatedPrincipal};
     use std::sync::Mutex;
@@ -629,6 +658,148 @@ mod tests {
             result.error_message.as_deref(),
             Some(AUTH_FAILURE_MSG_TOKEN_INVALID)
         );
+    }
+
+    /// 每个应用一个已投影的 serial。
+    struct ProjectedSerials(HashMap<String, u64>);
+
+    #[async_trait]
+    impl TenantRuntimeSource for ProjectedSerials {
+        async fn load(&self, _tenant_id: &str) -> Result<Option<TenantRuntimeSnapshot>, String> {
+            Ok(None)
+        }
+
+        async fn load_client_policy(
+            &self,
+            tenant_id: &str,
+        ) -> Result<Option<TenantClientPolicy>, String> {
+            Ok(self.0.get(tenant_id).map(|serial| TenantClientPolicy {
+                tenant_id: tenant_id.to_string(),
+                version: 1,
+                access_serial: *serial,
+                ..Default::default()
+            }))
+        }
+    }
+
+    fn projected(rows: &[(&str, u64)]) -> TenantRuntimeCache {
+        TenantRuntimeCache::with_source(
+            Arc::new(ProjectedSerials(
+                rows.iter().map(|(id, s)| (id.to_string(), *s)).collect(),
+            )),
+            TenantRuntimeCacheOptions::default(),
+        )
+    }
+
+    fn device_reporting(serial: Option<&str>) -> DeviceInfo {
+        let device = DeviceInfo::new("device-a".to_string(), DevicePlatform::Web);
+        match serial {
+            Some(serial) => {
+                device.with_metadata(metadata_keys::ACCESS_SERIAL.to_string(), serial.to_string())
+            }
+            None => device,
+        }
+    }
+
+    /// 认证结果带上应用投影的 serial；没投影的应用是 0，放行不受影响。
+    #[tokio::test]
+    async fn an_admitted_connection_carries_the_projected_serial_of_its_app() {
+        let device = device_reporting(None);
+        let result = handler(
+            Some(principal(None)),
+            projected(&[("tenant-a", 42), ("tenant-b", 7)]),
+            TenantAccessPolicy::Lenient,
+        )
+        .authenticate("token", "conn-a", Some(&device), None)
+        .await
+        .unwrap();
+        assert_eq!(result.access_serial, 42);
+
+        let result = handler(
+            Some(principal(None)),
+            projected(&[("tenant-b", 7)]),
+            TenantAccessPolicy::Lenient,
+        )
+        .authenticate("token", "conn-a", Some(&device), None)
+        .await
+        .unwrap();
+        assert!(result.authenticated);
+        assert_eq!(result.access_serial, 0);
+    }
+
+    /// 真实握手：网关的认证器接在 flare-core 上，CONNECT_ACK 带的是投影里的 serial。
+    #[tokio::test]
+    async fn the_connect_ack_reports_the_projected_serial() {
+        use flare_core::common::link::ConnectAckInfo;
+        use flare_core::common::protocol::flare::core::commands::command;
+        use flare_core::common::protocol::{
+            Reliability, SerializationFormat, builder, frame_with_system_command,
+        };
+        use flare_core::server::ServerConfig;
+        use flare_core::server::transports::server_core::ServerCore;
+
+        let authenticator = handler(
+            Some(principal(None)),
+            projected(&[("tenant-a", 42)]),
+            TenantAccessPolicy::Lenient,
+        );
+        let config = ServerConfig {
+            auth_enabled: true,
+            ..ServerConfig::default()
+        };
+        let core = ServerCore::new(&config, None).with_authenticator(Some(Arc::new(authenticator)));
+        let connect = frame_with_system_command(
+            builder::connect(
+                SerializationFormat::Json,
+                HashMap::from([
+                    ("token".to_string(), b"token".to_vec()),
+                    (metadata_keys::ACCESS_SERIAL.to_string(), b"40".to_vec()),
+                ]),
+            ),
+            Reliability::AtLeastOnce,
+        );
+        let (ack, _) = core
+            .handle_connect_message(&connect, "conn-a")
+            .await
+            .expect("negotiated");
+        let Some(command::Type::System(system)) = ack.command.and_then(|c| c.r#type) else {
+            panic!("system command expected");
+        };
+        assert_eq!(
+            ConnectAckInfo::from_metadata(&system.metadata).access_serial,
+            Some(42)
+        );
+    }
+
+    /// 采用率的分子分母：上报的 serial 与投影比较后计入对应的桶。
+    #[tokio::test]
+    async fn reported_serials_are_counted_against_the_projection() {
+        let metrics = Arc::new(flare_im_service_kit::metrics::AccessGatewayMetrics::new());
+        let handler = handler(
+            Some(principal(None)),
+            projected(&[("tenant-a", 42)]),
+            TenantAccessPolicy::Lenient,
+        )
+        .with_metrics(metrics.clone());
+        for (reported, state) in [
+            (Some("42"), "current"),
+            (Some("41"), "behind"),
+            (Some("43"), "ahead"),
+            (None, "unreported"),
+            (Some("not-a-number"), "unreported"),
+        ] {
+            let label = flare_im_service_kit::metrics::tenant_label("tenant-a");
+            let counter = metrics
+                .connect_access_serial_total
+                .with_label_values(&[label, state]);
+            let before = counter.get();
+            let device = device_reporting(reported);
+            handler
+                .authenticate("token", "conn-a", Some(&device), None)
+                .await
+                .unwrap();
+            assert_eq!(counter.get(), before + 1, "{reported:?}");
+        }
     }
 
     /// 令牌校验按给定错误失败。

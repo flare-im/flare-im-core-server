@@ -14,7 +14,7 @@ use flare_conversation::config::ConversationConfig;
 use flare_conversation::domain::model::{
     ConflictResolutionPolicy, Conversation, ConversationDomainConfig, ConversationFilter,
     ConversationLifecycleState, ConversationParticipant, ConversationPolicy, ConversationSort,
-    ConversationType, ConversationVisibility, HistoryPurgeBoundary,
+    ConversationType, ConversationUpdate, ConversationVisibility, HistoryPurgeBoundary,
     UpdateConversationUserSettingsPatch,
 };
 use flare_conversation::domain::repository::ConversationRepository;
@@ -155,7 +155,8 @@ async fn every_repository_method_requires_a_context_tenant() {
         assert_tenant_required("get_conversation", repo.get_conversation(&ctx, CID).await);
         assert_tenant_required(
             "update_conversation",
-            repo.update_conversation(&ctx, &conversation()).await,
+            repo.update_conversation(&ctx, CID, &ConversationUpdate::default())
+                .await,
         );
         assert_tenant_required(
             "delete_conversation",
@@ -229,6 +230,7 @@ async fn every_repository_method_requires_a_context_tenant() {
                     is_archived: None,
                     draft: None,
                     base_settings_version: 0,
+                    clear_history_through_seq: None,
                 },
             )
             .await,

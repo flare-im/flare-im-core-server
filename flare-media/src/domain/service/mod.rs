@@ -48,6 +48,7 @@ type UploadContextData<'a> = (
 );
 
 pub struct MediaService {
+    message_reader: Option<std::sync::Arc<dyn crate::domain::repository::MessageAttachmentReader>>,
     object_repo: Option<ObjectRepositoryRef>,
     metadata_store: Option<MetadataStoreRef>,
     metadata_cache: Option<MetadataCacheRef>,
@@ -81,6 +82,7 @@ impl MediaService {
         }
 
         Self {
+            message_reader: None,
             object_repo,
             metadata_store,
             metadata_cache,
@@ -98,6 +100,14 @@ impl MediaService {
         self
     }
 
+    pub fn with_message_reader(
+        mut self,
+        reader: std::sync::Arc<dyn crate::domain::repository::MessageAttachmentReader>,
+    ) -> Self {
+        self.message_reader = Some(reader);
+        self
+    }
+
     /// 测试用：缩短直传完成的领取租期，在毫秒级观察续租。
     #[cfg(test)]
     pub(crate) fn set_direct_completion_lease(&mut self, lease: Duration) {
@@ -105,6 +115,7 @@ impl MediaService {
     }
 }
 
+mod attachment_read;
 #[cfg(test)]
 mod cdn_url_tests;
 mod direct;
@@ -122,5 +133,4 @@ mod tests;
 mod upload_rejection_tests;
 #[cfg(test)]
 mod upload_url_tests;
-
 mod url_options;

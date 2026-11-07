@@ -119,6 +119,8 @@ impl ConnectionDomainService {
         };
         let app_build = client_build("app_build");
         let distribution = client_build("distribution");
+        let connection_epoch = client_build("connection_epoch");
+        let access_serial = client_build("access_serial");
 
         let login_request = LoginRequest {
             user_id: user_id.to_string(),
@@ -151,6 +153,8 @@ impl ConnectionDomainService {
                         app_version = %app_version,
                         app_build = %app_build,
                         distribution = %distribution,
+                        connection_epoch = %connection_epoch,
+                        access_serial = %access_serial,
                         "Connection registered successfully"
                     );
                     Ok(response.conversation_id)

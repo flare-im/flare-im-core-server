@@ -20,14 +20,15 @@ use flare_grpc_proto::conversation::{
     ListMessageReadersResponse, MessageReadSummary, MessageReaderState,
 };
 use flare_server_core::context::{ActorContext, ActorType, Context};
+use flare_server_core::error::Result as FlareResult;
 use sqlx::PgPool;
 use sqlx::postgres::PgPoolOptions;
 
 use crate::application::handlers::{ConversationCommandHandler, ConversationQueryHandler};
 use crate::config::ConversationConfig;
-use crate::domain::model::ConversationDomainConfig;
-use crate::domain::repository::ConversationRepository;
-use crate::domain::service::DefaultConversationDomainService;
+use crate::domain::model::{ConversationDomainConfig, DevicePresence};
+use crate::domain::repository::{ConversationRepository, PresenceRepository, PresenceUpdate};
+use crate::domain::service::{ConversationDomainService, DefaultConversationDomainService};
 use crate::infrastructure::persistence::PostgresConversationRepository;
 use crate::infrastructure::persistence::redis_presence::RedisPresenceRepository;
 use crate::interface::grpc::ConversationGrpcHandler;
@@ -123,6 +124,7 @@ async fn isolated_schema(url: &str) -> (PgPool, PgPool, String) {
     let baseline = migration("0001_baseline.sql");
     let ddl = [
         create_table(&baseline, "messages"),
+        create_table(&baseline, "message_visibility"),
         indexes(&baseline, "messages"),
         create_table(&baseline, "conversations"),
         create_table(&baseline, "conversation_participants"),
@@ -131,6 +133,7 @@ async fn isolated_schema(url: &str) -> (PgPool, PgPool, String) {
         migration("0003_20260810_add_participant_visible_from_seq.sql"),
         migration("0004_20260812_add_participant_mention_only.sql"),
         migration("0006_20260901_participants_joined_at_index.sql"),
+        migration("0021_20261103_conversation_history_clear.sql"),
     ]
     .join("\n");
     sqlx::raw_sql(&ddl).execute(&pool).await.unwrap();
@@ -219,6 +222,18 @@ fn user(user: &str) -> Context {
     Context::with_request_id("req-receipts")
         .with_tenant_id(TENANT)
         .with_user_id(user)
+}
+
+struct EmptyPresence;
+
+impl PresenceRepository for EmptyPresence {
+    async fn list_devices(&self, _: &Context, _: &str) -> FlareResult<Vec<DevicePresence>> {
+        Ok(Vec::new())
+    }
+
+    async fn update_presence(&self, _: &Context, _: PresenceUpdate) -> FlareResult<()> {
+        Ok(())
+    }
 }
 
 fn handler(repo: Arc<PostgresConversationRepository>) -> ConversationGrpcHandler {
@@ -1230,6 +1245,168 @@ async fn hiding_a_conversation_is_not_reading_it() {
     drop_schema(admin, pool, &schema).await;
 }
 
+#[tokio::test]
+#[ignore = "requires FLARE_CONVERSATION_TEST_DATABASE_URL pointing at a disposable PostgreSQL"]
+async fn lifecycle_archive_converges_through_incremental_bootstrap_and_keeps_history() {
+    use crate::domain::model::{
+        ConversationLifecycleState, ConversationUpdate, UpdateConversationUserSettingsPatch,
+    };
+
+    let url = std::env::var(ENV_DATABASE_URL)
+        .unwrap_or_else(|_| panic!("set {ENV_DATABASE_URL} to a disposable PostgreSQL instance"));
+    let (admin, pool, schema) = isolated_schema(&url).await;
+    let group = generate_group_conversation_id("archive-live");
+    let legacy = generate_group_conversation_id("archive-legacy");
+    let suspended = generate_group_conversation_id("archive-suspended");
+    let alice = user("alice");
+    let bob = user("bob");
+    for id in [&group, &legacy, &suspended] {
+        conversation(&pool, id, 2).await;
+        member(&pool, id, "alice", 0, false, false).await;
+    }
+    member(&pool, &group, "bob", 0, false, false).await;
+    message(&pool, &group, "historic-message", 1, "alice", 1).await;
+    sqlx::query(
+        "UPDATE conversations SET lifecycle_state = 'suspended' WHERE conversation_id IN ($1, $2)",
+    )
+    .bind(&legacy)
+    .bind(&suspended)
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query("UPDATE conversations SET attributes = jsonb_build_object('social_state', 'group_dissolved') WHERE conversation_id = $1")
+        .bind(&legacy).execute(&pool).await.unwrap();
+    sqlx::raw_sql("UPDATE conversations SET updated_at = '2020-01-01'; UPDATE conversation_participants SET updated_at = '2020-01-01', joined_at = '2020-01-01'; UPDATE messages SET timestamp = '2020-01-01';")
+        .execute(&pool).await.unwrap();
+
+    let repo = PostgresConversationRepository::new(Arc::new(pool.clone()), test_config());
+    let cursor = std::collections::HashMap::new();
+    let original = repo.load_bootstrap(&alice, &cursor, 0).await.unwrap();
+    assert_eq!(original.summaries.len(), 3);
+    assert!(
+        original
+            .summaries
+            .iter()
+            .all(|summary| !summary.is_archived)
+    );
+    let since = original.summaries[0].server_cursor_ts.unwrap();
+    let settings = |archived: bool| UpdateConversationUserSettingsPatch {
+        conversation_id: group.clone(),
+        is_archived: Some(archived),
+        is_mention_only: None,
+        is_pinned: None,
+        is_muted: None,
+        draft: None,
+        base_settings_version: 0,
+        clear_history_through_seq: None,
+    };
+    assert!(
+        repo.update_user_settings(&bob, &settings(true))
+            .await
+            .unwrap()
+            .is_archived
+    );
+
+    let archive = ConversationUpdate {
+        lifecycle_state: Some(ConversationLifecycleState::Archived),
+        ..Default::default()
+    };
+    repo.update_conversation(&alice, &group, &archive)
+        .await
+        .unwrap();
+    // Replay and a display-name update must neither resurrect the group nor bump settings twice.
+    repo.update_conversation(&alice, &group, &archive)
+        .await
+        .unwrap();
+    repo.update_conversation(
+        &alice,
+        &group,
+        &ConversationUpdate {
+            display_name: Some("Renamed archived group".into()),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    sqlx::raw_sql(&migration(
+        "0022_20261105_archive_legacy_dissolved_groups.sql",
+    ))
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let delta = repo.load_bootstrap(&alice, &cursor, since).await.unwrap();
+    assert_eq!(delta.summaries.len(), 2);
+    assert!(
+        delta
+            .summaries
+            .iter()
+            .all(|summary| summary.is_archived && summary.settings_version == 1)
+    );
+    let summary = delta
+        .summaries
+        .iter()
+        .find(|summary| summary.conversation_id == group)
+        .unwrap();
+    assert_eq!(
+        summary.display_name.as_deref(),
+        Some("Renamed archived group")
+    );
+    assert_eq!(summary.last_message_id.as_deref(), Some("historic-message"));
+    assert!(
+        delta
+            .summaries
+            .iter()
+            .any(|summary| summary.conversation_id == legacy)
+    );
+    assert_eq!(
+        repo.get_conversation(&alice, &suspended)
+            .await
+            .unwrap()
+            .unwrap()
+            .lifecycle_state,
+        ConversationLifecycleState::Suspended
+    );
+    let ack = repo
+        .update_user_settings(&alice, &settings(false))
+        .await
+        .unwrap();
+    assert!(ack.is_archived);
+    assert_eq!(ack.settings_version, 2);
+
+    repo.update_conversation(
+        &alice,
+        &group,
+        &ConversationUpdate {
+            lifecycle_state: Some(ConversationLifecycleState::Active),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let alice_summary = repo
+        .load_bootstrap(&alice, &cursor, 0)
+        .await
+        .unwrap()
+        .summaries
+        .into_iter()
+        .find(|s| s.conversation_id == group)
+        .unwrap();
+    assert!(!alice_summary.is_archived);
+    assert_eq!(alice_summary.settings_version, 3);
+    let bob_summary = repo
+        .load_bootstrap(&bob, &cursor, 0)
+        .await
+        .unwrap()
+        .summaries
+        .pop()
+        .unwrap();
+    assert!(bob_summary.is_archived);
+    assert_eq!(bob_summary.settings_version, 3);
+    drop(repo);
+    drop_schema(admin, pool, &schema).await;
+}
+
 /// Muting, pinning and "only mentions" are a member's own list settings. Member lists, member
 /// lookups, the member management answer and the list summary's member preview carry them only on
 /// the caller's own row; a service reading the member list gets none. The in-seat delivery read
@@ -1260,6 +1437,7 @@ async fn member_rows_carry_personal_settings_only_for_their_owner() {
             is_archived: None,
             draft: None,
             base_settings_version: 0,
+            clear_history_through_seq: None,
         }
     };
     repo.update_user_settings(&user("bob"), &set(true, true, true))
@@ -1377,22 +1555,27 @@ async fn member_rows_carry_personal_settings_only_for_their_owner() {
     );
 
     // The list summary's member preview, in Alice's conversation list.
-    let mut request = tonic::Request::new(
-        flare_grpc_proto::conversation::ConversationBootstrapRequest::default(),
+    let bootstrap = ConversationDomainService::<_, _, crate::infrastructure::rpc::StorageReaderClient>::new(
+        repo.clone(),
+        Arc::new(EmptyPresence),
+        None,
+        ConversationDomainConfig::default(),
     );
-    flare_server_core::client::set_context_metadata(&mut request, &user("alice"));
-    let preview = handler
-        .conversation_bootstrap(request)
+    let mut preview: Vec<Row> = bootstrap
+        .bootstrap_conversation(&user("alice"), Default::default(), false, None, 0, 0)
         .await
         .unwrap()
-        .into_inner()
-        .conversations
+        .summaries
         .into_iter()
         .find(|summary| summary.conversation_id == group)
         .expect("listed")
-        .member_preview;
+        .member_preview
+        .into_iter()
+        .map(|member| (member.user_id, member.muted, member.pinned, member.mention_only))
+        .collect();
+    preview.sort();
     assert_eq!(
-        rows(preview),
+        preview,
         [
             row("alice", true, false, false),
             row("bob", false, false, false),
@@ -1481,6 +1664,7 @@ async fn adding_an_existing_member_keeps_their_own_settings() {
             is_archived: None,
             draft: None,
             base_settings_version: 0,
+            clear_history_through_seq: None,
         },
     )
     .await
@@ -1581,5 +1765,51 @@ async fn adding_an_existing_member_keeps_their_own_settings() {
         )
     );
 
+    drop_schema(admin, pool, &schema).await;
+}
+
+#[tokio::test]
+#[ignore = "requires FLARE_CONVERSATION_TEST_DATABASE_URL pointing at a disposable PostgreSQL"]
+async fn personal_history_cutoff_is_monotonic_and_isolated_from_other_members() {
+    let url = std::env::var(ENV_DATABASE_URL)
+        .unwrap_or_else(|_| panic!("set {ENV_DATABASE_URL} to a disposable PostgreSQL instance"));
+    let (admin, pool, schema) = isolated_schema(&url).await;
+    let group = generate_group_conversation_id("personal-history");
+    conversation(&pool, &group, 2).await;
+    member(&pool, &group, "alice", 0, false, false).await;
+    member(&pool, &group, "bob", 0, false, false).await;
+    member(&pool, &group, "former", 0, false, true).await;
+    message(&pool, &group, "old", 2, "bob", 1).await;
+    let repo = PostgresConversationRepository::new(Arc::new(pool.clone()), test_config());
+
+    let clear = |seq| crate::domain::model::UpdateConversationUserSettingsPatch {
+        conversation_id: group.clone(),
+        clear_history_through_seq: Some(seq),
+        is_mention_only: None,
+        is_pinned: None,
+        is_muted: None,
+        is_archived: None,
+        draft: None,
+        base_settings_version: 0,
+    };
+    let result = repo.update_user_settings(&user("alice"), &clear(u64::MAX)).await.unwrap();
+    assert_eq!(result.history_cleared_through_seq, 2);
+    let alice = repo.load_bootstrap(&user("alice"), &Default::default(), 0).await.unwrap();
+    let bob = repo.load_bootstrap(&user("bob"), &Default::default(), 0).await.unwrap();
+    assert_eq!(alice.summaries[0].visible_after_seq, 2);
+    assert!(alice.summaries[0].last_message_id.is_none());
+    assert_eq!(bob.summaries[0].visible_after_seq, 0);
+    assert_eq!(bob.summaries[0].last_message_id.as_deref(), Some("old"));
+    message(&pool, &group, "new", 3, "bob", 1).await;
+    let result = repo.update_user_settings(&user("alice"), &clear(1)).await.unwrap();
+    assert_eq!(result.history_cleared_through_seq, 2);
+    assert!(repo.update_user_settings(&user("former"), &clear(3)).await.is_err());
+    let rows: Vec<(String, i64)> = sqlx::query_as(
+        "SELECT user_id, history_cleared_through_seq FROM conversation_participants ORDER BY user_id",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(rows, vec![("alice".into(), 2), ("bob".into(), 0), ("former".into(), 0)]);
     drop_schema(admin, pool, &schema).await;
 }

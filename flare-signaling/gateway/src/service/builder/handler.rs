@@ -26,6 +26,7 @@ type SharedAuthenticator = Arc<dyn flare_core::server::auth::Authenticator + Sen
 pub async fn build_authenticator(
     config: &AccessGatewayConfig,
     tenant_runtime: TenantRuntimeCache,
+    metrics: Arc<flare_im_service_kit::metrics::AccessGatewayMetrics>,
 ) -> flare_server_core::error::Result<SharedAuthenticator> {
     use tracing::{info, warn};
 
@@ -76,11 +77,14 @@ pub async fn build_authenticator(
         ))
     })?;
 
-    Ok(Arc::new(crate::application::handlers::AuthHandler::new(
-        token_validator,
-        tenant_runtime,
-        config.tenant_policy,
-    )))
+    Ok(Arc::new(
+        crate::application::handlers::AuthHandler::new(
+            token_validator,
+            tenant_runtime,
+            config.tenant_policy,
+        )
+        .with_metrics(metrics),
+    ))
 }
 
 /// 构建长连接上行处理器

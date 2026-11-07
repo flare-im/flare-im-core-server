@@ -10,10 +10,23 @@ impl MediaService {
         ctx: &Context,
         file_id: &str,
         expires_in: i64,
+        message: Option<(&str, i64)>,
         download: bool,
         headers: &MediaResponseHeaders,
     ) -> Result<PresignedUrl> {
-        let approved = self.create_presigned_url(ctx, file_id, expires_in).await?;
+        let approved = match message {
+            Some((conversation_id, sequence)) => {
+                self.create_message_presigned_url(
+                    ctx,
+                    file_id,
+                    expires_in,
+                    conversation_id,
+                    sequence,
+                )
+                .await?
+            }
+            None => self.create_presigned_url(ctx, file_id, expires_in).await?,
+        };
         if !download && headers.is_empty() {
             return Ok(approved);
         }
@@ -31,8 +44,8 @@ impl MediaService {
                     "signed media storage unavailable"
                 )
             })?;
-            // Preserve the already-authorized expiration; response overrides
-            // never extend the original retention or access window.
+            // Preserve the original message/retention TTL, including Staff's
+            // short inspection window, and never let an override extend it.
             let now = Utc::now();
             let ttl = (approved.expires_at - now)
                 .num_seconds()

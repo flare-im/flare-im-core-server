@@ -6,8 +6,8 @@ use flare_server_core::error::{ErrorBuilder, ErrorCode, Result};
 
 use crate::domain::model::{
     ConflictResolutionPolicy, Conversation, ConversationBootstrapResult, ConversationParticipant,
-    ConversationParticipantsPage, ConversationSummary, DevicePresence, DeviceState,
-    MessageSyncResult,
+    ConversationParticipantsPage, ConversationSummary, ConversationUpdate, DevicePresence,
+    DeviceState, MessageSyncResult,
 };
 
 #[derive(Clone, Debug)]
@@ -55,7 +55,8 @@ pub trait ConversationRepository: Send + Sync {
     async fn update_conversation(
         &self,
         ctx: &flare_server_core::context::Context,
-        conversation: &Conversation,
+        conversation_id: &str,
+        update: &ConversationUpdate,
     ) -> Result<()>;
     async fn delete_conversation(
         &self,
@@ -75,6 +76,18 @@ pub trait ConversationRepository: Send + Sync {
         conversation_id: &str,
         boundary: &crate::domain::model::HistoryPurgeBoundary,
     ) -> Result<crate::domain::model::ConversationHistoryPurge>;
+    /// Advance the conversation-wide participant visibility cutoff.
+    async fn clear_history_for_everyone(
+        &self,
+        _ctx: &flare_server_core::context::Context,
+        _conversation_id: &str,
+    ) -> Result<u64> {
+        Err(ErrorBuilder::new(
+            ErrorCode::ServiceUnavailable,
+            "conversation history clear storage is unavailable",
+        )
+        .build_error())
+    }
     async fn manage_participants(
         &self,
         ctx: &flare_server_core::context::Context,

@@ -5,6 +5,7 @@ mod admin_service;
 mod manage_service;
 mod read_receipt_service;
 mod read_service;
+mod roster_policy;
 mod shared;
 
 pub use admin_service::ConversationAdminGrpcHandler;
@@ -25,6 +26,7 @@ pub struct ConversationGrpcHandler {
     /// `PurgeConversationHistory` 的签名验证器（`FLARE_INTERNAL_CTX_PUBLIC_KEY`）。没有时该 RPC
     /// fail closed，见 [`manage_service::authorize_purge_history`]。
     pub(crate) purge_verifier: Option<SignedContextVerifier>,
+    pub(crate) roster_policy_endpoint: Option<String>,
 }
 
 impl ConversationGrpcHandler {
@@ -36,12 +38,18 @@ impl ConversationGrpcHandler {
             command_handler,
             query_handler,
             purge_verifier: None,
+            roster_policy_endpoint: None,
         }
     }
 
     /// 设置 `PurgeConversationHistory` 的签名验证器。
     pub fn with_purge_verifier(mut self, verifier: Option<SignedContextVerifier>) -> Self {
         self.purge_verifier = verifier;
+        self
+    }
+
+    pub fn with_roster_policy_endpoint(mut self, endpoint: Option<String>) -> Self {
+        self.roster_policy_endpoint = endpoint;
         self
     }
 }

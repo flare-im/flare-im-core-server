@@ -110,6 +110,7 @@ async fn isolated_schema(url: &str) -> (PgPool, PgPool, String) {
         create_table(&baseline, "conversation_participants"),
         migration("0003_20260810_add_participant_visible_from_seq.sql"),
         migration("0004_20260812_add_participant_mention_only.sql"),
+        migration("0021_20261103_conversation_history_clear.sql"),
         migration("0006_20260901_participants_joined_at_index.sql"),
     ]
     .join("\n");

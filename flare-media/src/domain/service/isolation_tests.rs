@@ -259,6 +259,252 @@ pub(crate) fn ctx(tenant: &str, user: &str) -> Context {
         .with_actor(flare_server_core::context::ActorContext::new(user))
 }
 
+struct VisibleAttachmentReader {
+    message: Option<flare_proto::common::Message>,
+    unavailable: bool,
+}
+
+struct AttachmentObjects {
+    fail: bool,
+}
+#[async_trait::async_trait]
+impl crate::domain::repository::MediaObjectRepository for AttachmentObjects {
+    async fn put_object(&self, context: &UploadContext<'_>) -> Result<String> {
+        Ok(format!("{}/{}", context.tenant_id, context.file_id))
+    }
+    async fn delete_object(&self, _: &str) -> Result<()> {
+        Ok(())
+    }
+    async fn presign_object(&self, _: &str, _: i64) -> Result<String> {
+        if self.fail {
+            return Err(flare_server_core::flare_err!(
+                ErrorCode::ServiceUnavailable,
+                "signing unavailable"
+            ));
+        }
+        Ok("https://objects.test/private?proof=opaque-test".into())
+    }
+    fn base_url(&self) -> Option<String> {
+        Some("https://unsigned.test".into())
+    }
+    fn cdn_base_url(&self) -> Option<String> {
+        Some("https://unsigned-cdn.test".into())
+    }
+    fn use_presigned_urls(&self) -> bool {
+        true
+    }
+    fn bucket_name(&self) -> Option<String> {
+        Some("private-test".into())
+    }
+}
+#[async_trait::async_trait]
+impl crate::domain::repository::MessageAttachmentReader for VisibleAttachmentReader {
+    async fn read_visible_message(
+        &self,
+        context: &Context,
+        conversation: &str,
+        sequence: i64,
+    ) -> Result<Option<flare_proto::common::Message>> {
+        if self.unavailable {
+            return Err(flare_server_core::flare_err!(
+                ErrorCode::ServiceUnavailable,
+                "reader unavailable"
+            ));
+        }
+        assert_eq!(conversation, "chat-attachment");
+        assert_eq!(sequence, 7);
+        Ok(
+            if context.tenant_id() == Some("tenant-a") && context.user_id() == Some("bob") {
+                self.message.clone()
+            } else {
+                None
+            },
+        )
+    }
+}
+
+async fn attachment_fixture(f: &Fixture) {
+    let payload = b"private attachment";
+    f.service
+        .store_media_file(
+            &ctx("tenant-a", "alice"),
+            UploadContext {
+                tenant_id: "tenant-a",
+                file_id: "attachment-file",
+                file_name: "attachment.txt",
+                mime_type: "text/plain",
+                file_size: payload.len() as i64,
+                payload,
+                file_category: "file".into(),
+                user_id: "alice",
+                trace_id: None,
+                namespace: None,
+                business_tag: None,
+                metadata: HashMap::new(),
+            },
+        )
+        .await
+        .expect("owned upload");
+}
+
+fn readable_attachment() -> flare_proto::common::Message {
+    flare_proto::common::Message {
+        conversation_id: "chat-attachment".into(),
+        conversation_seq: 7,
+        sender_id: "alice".into(),
+        status: flare_proto::common::MessageStatus::Persisted as i32,
+        content: Some(flare_proto::common::MessageContent {
+            content: Some(flare_proto::common::message_content::Content::File(
+                flare_proto::common::FileContent {
+                    file_id: "attachment-file".into(),
+                    ..Default::default()
+                },
+            )),
+        }),
+        ..Default::default()
+    }
+}
+
+#[tokio::test]
+async fn app_user_media_reads_do_not_require_owner_grants_or_a_message_reader() {
+    let mut f = Fixture::new();
+    f.service.object_repo = Some(Arc::new(AttachmentObjects { fail: false }));
+    attachment_fixture(&f).await;
+    let bob = ctx("tenant-a", "bob");
+    assert!(
+        f.service
+            .get_readable_metadata(&bob, "attachment-file")
+            .await
+            .is_ok()
+    );
+    assert!(
+        f.service
+            .create_presigned_url(&bob, "attachment-file", 60)
+            .await
+            .is_ok()
+    );
+    // A normal client does not need to submit the message's conversation/sequence.
+    // Older clients that do supply a reference follow the same application policy.
+    assert!(f.service.message_reader.is_none());
+    assert!(
+        f.service
+            .create_message_presigned_url(&bob, "attachment-file", 60, "any-chat", 1)
+            .await
+            .is_ok()
+    );
+    f.service.message_reader = Some(Arc::new(VisibleAttachmentReader {
+        message: Some(readable_attachment()),
+        unavailable: true,
+    }));
+    assert!(
+        f.service
+            .create_message_presigned_url(&bob, "attachment-file", 60, "chat-attachment", 7)
+            .await
+            .is_ok()
+    );
+    assert!(
+        f.service
+            .get_readable_metadata(&ctx("tenant-a", "carol"), "attachment-file")
+            .await
+            .is_ok()
+    );
+    for denied in [ctx("tenant-b", "bob"), Context::root()] {
+        assert!(
+            f.service
+                .get_readable_metadata(&denied, "attachment-file")
+                .await
+                .is_err()
+        );
+        assert!(
+            f.service
+                .create_presigned_url(&denied, "attachment-file", 60)
+                .await
+                .is_err()
+        );
+    }
+    for (conversation, sequence) in [
+        ("", 7),
+        ("chat-attachment", 0),
+        ("chat-attachment", i64::MAX),
+    ] {
+        assert!(
+            f.service
+                .create_message_presigned_url(&bob, "attachment-file", 60, conversation, sequence)
+                .await
+                .is_err()
+        );
+    }
+}
+
+#[tokio::test]
+async fn app_user_media_reads_preserve_identity_and_management_boundaries() {
+    let f = Fixture::new();
+    attachment_fixture(&f).await;
+    for denied in [
+        Context::root()
+            .with_tenant_id("tenant-a")
+            .with_user_id("bob"),
+        ctx("tenant-a", "alice").with_user_id("bob"),
+        ctx("", "bob"),
+        ctx("*", "bob"),
+    ] {
+        assert!(
+            f.service
+                .get_readable_metadata(&denied, "attachment-file")
+                .await
+                .is_err()
+        );
+    }
+    let bob = ctx("tenant-a", "bob");
+    // Presentation reads do not grant source-processing, reference management,
+    // or owner mutation access.
+    assert!(
+        f.service
+            .get_metadata(&bob, "attachment-file")
+            .await
+            .is_err()
+    );
+    assert!(
+        f.service
+            .list_references(&bob, "attachment-file")
+            .await
+            .is_err()
+    );
+    assert!(
+        f.service
+            .delete_media_file(&bob, "attachment-file")
+            .await
+            .is_err()
+    );
+    assert!(
+        f.service
+            .add_reference(
+                &bob,
+                "attachment-file",
+                MediaReferenceScope {
+                    namespace: "message".into(),
+                    owner_id: "bob".into(),
+                    business_tag: None,
+                },
+                HashMap::new()
+            )
+            .await
+            .is_err()
+    );
+    assert!(
+        f.service
+            .remove_reference(&bob, "attachment-file", None)
+            .await
+            .is_err()
+    );
+    assert!(
+        f.service
+            .get_readable_metadata(&bob, "attachment-file")
+            .await
+            .is_ok()
+    );
+}
+
 #[tokio::test]
 async fn upload_and_management_enforce_owner_presentation_reads_enforce_tenant() {
     let f = Fixture::new();
@@ -348,7 +594,7 @@ async fn upload_and_management_enforce_owner_presentation_reads_enforce_tenant()
         f.service.download_local_file(&a, "file").await.unwrap(),
         data
     );
-    // Unknown ownership still blocks management; presentation reads use the application policy.
+    // Unknown ownership still blocks management, while presentation reads use the application policy.
     legacy.owner_id = None;
     f.metadata.save_metadata(&a, &legacy).await.unwrap();
     assert!(f.service.get_metadata(&a, "file").await.is_err());
@@ -761,99 +1007,6 @@ fn tenant_key_encoding_is_injective_and_cannot_escape_its_segment() {
     assert_ne!(encode("A"), encode("a"));
 }
 
-async fn attachment_fixture(f: &Fixture) {
-    let payload = b"private attachment";
-    f.service
-        .store_media_file(
-            &ctx("tenant-a", "alice"),
-            UploadContext {
-                tenant_id: "tenant-a",
-                file_id: "attachment-file",
-                file_name: "attachment.txt",
-                mime_type: "text/plain",
-                file_size: payload.len() as i64,
-                payload,
-                file_category: "file".into(),
-                user_id: "alice",
-                trace_id: None,
-                namespace: None,
-                business_tag: None,
-                metadata: HashMap::new(),
-            },
-        )
-        .await
-        .expect("owned upload");
-}
-
-#[tokio::test]
-async fn app_user_media_reads_preserve_identity_and_management_boundaries() {
-    let f = Fixture::new();
-    attachment_fixture(&f).await;
-    for denied in [
-        Context::root()
-            .with_tenant_id("tenant-a")
-            .with_user_id("bob"),
-        ctx("tenant-a", "alice").with_user_id("bob"),
-        ctx("", "bob"),
-        ctx("*", "bob"),
-    ] {
-        assert!(
-            f.service
-                .get_readable_metadata(&denied, "attachment-file")
-                .await
-                .is_err()
-        );
-    }
-    let bob = ctx("tenant-a", "bob");
-    // Presentation reads do not grant source-processing, reference management,
-    // or owner mutation access.
-    assert!(
-        f.service
-            .get_metadata(&bob, "attachment-file")
-            .await
-            .is_err()
-    );
-    assert!(
-        f.service
-            .list_references(&bob, "attachment-file")
-            .await
-            .is_err()
-    );
-    assert!(
-        f.service
-            .delete_media_file(&bob, "attachment-file")
-            .await
-            .is_err()
-    );
-    assert!(
-        f.service
-            .add_reference(
-                &bob,
-                "attachment-file",
-                MediaReferenceScope {
-                    namespace: "message".into(),
-                    owner_id: "bob".into(),
-                    business_tag: None,
-                },
-                HashMap::new()
-            )
-            .await
-            .is_err()
-    );
-    assert!(
-        f.service
-            .remove_reference(&bob, "attachment-file", None)
-            .await
-            .is_err()
-    );
-    assert!(
-        f.service
-            .get_readable_metadata(&bob, "attachment-file")
-            .await
-            .is_ok()
-    );
-}
-
 struct DownloadObjects {
     captured: Mutex<Vec<flare_im_contracts::media_response::MediaResponseHeaders>>,
 }
@@ -907,6 +1060,7 @@ async fn download_options_preserve_application_authority_ttl_usage_and_inline_be
             &reader,
             "attachment-file",
             60,
+            None,
             false,
             &MediaResponseHeaders::default(),
         )
@@ -920,6 +1074,7 @@ async fn download_options_preserve_application_authority_ttl_usage_and_inline_be
             &reader,
             "attachment-file",
             60,
+            None,
             true,
             &MediaResponseHeaders::default(),
         )
@@ -952,6 +1107,7 @@ async fn download_options_preserve_application_authority_ttl_usage_and_inline_be
                     &denied,
                     "attachment-file",
                     60,
+                    None,
                     true,
                     &MediaResponseHeaders::default()
                 )
@@ -985,6 +1141,7 @@ async fn local_download_options_keep_the_existing_authenticated_url_and_filename
             &reader,
             "attachment-file",
             60,
+            None,
             false,
             &MediaResponseHeaders::default(),
         )
@@ -996,6 +1153,7 @@ async fn local_download_options_keep_the_existing_authenticated_url_and_filename
             &reader,
             "attachment-file",
             60,
+            None,
             true,
             &MediaResponseHeaders::default(),
         )
@@ -1027,6 +1185,7 @@ async fn local_download_options_keep_the_existing_authenticated_url_and_filename
                 &reader,
                 "attachment-file",
                 60,
+                None,
                 true,
                 &MediaResponseHeaders::default()
             )
@@ -1042,7 +1201,7 @@ async fn local_download_options_keep_the_existing_authenticated_url_and_filename
     .unwrap();
     assert_eq!(
         f.service
-            .create_file_url_with_options(&reader, "attachment-file", 60, false, &headers)
+            .create_file_url_with_options(&reader, "attachment-file", 60, None, false, &headers)
             .await
             .unwrap_err()
             .code(),

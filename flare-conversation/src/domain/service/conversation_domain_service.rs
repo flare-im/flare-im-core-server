@@ -20,8 +20,8 @@ use uuid::Uuid;
 use crate::domain::model::{
     ConflictResolutionPolicy, Conversation, ConversationDomainConfig, ConversationFilter,
     ConversationLifecycleState, ConversationParticipant, ConversationPolicy, ConversationSort,
-    ConversationSummary, ConversationType, ConversationVisibility, DevicePresence, DeviceState,
-    MessageSyncResult,
+    ConversationSummary, ConversationType, ConversationUpdate, ConversationVisibility,
+    DevicePresence, DeviceState, MessageSyncResult,
 };
 use crate::domain::repository::{
     ConversationRepository, MessageProvider, PresenceRepository, PresenceUpdate,
@@ -52,6 +52,28 @@ fn keep_viewer_settings_in_previews(ctx: &Context, summaries: &mut [Conversation
     for summary in summaries {
         crate::domain::model::keep_personal_settings_of(&mut summary.member_preview, viewer);
     }
+}
+
+/// An explicit single-chat open restores the caller's own hidden row. Reuse
+/// the stored identity and attributes; never reopen the other participant.
+fn participants_for_ensure(
+    existing: &[ConversationParticipant],
+    requested: Vec<ConversationParticipant>,
+    reopen_user: Option<&str>,
+) -> Vec<ConversationParticipant> {
+    requested
+        .into_iter()
+        .filter_map(|participant| {
+            match existing
+                .iter()
+                .find(|old| old.user_id == participant.user_id)
+            {
+                None => Some(participant),
+                Some(old) if reopen_user == Some(old.user_id.as_str()) => Some(old.clone()),
+                Some(_) => None,
+            }
+        })
+        .collect()
 }
 
 /// 会话领域服务 - 包含所有业务逻辑
@@ -493,16 +515,19 @@ impl<CR: ConversationRepository, PR: PresenceRepository, MP: MessageProvider>
                 );
 
                 // 获取需要添加的参与者（不在现有参与者列表中的）
-                let existing_participant_ids: std::collections::HashSet<String> = existing_session
-                    .participants
-                    .iter()
-                    .map(|p| p.user_id.clone())
-                    .collect();
-
-                let participants_to_add: Vec<ConversationParticipant> = participants
-                    .into_iter()
-                    .filter(|p| !existing_participant_ids.contains(&p.user_id))
-                    .collect();
+                let reopen_user = if conversation_type == ConversationType::Single
+                    && existing_session.conversation_type == ConversationType::Single
+                    && existing_session.lifecycle_state == ConversationLifecycleState::Active
+                {
+                    member_read_viewer(ctx)
+                } else {
+                    None
+                };
+                let participants_to_add = participants_for_ensure(
+                    &existing_session.participants,
+                    participants,
+                    reopen_user,
+                );
 
                 if !participants_to_add.is_empty() {
                     debug!(
@@ -689,7 +714,19 @@ impl<CR: ConversationRepository, PR: PresenceRepository, MP: MessageProvider>
         visibility: Option<ConversationVisibility>,
         lifecycle_state: Option<ConversationLifecycleState>,
     ) -> Result<Conversation> {
-        let mut conversation = self
+        self.conversation_repo
+            .update_conversation(
+                ctx,
+                conversation_id,
+                &ConversationUpdate {
+                    display_name,
+                    attributes,
+                    visibility,
+                    lifecycle_state,
+                },
+            )
+            .await?;
+        let conversation = self
             .conversation_repo
             .get_conversation(ctx, conversation_id)
             .await?
@@ -699,23 +736,6 @@ impl<CR: ConversationRepository, PR: PresenceRepository, MP: MessageProvider>
                     .build_error()
             })?;
 
-        if let Some(name) = display_name {
-            conversation.display_name = Some(name);
-        }
-        if let Some(attrs) = attributes {
-            conversation.attributes = attrs;
-        }
-        if let Some(vis) = visibility {
-            conversation.visibility = vis;
-        }
-        if let Some(state) = lifecycle_state {
-            conversation.lifecycle_state = state;
-        }
-        conversation.updated_at = chrono::Utc::now();
-
-        self.conversation_repo
-            .update_conversation(ctx, &conversation)
-            .await?;
         debug!(conversation_id = %conversation_id, "Conversation updated");
         Ok(conversation)
     }
@@ -745,6 +765,23 @@ impl<CR: ConversationRepository, PR: PresenceRepository, MP: MessageProvider>
         before_ms: i64,
     ) -> Result<crate::domain::model::ConversationHistoryPurge> {
         self.purge_history(ctx, conversation_id, before_ms, "", 0)
+            .await
+    }
+
+    pub async fn clear_history_for_everyone(
+        &self,
+        ctx: &Context,
+        conversation_id: &str,
+    ) -> Result<u64> {
+        if conversation_id.trim().is_empty() {
+            return Err(ErrorBuilder::new(
+                ErrorCode::InvalidParameter,
+                "conversation_id is required",
+            )
+            .build_error());
+        }
+        self.conversation_repo
+            .clear_history_for_everyone(ctx, conversation_id)
             .await
     }
 
@@ -1181,7 +1218,38 @@ fn parse_cursor(cursor: Option<&str>) -> (Option<i64>, String) {
 mod tests {
     use std::collections::HashMap;
 
-    use super::{required_route_id, valid_conversation_summary_id};
+    use super::{participants_for_ensure, required_route_id, valid_conversation_summary_id};
+    use crate::domain::model::ConversationParticipant;
+
+    fn participant(id: &str) -> ConversationParticipant {
+        ConversationParticipant {
+            user_id: id.into(),
+            roles: vec!["member".into()],
+            muted: false,
+            pinned: false,
+            attributes: HashMap::new(),
+            visible_from_seq: 0,
+            mention_only: false,
+        }
+    }
+
+    #[test]
+    fn reopening_restores_only_the_caller_with_its_stored_identity() {
+        let mut alice = participant("alice");
+        alice.roles = vec!["owner".into()];
+        alice.visible_from_seq = 42;
+        alice.attributes.insert("retain".into(), "value".into());
+        let existing = vec![alice, participant("bob")];
+        let requested = vec![participant("alice"), participant("bob")];
+        let result = participants_for_ensure(&existing, requested.clone(), Some("alice"));
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].user_id, "alice");
+        assert_eq!(result[0].roles, ["owner"]);
+        assert_eq!(result[0].visible_from_seq, 42);
+        assert_eq!(result[0].attributes["retain"], "value");
+        assert!(participants_for_ensure(&existing, requested.clone(), None).is_empty());
+        assert!(participants_for_ensure(&existing, requested, Some("outsider")).is_empty());
+    }
 
     #[test]
     fn conversation_summary_id_must_be_non_blank() {

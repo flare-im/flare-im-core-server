@@ -55,6 +55,17 @@ pub const REGISTERED_ENV_VARS: &[EnvVarSpec] = &[
         EnvOwner::ApiGateway,
         EnvPurpose::ServiceEndpoint,
     ),
+    env("CORE_INITIAL_DATABASE", EnvOwner::Ops, EnvPurpose::Database),
+    env(
+        "CORE_INITIAL_DATABASE_URL",
+        EnvOwner::Ops,
+        EnvPurpose::Database,
+    ),
+    env(
+        "MEDIA_STORAGE_READER_SERVICE_URL",
+        EnvOwner::Media,
+        EnvPurpose::ServiceEndpoint,
+    ),
     env(
         "FLARE_PLUGIN_CALL_KEY_ID",
         EnvOwner::Capability,
@@ -837,6 +848,11 @@ pub const REGISTERED_ENV_VARS: &[EnvVarSpec] = &[
     ),
     env(
         "GATEWAY_ENABLE_ENCRYPTION",
+        EnvOwner::AccessGateway,
+        EnvPurpose::GatewayRuntime,
+    ),
+    env(
+        "GATEWAY_AP_ID",
         EnvOwner::AccessGateway,
         EnvPurpose::GatewayRuntime,
     ),

@@ -64,7 +64,7 @@ impl ConversationReadService for ConversationGrpcHandler {
             None
         };
 
-        let bootstrap = self
+        let mut bootstrap = self
             .query_handler
             .handle_conversation_bootstrap(
                 &ctx,
@@ -79,6 +79,7 @@ impl ConversationReadService for ConversationGrpcHandler {
             .await
             .into_grpc()?;
 
+        self.protect_member_previews(&ctx, &mut bootstrap.summaries).await;
         let response = ConversationBootstrapResponse {
             conversations: bootstrap.summaries.into_iter().map(proto_summary).collect(),
             recent_messages: bootstrap.recent_messages,
@@ -96,7 +97,7 @@ impl ConversationReadService for ConversationGrpcHandler {
     ) -> Result<Response<ListConversationsResponse>, Status> {
         let ctx = require_ctx_from_request(&request)?;
         let req = request.into_inner();
-        let (summaries, next_cursor, has_more) = self
+        let (mut summaries, next_cursor, has_more) = self
             .query_handler
             .handle_list_conversations(
                 &ctx,
@@ -112,6 +113,7 @@ impl ConversationReadService for ConversationGrpcHandler {
             .await
             .into_grpc()?;
 
+        self.protect_member_previews(&ctx, &mut summaries).await;
         let response = ListConversationsResponse {
             conversations: summaries.into_iter().map(proto_summary).collect(),
             next_cursor: next_cursor.unwrap_or_default(),
@@ -158,18 +160,21 @@ impl ConversationReadService for ConversationGrpcHandler {
                 conversation_id: req.conversation_id.clone(),
                 user_ids: ids.split(',').map(|id| id.trim().to_string()).collect(),
             };
-            let participants = self
+            let mut participants = self
                 .query_handler
                 .handle_find_conversation_members(&ctx, query)
                 .await
                 .into_grpc()?;
+            if !self.can_disclose_roster(&ctx, req.conversation_id.trim()).await? {
+                participants.clear();
+            }
             return Ok(Response::new(ListConversationParticipantsResponse {
                 conversation_id: req.conversation_id.trim().to_string(),
                 participants: participants.into_iter().map(participant_to_proto).collect(),
                 ..Default::default()
             }));
         }
-        let page = self
+        let mut page = self
             .query_handler
             .handle_list_conversation_participants(
                 &ctx,
@@ -201,6 +206,11 @@ impl ConversationReadService for ConversationGrpcHandler {
             )
             .await
             .into_grpc()?;
+        if !self.can_disclose_roster(&ctx, &page.conversation_id).await? {
+            page.participants.clear();
+            page.next_cursor = None;
+            page.has_more = false;
+        }
 
         Ok(Response::new(ListConversationParticipantsResponse {
             conversation_id: page.conversation_id,

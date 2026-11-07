@@ -184,6 +184,7 @@ services:
       # 注册进 Consul 的对外地址。绑的是 0.0.0.0，而登记 127.0.0.1 在容器里
       # 指向服务自己——注册成功、健康检查也过，跨服务调用却全部 tcp connect error。
       SERVICE_ADVERTISE_HOST: conversation
+      CONVERSATION_ROSTER_POLICY_GRPC_URL: ${CONVERSATION_ROSTER_POLICY_GRPC_URL:-}
       # 会话管理员只读接口校验 admin-gateway 转发的 Staff 上下文，PurgeConversationHistory 验
       # flare-social-bridge 的服务签名，都用 Cell 公钥；不给公钥时一律 fail closed。
       FLARE_INTERNAL_CTX_PUBLIC_KEY: ${FLARE_INTERNAL_CTX_PUBLIC_KEY:?set the Cell Ed25519 public key}
@@ -215,6 +216,7 @@ services:
       # 注册进 Consul 的对外地址。绑的是 0.0.0.0，而登记 127.0.0.1 在容器里
       # 指向服务自己——注册成功、健康检查也过，跨服务调用却全部 tcp connect error。
       SERVICE_ADVERTISE_HOST: storage-reader
+      CONVERSATION_ROSTER_POLICY_GRPC_URL: ${CONVERSATION_ROSTER_POLICY_GRPC_URL:-}
       # 管理检索（admin-gateway 的 5 条 messages 路由）校验转发的 Staff 上下文；不给 Cell 公钥时一律 UNAUTHENTICATED。
       FLARE_INTERNAL_CTX_PUBLIC_KEY: ${FLARE_INTERNAL_CTX_PUBLIC_KEY:?set the Cell Ed25519 public key}
     command: ["flare-storage-reader"]
@@ -271,6 +273,9 @@ services:
       FLARE_INTERNAL_CTX_PUBLIC_KEY: ${FLARE_INTERNAL_CTX_PUBLIC_KEY:?set the Cell Ed25519 public key}
       # 平台公钥只验租户投影的 worker 断言。
       FLARE_PLATFORM_PUBLIC_KEY: ${FLARE_PLATFORM_PUBLIC_KEY:?set FLARE_PLATFORM_PUBLIC_KEY to the platform Ed25519 public key}
+      # 哪些业务服务能发布租户配置通知、各自的 topic 命名空间（`服务=前缀,前缀[,*]`，`*` 允许发给全部租户）。
+      # 空：TenantNoticeService 拒绝所有发布者，插件目录通知不受影响。
+      FLARE_TENANT_NOTICE_PUBLISHERS: ${FLARE_TENANT_NOTICE_PUBLISHERS:-}
     command: ["flare-capability"]
 
   media:

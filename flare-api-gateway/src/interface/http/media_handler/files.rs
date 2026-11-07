@@ -166,6 +166,7 @@ pub async fn serve_file(
                             retention_protected: false,
                             content_visibility: flare_proto::common::ContentVisibility::Available
                                 as i32,
+                            ..Default::default()
                         },
                     )
                     .await

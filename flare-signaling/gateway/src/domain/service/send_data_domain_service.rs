@@ -189,6 +189,11 @@ impl SendDataDomainService {
                 ErrorCode::MessageFormatError,
                 "uplink DataPacket must not use sync_response",
             )),
+            // Tenant notices only travel downlink, from Core's notice channel.
+            Some(DataPayload::TenantNotice(_)) => Err(FlareError::localized(
+                ErrorCode::MessageFormatError,
+                "uplink DataPacket must not use tenant_notice",
+            )),
             Some(DataPayload::Capability(_)) => Ok(None),
             Some(DataPayload::RealtimeControl(rc)) => {
                 // 轻量信令（typing/presence/已读光标）：网关在会话在线订阅集合内**直转**，

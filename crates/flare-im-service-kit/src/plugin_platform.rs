@@ -286,6 +286,7 @@ mod tests {
             credential_id: None,
             request_id: card_post_request_id("app-a", message).unwrap(),
             org_id: None,
+            organization_scope: None,
             permission: None,
             perm_version: None,
             trace_id: None,

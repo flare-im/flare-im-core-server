@@ -493,6 +493,7 @@ mod identity_boundary_tests {
             credential_id: None,
             request_id: "req-1".into(),
             org_id: None,
+            organization_scope: None,
             permission: None,
             reason: None,
             perm_version: None,

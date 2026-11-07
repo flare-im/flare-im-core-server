@@ -173,7 +173,15 @@ pub async fn admin_auth_middleware(
         .extensions_mut()
         .insert(VerifiedStaffContext::new(staff));
 
-    next.run(request).await
+    let mut response = next.run(request).await;
+    if route.permission == "core:messages:read" {
+        // Readable bodies and short-lived attachment capabilities must not be cached.
+        response.headers_mut().insert(
+            axum::http::header::CACHE_CONTROL,
+            axum::http::HeaderValue::from_static("private, no-store"),
+        );
+    }
+    response
 }
 
 /// A refusal, ready to send. Boxed: the response is large and the success path is the common one.

@@ -76,11 +76,14 @@ impl MediaQueryHandler {
         let headers = flare_im_contracts::media_response::MediaResponseHeaders::from_request(
             &request.response_headers,
         )?;
+        let message = (!request.conversation_id.is_empty() || request.message_seq != 0)
+            .then_some((request.conversation_id.as_str(), request.message_seq));
         self.domain_service
             .create_file_url_with_options(
                 ctx,
                 &request.file_id,
                 expires_in,
+                message,
                 request.download,
                 &headers,
             )

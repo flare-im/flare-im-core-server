@@ -28,7 +28,8 @@ use crate::infrastructure::persistence::plugin_card_bindings::PostgresPluginCard
 use crate::infrastructure::persistence::postgres_base::PostgresBaseStorage;
 use crate::infrastructure::persistence::redis_cache::RedisMessageCache;
 use flare_im_contracts::Ctx;
-use flare_proto::common::{ContentVisibility, MessageStatus};
+use flare_proto::common::event::Payload as ProtoEventPayload;
+use flare_proto::common::{ContentVisibility, Event as ProtoEvent, MessageStatus};
 
 // TODO: 暂时使用占位符类型，等 monitoring 模块实现后再替换
 // use crate::infrastructure::monitoring::performance_metrics::PerformanceMetrics;
@@ -61,6 +62,17 @@ const CONVERSATION_EVENT_HIGH_WATER_SQL: &str =
 
 fn user_id_from_ctx(ctx: &Ctx) -> &str {
     ctx.user_id().unwrap_or("")
+}
+
+fn redact_deleted_edit_events(events: &mut [ProtoEvent], hidden_message_ids: &HashSet<String>) {
+    for event in events {
+        if let Some(ProtoEventPayload::Edit(edit)) = event.payload.as_ref()
+            && hidden_message_ids.contains(&edit.server_msg_id)
+        {
+            // Retain the event cursor while dropping both the edit body and reason.
+            event.payload = None;
+        }
+    }
 }
 
 fn timestamp_from_datetime(dt: Option<DateTime<Utc>>) -> Option<prost_types::Timestamp> {
@@ -275,8 +287,9 @@ impl OptimizedPostgresMessageStorageImpl {
             return 0;
         }
         sqlx::query_scalar::<_, i64>(
-            "SELECT visible_from_seq FROM conversation_participants \
-             WHERE tenant_id = $1 AND conversation_id = $2 AND user_id = $3",
+            "SELECT GREATEST(cp.visible_from_seq, cp.history_cleared_through_seq, c.history_cleared_through_seq) \
+             FROM conversation_participants cp JOIN conversations c USING (tenant_id, conversation_id) \
+             WHERE cp.tenant_id = $1 AND cp.conversation_id = $2 AND cp.user_id = $3",
         )
         .bind(tenant_id)
         .bind(conversation_id)
@@ -352,7 +365,7 @@ const MESSAGE_ROW_PROJECTION_WITH_VISIBILITY: &str = r#"                    m.te
                               AND mv.visibility_status IN (1, 2)
                               AND (mv.scope = 2 OR (mv.scope = 1 AND mv.user_id = {uid}))
                         )
-                        THEN jsonb_set(COALESCE(m.extra, '{}'::jsonb), '{__sync_skip}', '"visibility_filtered"'::jsonb, true)
+                        THEN jsonb_build_object('__sync_skip', 'visibility_filtered')
                         ELSE m.extra
                     END AS extra,
                     CASE WHEN EXISTS (
@@ -408,7 +421,8 @@ fn message_row_projection(uid_param: &str) -> String {
 fn visible_from_seq_sql(tenant_param: &str, conversation_expr: &str, uid_param: &str) -> String {
     format!(
         "CASE WHEN {uid_param} = '' THEN 0 ELSE COALESCE(( \
-           SELECT cp.visible_from_seq FROM conversation_participants cp \
+           SELECT GREATEST(cp.visible_from_seq, cp.history_cleared_through_seq, c.history_cleared_through_seq) \
+           FROM conversation_participants cp JOIN conversations c USING (tenant_id, conversation_id) \
            WHERE cp.tenant_id = {tenant_param} AND cp.conversation_id = {conversation_expr} \
              AND cp.user_id = {uid_param}), {blocked}) END",
         blocked = i64::MAX,
@@ -473,8 +487,10 @@ impl MessageStorage for OptimizedPostgresMessageStorageImpl {
             .participant_visible_from_seq(&tenant_id, conversation_id, user_id.unwrap_or_default())
             .await;
 
-        // L2 缓存策略：先查 Redis，未命中再查 TimescaleDB
-        if let Some(cache) = &self.cache
+        // A user view must check current message visibility. The shared Redis range cache has
+        // no user dimension and may still contain a message hidden since the range was cached.
+        if user_id.is_none()
+            && let Some(cache) = &self.cache
             && let Ok(Some(cached_messages)) = cache
                 .get_session_messages(&tenant_id, conversation_id, start_ts, end_ts, limit)
                 .await
@@ -584,7 +600,7 @@ impl MessageStorage for OptimizedPostgresMessageStorageImpl {
                               AND mv.visibility_status IN (1, 2)
                               AND (mv.scope = 2 OR (mv.scope = 1 AND mv.user_id = $5))
                         )
-                        THEN jsonb_set(COALESCE(m.extra, '{}'::jsonb), '{__sync_skip}', '"visibility_filtered"'::jsonb, true)
+                        THEN jsonb_build_object('__sync_skip', 'visibility_filtered')
                         ELSE m.extra
                     END AS extra,
                     CASE WHEN EXISTS (
@@ -712,7 +728,9 @@ impl MessageStorage for OptimizedPostgresMessageStorageImpl {
         messages.reverse();
 
         // 回填缓存（异步，不阻塞）
-        if let Some(cache) = &self.cache {
+        if user_id.is_none()
+            && let Some(cache) = &self.cache
+        {
             let cache_clone = std::sync::Arc::clone(cache);
             let messages_clone = messages.clone();
             let tenant_id_clone = tenant_id.clone();
@@ -2042,7 +2060,7 @@ impl MessageStorage for OptimizedPostgresMessageStorageImpl {
         // 与消息查询一致地失败关闭：查不到参与者行 = 此刻不在这个会话里，一条都不给。
         let viewer_id = user_id_from_ctx(ctx);
         if !viewer_id.is_empty() {
-            b.push(" AND seq > COALESCE((SELECT cp.visible_from_seq FROM conversation_participants cp WHERE cp.tenant_id = ");
+            b.push(" AND seq > COALESCE((SELECT GREATEST(cp.visible_from_seq, cp.history_cleared_through_seq, c.history_cleared_through_seq) FROM conversation_participants cp JOIN conversations c USING (tenant_id, conversation_id) WHERE cp.tenant_id = ");
             b.push_bind(tenant_id);
             b.push(" AND cp.conversation_id = ");
             b.push_bind(conversation_id);
@@ -2051,6 +2069,11 @@ impl MessageStorage for OptimizedPostgresMessageStorageImpl {
             b.push("), ");
             b.push_bind(i64::MAX);
             b.push(")");
+            // The archived send event still carries the original body. A user who explicitly
+            // requests message events must not bypass a conversation-wide delete.
+            b.push(" AND (event_type <> ");
+            b.push_bind(flare_proto::common::EventType::EventMessage as i32);
+            b.push(" OR NOT EXISTS (SELECT 1 FROM messages m JOIN message_visibility mv ON mv.tenant_id = m.tenant_id AND mv.message_id = m.server_id WHERE m.tenant_id = events.tenant_id AND m.conversation_id = events.conversation_id AND m.seq = events.seq AND mv.scope = 2 AND mv.visibility_status IN (1, 2)))");
         }
         if before_seq > 0 {
             b.push(" AND seq < ");
@@ -2113,9 +2136,36 @@ impl MessageStorage for OptimizedPostgresMessageStorageImpl {
                     }
                 }
             };
-            out.push(event_from_proto(&proto_ev));
+            out.push(proto_ev);
         }
-        Ok(out)
+        if !viewer_id.is_empty() {
+            // The stored edit payload, rather than event_seq, carries its target message ID.
+            let edit_targets: Vec<_> = out
+                .iter()
+                .filter_map(|event| match event.payload.as_ref() {
+                    Some(ProtoEventPayload::Edit(edit)) => Some(edit.server_msg_id.clone()),
+                    _ => None,
+                })
+                .collect();
+            if !edit_targets.is_empty() {
+                let hidden_message_ids = sqlx::query_scalar::<_, String>(
+                    r#"
+                    SELECT message_id FROM message_visibility
+                    WHERE tenant_id = $1 AND message_id = ANY($2)
+                      AND scope = 2 AND visibility_status IN (1, 2)
+                    "#,
+                )
+                .bind(tenant_id)
+                .bind(edit_targets)
+                .fetch_all(&self.base.pool)
+                .await
+                .db_context("query visibility of replayed message edits")?
+                .into_iter()
+                .collect();
+                redact_deleted_edit_events(&mut out, &hidden_message_ids);
+            }
+        }
+        Ok(out.iter().map(event_from_proto).collect())
     }
 
     #[instrument(skip(self), fields(tenant_id, conversation_id))]
@@ -2391,6 +2441,60 @@ mod tests {
     fn conversation_high_water_uses_durable_event_stream() {
         assert!(CONVERSATION_EVENT_HIGH_WATER_SQL.contains("FROM events"));
         assert!(!CONVERSATION_EVENT_HIGH_WATER_SQL.contains("FROM messages"));
+    }
+
+    #[test]
+    fn replay_masks_only_edits_of_globally_deleted_messages_and_keeps_their_seq() {
+        use super::{ProtoEvent, ProtoEventPayload, redact_deleted_edit_events};
+        use flare_proto::common::message_content::Content;
+        use flare_proto::common::{
+            EventType, MessageContent, MessageDeleteEvent, MessageEditEvent, ReactionEvent,
+            TextContent,
+        };
+        use std::collections::HashSet;
+
+        let edit = |seq, id: &str| ProtoEvent {
+            conversation_seq: seq,
+            r#type: EventType::EventMessageEdit as i32,
+            payload: Some(ProtoEventPayload::Edit(MessageEditEvent {
+                server_msg_id: id.into(),
+                reason: "private edit reason".into(),
+                new_content: Some(MessageContent {
+                    content: Some(Content::Text(TextContent {
+                        text: "edited body".into(),
+                        ..Default::default()
+                    })),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            })),
+            ..Default::default()
+        };
+        let mut events = [
+            edit(21, "hidden"),
+            edit(22, "visible"),
+            ProtoEvent {
+                payload: Some(ProtoEventPayload::Delete(MessageDeleteEvent {
+                    server_msg_id: "hidden".into(),
+                    ..Default::default()
+                })),
+                ..Default::default()
+            },
+            ProtoEvent {
+                payload: Some(ProtoEventPayload::Reaction(ReactionEvent {
+                    server_msg_id: "hidden".into(),
+                    ..Default::default()
+                })),
+                ..Default::default()
+            },
+        ];
+        redact_deleted_edit_events(&mut events, &HashSet::from(["hidden".into()]));
+        assert_eq!(events[0].conversation_seq, 21);
+        assert_eq!(events[0].r#type, EventType::EventMessageEdit as i32);
+        assert!(events[0].payload.is_none());
+        assert!(matches!(events[1].payload, Some(ProtoEventPayload::Edit(_))));
+        assert!(matches!(events[2].payload, Some(ProtoEventPayload::Delete(_))));
+        assert!(matches!(events[3].payload, Some(ProtoEventPayload::Reaction(_))));
     }
 
     fn storage() -> OptimizedPostgresMessageStorageImpl {

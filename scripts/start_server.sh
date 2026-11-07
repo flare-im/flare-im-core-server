@@ -256,7 +256,7 @@ load_platform_public_key() {
 
 # Message Ingest stamps a write proof on the messages that need one and Storage Writer
 # refuses to start without the key that verifies it (release/supervise-core.toml gives the
-# pair to Ingest and the public half to the Writer). Both read PKCS8 / SPKI PEM text.
+# pair to Ingest and the public half to the Writer). Both read Base64 PKCS8 / SPKI DER.
 # Supply both, or let this launcher keep a local Ed25519 pair under logs/.dev-write-proof.
 load_write_proof_keys() {
     CORE_WRITE_PROOF_PRIVATE_KEY="${FLARE_WRITE_PROOF_PRIVATE_KEY:-}"
@@ -282,14 +282,22 @@ load_write_proof_keys() {
                 return 1
             }
         fi
-        CORE_WRITE_PROOF_PRIVATE_KEY="$(cat "$private_file")"
-        CORE_WRITE_PROOF_PUBLIC_KEY="$(openssl pkey -in "$private_file" -pubout 2>/dev/null)"
+        CORE_WRITE_PROOF_PRIVATE_KEY="$(openssl pkcs8 -topk8 -nocrypt -in "$private_file" -outform DER 2>/dev/null | openssl base64 -A)"
+        CORE_WRITE_PROOF_PUBLIC_KEY="$(openssl pkey -in "$private_file" -pubout -outform DER 2>/dev/null | openssl base64 -A)"
     fi
     # Refuse here, with a message, what Message Ingest and Storage Writer would refuse at
     # startup.
-    if ! printf '%s\n' "$CORE_WRITE_PROOF_PRIVATE_KEY" | openssl pkey -noout 2>/dev/null ||
-       ! printf '%s\n' "$CORE_WRITE_PROOF_PUBLIC_KEY" | openssl pkey -pubin -noout 2>/dev/null; then
-        echo "写入证明密钥不是 Ed25519 的 PKCS8 / SPKI PEM" >&2
+    local private_description public_description derived_public canonical_private canonical_public
+    private_description="$(printf '%s' "$CORE_WRITE_PROOF_PRIVATE_KEY" | openssl base64 -d -A | openssl pkey -inform DER -text -noout 2>/dev/null)" || return 1
+    public_description="$(printf '%s' "$CORE_WRITE_PROOF_PUBLIC_KEY" | openssl base64 -d -A | openssl pkey -pubin -inform DER -text -noout 2>/dev/null)" || return 1
+    canonical_private="$(printf '%s' "$CORE_WRITE_PROOF_PRIVATE_KEY" | openssl base64 -d -A | openssl pkcs8 -inform DER -topk8 -nocrypt -outform DER 2>/dev/null | openssl base64 -A)"
+    canonical_public="$(printf '%s' "$CORE_WRITE_PROOF_PUBLIC_KEY" | openssl base64 -d -A | openssl pkey -pubin -inform DER -pubout -outform DER 2>/dev/null | openssl base64 -A)"
+    derived_public="$(printf '%s' "$CORE_WRITE_PROOF_PRIVATE_KEY" | openssl base64 -d -A | openssl pkey -inform DER -pubout -outform DER 2>/dev/null | openssl base64 -A)"
+    if [[ "$private_description" != *ED25519* ]] || [[ "$public_description" != *ED25519* ]] ||
+       [ "$canonical_private" != "$CORE_WRITE_PROOF_PRIVATE_KEY" ] ||
+       [ "$canonical_public" != "$CORE_WRITE_PROOF_PUBLIC_KEY" ] ||
+       [ "$derived_public" != "$CORE_WRITE_PROOF_PUBLIC_KEY" ]; then
+        echo "写入证明密钥必须是配对的 Ed25519 Base64 PKCS8 / SPKI DER" >&2
         return 1
     fi
     export -n CORE_WRITE_PROOF_PRIVATE_KEY CORE_WRITE_PROOF_PUBLIC_KEY

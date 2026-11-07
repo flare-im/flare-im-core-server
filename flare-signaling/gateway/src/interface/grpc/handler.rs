@@ -523,6 +523,7 @@ mod realtime_relay_tests {
                 &body("same").packet,
             ),
             org_id: None,
+            organization_scope: None,
             permission: None,
             perm_version: None,
             trace_id: None,

@@ -15,7 +15,9 @@ use std::sync::Arc;
 
 use flare_server_core::error::Result;
 
+use crate::application::handler::tenant_notice_relay::TenantNoticeRelay;
 use crate::infrastructure::persistence::PostgresTenantProjectionRepository;
+use crate::infrastructure::persistence::postgres_client_policy::PostgresTenantNoticeOutbox;
 use crate::interface::grpc::{CapabilityAdminGrpcServer, TenantProjectionGrpcServer};
 
 use crate::composition::process_config::CapabilityServiceConfig;
@@ -82,6 +84,9 @@ pub(crate) async fn initialize(
         .as_ref()
         .map(|pool| Arc::new(PostgresTenantProjectionRepository::new(Arc::clone(pool))));
     let notices = tenant_notices(&config)?;
+    let tenant_notice_relay = db_pool.clone().zip(notices.clone()).map(|(pool, notices)| {
+        TenantNoticeRelay::new(Arc::new(PostgresTenantNoticeOutbox { pool }), notices)
+    });
     let tenant_projection = tenant_projection_repository.as_ref().map(|repository| {
         TenantProjectionGrpcServer::new(Arc::clone(repository), platform_verifier.clone())
             .with_notices(notices.clone())
@@ -92,6 +97,17 @@ pub(crate) async fn initialize(
         Arc::clone(&capability_policy),
         tenant_projection_repository,
         internal_ctx::admin_staff_verifier_from_env("Capability admin RPCs")?,
+    );
+
+    if config.notice_publishers.is_empty() {
+        tracing::warn!(
+            "FLARE_TENANT_NOTICE_PUBLISHERS empty; TenantNoticeService accepts no publisher"
+        );
+    }
+    let tenant_notice = crate::interface::grpc::TenantNoticeGrpcServer::new(
+        notices.clone(),
+        config.notice_publishers.clone(),
+        internal_ctx::internal_ctx_verifier_from_env("TenantNoticeService")?,
     );
 
     let extension_router = capability_registry.extension_router().await;
@@ -142,10 +158,12 @@ pub(crate) async fn initialize(
         capability_grpc,
         capability_runtime,
         tenant_projection,
+        tenant_notice,
         capability_admin,
         hook_config_listener,
         hook_execution_background: hook.execution_background,
         entity_lifecycle_worker,
+        tenant_notice_relay,
     })
 }
 
@@ -157,7 +175,7 @@ fn tenant_notices(
     use crate::infrastructure::adapters::redis_tenant_notices::RedisTenantNotices;
     let Some(url) = config.notice_redis_url.as_deref() else {
         tracing::warn!(
-            "no notice Redis (token_store profile or FLARE_CAPABILITY_NOTICE_REDIS_URL); plugin catalog changes are not announced"
+            "no notice Redis (token_store profile or FLARE_CAPABILITY_NOTICE_REDIS_URL); plugin catalog and client policy changes are not announced"
         );
         return Ok(None);
     };

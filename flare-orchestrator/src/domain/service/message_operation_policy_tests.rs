@@ -542,6 +542,14 @@ async fn deletes_follow_their_scope() {
         .authorize(&user("alice"), "tenant-a", global())
         .await
         .expect("sender global delete");
+    f.policy
+        .authorize(
+            &signed_as(SignedActorType::Service, "flare-social-bridge"),
+            "tenant-a",
+            global(),
+        )
+        .await
+        .expect("trusted Social moderation may delete another sender's message for everyone");
     // A private delete hides only the operator's own view.
     let error = refused(
         &f.policy,

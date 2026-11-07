@@ -164,13 +164,23 @@ async fn hook_plugin_channel(endpoint: &str) -> Result<Channel> {
     })
 }
 
-/// gRPC PreSend Hook 回 `allow=false`：策略拒绝。错误码与原因同以前（客户端照旧看到
-/// `OPERATION_FAILED` / `pre-send hook rejected`），另带进程内的策略拒绝标记。
-fn pre_send_hook_rejection() -> flare_server_core::error::FlareError {
-    pre_send_rejection(
+/// Keep the validated machine reason and give older clients a readable fallback.
+/// Hook diagnostics stay private, and invalid codes retain the legacy response.
+fn pre_send_hook_rejection(
+    response: &ProtoPreSendHookResponse,
+) -> flare_server_core::error::FlareError {
+    let reason = response.deny_reason_code.as_str();
+    let mut bytes = reason.bytes();
+    let error = if reason.len() <= 64
+        && bytes.next().is_some_and(|b| b.is_ascii_uppercase())
+        && bytes.all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'_')
+    {
+        ErrorBuilder::new(ErrorCode::OperationFailed, reason).details("服务端拒绝发送此消息")
+    } else {
         ErrorBuilder::new(ErrorCode::OperationFailed, "pre-send hook rejected")
-            .details("allow=false"),
-    )
+            .details("allow=false")
+    };
+    pre_send_rejection(error)
 }
 
 #[derive(Clone)]
@@ -205,7 +215,7 @@ impl PreSendHook for GrpcPreSendHook {
             Ok(inner) => {
                 if !inner.allow {
                     return PreSendDecision::Reject {
-                        error: pre_send_hook_rejection(),
+                        error: pre_send_hook_rejection(&inner),
                     };
                 }
                 if let Some(draft_resp) = inner.draft {
@@ -583,7 +593,7 @@ mod tests {
         use crate::hooks::is_pre_send_rejection;
         use flare_server_core::error::{ErrorBuilder, ErrorCode, FlareError};
 
-        let rejection = super::pre_send_hook_rejection();
+        let rejection = super::pre_send_hook_rejection(&Default::default());
         assert!(is_pre_send_rejection(&rejection));
         match &rejection {
             FlareError::Localized {
@@ -607,6 +617,36 @@ mod tests {
             .details("transport error")
             .build_error();
         assert!(!is_pre_send_rejection(&unavailable));
+    }
+
+    #[test]
+    fn hook_rejection_preserves_only_valid_machine_reasons() {
+        use crate::hooks::is_pre_send_rejection;
+        use flare_server_core::error::to_error_detail;
+
+        let mut response = super::ProtoPreSendHookResponse {
+            deny_reason_code: "GROUP_WRITE_DISABLED".into(),
+            deny_reason_message: "operator-only diagnostic".into(),
+            ..Default::default()
+        };
+        let rejection = super::pre_send_hook_rejection(&response);
+        assert!(is_pre_send_rejection(&rejection));
+        let detail = to_error_detail(&rejection, "");
+        assert_eq!(detail.reason, "GROUP_WRITE_DISABLED");
+        assert_eq!(detail.message, "服务端拒绝发送此消息");
+
+        for invalid in [
+            "bad_reason",
+            "UPPER CASE",
+            "1DENIED",
+            "DENIED\n",
+            &"A".repeat(65),
+        ] {
+            response.deny_reason_code = invalid.into();
+            let detail = to_error_detail(&super::pre_send_hook_rejection(&response), "");
+            assert_eq!(detail.reason, "pre-send hook rejected");
+            assert_eq!(detail.message, "allow=false");
+        }
     }
 
     #[test]

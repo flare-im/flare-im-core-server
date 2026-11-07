@@ -98,4 +98,5 @@ pub struct UpdateConversationUserSettingsCommand {
     pub is_archived: Option<bool>,
     pub draft: Option<String>,
     pub base_settings_version: u64,
+    pub clear_history_through_seq: Option<u64>,
 }

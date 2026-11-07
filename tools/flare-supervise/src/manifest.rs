@@ -7,7 +7,7 @@ use std::{
     path::Path,
 };
 
-use crate::error::{Context, Result, ensure, fail};
+use crate::error::{Context, FlareError, Result, ensure, fail};
 use serde::Deserialize;
 
 #[derive(Clone, Debug, Deserialize)]
@@ -104,6 +104,10 @@ pub(crate) struct Service {
     pub(crate) enabled_if_env: Option<String>,
     #[serde(default)]
     pub(crate) environment: BTreeMap<String, String>,
+    /// Destination -> parent variable NAME. Values stay in the private parent
+    /// environment, not this manifest; only the destination reaches the child.
+    #[serde(default)]
+    pub(crate) environment_bindings: BTreeMap<String, String>,
     #[serde(default)]
     pub(crate) environment_defaults: Vec<EnvironmentDefaults>,
     #[serde(default)]
@@ -114,8 +118,10 @@ impl Manifest {
     pub(crate) fn load(path: &Path) -> Result<Self> {
         let source = fs::read_to_string(path)
             .with_context(|| format!("read supervisor manifest {}", path.display()))?;
+        // A malformed manifest may contain a mistakenly pasted secret. TOML's
+        // original error includes the source line; never put that in diagnostics.
         let manifest: Self = toml::from_str(&source)
-            .with_context(|| format!("parse supervisor manifest {}", path.display()))?;
+            .map_err(|_| FlareError::system("invalid supervisor manifest syntax"))?;
         manifest.validate()?;
         Ok(manifest)
     }
@@ -215,6 +221,51 @@ impl Manifest {
                 );
             }
             self.validate_environment_defaults(service)?;
+            for (target, source) in &service.environment_bindings {
+                validate_env_name(target)
+                    .map_err(|_| FlareError::system("invalid binding variable name"))?;
+                validate_env_name(source)
+                    .map_err(|_| FlareError::system("invalid binding variable name"))?;
+                ensure!(
+                    target != source && self.env_allowed(service, target),
+                    "{} binding destination must be explicitly inherited",
+                    service.name
+                );
+                ensure!(
+                    !self.forbidden_env.contains(source)
+                        && !self.env_allowed(service, source)
+                        && !service.environment.contains_key(source)
+                        && !service
+                            .environment_defaults
+                            .iter()
+                            .any(|defaults| defaults.values.contains_key(source)),
+                    "{} binding source is forbidden or already inherited",
+                    service.name
+                );
+                ensure!(
+                    !service.environment.contains_key(target)
+                        && !service
+                            .environment_defaults
+                            .iter()
+                            .any(|defaults| defaults.values.contains_key(target)),
+                    "{} binding destination conflicts with a literal/default",
+                    service.name
+                );
+                ensure!(
+                    !self
+                        .required_env_unless
+                        .iter()
+                        .chain(&service.required_env_unless)
+                        .any(|condition| &condition.when_env == target)
+                        && service.enabled_if_env.as_ref() != Some(target)
+                        && !service
+                            .environment_defaults
+                            .iter()
+                            .any(|defaults| &defaults.when_env == target),
+                    "{} binding destination cannot select a mode",
+                    service.name
+                );
+            }
             if let Some(name) = &service.enabled_if_env {
                 validate_env_name(name)?;
             }
@@ -282,12 +333,28 @@ impl Manifest {
                 }
                 fail!("{} requires nonempty {}", service.name, condition);
             }
+            for (target, source) in &service.environment_bindings {
+                ensure!(
+                    !env_is_set(env_value(target).as_deref()),
+                    "{} bound destination must not be set in parent",
+                    service.name
+                );
+                ensure!(
+                    env_is_set(env_value(source).as_deref()),
+                    "{} requires nonempty binding source",
+                    service.name
+                );
+            }
             let require_present = |required: &String| -> Result<()> {
+                let parent_name = service
+                    .environment_bindings
+                    .get(required)
+                    .unwrap_or(required);
                 let present = service
                     .environment
                     .get(required)
                     .map(|value| !value.is_empty())
-                    .unwrap_or_else(|| env_is_set(env_value(required).as_deref()));
+                    .unwrap_or_else(|| env_is_set(env_value(parent_name).as_deref()));
                 ensure!(present, "{} requires nonempty {}", service.name, required);
                 Ok(())
             };
@@ -407,13 +474,22 @@ impl Manifest {
         service: &Service,
         parent: impl IntoIterator<Item = (OsString, OsString)>,
     ) -> Vec<(OsString, OsString)> {
+        let parent: BTreeMap<OsString, OsString> = parent.into_iter().collect();
         let mut child: BTreeMap<OsString, OsString> = parent
-            .into_iter()
+            .iter()
             .filter(|(key, _)| {
-                key.to_str()
-                    .is_some_and(|name| self.env_allowed(service, name))
+                key.to_str().is_some_and(|name| {
+                    self.env_allowed(service, name)
+                        && !service.environment_bindings.contains_key(name)
+                })
             })
+            .map(|(key, value)| (key.clone(), value.clone()))
             .collect();
+        for (target, source) in &service.environment_bindings {
+            if let Some(value) = parent.get(&OsString::from(source)) {
+                child.insert(OsString::from(target), value.clone());
+            }
+        }
         for defaults in &service.environment_defaults {
             let selected = child
                 .get(&OsString::from(&defaults.when_env))
@@ -601,6 +677,127 @@ required_env_unless = [
         assert!(manifest.env_allowed(&manifest.services[0], "FLARE_INTERNAL_CTX_PRIVATE_KEY"));
         assert!(!manifest.env_allowed(&manifest.services[1], "FLARE_INTERNAL_CTX_PRIVATE_KEY"));
         assert!(!manifest.env_allowed(&manifest.services[0], "FLARE_CONSOLE_SIGNING_KEY"));
+    }
+
+    fn binding_fixture() -> Manifest {
+        toml::from_str(
+            r#"
+version = 1
+forbidden_env = ["IAM_PRIVATE"]
+[[services]]
+name = "gateway"
+command = "/bin/sh"
+inherit_env = ["SDK_SIGNING_KEY"]
+required_env = ["SDK_SIGNING_KEY"]
+environment_bindings = { SDK_SIGNING_KEY = "GATEWAY_KEY" }
+[[services]]
+name = "cell"
+command = "/bin/sh"
+inherit_env = ["SDK_SIGNING_KEY"]
+required_env = ["SDK_SIGNING_KEY"]
+environment_bindings = { SDK_SIGNING_KEY = "CELL_KEY" }
+"#,
+        )
+        .unwrap()
+    }
+    #[test]
+    fn bindings_require_private_sources_and_reject_ambiguous_legacy_parent() {
+        let manifest = binding_fixture();
+        manifest.validate().unwrap();
+        assert_eq!(
+            manifest
+                .select_with_env("all", |name| match name {
+                    "GATEWAY_KEY" => Some("dummy-gateway".into()),
+                    "CELL_KEY" => Some("dummy-cell".into()),
+                    _ => None,
+                })
+                .unwrap()
+                .len(),
+            2
+        );
+        for missing in ["GATEWAY_KEY", "CELL_KEY"] {
+            assert!(
+                manifest
+                    .select_with_env("all", |name| if name == missing {
+                        None
+                    } else if name.ends_with("_KEY") && name != "SDK_SIGNING_KEY" {
+                        Some("dummy".into())
+                    } else {
+                        None
+                    })
+                    .is_err()
+            );
+        }
+        let error = manifest
+            .select_with_env("all", |name| {
+                if name == "IAM_PRIVATE" {
+                    None
+                } else {
+                    Some("not-a-real-secret".into())
+                }
+            })
+            .unwrap_err()
+            .to_string();
+        assert!(!error.contains("not-a-real-secret"));
+        assert!(error.contains("bound destination"));
+        assert!(
+            manifest
+                .select_with_env("gateway", |name| if name == "GATEWAY_KEY" {
+                    Some("dummy".into())
+                } else {
+                    None
+                })
+                .is_ok()
+        );
+    }
+    #[test]
+    fn bindings_cannot_copy_forbidden_or_inherited_inputs_or_override_modes() {
+        for source in ["IAM_PRIVATE", "SDK_SIGNING_KEY", "bad-name"] {
+            let mut manifest = binding_fixture();
+            manifest.services[0]
+                .environment_bindings
+                .insert("SDK_SIGNING_KEY".into(), source.into());
+            assert!(manifest.validate().is_err());
+        }
+        let mut manifest = binding_fixture();
+        manifest.services[0]
+            .environment
+            .insert("SDK_SIGNING_KEY".into(), "dummy".into());
+        assert!(manifest.validate().is_err());
+        let mut manifest = binding_fixture();
+        manifest.services[0]
+            .environment
+            .insert("GATEWAY_KEY".into(), "dummy".into());
+        assert!(manifest.validate().is_err());
+        let mut manifest = binding_fixture();
+        manifest.services[0].enabled_if_env = Some("SDK_SIGNING_KEY".into());
+        assert!(manifest.validate().is_err());
+    }
+    #[test]
+    fn actual_children_receive_only_their_bound_key_not_parent_aliases() {
+        let manifest = binding_fixture();
+        manifest.validate().unwrap();
+        for (index, expected) in [(0, "dummy-gateway"), (1, "dummy-cell")] {
+            let parent = [
+                ("GATEWAY_KEY", "dummy-gateway"),
+                ("CELL_KEY", "dummy-cell"),
+                ("SDK_SIGNING_KEY", "wrong-legacy"),
+                ("IAM_PRIVATE", "not-exported"),
+            ]
+            .into_iter()
+            .map(|(key, value)| (OsString::from(key), OsString::from(value)));
+            let environment = manifest.child_environment(&manifest.services[index], parent);
+            let output = std::process::Command::new("/usr/bin/env")
+                .env_clear()
+                .envs(environment)
+                .output()
+                .unwrap();
+            assert!(output.status.success());
+            assert_eq!(
+                String::from_utf8(output.stdout).unwrap(),
+                format!("SDK_SIGNING_KEY={expected}\n")
+            );
+        }
     }
 
     #[test]
@@ -832,7 +1029,15 @@ required_env_unless = [
             !manifest
                 .services
                 .iter()
-                .filter(|service| service.name != "admin-gateway")
+                .filter(|service| ![
+                    "signaling-online",
+                    "capability",
+                    "storage-writer",
+                    "storage-reader",
+                    "media",
+                    "admin-gateway"
+                ]
+                .contains(&service.name.as_str()))
                 .any(|service| manifest.env_allowed(service, "FLARE_AUDIT_NATS_URL"))
         );
         // Exactly the six usage counting points receive the usage stream settings.
@@ -855,6 +1060,57 @@ required_env_unless = [
                 ],
                 "{name}"
             );
+        }
+    }
+
+    #[test]
+    fn core_manifest_delivers_purpose_inputs_to_only_the_actual_owners() {
+        let manifest: Manifest =
+            toml::from_str(include_str!("../../../release/supervise-core.toml")).unwrap();
+        manifest.validate().unwrap();
+        for (variable, owners) in [
+            ("FLARE_WRITE_PROOF_PRIVATE_KEY", vec!["message-ingest"]),
+            (
+                "FLARE_WRITE_PROOF_PUBLIC_KEY",
+                vec!["message-ingest", "storage-writer"],
+            ),
+            ("FLARE_API_GATEWAY_CTX_PRIVATE_KEY", vec!["api-gateway"]),
+            ("PUSH_WORKER_MOBILE_SNAPSHOT_FILE", vec!["push-worker"]),
+            (
+                "MESSAGE_INGEST_CAPABILITY_DELEGATED_PRE_SEND",
+                vec!["message-ingest"],
+            ),
+            ("FLARE_OPS_READ_TOKEN", vec!["admin-gateway"]),
+            (
+                "FLARE_AUDIT_NATS_URL",
+                vec![
+                    "signaling-online",
+                    "capability",
+                    "storage-writer",
+                    "storage-reader",
+                    "media",
+                    "admin-gateway",
+                ],
+            ),
+        ] {
+            let actual: Vec<_> = manifest
+                .services
+                .iter()
+                .filter(|service| {
+                    manifest
+                        .child_environment(
+                            service,
+                            [(
+                                OsString::from(variable),
+                                OsString::from("non-secret-test-input"),
+                            )],
+                        )
+                        .iter()
+                        .any(|(key, _)| key == &OsString::from(variable))
+                })
+                .map(|s| s.name.as_str())
+                .collect();
+            assert_eq!(actual, owners, "{variable}");
         }
     }
 
@@ -897,6 +1153,56 @@ required_env_unless = [
                 assert!(
                     holders(variable).contains(&receiver),
                     "{receiver} {variable}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn core_manifest_requires_hmac_unless_explicit_http_hook_mode() {
+        let mut manifest: Manifest =
+            toml::from_str(include_str!("../../../release/supervise-core.toml")).unwrap();
+        for service in &mut manifest.services {
+            service.command = "/usr/bin/true".into();
+        }
+        manifest.validate().unwrap();
+        for (service_name, mode_name, hmac_name) in [
+            (
+                "api-gateway",
+                "FLARE_API_GATEWAY_AUTH_MODE",
+                "FLARE_API_GATEWAY_TOKEN_SECRET",
+            ),
+            (
+                "signaling-gateway",
+                "ACCESS_GATEWAY_AUTH_MODE",
+                "ACCESS_GATEWAY_TOKEN_SECRET",
+            ),
+        ] {
+            let service = manifest
+                .services
+                .iter()
+                .find(|s| s.name == service_name)
+                .unwrap();
+            let mut inputs: BTreeMap<String, String> = manifest
+                .required_env
+                .iter()
+                .chain(&service.required_env)
+                .filter(|name| name.as_str() != hmac_name)
+                .map(|name| (name.clone(), "test-input".into()))
+                .collect();
+            inputs.insert(mode_name.into(), "http_hook".into());
+            assert!(
+                manifest
+                    .select_with_env(service_name, |name| inputs.get(name).cloned())
+                    .is_ok()
+            );
+            for invalid in ["", " HTTP_HOOK", "configured", "http_hook "] {
+                inputs.insert(mode_name.into(), invalid.into());
+                assert!(
+                    manifest
+                        .select_with_env(service_name, |name| inputs.get(name).cloned())
+                        .is_err(),
+                    "{service_name}: {invalid}"
                 );
             }
         }

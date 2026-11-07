@@ -11,7 +11,7 @@ use super::admin_extract::{AdminJson, AdminPath, AdminQuery};
 use super::audit_target::AuditTarget;
 use super::ops_handler::{AdminCapability, admin_rpc_error, audit_write};
 use crate::application::admin_messages::{
-    AdminMessageDetailHttpResponse, AdminMessageEventsHttpResponse,
+    AdminMessageDetailHttpResponse, AdminMessageDetailQuery, AdminMessageEventsHttpResponse,
     AdminMessageEventsQueryHttpRequest, AdminMessageExportHttpRequest,
     AdminMessageExportHttpResponse, AdminMessageQueryHttpRequest, AdminMessageQueryHttpResponse,
     AdminMessageWriteLedgerHttpResponse, AdminMessageWriteLedgerQueryHttpRequest,
@@ -341,6 +341,7 @@ pub async fn admin_query_messages(
     tag = "Admin",
     params(
         ("message_id" = String, Path, description = "Server message id"),
+        ("attachment_id" = Option<String>, Query, description = "Resolve only a persisted attachment of this readable message; URL expires within 60 seconds"),
     ),
     responses(
         (status = 200, description = "Admin message detail", body = ApiResponse<AdminMessageDetailHttpResponse>),
@@ -358,6 +359,7 @@ pub async fn admin_get_message(
     Extension(clients): Extension<Arc<AdminGrpcClients>>,
     Extension(staff): Extension<VerifiedStaffContext>,
     AdminPath(message_id): AdminPath<String>,
+    AdminQuery(query): AdminQuery<AdminMessageDetailQuery>,
 ) -> Result<Json<ApiResponse<AdminMessageDetailHttpResponse>>> {
     let storage_request = build_storage_get_message_request(&message_id)
         .map_err(|err| GatewayError::bad_request(err.code, err.message))?;
@@ -371,8 +373,70 @@ pub async fn admin_get_message(
         })
         .await
         .map_err(|err| admin_rpc_error(err, "ADMIN_MESSAGE_DETAIL_FAILED"))?;
-    let response = admin_message_detail_response(storage_response)
+    let mut response = admin_message_detail_response(storage_response)
         .ok_or_else(|| GatewayError::not_found("message not found"))?;
+
+    if let Some(file_id) = query.attachment_id {
+        if !response
+            .message
+            .content
+            .as_ref()
+            .is_some_and(|body| body.attachments.iter().any(|file| file.file_id == file_id))
+        {
+            return Err(GatewayError::not_found("message attachment not found"));
+        }
+        let sequence = i64::try_from(response.message.conversation_seq).map_err(|_| {
+            GatewayError::bad_request("ADMIN_MESSAGE_SEQUENCE_INVALID", "invalid message sequence")
+        })?;
+        let caller = flare_im_service_kit::clients::MediaCaller::staff(staff.ctx().clone())
+            .map_err(|_| {
+                GatewayError(
+                    flare_server_core::error::ErrorBuilder::new(
+                        flare_server_core::error::ErrorCode::HttpForbidden,
+                        "ADMIN_IDENTITY_REQUIRED",
+                    )
+                    .build_error(),
+                )
+            })?;
+        let access = clients
+            .bounded(async {
+                clients
+                    .media
+                    .lock()
+                    .await
+                    .get_file_url(
+                        &caller,
+                        flare_grpc_proto::media::GetFileUrlRequest {
+                            file_id: file_id.clone(),
+                            expires_in: 60,
+                            conversation_id: response.message.conversation_id.clone(),
+                            message_seq: sequence,
+                            ..Default::default()
+                        },
+                    )
+                    .await
+            })
+            .await
+            .map_err(|err| admin_rpc_error(err, "ADMIN_MESSAGE_ATTACHMENT_FAILED"))?;
+        if !access.success || !access.url.starts_with("https://") {
+            return Err(GatewayError::bad_request(
+                "ADMIN_MESSAGE_ATTACHMENT_UNAVAILABLE",
+                "secure attachment URL unavailable",
+            ));
+        }
+        response.attachment = Some(
+            crate::application::message_body::AdminMessageAttachmentAccessHttp {
+                file_id,
+                url: access.url,
+                expires_at: access
+                    .expires_at
+                    .map(|time| {
+                        time.seconds.saturating_mul(1000) + i64::from(time.nanos) / 1_000_000
+                    })
+                    .unwrap_or_default(),
+            },
+        );
+    }
 
     Ok(Json(ApiResponse::success(response)))
 }

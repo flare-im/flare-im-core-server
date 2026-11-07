@@ -157,7 +157,17 @@ async fn social_profile_installs_one_mandatory_pre_send_for_all_chat_tenants() {
         .await
         .unwrap();
     for tenant in ["0", "tenant-a", "tenant-b"] {
-        for conversation_type in ["single", "single_chat", "direct", "group", "group_chat"] {
+        for conversation_type in [
+            "single",
+            "single_chat",
+            "direct",
+            "group",
+            "group_chat",
+            "unknown",
+            "",
+            "ai",
+            "system",
+        ] {
             let context = Context::with_request_id("social-profile-install").with_tenant_id(tenant);
             let ctx: Ctx = Arc::new(set_hook_context_data(
                 context,

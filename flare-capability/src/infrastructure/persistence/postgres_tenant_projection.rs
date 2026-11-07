@@ -112,6 +112,25 @@ impl TenantProjectionRepository for PostgresTenantProjectionRepository {
         })
     }
 
+    async fn upsert_client_policy(
+        &self,
+        record: &crate::domain::model::ClientPolicyRecord,
+    ) -> Result<TenantProjectionOutcome> {
+        super::postgres_client_policy::PostgresClientPolicy {
+            pool: self.pool.clone(),
+        }
+        .upsert_if_newer(record)
+        .await
+    }
+
+    async fn client_policy_versions(&self, app_ids: &[String]) -> Result<Vec<(String, u64)>> {
+        super::postgres_client_policy::PostgresClientPolicy {
+            pool: self.pool.clone(),
+        }
+        .versions(app_ids)
+        .await
+    }
+
     async fn credential_versions(&self, app_ids: &[String]) -> Result<Vec<(String, u64)>> {
         let rows=sqlx::query("SELECT app_id,version FROM credential_projection_versions WHERE cardinality($1::text[])=0 OR app_id=ANY($1) ORDER BY app_id")
             .bind(app_ids).fetch_all(&*self.pool).await

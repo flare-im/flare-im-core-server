@@ -19,7 +19,7 @@ require_success = true
 [pre_send.selector]
 # tenants 省略 = 匹配所有租户（HookSelectorConfig 空列表 → MatchRule::Any）。
 # Social 侧策略是多租户的，核不能只把 "0" 交给它；要限定租户时再写 tenants = ["a", "b"]。
-conversation_types = ["single", "single_chat", "direct", "group", "group_chat"]
+# Do not filter on a client-supplied conversation kind. Social validates routing.
 
 [pre_send.transport]
 type = "grpc"

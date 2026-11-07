@@ -443,21 +443,25 @@ async fn app_user_file_urls_require_signed_login_and_tenant_but_not_file_ownersh
     let h = serve().await;
     let file_id = seed_private_file(&h).await;
     let user = token(&h.signer, SignedActorType::User, "tenant-a", "reader");
-    let response = MediaServiceClient::new(h.channel.clone())
-        .get_file_url(raw(
-            GetFileUrlRequest {
-                file_id: file_id.clone(),
-                expires_in: 60,
-                ..Default::default()
+    for with_reference in [false, true] {
+        let request = GetFileUrlRequest {
+            file_id: file_id.clone(),
+            expires_in: 60,
+            conversation_id: if with_reference {
+                "unrelated-chat".into()
+            } else {
+                String::new()
             },
-            Some(&user),
-            "tenant-b",
-            "wrong-owner",
-        ))
-        .await
-        .expect("same-application signed user read")
-        .into_inner();
-    assert!(response.success);
+            message_seq: if with_reference { 7 } else { 0 },
+            ..Default::default()
+        };
+        let response = MediaServiceClient::new(h.channel.clone())
+            .get_file_url(raw(request, Some(&user), "tenant-b", "wrong-owner"))
+            .await
+            .expect("same-application signed user read")
+            .into_inner();
+        assert!(response.success);
+    }
     let request = || GetFileUrlRequest {
         file_id: file_id.clone(),
         ..Default::default()

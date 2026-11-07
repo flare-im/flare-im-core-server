@@ -48,6 +48,7 @@ members = [
     "tools/flare-dlq-replay",
     "tools/flare-supervise",
     "tools/flare-smoke-grpc",
+    "tools/flare-core-initialize",
 ]
 
 # Its own workspace (it links the DevKit plugin host); built with --manifest-path.

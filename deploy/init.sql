@@ -133,6 +133,35 @@ CREATE TABLE core_audit_outbox (
 CREATE INDEX core_audit_outbox_pending ON core_audit_outbox(next_at,event_id) WHERE delivered_at IS NULL;
 CREATE INDEX core_audit_outbox_delivered ON core_audit_outbox(delivered_at) WHERE delivered_at IS NOT NULL;
 
+-- Client policy projection and Core's tenant notice outbox (migration 0023).
+DROP TABLE IF EXISTS tenant_client_policy CASCADE;
+CREATE TABLE tenant_client_policy (
+    tenant_id TEXT PRIMARY KEY CHECK (tenant_id ~ '^[0-9A-Za-z_-]{1,32}$'),
+    version BIGINT NOT NULL CHECK (version > 0),
+    access_serial BIGINT NOT NULL CHECK (access_serial >= 0),
+    release_generation BIGINT NOT NULL CHECK (release_generation >= 0),
+    build_policies JSONB NOT NULL
+        CHECK (jsonb_typeof(build_policies) = 'object' AND octet_length(build_policies::text) <= 262144),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+COMMENT ON TABLE tenant_client_policy IS '应用客户端策略投影（真源在控制面，核只按 version 幂等写入）';
+COMMENT ON COLUMN tenant_client_policy.access_serial IS '已发布的接入清单 serial，只进不退；CONNECT_ACK 下发';
+COMMENT ON COLUMN tenant_client_policy.release_generation IS '应用级发布代数，只进不退';
+COMMENT ON COLUMN tenant_client_policy.build_policies IS 'platform -> {min_build, min_build_effective_from_ms, blocked: [{from, to}]}';
+DROP TABLE IF EXISTS tenant_notice_outbox CASCADE;
+CREATE TABLE tenant_notice_outbox (
+    tenant_id TEXT NOT NULL CHECK (tenant_id ~ '^[0-9A-Za-z_-]{1,32}$'),
+    topic TEXT NOT NULL CHECK (topic IN ('flare.access', 'flare.release')),
+    version BIGINT NOT NULL CHECK (version > 0),
+    attempts INTEGER NOT NULL DEFAULT 0 CHECK (attempts >= 0),
+    next_attempt_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    last_error TEXT CHECK (last_error IS NULL OR char_length(last_error) <= 512),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (tenant_id, topic)
+);
+COMMENT ON TABLE tenant_notice_outbox IS 'Core 自发 flare.* 租户通知的 outbox：与投影同事务写入，发出后删除';
+CREATE INDEX idx_tenant_notice_outbox_due ON tenant_notice_outbox(next_attempt_at);
+
 -- Durable physical-target kick command journal (migration 0014). Redis session indexes remain projections.
 DROP TABLE IF EXISTS online_kick_commands CASCADE;
 CREATE TABLE online_kick_commands (

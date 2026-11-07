@@ -174,6 +174,7 @@ fn staff_claims(f: &Fixture, operation: &str) -> PluginStaffCallClaims {
         configuration_digest,
     ) = grant_identity(&f.projection);
     PluginStaffCallClaims {
+        scope: Default::default(),
         tenant_id: "app-a".into(),
         plugin_id: "example.poll".into(),
         plugin_version,

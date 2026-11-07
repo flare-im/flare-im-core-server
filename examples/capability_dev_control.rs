@@ -248,6 +248,7 @@ fn snapshot(
         .map(|artifact| artifact.digest.clone())
         .ok_or("the manifest declares no artifact")?;
     let snapshot = PluginRuntimeSnapshot {
+        organization_id: None, // This local Core-only control has no organization directory.
         tenant_id: tenant.to_owned(),
         version,
         issued_at_ms: now,

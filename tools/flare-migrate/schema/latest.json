@@ -5,6 +5,17 @@
   },
   "objects": [
     {
+      "collation": null,
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "kind": "column",
+      "name": "access_serial",
+      "not_null": true,
+      "table": "tenant_client_policy",
+      "type": "bigint"
+    },
+    {
       "collation": "default",
       "default": "'private'::text",
       "generated": "",
@@ -248,6 +259,17 @@
     },
     {
       "collation": null,
+      "default": "0",
+      "generated": "",
+      "identity": "",
+      "kind": "column",
+      "name": "attempts",
+      "not_null": true,
+      "table": "tenant_notice_outbox",
+      "type": "integer"
+    },
+    {
+      "collation": null,
       "default": "'{}'::jsonb",
       "generated": "",
       "identity": "",
@@ -278,6 +300,17 @@
       "not_null": false,
       "table": "conversations",
       "type": "text"
+    },
+    {
+      "collation": null,
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "kind": "column",
+      "name": "build_policies",
+      "not_null": true,
+      "table": "tenant_client_policy",
+      "type": "jsonb"
     },
     {
       "collation": null,
@@ -2343,6 +2376,17 @@
       "identity": "",
       "kind": "column",
       "name": "created_at",
+      "not_null": true,
+      "table": "tenant_notice_outbox",
+      "type": "timestamp with time zone"
+    },
+    {
+      "collation": null,
+      "default": "CURRENT_TIMESTAMP",
+      "generated": "",
+      "identity": "",
+      "kind": "column",
+      "name": "created_at",
       "not_null": false,
       "table": "tenants",
       "type": "timestamp with time zone"
@@ -3349,6 +3393,28 @@
       "type": "text"
     },
     {
+      "collation": null,
+      "default": "0",
+      "generated": "",
+      "identity": "",
+      "kind": "column",
+      "name": "history_cleared_through_seq",
+      "not_null": true,
+      "table": "conversation_participants",
+      "type": "bigint"
+    },
+    {
+      "collation": null,
+      "default": "0",
+      "generated": "",
+      "identity": "",
+      "kind": "column",
+      "name": "history_cleared_through_seq",
+      "not_null": true,
+      "table": "conversations",
+      "type": "bigint"
+    },
+    {
       "collation": "default",
       "default": null,
       "generated": "",
@@ -3698,6 +3764,17 @@
       "name": "last_error",
       "not_null": false,
       "table": "plugin_entity_lifecycle_outbox",
+      "type": "text"
+    },
+    {
+      "collation": "default",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "kind": "column",
+      "name": "last_error",
+      "not_null": false,
+      "table": "tenant_notice_outbox",
       "type": "text"
     },
     {
@@ -4218,6 +4295,17 @@
       "type": "timestamp with time zone"
     },
     {
+      "collation": null,
+      "default": "CURRENT_TIMESTAMP",
+      "generated": "",
+      "identity": "",
+      "kind": "column",
+      "name": "next_attempt_at",
+      "not_null": true,
+      "table": "tenant_notice_outbox",
+      "type": "timestamp with time zone"
+    },
+    {
       "collation": "default",
       "default": null,
       "generated": "",
@@ -4689,6 +4777,17 @@
       "not_null": true,
       "table": "capability_plugin_endpoints",
       "type": "timestamp with time zone"
+    },
+    {
+      "collation": null,
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "kind": "column",
+      "name": "release_generation",
+      "not_null": true,
+      "table": "tenant_client_policy",
+      "type": "bigint"
     },
     {
       "collation": null,
@@ -6645,6 +6744,28 @@
       "kind": "column",
       "name": "tenant_id",
       "not_null": true,
+      "table": "tenant_client_policy",
+      "type": "text"
+    },
+    {
+      "collation": "default",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "kind": "column",
+      "name": "tenant_id",
+      "not_null": true,
+      "table": "tenant_notice_outbox",
+      "type": "text"
+    },
+    {
+      "collation": "default",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "kind": "column",
+      "name": "tenant_id",
+      "not_null": true,
       "table": "tenants",
       "type": "text"
     },
@@ -6778,6 +6899,17 @@
       "name": "title",
       "not_null": false,
       "table": "threads",
+      "type": "text"
+    },
+    {
+      "collation": "default",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "kind": "column",
+      "name": "topic",
+      "not_null": true,
+      "table": "tenant_notice_outbox",
       "type": "text"
     },
     {
@@ -6987,6 +7119,17 @@
       "name": "updated_at",
       "not_null": true,
       "table": "plugin_entity_lifecycle_outbox",
+      "type": "timestamp with time zone"
+    },
+    {
+      "collation": null,
+      "default": "now()",
+      "generated": "",
+      "identity": "",
+      "kind": "column",
+      "name": "updated_at",
+      "not_null": true,
+      "table": "tenant_client_policy",
       "type": "timestamp with time zone"
     },
     {
@@ -7218,6 +7361,28 @@
       "name": "version",
       "not_null": true,
       "table": "plugin_authorization_snapshots",
+      "type": "bigint"
+    },
+    {
+      "collation": null,
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "kind": "column",
+      "name": "version",
+      "not_null": true,
+      "table": "tenant_client_policy",
+      "type": "bigint"
+    },
+    {
+      "collation": null,
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "kind": "column",
+      "name": "version",
+      "not_null": true,
+      "table": "tenant_notice_outbox",
       "type": "bigint"
     },
     {
@@ -8611,6 +8776,126 @@
     {
       "deferrable": false,
       "deferred": false,
+      "definition": "CHECK ((access_serial >= 0))",
+      "kind": "constraint",
+      "name": "tenant_client_policy_access_serial_check",
+      "table": "tenant_client_policy",
+      "type": "c",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "deferred": false,
+      "definition": "CHECK (((jsonb_typeof(build_policies) = 'object'::text) AND (octet_length((build_policies)::text) <= 262144)))",
+      "kind": "constraint",
+      "name": "tenant_client_policy_build_policies_check",
+      "table": "tenant_client_policy",
+      "type": "c",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "deferred": false,
+      "definition": "PRIMARY KEY (tenant_id)",
+      "kind": "constraint",
+      "name": "tenant_client_policy_pkey",
+      "table": "tenant_client_policy",
+      "type": "p",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "deferred": false,
+      "definition": "CHECK ((release_generation >= 0))",
+      "kind": "constraint",
+      "name": "tenant_client_policy_release_generation_check",
+      "table": "tenant_client_policy",
+      "type": "c",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "deferred": false,
+      "definition": "CHECK ((tenant_id ~ '^[0-9A-Za-z_-]{1,32}$'::text))",
+      "kind": "constraint",
+      "name": "tenant_client_policy_tenant_id_check",
+      "table": "tenant_client_policy",
+      "type": "c",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "deferred": false,
+      "definition": "CHECK ((version > 0))",
+      "kind": "constraint",
+      "name": "tenant_client_policy_version_check",
+      "table": "tenant_client_policy",
+      "type": "c",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "deferred": false,
+      "definition": "CHECK ((attempts >= 0))",
+      "kind": "constraint",
+      "name": "tenant_notice_outbox_attempts_check",
+      "table": "tenant_notice_outbox",
+      "type": "c",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "deferred": false,
+      "definition": "CHECK (((last_error IS NULL) OR (char_length(last_error) <= 512)))",
+      "kind": "constraint",
+      "name": "tenant_notice_outbox_last_error_check",
+      "table": "tenant_notice_outbox",
+      "type": "c",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "deferred": false,
+      "definition": "PRIMARY KEY (tenant_id, topic)",
+      "kind": "constraint",
+      "name": "tenant_notice_outbox_pkey",
+      "table": "tenant_notice_outbox",
+      "type": "p",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "deferred": false,
+      "definition": "CHECK ((tenant_id ~ '^[0-9A-Za-z_-]{1,32}$'::text))",
+      "kind": "constraint",
+      "name": "tenant_notice_outbox_tenant_id_check",
+      "table": "tenant_notice_outbox",
+      "type": "c",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "deferred": false,
+      "definition": "CHECK ((topic = ANY (ARRAY['flare.access'::text, 'flare.release'::text])))",
+      "kind": "constraint",
+      "name": "tenant_notice_outbox_topic_check",
+      "table": "tenant_notice_outbox",
+      "type": "c",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "deferred": false,
+      "definition": "CHECK ((version > 0))",
+      "kind": "constraint",
+      "name": "tenant_notice_outbox_version_check",
+      "table": "tenant_notice_outbox",
+      "type": "c",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "deferred": false,
       "definition": "PRIMARY KEY (tenant_id)",
       "kind": "constraint",
       "name": "tenants_pkey",
@@ -9482,6 +9767,16 @@
       "ready": true,
       "replica_identity": false,
       "table": "plugin_entity_lifecycle_outbox",
+      "valid": true
+    },
+    {
+      "clustered": false,
+      "definition": "CREATE INDEX idx_tenant_notice_outbox_due ON public.tenant_notice_outbox USING btree (next_attempt_at)",
+      "kind": "index",
+      "name": "idx_tenant_notice_outbox_due",
+      "ready": true,
+      "replica_identity": false,
+      "table": "tenant_notice_outbox",
       "valid": true
     },
     {
@@ -10516,6 +10811,26 @@
     },
     {
       "clustered": false,
+      "definition": "CREATE UNIQUE INDEX tenant_client_policy_pkey ON public.tenant_client_policy USING btree (tenant_id)",
+      "kind": "index",
+      "name": "tenant_client_policy_pkey",
+      "ready": true,
+      "replica_identity": false,
+      "table": "tenant_client_policy",
+      "valid": true
+    },
+    {
+      "clustered": false,
+      "definition": "CREATE UNIQUE INDEX tenant_notice_outbox_pkey ON public.tenant_notice_outbox USING btree (tenant_id, topic)",
+      "kind": "index",
+      "name": "tenant_notice_outbox_pkey",
+      "ready": true,
+      "replica_identity": false,
+      "table": "tenant_notice_outbox",
+      "valid": true
+    },
+    {
+      "clustered": false,
       "definition": "CREATE UNIQUE INDEX tenants_pkey ON public.tenants USING btree (tenant_id)",
       "kind": "index",
       "name": "tenants_pkey",
@@ -11295,6 +11610,28 @@
       "force_row_security": false,
       "kind": "relation",
       "name": "plugin_entity_lifecycle_outbox",
+      "options": null,
+      "partition": null,
+      "persistence": "p",
+      "replica_identity": "d",
+      "row_security": false,
+      "type": "r"
+    },
+    {
+      "force_row_security": false,
+      "kind": "relation",
+      "name": "tenant_client_policy",
+      "options": null,
+      "partition": null,
+      "persistence": "p",
+      "replica_identity": "d",
+      "row_security": false,
+      "type": "r"
+    },
+    {
+      "force_row_security": false,
+      "kind": "relation",
+      "name": "tenant_notice_outbox",
       "options": null,
       "partition": null,
       "persistence": "p",

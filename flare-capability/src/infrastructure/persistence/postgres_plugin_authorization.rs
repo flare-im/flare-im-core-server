@@ -104,6 +104,7 @@ mod tests {
         let repo = PostgresPluginAuthorization { pool: pool.clone() };
         let now = chrono::Utc::now().timestamp_millis();
         let snapshot = PluginRuntimeSnapshot {
+            organization_id: Some("org-1".into()),
             tenant_id: "201".into(),
             version: 20,
             issued_at_ms: now,

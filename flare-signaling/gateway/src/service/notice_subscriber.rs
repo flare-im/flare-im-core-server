@@ -1,20 +1,24 @@
-//! Tenant notices: subscribe to Redis `{namespace}:notice` (next to the kick channel
+//! Tenant config notices: subscribe to Redis `{namespace}:notice` (next to the kick channel
 //! `{namespace}:kick`) and forward each notice to this node's authenticated connections of its
-//! tenant as `DataPacket.capability` (`flare_im_service_kit::tenant_notice`).
+//! tenant, or of every tenant for `*`, as `DataPacket.tenant_notice`
+//! (`flare_im_service_kit::tenant_notice`).
 //!
-//! Capability publishes a notice after it commits a newer plugin authorization projection.
-//! Forwarding is best effort with bounded concurrency: a client that misses one refreshes its
-//! catalog on reconnect and when it returns to the foreground. Scanning the node's connections is
-//! O(connections on this node), acceptable for an event that happens on plugin install, enable,
-//! disable or configuration change only.
+//! Capability publishes a notice once per version of a tenant's topic. Forwarding is best effort
+//! with bounded concurrency: a client that misses one re-reads on reconnect and when it returns to
+//! the foreground. The packet tells clients how long to spread their re-reads over, from the number
+//! of connections this node writes it to and the re-read rate one node may cause, so the read side
+//! sees about `nodes x rate` requests per second whatever the tenant's size. Scanning the node's
+//! connections is O(connections on this node), acceptable for configuration changes.
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
 
 use flare_core::server::connection::ConnectionManagerTrait;
 use flare_im_contracts::domain::tenant::is_valid_tenant_id;
-use flare_im_service_kit::tenant_notice::{MAX_TENANT_NOTICE_BYTES, TenantNotice, notice_channel};
-use flare_proto::common::{CapabilityPacket, DataPacket, data_packet};
+use flare_im_service_kit::tenant_notice::{
+    ALL_TENANTS, MAX_TENANT_NOTICE_BYTES, TenantNotice, notice_channel, spread_ms, valid_topic,
+};
 use futures::StreamExt;
 use prost::Message as _;
 use tokio::sync::Semaphore;
@@ -28,6 +32,17 @@ const MAX_CONCURRENT_NOTICES: usize = 8;
 const CONNECTION_CHUNK: usize = 500;
 /// Fan-out calls of one notice in flight.
 const CHUNK_CONCURRENCY: usize = 4;
+/// Re-reads per second one node may cause: `FLARE_NOTICE_REFRESH_RPS_PER_NODE`.
+pub const DEFAULT_REFRESH_RPS_PER_NODE: u32 = 500;
+
+/// The re-read rate of this node, from `FLARE_NOTICE_REFRESH_RPS_PER_NODE`.
+pub fn refresh_rps_per_node_from_env() -> u32 {
+    std::env::var("FLARE_NOTICE_REFRESH_RPS_PER_NODE")
+        .ok()
+        .and_then(|value| value.trim().parse::<u32>().ok())
+        .filter(|rate| *rate > 0)
+        .unwrap_or(DEFAULT_REFRESH_RPS_PER_NODE)
+}
 
 /// Start the background subscription (best effort, reconnects after a failure).
 pub fn spawn_notice_subscriber(
@@ -35,11 +50,13 @@ pub fn spawn_notice_subscriber(
     namespace: String,
     connection_manager: Arc<dyn ConnectionManagerTrait>,
     push_port: Arc<dyn IPushPort>,
+    refresh_rps_per_node: u32,
 ) {
     let channel = notice_channel(&namespace);
     let forwarder = Arc::new(NoticeForwarder {
         connection_manager,
         push_port,
+        refresh_rps_per_node,
     });
     let permits = Arc::new(Semaphore::new(MAX_CONCURRENT_NOTICES));
     tokio::spawn(async move {
@@ -69,8 +86,8 @@ async fn run_subscriber(
             warn!("bad tenant notice payload; ignoring");
             continue;
         };
-        let Some((tenant_id, packet)) = parse_notice(&payload) else {
-            warn!("malformed or unknown tenant notice ignored");
+        let Some(notice) = parse_notice(&payload) else {
+            warn!("malformed tenant notice ignored");
             continue;
         };
         let Ok(permit) = permits.clone().acquire_owned().await else {
@@ -79,74 +96,76 @@ async fn run_subscriber(
         let forwarder = forwarder.clone();
         tokio::spawn(async move {
             let _permit = permit;
-            forwarder.forward(&tenant_id, packet).await;
+            forwarder.forward(&notice).await;
         });
     }
     Ok(())
 }
 
-/// The tenant and downlink packet of a notice this gateway forwards; `None` for anything else.
-fn parse_notice(payload: &str) -> Option<(String, CapabilityPacket)> {
+/// A notice of a canonical tenant (or `*`), a valid topic and a version above zero.
+fn parse_notice(payload: &str) -> Option<TenantNotice> {
     if payload.len() > MAX_TENANT_NOTICE_BYTES {
         return None;
     }
     let notice: TenantNotice = serde_json::from_str(payload).ok()?;
-    if !is_valid_tenant_id(&notice.tenant_id)
-        || flare_im_contracts::utils::normalize_tenant_id(&notice.tenant_id) != notice.tenant_id
-        || notice.version.is_empty()
-        || !notice.version.bytes().all(|b| b.is_ascii_digit())
-    {
-        return None;
-    }
-    let packet = notice.catalog_packet()?;
-    Some((notice.tenant_id, packet))
+    let tenant_ok = notice.tenant_wide()
+        || (is_valid_tenant_id(&notice.tenant_id)
+            && flare_im_contracts::utils::normalize_tenant_id(&notice.tenant_id)
+                == notice.tenant_id);
+    (tenant_ok && valid_topic(&notice.topic) && notice.version().is_some()).then_some(notice)
 }
 
 struct NoticeForwarder {
     connection_manager: Arc<dyn ConnectionManagerTrait>,
     push_port: Arc<dyn IPushPort>,
+    refresh_rps_per_node: u32,
 }
 
 impl NoticeForwarder {
-    /// This node's authenticated connections of `tenant_id`.
-    async fn tenant_connections(&self, tenant_id: &str) -> Vec<String> {
-        let mut targets = Vec::new();
+    /// This node's authenticated connections of `tenant_id` (every tenant for `*`), by tenant.
+    async fn connections(&self, tenant_id: &str) -> BTreeMap<String, Vec<String>> {
+        let mut targets: BTreeMap<String, Vec<String>> = BTreeMap::new();
         for connection_id in self.connection_manager.list_connections().await {
             let Some((_, info)) = self.connection_manager.get_connection(&connection_id).await
             else {
                 continue;
             };
-            if info.authenticated
-                && info.metadata.get("tenant_id").map(String::as_str) == Some(tenant_id)
-            {
-                targets.push(connection_id);
+            let Some(tenant) = info.metadata.get("tenant_id") else {
+                continue;
+            };
+            if info.authenticated && (tenant_id == ALL_TENANTS || tenant == tenant_id) {
+                targets.entry(tenant.clone()).or_default().push(connection_id);
             }
         }
         targets
     }
 
-    /// Write `packet` to every connection of `tenant_id` on this node; returns how many took it.
-    async fn forward(&self, tenant_id: &str, packet: CapabilityPacket) -> usize {
-        let targets = self.tenant_connections(tenant_id).await;
-        if targets.is_empty() {
+    /// Write `notice` to its connections on this node; returns how many took it.
+    async fn forward(&self, notice: &TenantNotice) -> usize {
+        let targets = self.connections(&notice.tenant_id).await;
+        let connections: usize = targets.values().map(Vec::len).sum();
+        if connections == 0 {
             return 0;
         }
-        let payload = DataPacket {
-            payload: Some(data_packet::Payload::Capability(packet)),
-        }
-        .encode_to_vec();
-        let ctx: flare_im_contracts::Ctx =
-            Arc::new(flare_server_core::Context::root().with_tenant_id(tenant_id));
+        let spread = spread_ms(connections, self.refresh_rps_per_node);
+        let Some(packet) = notice.downlink(spread) else {
+            return 0;
+        };
+        let payload = packet.encode_to_vec();
         let payload_type = flare_core::common::protocol::payload_command::Type::Data as i32;
-        let chunks: Vec<Vec<String>> = targets
-            .chunks(CONNECTION_CHUNK)
-            .map(<[String]>::to_vec)
+        let chunks: Vec<(String, Vec<String>)> = targets
+            .iter()
+            .flat_map(|(tenant, ids)| {
+                ids.chunks(CONNECTION_CHUNK)
+                    .map(|chunk| (tenant.clone(), chunk.to_vec()))
+            })
             .collect();
         let delivered = futures::stream::iter(chunks)
-            .map(|chunk| {
-                let (ctx, payload, push_port) =
-                    (ctx.clone(), payload.clone(), self.push_port.clone());
+            .map(|(tenant, chunk)| {
+                let (payload, push_port) = (payload.clone(), self.push_port.clone());
                 async move {
+                    let ctx: flare_im_contracts::Ctx =
+                        Arc::new(flare_server_core::Context::root().with_tenant_id(&tenant));
                     match push_port
                         .push_payload_to_connections(&ctx, &chunk, payload_type, payload)
                         .await
@@ -163,9 +182,11 @@ impl NoticeForwarder {
             .fold(0usize, |sum, ok| async move { sum + ok })
             .await;
         info!(
-            %tenant_id,
-            connections = targets.len(),
+            tenant_id = %notice.tenant_id,
+            topic = %notice.topic,
+            connections,
             delivered,
+            spread_ms = spread,
             "tenant notice forwarded to local connections"
         );
         delivered
@@ -175,6 +196,7 @@ impl NoticeForwarder {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use flare_proto::common::{DataPacket, data_packet};
     use flare_core::transport::connection::Connection;
     use flare_im_contracts::Ctx;
     use std::collections::HashMap;
@@ -303,28 +325,52 @@ mod tests {
     }
 
     #[test]
-    fn only_well_formed_catalog_notices_of_a_canonical_tenant_are_forwarded() {
-        let (tenant, packet) =
-            parse_notice(r#"{"tenantId":"app-a","kind":"plugin.catalog.changed","version":"7"}"#)
+    fn only_well_formed_notices_of_a_canonical_tenant_or_every_tenant_are_forwarded() {
+        let notice =
+            parse_notice(r#"{"tenantId":"app-a","topic":"social.features","version":"7"}"#)
                 .unwrap();
-        assert_eq!(tenant, "app-a");
-        assert_eq!(packet.capability_id, "flare.plugin.catalog");
-        assert_eq!(packet.packet_type, "changed");
+        assert_eq!(notice.tenant_id, "app-a");
+        assert_eq!(notice.version(), Some(7));
+        assert!(
+            parse_notice(r#"{"tenantId":"*","topic":"flare.plugin.catalog","version":"1"}"#)
+                .unwrap()
+                .tenant_wide()
+        );
         for bad in [
-            r#"{"tenantId":"app-a","kind":"something.else","version":"7"}"#,
-            r#"{"tenantId":"","kind":"plugin.catalog.changed","version":"7"}"#,
-            r#"{"tenantId":" app-a","kind":"plugin.catalog.changed","version":"7"}"#,
-            r#"{"tenantId":"app-a","kind":"plugin.catalog.changed","version":"v7"}"#,
-            r#"{"tenantId":"app-a","kind":"plugin.catalog.changed"}"#,
+            r#"{"tenantId":"app-a","topic":"social","version":"7"}"#,
+            r#"{"tenantId":"","topic":"social.features","version":"7"}"#,
+            r#"{"tenantId":" app-a","topic":"social.features","version":"7"}"#,
+            r#"{"tenantId":"app-a","topic":"social.features","version":"v7"}"#,
+            r#"{"tenantId":"app-a","topic":"social.features","version":"0"}"#,
+            r#"{"tenantId":"app-a","topic":"social.features"}"#,
+            r#"{"tenantId":"app-a","kind":"plugin.catalog.changed","version":"7"}"#,
             "app-a",
         ] {
             assert!(parse_notice(bad).is_none(), "{bad}");
         }
         let oversized = format!(
-            r#"{{"tenantId":"app-a","kind":"plugin.catalog.changed","version":"7","x":"{}"}}"#,
+            r#"{{"tenantId":"app-a","topic":"social.features","version":"7","x":"{}"}}"#,
             "x".repeat(MAX_TENANT_NOTICE_BYTES)
         );
         assert!(parse_notice(&oversized).is_none());
+    }
+
+    fn forwarder(
+        manager: &Arc<flare_core::server::connection::ConnectionManager>,
+        recorder: &Arc<Recorder>,
+    ) -> NoticeForwarder {
+        NoticeForwarder {
+            connection_manager: manager.clone() as Arc<dyn ConnectionManagerTrait>,
+            push_port: recorder.clone(),
+            refresh_rps_per_node: DEFAULT_REFRESH_RPS_PER_NODE,
+        }
+    }
+
+    fn sent_notice(payload: &[u8]) -> flare_proto::common::TenantNotice {
+        match DataPacket::decode(payload).unwrap().payload {
+            Some(data_packet::Payload::TenantNotice(notice)) => notice,
+            other => panic!("expected a tenant notice, got {other:?}"),
+        }
     }
 
     /// The packet reaches the authenticated connections of the notice's tenant only.
@@ -336,14 +382,11 @@ mod tests {
         connect(&manager, "a-anonymous", "app-a", false).await;
         connect(&manager, "b-1", "app-b", true).await;
         let recorder = Arc::new(Recorder::default());
-        let forwarder = NoticeForwarder {
-            connection_manager: manager.clone() as Arc<dyn ConnectionManagerTrait>,
-            push_port: recorder.clone(),
-        };
-        let (tenant, packet) =
-            parse_notice(r#"{"tenantId":"app-a","kind":"plugin.catalog.changed","version":"7"}"#)
+        let forwarder = forwarder(&manager, &recorder);
+        let notice =
+            parse_notice(r#"{"tenantId":"app-a","topic":"social.features","version":"7"}"#)
                 .unwrap();
-        assert_eq!(forwarder.forward(&tenant, packet.clone()).await, 2);
+        assert_eq!(forwarder.forward(&notice).await, 2);
 
         let calls = recorder.0.lock().unwrap().clone();
         assert_eq!(calls.len(), 1);
@@ -354,16 +397,70 @@ mod tests {
             *payload_type,
             flare_core::common::protocol::payload_command::Type::Data as i32
         );
+        let sent = sent_notice(payload);
         assert_eq!(
-            DataPacket::decode(payload.as_slice()).unwrap().payload,
-            Some(data_packet::Payload::Capability(packet))
+            (sent.topic.as_str(), sent.version, sent.spread_ms, sent.tenant_wide),
+            ("social.features", 7, 3_000, false)
         );
 
         // A tenant with no connection here: nothing is sent.
-        let (tenant, packet) =
-            parse_notice(r#"{"tenantId":"app-c","kind":"plugin.catalog.changed","version":"1"}"#)
+        let notice =
+            parse_notice(r#"{"tenantId":"app-c","topic":"social.features","version":"1"}"#)
                 .unwrap();
-        assert_eq!(forwarder.forward(&tenant, packet).await, 0);
+        assert_eq!(forwarder.forward(&notice).await, 0);
         assert_eq!(recorder.0.lock().unwrap().len(), 1);
+    }
+
+    /// The access and release topics are Core's own and travel like any other notice: the serial
+    /// or generation as the version, with the spread the gateway computes for this node.
+    #[tokio::test]
+    async fn access_and_release_notices_carry_their_watermark_and_spread() {
+        let manager = Arc::new(flare_core::server::connection::ConnectionManager::new());
+        connect(&manager, "a-1", "app-a", true).await;
+        let recorder = Arc::new(Recorder::default());
+        let forwarder = forwarder(&manager, &recorder);
+        for (topic, version) in [
+            (flare_im_service_kit::tenant_notice::ACCESS_TOPIC, 42),
+            (flare_im_service_kit::tenant_notice::RELEASE_TOPIC, 3),
+        ] {
+            let payload =
+                serde_json::to_string(&TenantNotice::new("app-a", topic, version)).unwrap();
+            let notice = parse_notice(&payload).unwrap();
+            assert_eq!(forwarder.forward(&notice).await, 1);
+            let calls = recorder.0.lock().unwrap().clone();
+            let sent = sent_notice(&calls.last().unwrap().3);
+            assert_eq!(
+                (sent.topic.as_str(), sent.version, sent.spread_ms),
+                (topic, version, 3_000)
+            );
+        }
+    }
+
+    /// `*` reaches every tenant's authenticated connections, each chunk under its own tenant.
+    #[tokio::test]
+    async fn a_tenant_wide_notice_reaches_every_tenant() {
+        let manager = Arc::new(flare_core::server::connection::ConnectionManager::new());
+        connect(&manager, "a-1", "app-a", true).await;
+        connect(&manager, "b-1", "app-b", true).await;
+        connect(&manager, "b-anonymous", "app-b", false).await;
+        let recorder = Arc::new(Recorder::default());
+        let forwarder = forwarder(&manager, &recorder);
+        let notice = parse_notice(r#"{"tenantId":"*","topic":"social.features","version":"3"}"#)
+            .unwrap();
+        assert_eq!(forwarder.forward(&notice).await, 2);
+        let mut calls = recorder.0.lock().unwrap().clone();
+        calls.sort();
+        let tenants: Vec<(Option<String>, Vec<String>)> = calls
+            .iter()
+            .map(|(tenant, ids, _, _)| (tenant.clone(), ids.clone()))
+            .collect();
+        assert_eq!(
+            tenants,
+            vec![
+                (Some("app-a".into()), vec!["a-1".into()]),
+                (Some("app-b".into()), vec!["b-1".into()]),
+            ]
+        );
+        assert!(sent_notice(&calls[0].3).tenant_wide);
     }
 }

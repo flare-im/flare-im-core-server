@@ -201,8 +201,10 @@ pub async fn initialize(
             None
         }
     };
+    let roster_policy_endpoint = flare_im_service_kit::roster_policy::endpoint_from_env();
     let grpc_handler = ConversationGrpcHandler::new(command_handler, query_handler)
-        .with_purge_verifier(purge_verifier);
+        .with_purge_verifier(purge_verifier)
+        .with_roster_policy_endpoint(roster_policy_endpoint);
     // 管理员只读只认网关 admin 分区签的 Staff `x-flare-ctx`（Cell 公钥集，Staff 钉死
     // kid=gateway）；没配公钥时 fail closed（UNAUTHENTICATED）。
     let staff_verifier = match SignedContextVerifier::from_env_optional() {

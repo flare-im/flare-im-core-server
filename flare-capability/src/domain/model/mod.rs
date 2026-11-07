@@ -18,11 +18,16 @@ use tokio::time::timeout;
 
 use crate::domain::service::hook_execution::{HookCall, HookExecutionGuard, HookIdentity};
 
+pub mod client_policy;
 pub mod hook_execution;
 pub mod hook_name;
 pub mod plugin_endpoint;
+pub mod tenant_notice;
 pub mod tenant_projection;
 pub mod tenant_runtime;
+pub use client_policy::{
+    ClientPolicyNotice, ClientPolicyRecord, ClientPolicyValidationError, ClientPolicyWatermarks,
+};
 pub use hook_execution::{
     HOOK_CALL_FAILED_CODE, HOOK_CIRCUIT_OPEN_CODE, HOOK_REJECTED_CODE, HOOK_TIMEOUT_CODE,
     HookExecutionClass, HookExecutionFilter, HookExecutionOutcome, HookExecutionRecord,
@@ -31,6 +36,7 @@ pub use hook_execution::{
 };
 pub use hook_name::{LoggableName, MAX_HOOK_NAME_CHARS, validate_hook_name};
 pub use plugin_endpoint::{PluginEndpoint, PluginEndpointKey, validate_plugin_endpoint};
+pub use tenant_notice::{NoticeDenied, NoticeOutcome, NoticePublishers};
 pub use tenant_projection::{
     TenantProjectionOutcome, TenantProjectionRecord, TenantProjectionValidationError,
 };

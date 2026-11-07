@@ -210,7 +210,7 @@ pub async fn initialize(
     let push_port: Arc<dyn crate::domain::ports::IPushPort> =
         Arc::new(PushRepository::new(push_handle_slot.clone()));
 
-    // 7b. 租户通知：与 kick 同一个 token_store Redis，`{namespace}:notice` 上的插件目录变更转给本节点该租户的连接。
+    // 7b. 租户配置通知：与 kick 同一个 token_store Redis，`{namespace}:notice` 上的通知转给本节点该租户（`*` 为全部租户）的连接。
     if let Some(redis_url) = access_config.token_store_redis_url.clone() {
         crate::service::notice_subscriber::spawn_notice_subscriber(
             redis_url,
@@ -220,6 +220,7 @@ pub async fn initialize(
                 .unwrap_or_else(|| "flare".to_string()),
             connection_manager.clone() as Arc<dyn ConnectionManagerTrait>,
             push_port.clone(),
+            crate::service::notice_subscriber::refresh_rps_per_node_from_env(),
         );
     }
 
@@ -304,7 +305,8 @@ pub async fn initialize(
     ));
 
     // 12. 认证器
-    let authenticator = build_authenticator(&access_config, tenant_runtime).await?;
+    let authenticator =
+        build_authenticator(&access_config, tenant_runtime, metrics.clone()).await?;
 
     // 13. 长连接服务器
     debug!(ws_port = %port_config.ws_port, quic_port = %port_config.quic_port, "Building long connection server");

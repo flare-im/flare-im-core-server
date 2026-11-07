@@ -1,7 +1,10 @@
 //! Durable provenance, not an authorization token. Minted only after verified machine
 //! admission and bound to the finalized queue message. No expiry: delayed queue delivery
 //! must remain auditable. The message ledger is the replay/idempotency boundary.
-use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD as B64};
+use base64::{
+    Engine,
+    engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD as B64},
+};
 use ed25519_dalek::{
     Signature, Signer, SigningKey, Verifier, VerifyingKey,
     pkcs8::{DecodePrivateKey, DecodePublicKey},
@@ -81,6 +84,19 @@ fn env_value(name: &str) -> Result<Option<String>> {
     }
 }
 impl ProofSigner {
+    /// Canonical single-line Base64 PKCS8 DER, matching initial purpose inputs.
+    /// PEM is only an explicit in-memory constructor, not an env fallback.
+    pub fn from_base64_der(value: &str) -> Result<Self> {
+        let bytes = STANDARD
+            .decode(value)
+            .map_err(|_| "invalid write proof private key")?;
+        if STANDARD.encode(&bytes) != value {
+            return Err("invalid write proof private key");
+        }
+        SigningKey::from_pkcs8_der(&bytes)
+            .map(Self)
+            .map_err(|_| "invalid write proof private key")
+    }
     pub fn from_pem(pem: &str) -> Result<Self> {
         SigningKey::from_pkcs8_pem(pem)
             .map(Self)
@@ -88,7 +104,7 @@ impl ProofSigner {
     }
     pub fn from_env() -> Result<Option<Self>> {
         env_value(PRIVATE_ENV)?
-            .map(|p| Self::from_pem(&p))
+            .map(|p| Self::from_base64_der(&p))
             .transpose()
     }
     pub fn stamp(&self, ctx: &Ctx, message: &Message) -> Result<String> {
@@ -125,7 +141,55 @@ impl ProofSigner {
 pub fn requires_proof(message: &Message) -> bool {
     matches!(message.content.as_ref().and_then(|c|c.content.as_ref()),Some(Content::System(s)) if s.event_kind.starts_with("platform."))
 }
+
+#[cfg(test)]
+mod initial_key_encoding_tests {
+    use super::*;
+    use ed25519_dalek::pkcs8::{EncodePrivateKey, EncodePublicKey};
+
+    #[test]
+    fn purpose_inputs_load_canonical_der_pair_and_sign() {
+        let key = SigningKey::from_bytes(&[47; 32]);
+        let private = STANDARD.encode(key.to_pkcs8_der().unwrap().as_bytes());
+        let public = STANDARD.encode(key.verifying_key().to_public_key_der().unwrap().as_bytes());
+        let signer = ProofSigner::from_base64_der(&private).unwrap();
+        let verifier = ProofVerifier::from_base64_der(&public).unwrap();
+        let message = b"generic durable write provenance";
+        verifier.0.verify(message, &signer.0.sign(message)).unwrap();
+    }
+
+    #[test]
+    fn purpose_inputs_reject_swapped_keys_raw_bytes_and_pem() {
+        let key = SigningKey::from_bytes(&[48; 32]);
+        let private = STANDARD.encode(key.to_pkcs8_der().unwrap().as_bytes());
+        let public = STANDARD.encode(key.verifying_key().to_public_key_der().unwrap().as_bytes());
+        assert!(ProofSigner::from_base64_der(&public).is_err());
+        assert!(ProofVerifier::from_base64_der(&private).is_err());
+        for invalid in [
+            "",
+            "not a key",
+            "-----BEGIN PRIVATE KEY-----",
+            &STANDARD.encode([0; 32]),
+            &(private.clone() + "\n"),
+        ] {
+            assert!(ProofSigner::from_base64_der(invalid).is_err());
+            assert!(ProofVerifier::from_base64_der(invalid).is_err());
+        }
+    }
+}
 impl ProofVerifier {
+    /// Canonical Base64 SPKI DER, never a private key or token encoding.
+    pub fn from_base64_der(value: &str) -> Result<Self> {
+        let bytes = STANDARD
+            .decode(value)
+            .map_err(|_| "invalid write proof public key")?;
+        if STANDARD.encode(&bytes) != value {
+            return Err("invalid write proof public key");
+        }
+        VerifyingKey::from_public_key_der(&bytes)
+            .map(Self)
+            .map_err(|_| "invalid write proof public key")
+    }
     pub fn recover(&self, token: &str, app: &str, message: &Message) -> Result<RecoveredWrite> {
         Ok(RecoveredWrite {
             verified: self.verify(token, app, message)?,
@@ -139,7 +203,7 @@ impl ProofVerifier {
     }
     pub fn from_env() -> Result<Option<Self>> {
         env_value(PUBLIC_ENV)?
-            .map(|p| Self::from_pem(&p))
+            .map(|p| Self::from_base64_der(&p))
             .transpose()
     }
     pub fn verify(&self, token: &str, app: &str, message: &Message) -> Result<VerifiedWrite> {

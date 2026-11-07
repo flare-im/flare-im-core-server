@@ -83,6 +83,7 @@ pub struct VerifiedStaff {
     pub tenant_id: String,
     /// `None` for platform staff.
     pub org_id: Option<String>,
+    pub organization_scope: Option<String>,
     /// The route code the admin partition matched; equal to the code the operation required.
     pub permission: Option<String>,
     pub request_id: String,
@@ -148,6 +149,7 @@ impl VerifiedStaff {
             actor_id: claims.actor_id.clone(),
             tenant_id: claims.tenant_id.clone(),
             org_id: claims.org_id.clone(),
+            organization_scope: claims.organization_scope.clone(),
             permission: claims.permission.clone(),
             request_id: claims.request_id.clone(),
             trace_id: claims.trace_id.clone(),

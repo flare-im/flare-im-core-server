@@ -1,5 +1,8 @@
 use std::collections::HashMap;
 
+use super::message_body::{
+    AdminMessageAttachmentAccessHttp, AdminMessageBodyHttp, body, content_state,
+};
 use flare_grpc_proto::storage::{
     ExportMessagesRequest, ExportMessagesResponse, GetMessageRequest, GetMessageResponse,
     MessageWriteLedgerEntry as ProtoMessageWriteLedgerEntry, QueryMessageEventsRequest,
@@ -103,6 +106,14 @@ pub struct AdminMessageExportHttpRequest {
 #[derive(Debug, Clone, Serialize, ToSchema)]
 pub struct AdminMessageDetailHttpResponse {
     pub message: AdminMessageHttp,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub attachment: Option<AdminMessageAttachmentAccessHttp>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AdminMessageDetailQuery {
+    pub attachment_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, ToSchema)]
@@ -205,6 +216,8 @@ pub struct AdminMessageHttp {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sender_avatar: Option<String>,
     pub content_kind: String,
+    pub content_state: String,
+    pub content: Option<AdminMessageBodyHttp>,
     pub attributes: HashMap<String, String>,
     pub extension_keys: Vec<String>,
 }
@@ -276,7 +289,12 @@ pub fn admin_message_query_response(
         messages: response
             .messages
             .into_iter()
-            .map(AdminMessageHttp::from)
+            .map(|message| {
+                let content = body(&message, true);
+                let mut row = AdminMessageHttp::from(message);
+                row.content = content;
+                row
+            })
             .collect(),
         has_more,
         next_cursor,
@@ -292,6 +310,7 @@ pub fn admin_message_detail_response(
         .message
         .map(|message| AdminMessageDetailHttpResponse {
             message: AdminMessageHttp::from(message),
+            attachment: None,
         })
 }
 
@@ -593,6 +612,8 @@ fn parse_event_types(value: Option<&str>) -> Result<Vec<i32>, AdminMessageQueryE
 impl From<Message> for AdminMessageHttp {
     fn from(message: Message) -> Self {
         let extension_keys = message.extensions.keys().cloned().collect();
+        let state = content_state(&message).to_owned();
+        let content = body(&message, false);
         Self {
             server_id: message.server_id,
             conversation_id: message.conversation_id,
@@ -609,6 +630,8 @@ impl From<Message> for AdminMessageHttp {
             sender_name: optional_string(message.sender_name),
             sender_avatar: optional_string(message.sender_avatar),
             content_kind: content_kind(message.content.as_ref()),
+            content_state: state,
+            content,
             attributes: message.attributes,
             extension_keys,
         }
@@ -763,7 +786,7 @@ mod tests {
     }
 
     #[test]
-    fn admin_message_detail_response_summarizes_message_without_payload() {
+    fn admin_message_detail_response_omits_opaque_payload() {
         let response = admin_message_detail_response(GetMessageResponse {
             message: Some(test_message()),
         })

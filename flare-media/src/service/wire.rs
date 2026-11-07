@@ -54,7 +54,9 @@ pub async fn initialize(
 
     // 2. 构建媒体服务
     let usage = flare_im_usage::UsageReporter::from_env("flare-media").await?;
-    let (media_service, audit_pool) = build_media_service(&media_config, usage.recorder())
+    let reader =
+        crate::infrastructure::message_attachment_reader::Reader::from_environment().await?;
+    let (media_service, audit_pool) = build_media_service(&media_config, usage.recorder(), reader)
         .await
         .context("Failed to build media service")?;
 
@@ -93,6 +95,7 @@ pub async fn initialize(
 async fn build_media_service(
     config: &MediaConfig,
     usage: flare_im_usage::UsageRecorder,
+    reader: Arc<dyn crate::domain::repository::MessageAttachmentReader>,
 ) -> Result<(Arc<MediaService>, Option<Arc<sqlx::PgPool>>)> {
     let object_repo: Option<ObjectRepositoryRef> =
         build_object_store(config.object_store.as_ref()).await?;
@@ -190,7 +193,8 @@ async fn build_media_service(
                 local_store,
                 domain_config,
             )
-            .with_usage(usage),
+            .with_usage(usage)
+            .with_message_reader(reader),
         ),
         audit_pool,
     ))

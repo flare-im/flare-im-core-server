@@ -611,6 +611,7 @@ pub(crate) fn poll_snapshot(
     let digest = digest_bytes(raw.as_bytes());
     let now = chrono::Utc::now().timestamp_millis();
     PluginRuntimeSnapshot {
+        organization_id: Some("org-1".into()),
         tenant_id: "app-a".into(),
         version: 3,
         issued_at_ms: now,

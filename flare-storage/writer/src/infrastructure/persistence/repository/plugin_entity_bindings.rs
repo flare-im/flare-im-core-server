@@ -278,6 +278,7 @@ mod tests {
         let raw = serde_json::to_string(&manifest).unwrap();
         let digest = digest_bytes(raw.as_bytes());
         PluginRuntimeSnapshot {
+            organization_id: Some("org-1".into()),
             tenant_id: tenant.into(),
             version: 7,
             issued_at_ms: now,

@@ -34,6 +34,9 @@ pub struct CapabilityServiceConfig {
     pub notice_redis_url: Option<String>,
     /// `{token_store namespace}:notice`.
     pub notice_channel: String,
+    /// Services that publish tenant config notices and their topic namespaces:
+    /// `FLARE_TENANT_NOTICE_PUBLISHERS` (see [`crate::domain::model::NoticePublishers`]).
+    pub notice_publishers: crate::domain::model::NoticePublishers,
 }
 
 impl Default for CapabilityServiceConfig {
@@ -53,6 +56,7 @@ impl Default for CapabilityServiceConfig {
             refresh_interval_secs: 60,
             notice_redis_url: None,
             notice_channel: flare_im_service_kit::tenant_notice::notice_channel("flare"),
+            notice_publishers: crate::domain::model::NoticePublishers::default(),
         }
     }
 }

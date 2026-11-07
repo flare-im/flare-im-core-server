@@ -87,10 +87,12 @@ impl ApplicationBootstrap {
         let extension_verifier = context.extension_verifier;
         let plugin_resource_bridge = context.plugin_resource_bridge;
         let tenant_projection = context.tenant_projection;
+        let tenant_notice = context.tenant_notice;
         let capability_admin = context.capability_admin;
         let hook_config_listener = context.hook_config_listener;
         let hook_execution_background = context.hook_execution_background;
         let entity_lifecycle_worker = context.entity_lifecycle_worker;
+        let tenant_notice_relay = context.tenant_notice_relay;
 
         let mut runtime = runtime_plan.service_runtime();
         if let Some((pool, publisher)) = context.audit_delivery {
@@ -112,6 +114,20 @@ impl ApplicationBootstrap {
                 "flare-capability-entity-lifecycle",
                 move |shutdown| async move {
                     worker
+                        .run(async {
+                            let _ = shutdown.await;
+                        })
+                        .await;
+                    Ok(())
+                },
+            );
+        }
+        // 租户通知 outbox：至少一次发到通知通道，多副本并发时通道按版本去重。
+        if let Some(relay) = tenant_notice_relay {
+            runtime = runtime.add_spawn_with_shutdown(
+                "flare-capability-tenant-notice-relay",
+                move |shutdown| async move {
+                    relay
                         .run(async {
                             let _ = shutdown.await;
                         })
@@ -219,7 +235,12 @@ impl ApplicationBootstrap {
                     .add_service(capability_admin_service)
                     .add_optional_service(plugin_resource_bridge.map(|bridge| flare_grpc_proto::capability::plugin_host_bridge_server::PluginHostBridgeServer::new(bridge)
                         .max_decoding_message_size(16384).max_encoding_message_size(66560)))
-                    .add_optional_service(tenant_projection_service);
+                    .add_optional_service(tenant_projection_service)
+                    .add_service(
+                        flare_grpc_proto::capability::tenant_notice_service_server::TenantNoticeServiceServer::new(
+                            tenant_notice,
+                        ),
+                    );
 
                 server
                     .serve_with_shutdown(address_clone, async {
@@ -357,6 +378,14 @@ fn capability_config_from_env(
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
         .or_else(|| token_store.map(|profile| profile.url.clone()));
+    let notice_publishers = crate::domain::model::NoticePublishers::parse(
+        &std::env::var("FLARE_TENANT_NOTICE_PUBLISHERS").unwrap_or_default(),
+    )
+    .map_err(|detail| {
+        flare_server_core::error::FlareError::system(format!(
+            "invalid FLARE_TENANT_NOTICE_PUBLISHERS: {detail}"
+        ))
+    })?;
     let notice_channel = flare_im_service_kit::tenant_notice::notice_channel(
         token_store
             .and_then(|profile| profile.namespace.as_deref())
@@ -378,6 +407,7 @@ fn capability_config_from_env(
         refresh_interval_secs: 60,
         notice_redis_url,
         notice_channel,
+        notice_publishers,
     })
 }
 

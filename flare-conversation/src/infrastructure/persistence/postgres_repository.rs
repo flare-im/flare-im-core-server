@@ -14,7 +14,7 @@ use crate::config::ConversationConfig;
 use crate::domain::model::{
     Conversation, ConversationBootstrapResult, ConversationFilter, ConversationHistoryPurge,
     ConversationParticipant, ConversationParticipantsPage, ConversationSort, ConversationSummary,
-    ConversationType, HistoryPurgeBoundary,
+    ConversationType, ConversationUpdate, HistoryPurgeBoundary,
 };
 use crate::domain::repository::ConversationRepository;
 use crate::infrastructure::persistence::message_cache::MessageCacheInvalidator;
@@ -106,6 +106,24 @@ pub struct PostgresConversationRepository {
 }
 
 impl PostgresConversationRepository {
+    pub(crate) async fn external_roster_channel(
+        &self,
+        ctx: &flare_server_core::context::Context,
+        conversation_id: &str,
+        provider_configured: bool,
+    ) -> Result<Option<(String, bool)>> {
+        sqlx::query_as(
+            "SELECT channel_id, business_type = $3 FROM conversations WHERE tenant_id = $1 AND conversation_id = $2 AND (business_type = $3 OR $4)",
+        )
+        .bind(required_tenant(ctx)?)
+        .bind(conversation_id)
+        .bind(crate::domain::model::EXTERNAL_GROUP_ROSTER_BUSINESS_TYPE)
+        .bind(provider_configured)
+        .fetch_optional(&*self.pool)
+        .await
+        .map_err(|error| map_infra_error(error, ErrorCode::DatabaseError, "read conversation roster owner"))
+    }
+
     /// 创建PostgreSQL Conversation Repository
     pub fn new(pool: Arc<PgPool>, config: Arc<ConversationConfig>) -> Self {
         Self {
@@ -592,23 +610,20 @@ impl ConversationRepository for PostgresConversationRepository {
                 -- 本人列表的已读位置：真实已读与隐藏会话时清到的位置（last_sync_seq）取大者。
                 -- 只给本人看；别人看到的已读（peer_read_seq、群已读）只取 last_read_seq。
                 GREATEST(COALESCE(sp.last_read_seq, 0), COALESCE(sp.last_sync_seq, 0)) as last_read_seq,
-                GREATEST(
-                    COALESCE(sp.unread_count, 0),
-                    COALESCE(unread_tail.unread_count, 0)
-                ) as unread_count,
+                CASE WHEN GREATEST(sp.history_cleared_through_seq, s.history_cleared_through_seq) > 0
+                     THEN COALESCE(unread_tail.unread_count, 0)
+                     ELSE GREATEST(COALESCE(sp.unread_count, 0), COALESCE(unread_tail.unread_count, 0))
+                END AS unread_count,
                 COALESCE(sp.muted, false) as muted,
+                COALESCE(sp.mention_only, false) AS mention_only,
                 COALESCE(sp.pinned, false) as pinned,
-                COALESCE(sp.is_archived, false) as is_archived,
+                (s.lifecycle_state = 'archived' OR COALESCE(sp.is_archived, false)) as is_archived,
                 COALESCE(sp.settings_version, 0) as settings_version,
                 sp.draft as draft,
-                -- visible_after_seq 是历史可见边界，不是同步游标：
-                -- 不能用 last_sync_seq / user_sync_cursor 代替，那是「同步到哪了」不是「能看到哪」。
-                --
-                -- 数据源本应是成员的 visible_from_seq，但**暂不喂真值**：实测发出去之后，
-                -- 新成员反而把入群前的消息拉进了时间线——客户端把它当同步锚点用，
-                -- 且 shared.rs 还会拿它抬高 last_read_seq。在客户端语义厘清前保持 0；
-                -- 服务端该挡的已在存储读取侧按 visible_from_seq 挡住，不依赖这个字段。
-                0::BIGINT AS visible_after_seq,
+                -- Broadcast only the persisted clear boundary. Membership visibility is also
+                -- enforced by the read-side floor, independently of the client cursor.
+                GREATEST(sp.history_cleared_through_seq, s.history_cleared_through_seq)
+                    AS visible_after_seq,
                 CASE
                     WHEN COALESCE(peer.max_peer_read_seq, 0) <= GREATEST(
                         COALESCE(s.last_message_seq, 0),
@@ -646,7 +661,12 @@ impl ConversationRepository for PostgresConversationRepository {
                   AND m.conversation_id = s.conversation_id
                   -- 预览也要守住历史下限：否则会话列表里照样显示一条入群前消息的内容，
                   -- 时间线挡住了、摘要却漏出去，等于没挡。
-                  AND m.seq > COALESCE(sp.visible_from_seq, 0)
+                  AND m.seq > GREATEST(sp.visible_from_seq, sp.history_cleared_through_seq, s.history_cleared_through_seq)
+                  AND NOT EXISTS (
+                      SELECT 1 FROM message_visibility mv
+                      WHERE mv.tenant_id = m.tenant_id AND mv.message_id = m.server_id
+                        AND mv.scope = 2 AND mv.visibility_status IN (1, 2)
+                  )
                 ORDER BY m.seq DESC
                 LIMIT 1
             ) message_tail ON TRUE
@@ -670,10 +690,17 @@ impl ConversationRepository for PostgresConversationRepository {
                       AND m.seq > GREATEST(
                           COALESCE(sp.last_read_seq, 0),
                           COALESCE(sp.visible_from_seq, 0),
+                          sp.history_cleared_through_seq,
+                          s.history_cleared_through_seq,
                           COALESCE(sp.last_sync_seq, 0)
                       )
                       AND m.sender_id <> $2
                       AND NOT (COALESCE(m.status, 1) = ANY($5))
+                      AND NOT EXISTS (
+                          SELECT 1 FROM message_visibility mv
+                          WHERE mv.tenant_id = m.tenant_id AND mv.message_id = m.server_id
+                            AND mv.scope = 2 AND mv.visibility_status IN (1, 2)
+                      )
                     LIMIT $4
                 ) capped
             ) unread_tail ON TRUE
@@ -726,6 +753,7 @@ impl ConversationRepository for PostgresConversationRepository {
             let last_read_seq: i64 = row.get("last_read_seq");
             let unread_count: i32 = row.get("unread_count");
             let is_muted: bool = row.get("muted");
+            let is_mention_only: bool = row.get("mention_only");
             let is_pinned: bool = row.get("pinned");
             let is_archived: bool = row.get("is_archived");
             let settings_version: i64 = row.get("settings_version");
@@ -789,6 +817,7 @@ impl ConversationRepository for PostgresConversationRepository {
                 participant_version: 0,
                 member_preview: Vec::new(),
                 is_muted,
+                is_mention_only,
                 is_pinned,
                 is_archived,
                 settings_version: settings_version.max(0) as u64,
@@ -1087,41 +1116,66 @@ impl ConversationRepository for PostgresConversationRepository {
     async fn update_conversation(
         &self,
         ctx: &flare_server_core::context::Context,
-        session: &Conversation,
+        conversation_id: &str,
+        update: &ConversationUpdate,
     ) -> Result<()> {
         let tenant_id = required_tenant(ctx)?;
+        let attributes = update
+            .attributes
+            .as_ref()
+            .map(serde_json::to_value)
+            .transpose()
+            .map_err(|e| {
+                map_infra_error(
+                    e,
+                    ErrorCode::SerializationError,
+                    "serialize session attributes",
+                )
+            })?;
         sqlx::query(
             r#"
-            UPDATE conversations
-            SET display_name = $1,
-                attributes = $2,
-                visibility = $3,
-                lifecycle_state = $4,
-                channel_id = $5,
-                updated_at = CURRENT_TIMESTAMP
-            WHERE tenant_id = $6 AND conversation_id = $7
+            WITH previous AS (
+                SELECT lifecycle_state
+                FROM conversations
+                WHERE tenant_id = $1 AND conversation_id = $2
+                FOR NO KEY UPDATE
+            ), updated AS (
+                UPDATE conversations c
+                SET display_name = COALESCE($3, c.display_name),
+                    attributes = COALESCE($4, c.attributes),
+                    visibility = COALESCE($5, c.visibility),
+                    lifecycle_state = COALESCE($6, c.lifecycle_state),
+                    updated_at = GREATEST(clock_timestamp(), c.updated_at + INTERVAL '1 millisecond')
+                FROM previous
+                WHERE c.tenant_id = $1 AND c.conversation_id = $2
+                RETURNING (previous.lifecycle_state = 'archived') <> (c.lifecycle_state = 'archived')
+                    AS archive_changed
+            )
+            -- A lifecycle change updates the effective archive flag even when a client's
+            -- local settings are dirty. Keep the member's personal archive preference.
+            UPDATE conversation_participants sp
+            SET settings_version = sp.settings_version + 1,
+                updated_at = GREATEST(clock_timestamp(), sp.updated_at + INTERVAL '1 millisecond',
+                                      sp.joined_at + INTERVAL '1 millisecond')
+            FROM updated
+            WHERE updated.archive_changed
+              AND sp.tenant_id = $1 AND sp.conversation_id = $2
+              AND NOT COALESCE(sp.is_deleted, false)
             "#,
         )
-        .bind(&session.display_name)
-        .bind(serde_json::to_value(&session.attributes).map_err(|e| {
-            map_infra_error(
-                e,
-                ErrorCode::SerializationError,
-                "serialize session attributes",
-            )
-        })?)
-        .bind(session.visibility.as_proto())
-        .bind(session.lifecycle_state.as_str())
-        .bind(&session.channel_id)
         .bind(tenant_id)
-        .bind(&session.conversation_id)
+        .bind(conversation_id)
+        .bind(update.display_name.as_deref())
+        .bind(attributes)
+        .bind(update.visibility.map(|value| value.as_proto()))
+        .bind(update.lifecycle_state.map(|value| value.as_str()))
         .execute(&*self.pool)
         .await
         .map_err(|e| {
             map_infra_error(e, ErrorCode::DatabaseError, "Failed to update conversation")
         })?;
 
-        debug!(conversation_id = %session.conversation_id, "Conversation updated");
+        debug!(%conversation_id, "Conversation updated");
         Ok(())
     }
 
@@ -1253,6 +1307,79 @@ impl ConversationRepository for PostgresConversationRepository {
 
         debug!(conversation_id = %conversation_id, hard_delete = hard_delete, "Conversation deleted");
         Ok(())
+    }
+
+    async fn clear_history_for_everyone(
+        &self,
+        ctx: &flare_server_core::context::Context,
+        conversation_id: &str,
+    ) -> Result<u64> {
+        let tenant_id = required_tenant(ctx)?;
+        let mut tx = self.pool.begin().await.map_err(|e| {
+            map_infra_error(e, ErrorCode::DatabaseError, "begin conversation history clear")
+        })?;
+        let cutoff: Option<i64> = sqlx::query_scalar(
+            r#"
+            UPDATE conversations c
+            SET history_cleared_through_seq = GREATEST(
+                    c.history_cleared_through_seq,
+                    COALESCE(c.last_message_seq, 0),
+                    COALESCE((SELECT MAX(m.seq) FROM messages m
+                        WHERE m.tenant_id = c.tenant_id AND m.conversation_id = c.conversation_id), 0)
+                ),
+                updated_at = clock_timestamp()
+            WHERE c.tenant_id = $1 AND c.conversation_id = $2
+              AND c.lifecycle_state <> 'deleted'
+            RETURNING c.history_cleared_through_seq
+            "#,
+        )
+        .bind(tenant_id)
+        .bind(conversation_id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|e| map_infra_error(e, ErrorCode::DatabaseError, "advance conversation history cutoff"))?;
+        let cutoff = cutoff.ok_or_else(|| {
+            ErrorBuilder::new(
+                ErrorCode::ServiceUnavailable,
+                "conversation is not available",
+            )
+            .build_error()
+        })?;
+        sqlx::query(
+            r#"
+            UPDATE conversation_participants p
+            SET unread_count = LEAST(
+                GREATEST(COALESCE(p.unread_count, 0), 0),
+                (
+                    SELECT COUNT(*)::INT FROM (
+                        SELECT 1 FROM messages m
+                        WHERE m.tenant_id = p.tenant_id AND m.conversation_id = p.conversation_id
+                          AND m.seq > GREATEST(
+                              $3, p.history_cleared_through_seq, COALESCE(p.visible_from_seq, 0),
+                              COALESCE(p.last_read_seq, 0), COALESCE(p.last_sync_seq, 0)
+                          )
+                          AND m.sender_id <> p.user_id
+                          AND NOT (COALESCE(m.status, 1) = ANY($4))
+                        LIMIT GREATEST(COALESCE(p.unread_count, 0), 0)
+                    ) remaining
+                )
+            )
+            WHERE p.tenant_id = $1 AND p.conversation_id = $2 AND p.unread_count > 0
+            "#,
+        )
+        .bind(tenant_id)
+        .bind(conversation_id)
+        .bind(cutoff)
+        .bind(UNREAD_EXCLUDED_STATUSES.as_slice())
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| {
+            map_infra_error(e, ErrorCode::DatabaseError, "recompute unread after history clear")
+        })?;
+        tx.commit().await.map_err(|e| {
+            map_infra_error(e, ErrorCode::DatabaseError, "commit conversation history clear")
+        })?;
+        Ok(cutoff.max(0) as u64)
     }
 
     async fn purge_history(
@@ -1887,7 +2014,9 @@ impl ConversationRepository for PostgresConversationRepository {
                                      AND m.seq > GREATEST(
                                          COALESCE(sp.last_read_seq, 0),
                                          COALESCE(sp.visible_from_seq, 0),
-                                         COALESCE(sp.last_sync_seq, 0)
+                                         COALESCE(sp.last_sync_seq, 0),
+                                         sp.history_cleared_through_seq,
+                                         c.history_cleared_through_seq
                                      )
                                      AND m.sender_id <> sp.user_id
                                      AND m.server_id <> $3
@@ -1896,12 +2025,16 @@ impl ConversationRepository for PostgresConversationRepository {
                                ) remaining
                            )
                        ) AS next_unread
-                FROM conversation_participants sp, target
+                FROM conversation_participants sp
+                JOIN conversations c ON c.tenant_id = sp.tenant_id
+                    AND c.conversation_id = sp.conversation_id
+                CROSS JOIN target
                 WHERE sp.tenant_id = $1
                   AND sp.conversation_id = $2
                   AND NOT COALESCE(sp.is_deleted, false)
                   AND COALESCE(sp.unread_count, 0) > 0
-                  AND GREATEST(COALESCE(sp.last_read_seq, 0), COALESCE(sp.last_sync_seq, 0)) < target.seq
+                  AND GREATEST(COALESCE(sp.last_read_seq, 0), COALESCE(sp.last_sync_seq, 0),
+                      sp.history_cleared_through_seq, c.history_cleared_through_seq) < target.seq
                   AND sp.user_id <> target.sender_id
             )
             UPDATE conversation_participants sp
@@ -2225,6 +2358,7 @@ impl ConversationRepository for PostgresConversationRepository {
                     participant_version: 0,
                     member_preview: Vec::new(),
                     is_muted: false,
+                    is_mention_only: false,
                     is_pinned: false,
                     is_archived: false,
                     settings_version: 0,
@@ -2298,7 +2432,12 @@ impl ConversationRepository for PostgresConversationRepository {
                 SELECT
                     COALESCE(sp.last_read_seq, 0) AS prev_read_seq,
                     -- 隐藏会话时清掉的那段不在未读里，扣减不能再扣它。
-                    COALESCE(sp.last_sync_seq, 0) AS list_floor_seq,
+                    GREATEST(
+                        COALESCE(sp.last_sync_seq, 0),
+                        COALESCE(sp.visible_from_seq, 0),
+                        sp.history_cleared_through_seq,
+                        COALESCE(c.history_cleared_through_seq, 0)
+                    ) AS list_floor_seq,
                     COALESCE(sp.unread_count, 0) AS prev_unread_count,
                     GREATEST(
                         COALESCE(c.last_message_seq, 0),
@@ -2421,7 +2560,8 @@ impl ConversationRepository for PostgresConversationRepository {
             || patch.is_mention_only.is_some()
             || patch.is_muted.is_some()
             || patch.is_archived.is_some()
-            || patch.draft.is_some();
+            || patch.draft.is_some()
+            || patch.clear_history_through_seq.is_some();
         if !has_patch {
             return Err(ErrorBuilder::new(
                 ErrorCode::InvalidParameter,
@@ -2432,25 +2572,50 @@ impl ConversationRepository for PostgresConversationRepository {
 
         let row = sqlx::query(
             r#"
+            WITH conversation AS (
+                SELECT tenant_id, conversation_id, last_message_seq, lifecycle_state
+                FROM conversations
+                WHERE tenant_id = $1 AND conversation_id = $2
+                FOR SHARE
+            )
             UPDATE conversation_participants sp
             SET
                 pinned = CASE WHEN $5::bool IS NOT NULL THEN $5 ELSE sp.pinned END,
                 muted = CASE WHEN $6::bool IS NOT NULL THEN $6 ELSE sp.muted END,
                 mention_only = CASE WHEN $9::bool IS NOT NULL THEN $9 ELSE sp.mention_only END,
-                is_archived = CASE WHEN $7::bool IS NOT NULL THEN $7 ELSE sp.is_archived END,
+                is_archived = CASE
+                    WHEN c.lifecycle_state <> 'archived' AND $7::bool IS NOT NULL THEN $7
+                    ELSE sp.is_archived
+                END,
                 draft = CASE
                     WHEN $8::text IS NULL THEN sp.draft
                     WHEN $8 = '' THEN NULL
                     ELSE $8
                 END,
+                history_cleared_through_seq = CASE WHEN $10::bigint IS NULL THEN sp.history_cleared_through_seq
+                ELSE GREATEST(
+                    sp.history_cleared_through_seq,
+                    LEAST($10::bigint, GREATEST(
+                        c.last_message_seq,
+                        (SELECT m.seq FROM messages m
+                         WHERE m.tenant_id = sp.tenant_id AND m.conversation_id = sp.conversation_id
+                         ORDER BY m.seq DESC LIMIT 1),
+                        0
+                    ))
+                ) END,
                 settings_version = sp.settings_version + 1,
                 updated_at = CURRENT_TIMESTAMP
+            FROM conversation c
             WHERE sp.tenant_id = $1
               AND sp.conversation_id = $2
               AND sp.user_id = $3
+              AND c.tenant_id = sp.tenant_id AND c.conversation_id = sp.conversation_id
               AND NOT COALESCE(sp.is_deleted, false)
+              AND ($10::bigint IS NULL OR (sp.quit_at IS NULL AND c.lifecycle_state != 'deleted'))
               AND ($4 = 0 OR sp.settings_version = $4)
-            RETURNING sp.pinned, sp.muted, sp.mention_only, sp.is_archived, sp.draft, sp.settings_version
+            RETURNING sp.pinned, sp.muted, sp.mention_only,
+                      (c.lifecycle_state = 'archived' OR sp.is_archived) AS is_archived, sp.draft,
+                      sp.settings_version, sp.history_cleared_through_seq
             "#,
         )
         .bind(tenant_id)
@@ -2462,6 +2627,7 @@ impl ConversationRepository for PostgresConversationRepository {
         .bind(patch.is_archived)
         .bind(patch.draft.as_deref())
         .bind(patch.is_mention_only)
+        .bind(patch.clear_history_through_seq.map(|seq| i64::try_from(seq).unwrap_or(i64::MAX)))
         .fetch_optional(&*self.pool)
         .await
         .map_err(|e| map_infra_error(e, ErrorCode::DatabaseError, "update user settings"))?;
@@ -2488,6 +2654,7 @@ impl ConversationRepository for PostgresConversationRepository {
             is_archived: row.get("is_archived"),
             draft: row.get::<Option<String>, _>("draft"),
             settings_version: row.get::<i64, _>("settings_version").max(0) as u64,
+            history_cleared_through_seq: row.get::<i64, _>("history_cleared_through_seq") as u64,
         })
     }
 
@@ -2542,13 +2709,22 @@ impl ConversationRepository for PostgresConversationRepository {
                 unread_count = CASE
                     WHEN sp.user_id = $4 THEN COALESCE(sp.unread_count, 0)
                     WHEN $5 = ANY($6) THEN COALESCE(sp.unread_count, 0)
-                    WHEN GREATEST(COALESCE(sp.last_read_seq, 0), COALESCE(sp.last_sync_seq, 0)) >= $1
+                    WHEN GREATEST(
+                        COALESCE(sp.last_read_seq, 0),
+                        COALESCE(sp.last_sync_seq, 0),
+                        COALESCE(sp.visible_from_seq, 0),
+                        sp.history_cleared_through_seq,
+                        c.history_cleared_through_seq
+                    ) >= $1
                         THEN COALESCE(sp.unread_count, 0)
                     ELSE COALESCE(sp.unread_count, 0) + 1
                 END,
                 updated_at = CURRENT_TIMESTAMP
+            FROM conversations c
             WHERE sp.tenant_id = $2
               AND sp.conversation_id = $3
+              AND c.tenant_id = sp.tenant_id
+              AND c.conversation_id = sp.conversation_id
               AND NOT COALESCE(sp.is_deleted, false)
             "#,
         )
@@ -3014,6 +3190,7 @@ mod single_chat_peer_tests {
             participant_version: 0,
             member_preview: Vec::new(),
             is_muted: false,
+            is_mention_only: false,
             is_pinned: false,
             is_archived: false,
             settings_version: 0,

@@ -117,6 +117,7 @@ impl MediaService for MediaGrpcHandler {
                     response_headers: Default::default(),
                     retention_protected: false,
                     content_visibility: flare_proto::common::ContentVisibility::Available as i32,
+                    ..Default::default()
                 },
             )
             .await
@@ -201,6 +202,7 @@ impl MediaService for MediaGrpcHandler {
                     response_headers: Default::default(),
                     retention_protected: false,
                     content_visibility: flare_proto::common::ContentVisibility::Available as i32,
+                    ..Default::default()
                 },
             )
             .await
@@ -325,6 +327,7 @@ impl MediaService for MediaGrpcHandler {
                     response_headers: Default::default(),
                     retention_protected: false,
                     content_visibility: flare_proto::common::ContentVisibility::Available as i32,
+                    ..Default::default()
                 },
             )
             .await

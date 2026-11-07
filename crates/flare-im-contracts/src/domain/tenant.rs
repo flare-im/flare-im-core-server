@@ -4,6 +4,8 @@
 //! `tenants` 表；网关 / ingest / sync 只读本模块的快照。这里不放任何产品语义：状态只有
 //! 「能否接入」，配额只有核自己执行的三项运行时配额。
 
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 
 /// 租户状态（与 `tenants.status` 的 CHECK 约束一致）。
@@ -77,6 +79,37 @@ impl TenantRuntimeSnapshot {
     }
 }
 
+/// 构建号闭区间。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClientBuildRange {
+    pub from: u64,
+    pub to: u64,
+}
+
+/// 一个平台的最低构建号与封禁区间（`tenant_client_policy.build_policies` 的值）。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ClientBuildPolicy {
+    /// `0` = 不限。
+    pub min_build: u64,
+    /// `0` = 立即生效。
+    pub min_build_effective_from_ms: i64,
+    pub blocked: Vec<ClientBuildRange>,
+}
+
+/// 一个应用的客户端策略投影（`tenant_client_policy` 的一行）。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TenantClientPolicy {
+    pub tenant_id: String,
+    pub version: u64,
+    /// 已发布的接入清单 serial；`0` = 从未发布。
+    pub access_serial: u64,
+    /// 应用级发布代数：任一发布清单发布即加一；`0` = 从未发布。
+    pub release_generation: u64,
+    /// key = 平台。
+    pub build_policies: BTreeMap<String, ClientBuildPolicy>,
+}
+
 /// 数据面租户 ID 允许的字符集：`^[0-9A-Za-z_-]{1,32}$`；`*` 只属于功能开关的平台默认行，租户投影不允许。
 pub fn is_valid_tenant_id(tenant_id: &str) -> bool {
     !tenant_id.is_empty()
@@ -114,6 +147,14 @@ mod tests {
         assert_eq!(quota.core.sync_pull_qps, 0);
         let empty: TenantQuota = serde_json::from_str("{}").unwrap();
         assert_eq!(empty, TenantQuota::default());
+    }
+
+    #[test]
+    fn build_policy_json_defaults_missing_fields() {
+        let policy: ClientBuildPolicy =
+            serde_json::from_str(r#"{"blocked": [{"from": 1, "to": 2}]}"#).unwrap();
+        assert_eq!(policy.min_build, 0);
+        assert_eq!(policy.blocked, vec![ClientBuildRange { from: 1, to: 2 }]);
     }
 
     #[test]

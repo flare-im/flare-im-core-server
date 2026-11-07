@@ -46,6 +46,9 @@ pub struct AccessGatewayConfig {
     /// 所在可用区（`GATEWAY_ZONE` > `services.access_gateway.zone`），与 region 一起写进服务发现
     /// 实例元数据与网关租约。
     pub zone: Option<String>,
+    /// 本网关所在的接入点 ID（`GATEWAY_AP_ID`），在 CONNECT_ACK 里报给客户端（诊断用）；
+    /// 没配置时不报。
+    pub ap_id: Option<String>,
     // 压缩和加密配置
     pub compression_algorithm: Option<String>,
     pub enable_encryption: bool,
@@ -177,6 +180,8 @@ impl AccessGatewayConfig {
             .ok()
             .and_then(non_empty)
             .or_else(|| service.zone.clone().and_then(non_empty));
+
+        let ap_id = std::env::var("GATEWAY_AP_ID").ok().and_then(non_empty);
 
         // 压缩算法配置（支持环境变量覆盖）
         let compression_algorithm = std::env::var("GATEWAY_COMPRESSION_ALGORITHM")
@@ -312,6 +317,7 @@ impl AccessGatewayConfig {
             gateway_id,
             region,
             zone,
+            ap_id,
             compression_algorithm,
             enable_encryption,
             encryption_key,

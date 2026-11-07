@@ -22,6 +22,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use flare_im_capability_core::plugin::ProtocolError;
 use flare_im_capability_core::plugin::authorization::PluginInvocation;
 use flare_im_capability_core::plugin::invocation::{
     MAX_PERMISSION_CODE_BYTES, PluginStaffCallClaims, plugin_permission_target,
@@ -206,7 +207,8 @@ pub struct AdminPluginResult {
     pub audit_target: Option<String>,
 }
 
-fn denied(reason: &str) -> CapabilityError {
+fn denied(reason: &'static str) -> CapabilityError {
+    tracing::warn!(deny_reason = reason, "plugin admin call denied");
     CapabilityError::PolicyDenied(format!("plugin admin call denied: {reason}"))
 }
 
@@ -231,7 +233,6 @@ pub async fn dispatch_admin(
         ));
     }
     let tenant = staff.tenant_id.as_str();
-    let now = chrono::Utc::now().timestamp_millis();
     let snapshot = routes
         .authorization
         .as_ref()
@@ -240,6 +241,9 @@ pub async fn dispatch_admin(
         .await
         .map_err(|_| denied("plugin authorization unavailable"))?
         .ok_or_else(|| denied("no plugin projection for this application"))?;
+    // Reading may deliver a renewed grant, or take long enough for the old one
+    // to expire. Authorize against the time after that asynchronous boundary.
+    let now = chrono::Utc::now().timestamp_millis();
     snapshot
         .validate(now)
         .map_err(|_| denied("plugin projection expired"))?;
@@ -267,6 +271,31 @@ pub async fn dispatch_admin(
             AdminCall::Dispatch => op.mode == OperationMode::Command,
         })
         .ok_or_else(|| denied("operation is not an admin operation of this kind"))?;
+    let scope = match declared.scope {
+        flare_im_capability_core::plugin::admin::AdminOperationScope::Application => {
+            if staff.organization_scope.is_some() {
+                return Err(denied("application operation refuses organization scope"));
+            }
+            flare_im_capability_core::plugin::invocation::PluginAdminScope::Application
+        }
+        flare_im_capability_core::plugin::admin::AdminOperationScope::Organization => {
+            let organization = staff
+                .organization_scope
+                .as_deref()
+                .ok_or_else(|| denied("organization operation needs explicit signed scope"))?;
+            if snapshot.organization_id.as_deref() != Some(organization)
+                || staff
+                    .org_id
+                    .as_deref()
+                    .is_some_and(|member| member != organization)
+            {
+                return Err(denied("organization scope does not own this application"));
+            }
+            flare_im_capability_core::plugin::invocation::PluginAdminScope::Organization {
+                organization_id: organization.into(),
+            }
+        }
+    };
     let audit_target: Option<String> = declared
         .audit_target
         .as_deref()
@@ -302,7 +331,17 @@ pub async fn dispatch_admin(
             platform_enabled: true,
             now_ms: now,
         })
-        .map_err(|_| denied("operation not approved for this application"))?;
+        .map_err(|error| {
+            let reason = match error {
+                ProtocolError::Denied(reason) => reason,
+                _ => "protocol_validation_failed",
+            };
+            tracing::warn!(
+                authorization_reason = reason,
+                "plugin admin authorization denied"
+            );
+            denied("operation not approved for this application")
+        })?;
     let timeout = timeout.min(Duration::from_millis(u64::from(operation.timeout_ms)));
     // One intent, one command: the command id comes from the staff member and the console's
     // key, whatever the input said.
@@ -317,6 +356,7 @@ pub async fn dispatch_admin(
             .insert("commandId".into(), Value::String(command_id));
     }
     let claims = PluginStaffCallClaims {
+        scope,
         tenant_id: tenant.to_owned(),
         plugin_id: projected.grant.plugin_id.clone(),
         plugin_version: projected.grant.plugin_version.clone(),

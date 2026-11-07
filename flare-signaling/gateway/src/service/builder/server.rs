@@ -29,6 +29,7 @@ pub fn build_flare_server(
     compression_algorithm: flare_core::common::compression::CompressionAlgorithm,
     encryption_enabled: bool,
     access_config: &AccessGatewayConfig,
+    gateway_id: &str,
 ) -> Result<FlareServer> {
     use flare_core::common::config_types::{HeartbeatConfig, TransportProtocol};
     use flare_core::common::protocol::SerializationFormat;
@@ -53,7 +54,13 @@ pub fn build_flare_server(
                 .with_timeout(Duration::from_secs(access_config.heartbeat_timeout_secs)),
         )
         .with_default_format(SerializationFormat::Protobuf)
-        .with_default_compression(compression_algorithm);
+        .with_default_compression(compression_algorithm)
+        // CONNECT_ACK 带给客户端的诊断信息：稳定网关 ID、接入点 ID（配置了才报）。服务端时间与
+        // 心跳建议（取上面的心跳间隔）由 flare-core 填；清单 serial 由认证器按应用给出。
+        .with_gateway_id(gateway_id);
+    if let Some(ap_id) = access_config.ap_id.as_deref() {
+        builder = builder.with_ap_id(ap_id);
+    }
 
     // 可选：启用加密
     if encryption_enabled {
@@ -111,6 +118,8 @@ pub async fn build_long_connection_server(
 
     let ws_addr = format!("{}:{}", runtime_config.server.address, ws_port);
     let quic_addr = format!("{}:{}", runtime_config.server.address, quic_port);
+    // 与服务发现、Online 会话用的是同一个稳定 ID（同一函数、同一输入）
+    let gateway_id = access_config.resolve_gateway_id(ws_port)?;
 
     // 配置压缩和加密
     info!(
@@ -145,6 +154,7 @@ pub async fn build_long_connection_server(
         compression_algorithm.clone(),
         encryption_config.enabled,
         access_config.as_ref(),
+        &gateway_id,
     ) {
         Ok(server) => server,
         Err(e) => {
@@ -172,6 +182,7 @@ pub async fn build_long_connection_server(
                     compression_algorithm,
                     encryption_config.enabled,
                     access_config.as_ref(),
+                    &gateway_id,
                 )?
             } else {
                 error!(error = %e, "Failed to build FlareServer");

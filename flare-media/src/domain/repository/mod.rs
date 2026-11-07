@@ -8,6 +8,19 @@ use crate::domain::model::{
     UploadedPartRecord,
 };
 
+/// Authoritative message read, never a client-supplied attachment list.
+/// Implementations preserve the original verified identity: User reads apply
+/// participation/history checks; Staff reads require exact core:messages:read.
+#[async_trait::async_trait]
+pub trait MessageAttachmentReader: Send + Sync {
+    async fn read_visible_message(
+        &self,
+        ctx: &Context,
+        conversation_id: &str,
+        message_seq: i64,
+    ) -> Result<Option<flare_proto::common::Message>>;
+}
+
 /// 对象存储仓储接口
 ///
 /// **重要说明**：使用 `#[async_trait::async_trait]` 宏是因为该 trait 需要作为 trait 对象（dyn Trait）使用，

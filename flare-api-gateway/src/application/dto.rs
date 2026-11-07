@@ -81,6 +81,10 @@ pub struct GetFileUrlHttpRequest {
     pub retention_protected: bool,
     #[serde(default = "available_content_visibility")]
     pub content_visibility: i32,
+    #[serde(default)]
+    pub conversation_id: String,
+    #[serde(default)]
+    pub message_seq: i64,
 }
 
 fn available_content_visibility() -> i32 {
@@ -96,6 +100,8 @@ impl From<GetFileUrlHttpRequest> for flare_grpc_proto::media::GetFileUrlRequest 
             response_headers: value.response_headers,
             retention_protected: value.retention_protected,
             content_visibility: value.content_visibility,
+            conversation_id: value.conversation_id,
+            message_seq: value.message_seq,
         }
     }
 }

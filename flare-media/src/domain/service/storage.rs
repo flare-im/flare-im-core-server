@@ -456,9 +456,20 @@ impl MediaService {
         expires_in: i64,
     ) -> Result<PresignedUrl> {
         ctx.ensure_not_cancelled().map_err(map_context_error)?;
-
-        let tenant = require_tenant(ctx)?;
         let metadata = self.get_readable_metadata(ctx, file_id).await?;
+        self.presign_authorized_metadata(ctx, &metadata, expires_in)
+            .await
+    }
+
+    pub(super) async fn presign_authorized_metadata(
+        &self,
+        ctx: &Context,
+        metadata: &MediaFileMetadata,
+        expires_in: i64,
+    ) -> Result<PresignedUrl> {
+        ctx.ensure_not_cancelled().map_err(map_context_error)?;
+        let tenant = require_tenant(ctx)?;
+        let file_id = metadata.file_id.as_str();
         let expires_in = if expires_in > 0 {
             expires_in
         } else {

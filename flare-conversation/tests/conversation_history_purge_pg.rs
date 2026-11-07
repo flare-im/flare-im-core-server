@@ -264,6 +264,65 @@ fn domain_over(repo: PostgresConversationRepository) -> DefaultConversationDomai
 
 #[tokio::test]
 #[ignore = "requires FLARE_CONVERSATION_TEST_DATABASE_URL pointing at a disposable PostgreSQL"]
+async fn clear_for_everyone_advances_only_the_target_conversation_cutoff() {
+    let url = std::env::var(ENV_DATABASE_URL)
+        .unwrap_or_else(|_| panic!("set {ENV_DATABASE_URL} to a disposable PostgreSQL instance"));
+    let (admin, pool, schema) = isolated_schema(&url).await;
+    sqlx::raw_sql(
+        r#"
+        ALTER TABLE conversations ADD COLUMN last_message_seq BIGINT;
+        ALTER TABLE conversations ADD COLUMN updated_at TIMESTAMPTZ;
+        ALTER TABLE conversations ADD COLUMN lifecycle_state TEXT NOT NULL DEFAULT 'active';
+        INSERT INTO conversations (tenant_id, conversation_id) VALUES ('a', 'group'), ('b', 'group');
+        INSERT INTO conversation_participants (tenant_id, conversation_id, user_id, unread_count)
+        VALUES ('a', 'group', 'bob', 2), ('b', 'group', 'bob', 1);
+        "#,
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::raw_sql(include_str!(
+        "../../migrations/0021_20261103_conversation_history_clear.sql"
+    ))
+    .execute(&pool)
+    .await
+    .unwrap();
+    seed_message(&pool, "a", "group", "first", 3, 10).await;
+    seed_message(&pool, "a", "group", "second", 6, 20).await;
+    seed_message(&pool, "b", "group", "other-tenant", 12, 30).await;
+    let domain = domain_over(PostgresConversationRepository::new(
+        Arc::new(pool.clone()),
+        test_config(),
+    ));
+    let ctx = Context::root().with_tenant_id("a");
+
+    assert_eq!(domain.clear_history_for_everyone(&ctx, "group").await.unwrap(), 6);
+    seed_message(&pool, "a", "group", "after-clear", 7, 40).await;
+
+    let floors: Vec<(String, i64)> = sqlx::query_as(
+        "SELECT tenant_id, history_cleared_through_seq FROM conversations ORDER BY tenant_id",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(floors, vec![("a".into(), 6), ("b".into(), 0)]);
+    let unread: Vec<(String, i32)> = sqlx::query_as(
+        "SELECT tenant_id, unread_count FROM conversation_participants ORDER BY tenant_id",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(unread, vec![("a".into(), 0), ("b".into(), 1)]);
+    let retained: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM messages")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(retained, 4);
+    drop_schema(admin, pool, &schema).await;
+}
+
+#[tokio::test]
+#[ignore = "requires FLARE_CONVERSATION_TEST_DATABASE_URL pointing at a disposable PostgreSQL"]
 async fn purge_deletes_only_history_before_the_boundary() {
     let url = std::env::var(ENV_DATABASE_URL)
         .unwrap_or_else(|_| panic!("set {ENV_DATABASE_URL} to a disposable PostgreSQL instance"));

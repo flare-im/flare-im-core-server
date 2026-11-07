@@ -25,6 +25,9 @@ use crate::domain::model::{
 use crate::domain::repository::MessageStorage;
 use flare_im_contracts::utils::extract_seq_from_message;
 use flare_im_service_kit::audit_effects::durable::StaffAudit;
+use flare_im_service_kit::roster_policy::{
+    check_channels, endpoint_from_env, trusted_internal_reader,
+};
 use flare_im_service_kit::staff_context::{VerifiedStaff, require_staff};
 use flare_server_core::SignedContextVerifier;
 use flare_server_core::auth::core_admin::permission::{MESSAGES_EXPORT, MESSAGES_READ};
@@ -41,6 +44,7 @@ where
     /// 验 admin-gateway 原样转发的 Staff `x-flare-ctx`（Cell 公钥集，Staff 钉死 `kid=gateway`）。
     /// 没有配置时管理检索一律 UNAUTHENTICATED。
     staff_verifier: Option<SignedContextVerifier>,
+    roster_policy_endpoint: Option<String>,
 }
 
 impl<M> StorageReaderGrpcHandler<M>
@@ -54,7 +58,44 @@ where
         Ok(Self {
             query_handler,
             staff_verifier,
+            roster_policy_endpoint: endpoint_from_env(),
         })
+    }
+
+    async fn protect_group_history<'a>(
+        &self,
+        ctx: &flare_server_core::context::Context,
+        messages: impl Iterator<Item = &'a mut flare_proto::Message>,
+    ) {
+        if trusted_internal_reader(ctx) {
+            return;
+        }
+        let system_messages: Vec<_> = messages
+            .filter_map(|message| {
+                let channel = group_notice_channel(message)?.to_owned();
+                Some((channel, message))
+            })
+            .collect();
+        if system_messages.is_empty() {
+            return;
+        }
+        let mut channels: Vec<_> = system_messages
+            .iter()
+            .map(|(channel, _)| channel.clone())
+            .collect();
+        channels.sort_unstable();
+        channels.dedup();
+        channels.retain(|channel| !channel.is_empty());
+        let visibility = check_channels(self.roster_policy_endpoint.as_deref(), ctx, &channels)
+            .await
+            .unwrap_or_default();
+        for (channel, message) in system_messages {
+            protect_group_notice(
+                message,
+                ctx.user_id(),
+                visibility.allows_full_roster(&channel, true),
+            );
+        }
     }
 
     /// 管理检索（search、get、事件链、写入台账要求 `core:messages:read`，导出要求
@@ -107,6 +148,116 @@ where
                     && !claims.tenant_id.trim().is_empty()
             });
         Ok(admitted.then_some(ctx))
+    }
+}
+
+const GROUP_NOTICE_EVENT_ID: &str = "flare.social.event_id";
+const GROUP_NOTICE_EVENT_TYPE: &str = "flare.social.event_type";
+const GROUP_NOTICE_AUDIENCE: &str = "flare.social.recipient_user_ids";
+
+fn group_notice_channel(message: &flare_proto::Message) -> Option<&str> {
+    use flare_proto::common::{ConversationType, message_content::Content};
+    match message.content.as_ref()?.content.as_ref()? {
+        Content::System(notice)
+            if message.conversation_type == ConversationType::Group as i32
+                && (notice.attributes.contains_key(GROUP_NOTICE_AUDIENCE)
+                    || notice.event_kind.starts_with("group.member_")
+                    || notice.event_kind == "group.owner_transferred") =>
+        {
+            Some(if message.channel_id.is_empty() {
+                notice
+                    .attributes
+                    .get("group_id")
+                    .map(String::as_str)
+                    .unwrap_or_default()
+            } else {
+                message.channel_id.as_str()
+            })
+        }
+        Content::Notification(notice)
+            if matches!(
+                notice.notification_type.as_str(),
+                "social.group.member_joined"
+                    | "social.group.member_left"
+                    | "social.group.member_removed"
+                    | "social.group.member_muted"
+                    | "social.group.member_unmuted"
+                    | "social.group.member_roles_changed"
+                    | "social.group.owner_transferred"
+            ) =>
+        {
+            Some(
+                notice
+                    .attributes
+                    .get("group_id")
+                    .map(String::as_str)
+                    .unwrap_or_default(),
+            )
+        }
+        _ => None,
+    }
+}
+
+fn protect_group_notice(
+    message: &mut flare_proto::Message,
+    viewer: Option<&str>,
+    allow_identities: bool,
+) {
+    use flare_proto::common::message_content::Content;
+    let Some(content) = message
+        .content
+        .as_mut()
+        .and_then(|content| content.content.as_mut())
+    else {
+        return;
+    };
+    if !allow_identities {
+        // Preserve sequence and message identity so history paging and gap detection still work.
+        message.sender_id = "system".into();
+        match content {
+            Content::System(notice) => {
+                notice.event_kind = "group.activity".into();
+                notice.body.clear();
+                notice.attributes.clear();
+                notice.payload.clear();
+            }
+            Content::Notification(notice) => {
+                notice.notification_type = "group.activity".into();
+                notice.title.clear();
+                notice.body.clear();
+                notice.attributes.clear();
+                notice.target_user_ids.clear();
+                notice.target_role_id.clear();
+                notice.notify_all = false;
+                notice.show_badge = false;
+                notice.show_in_list = false;
+                notice.play_sound = false;
+            }
+            _ => {}
+        }
+        return;
+    }
+    let Content::System(notice) = content else {
+        return;
+    };
+    if let Some(audience) = notice.attributes.remove(GROUP_NOTICE_AUDIENCE) {
+        let recipient = viewer.filter(|viewer| {
+            serde_json::from_str::<Vec<String>>(&audience)
+                .ok()
+                .is_some_and(|users| users.iter().any(|user| user == viewer))
+        });
+        if let Some(recipient) = recipient
+            && let Ok(narrowed) = serde_json::to_string(&[recipient])
+        {
+            notice
+                .attributes
+                .insert(GROUP_NOTICE_AUDIENCE.into(), narrowed);
+            return;
+        }
+        // A historical reader outside the original audience may see the timeline notice when
+        // otherwise authorized, but cannot treat it as an event directed to their account.
+        notice.attributes.remove(GROUP_NOTICE_EVENT_ID);
+        notice.attributes.remove(GROUP_NOTICE_EVENT_TYPE);
     }
 }
 
@@ -506,11 +657,13 @@ where
         {
             Ok(result) => {
                 // 转换消息为 proto 类型
-                let proto_messages: Vec<flare_proto::Message> = result
+                let mut proto_messages: Vec<flare_proto::Message> = result
                     .messages
                     .into_iter()
                     .map(|msg| message_to_proto(&msg))
                     .collect();
+                self.protect_group_history(&ctx, proto_messages.iter_mut())
+                    .await;
 
                 Ok(Response::new(QueryMessagesResponse {
                     messages: proto_messages,
@@ -585,10 +738,12 @@ where
                     .unwrap_or(0);
 
                 // 转换消息为 proto 类型
-                let proto_messages: Vec<flare_proto::Message> = messages
+                let mut proto_messages: Vec<flare_proto::Message> = messages
                     .into_iter()
                     .map(|msg| message_to_proto(&msg))
                     .collect();
+                self.protect_group_history(&ctx, proto_messages.iter_mut())
+                    .await;
 
                 // 构建基于 seq 的游标
                 let next_cursor = proto_messages
@@ -640,8 +795,8 @@ where
             )
             .await
         {
-            Ok(windows) => Ok(Response::new(QueryConversationsMessageWindowsResponse {
-                windows: windows
+            Ok(windows) => {
+                let mut windows: Vec<_> = windows
                     .into_iter()
                     .map(|(conversation_id, messages)| {
                         // 按值转换：move 内容字节/字符串，整页免深拷贝。
@@ -657,8 +812,18 @@ where
                             last_seq,
                         }
                     })
-                    .collect(),
-            })),
+                    .collect();
+                self.protect_group_history(
+                    &ctx,
+                    windows
+                        .iter_mut()
+                        .flat_map(|window| window.messages.iter_mut()),
+                )
+                .await;
+                Ok(Response::new(QueryConversationsMessageWindowsResponse {
+                    windows,
+                }))
+            }
             Err(err) => {
                 error!(error = ?err, "Failed to query conversations message windows");
                 Err(storage_failure(&err, StorageRead::Listing))
@@ -1098,7 +1263,18 @@ where
             )
             .await
         {
-            Ok((events, last_seq, has_more, next_cursor)) => {
+            Ok((mut events, last_seq, has_more, next_cursor)) => {
+                use flare_proto::common::event::Payload;
+                self.protect_group_history(
+                    &ctx,
+                    events
+                        .iter_mut()
+                        .filter_map(|event| match event.payload.as_mut() {
+                            Some(Payload::Message(message)) => Some(message),
+                            _ => None,
+                        }),
+                )
+                .await;
                 Ok(Response::new(QueryConversationEventsResponse {
                     events,
                     last_seq,
@@ -1216,6 +1392,53 @@ mod tests {
     use super::*;
     use flare_server_core::Context;
     use std::sync::Arc;
+
+    #[test]
+    fn historical_group_notice_never_exposes_another_recipient() {
+        use flare_proto::common::{
+            ConversationType, MessageContent, SystemContent, message_content::Content,
+        };
+        let message = flare_proto::Message {
+            sender_id: "member-b".into(),
+            server_id: "m42".into(),
+            conversation_type: ConversationType::Group as i32,
+            content: Some(MessageContent {
+                content: Some(Content::System(SystemContent {
+                    event_kind: "group.member_joined".into(),
+                    body: "member-b joined".into(),
+                    attributes: [
+                        ("group_id".into(), "g1".into()),
+                        ("user_id".into(), "member-b".into()),
+                        (
+                            GROUP_NOTICE_AUDIENCE.into(),
+                            r#"["member-a","member-b"]"#.into(),
+                        ),
+                    ]
+                    .into(),
+                    ..Default::default()
+                })),
+            }),
+            ..Default::default()
+        };
+        assert_eq!(group_notice_channel(&message), Some("g1"));
+        let mut restricted = message.clone();
+        protect_group_notice(&mut restricted, Some("member-a"), false);
+        assert_eq!(restricted.server_id, "m42");
+        assert_eq!(restricted.sender_id, "system");
+        let Some(Content::System(notice)) = restricted.content.unwrap().content else {
+            panic!("system content")
+        };
+        assert!(notice.attributes.is_empty());
+        assert!(notice.body.is_empty());
+
+        let mut full = message;
+        protect_group_notice(&mut full, Some("member-a"), true);
+        let Some(Content::System(notice)) = full.content.unwrap().content else {
+            panic!("system content")
+        };
+        assert_eq!(notice.attributes[GROUP_NOTICE_AUDIENCE], r#"["member-a"]"#);
+        assert_eq!(notice.attributes["user_id"], "member-b");
+    }
 
     #[test]
     fn message_event_pagination_is_bounded_and_cursor_is_offset() {
@@ -1383,6 +1606,7 @@ mod tests {
         StorageReaderGrpcHandler {
             query_handler: Arc::new(MessageStorageQueryHandler::new(storage)),
             staff_verifier: verifier,
+            roster_policy_endpoint: None,
         }
     }
 

@@ -64,6 +64,7 @@ struct ConversationSyncRoutingHint {
     participant_version: u64,
     member_preview: Vec<ConversationParticipant>,
     is_muted: bool,
+    is_mention_only: Option<bool>,
     is_pinned: bool,
     is_archived: bool,
     user_settings_version: u64,
@@ -463,6 +464,7 @@ where
                     participant_version: m.bootstrap.participant_version,
                     member_preview: m.bootstrap.member_preview.clone(),
                     is_muted: m.bootstrap.is_muted,
+                    is_mention_only: m.bootstrap.is_mention_only,
                     is_pinned: m.bootstrap.is_pinned,
                     is_archived: m.bootstrap.is_archived,
                     user_settings_version: m.bootstrap.user_settings_version,
@@ -1344,6 +1346,7 @@ where
                     // 客户端同步协议暂不带该字段：「只接收@我」由业务侧（群通知设置）
                     // 投影下来，不是客户端直接改的。None = 不修改。
                     is_mention_only: None,
+                    clear_history_through_seq: req.clear_history_through_seq,
                 },
             )
             .await?;
@@ -1545,7 +1548,15 @@ fn build_contiguous_sync_items(
 }
 
 fn latest_message(item: &SnapshotConversationRow) -> Option<&Message> {
-    item.messages.iter().max_by_key(|m| m.conversation_seq)
+    item.messages
+        .iter()
+        .filter(|message| {
+            message
+                .attributes
+                .get("__sync_skip")
+                .is_none_or(|reason| reason.trim().is_empty())
+        })
+        .max_by_key(|message| message.conversation_seq)
 }
 
 fn conversation_type_int(message: Option<&Message>) -> i32 {
@@ -1726,6 +1737,7 @@ fn snapshot_row_to_summary(
         max_conversation_seq: max_seq,
         last_read_seq,
         is_muted: hint.is_muted,
+        is_mention_only: hint.is_mention_only,
         is_pinned: hint.is_pinned,
         mute_until: None,
         is_archived: hint.is_archived,
@@ -2782,6 +2794,7 @@ mod tests {
                             is_archived: Some(true),
                             draft: Some("draft text".to_string()),
                             base_settings_version: 7,
+                            clear_history_through_seq: Some(42),
                         },
                     )),
                 },
@@ -2806,6 +2819,7 @@ mod tests {
         assert_eq!(updates.len(), 1);
         assert_eq!(updates[0].conversation_id, "c1");
         assert_eq!(updates[0].base_settings_version, 7);
+        assert_eq!(updates[0].clear_history_through_seq, Some(42));
     }
 
     #[test]
@@ -2954,6 +2968,37 @@ mod tests {
         let summary = snapshot_row_to_summary(&item, &ConversationSyncRoutingHint::default());
 
         assert_eq!(summary.conversation_type, "single");
+    }
+
+    #[test]
+    fn snapshot_summary_uses_latest_visible_message_after_global_delete() {
+        let visible = Message {
+            server_id: "visible".into(),
+            conversation_seq: 10,
+            attributes: HashMap::from([("text_preview".into(), "kept message".into())]),
+            ..Default::default()
+        };
+        let hidden = Message {
+            server_id: "hidden".into(),
+            conversation_seq: 11,
+            attributes: HashMap::from([
+                ("__sync_skip".into(), "visibility_filtered".into()),
+                ("text_preview".into(), "deleted message".into()),
+            ]),
+            ..Default::default()
+        };
+        let item = SnapshotConversationRow {
+            conversation_id: "2A_group".into(),
+            messages: vec![visible, hidden],
+            last_conversation_seq: 11,
+            ..Default::default()
+        };
+
+        let summary = snapshot_row_to_summary(&item, &ConversationSyncRoutingHint::default());
+        let last = summary.last_message.unwrap();
+        assert_eq!(last.message_id, "visible");
+        assert_eq!(last.text, "kept message");
+        assert_eq!(summary.max_conversation_seq, 11);
     }
 
     #[test]

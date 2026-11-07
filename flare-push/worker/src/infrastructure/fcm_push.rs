@@ -228,6 +228,17 @@ pub fn build_fcm_message_body(envelope: &PushTaskEnvelope, registration_token: &
                 // 有正文的消息按 high 投递，保证熄屏也能唤醒；
                 // 静默类走 normal 由系统合并，省电。
                 "priority": if envelope.priority > 0 { "high" } else { "normal" },
+                // Android channel settings, not an absent sound field, control
+                // actual presentation. The optional native host creates these
+                // four stable channels; user OS settings remain authoritative.
+                "notification": {
+                    "channel_id": match (display.play_sound, display.show_badge) {
+                        (true, true) => "flare_messages_v1",
+                        (false, true) => "flare_messages_quiet_v1",
+                        (true, false) => "flare_messages_no_badge_v1",
+                        (false, false) => "flare_messages_quiet_no_badge_v1",
+                    },
+                },
             },
             "apns": {
                 "headers": {
@@ -561,6 +572,10 @@ mod tests {
         assert_eq!(m["data"]["tenant_id"], "t1");
         assert!(m["notification"]["title"].is_string());
         assert!(m["notification"]["body"].is_string());
+        assert_eq!(
+            m["android"]["notification"]["channel_id"],
+            "flare_messages_no_badge_v1"
+        );
     }
 
     #[test]
@@ -572,6 +587,43 @@ mod tests {
         let normal = build_fcm_message_body(&envelope(0), "t");
         assert_eq!(normal["message"]["android"]["priority"], "normal");
         assert_eq!(normal["message"]["apns"]["headers"]["apns-priority"], "5");
+    }
+
+    #[test]
+    fn android_channel_covers_independent_sound_and_badge_hints() {
+        use flare_proto::common::{
+            Message, MessageContent, NotificationContent, message_content::Content,
+        };
+        use prost::Message as _;
+        for (sound, badge, channel) in [
+            (true, true, "flare_messages_v1"),
+            (false, true, "flare_messages_quiet_v1"),
+            (true, false, "flare_messages_no_badge_v1"),
+            (false, false, "flare_messages_quiet_no_badge_v1"),
+        ] {
+            let mut task = envelope(1);
+            task.push_payload = flare_grpc_proto::access_gateway::PushMessageRequest {
+                messages: vec![Message {
+                    content: Some(MessageContent {
+                        content: Some(Content::Notification(NotificationContent {
+                            title: "Title".into(),
+                            body: "Body".into(),
+                            play_sound: sound,
+                            show_badge: badge,
+                            ..Default::default()
+                        })),
+                    }),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }
+            .encode_to_vec();
+            let body = build_fcm_message_body(&task, "token");
+            assert_eq!(
+                body["message"]["android"]["notification"]["channel_id"],
+                channel
+            );
+        }
     }
 
     #[test]
@@ -600,6 +652,11 @@ mod tests {
         let body = build_fcm_message_body(&task, "token");
         assert_eq!(body["message"]["notification"]["body"], "Quiet");
         assert_eq!(body["message"]["data"]["play_sound"], "false");
+        assert_eq!(
+            body["message"]["android"]["notification"]["channel_id"],
+            "flare_messages_quiet_no_badge_v1"
+        );
+        assert!(body["message"]["android"]["notification"]["sound"].is_null());
         assert!(body["message"]["apns"]["payload"]["aps"]["sound"].is_null());
         let apns = crate::infrastructure::apns_push::build_apns_payload(&task);
         assert_eq!(apns["aps"]["alert"]["body"], "Quiet");

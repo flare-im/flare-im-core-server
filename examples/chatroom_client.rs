@@ -166,9 +166,7 @@ async fn main() -> Result<()> {
         .with_device_info(device_info)
         .with_user_id(user_id.clone())
         .with_heartbeat(heartbeat)
-        .with_connect_timeout(Duration::from_secs(10))
-        .with_reconnect_interval(Duration::from_secs(3))
-        .with_max_reconnect_attempts(Some(5));
+        .with_connect_timeout(Duration::from_secs(10));
 
     // 如果提供了 token，添加到客户端配置
     if !token.is_empty() {
@@ -747,20 +745,11 @@ impl MessageListener for ChatListener {
 
         Ok(None)
     }
-    async fn on_connect(&self) -> Result<()> {
-        info!("✅ 已连接到服务器");
-        info!("   用户ID: {}", self.user_id);
-        info!("   接收方ID: {}", self.recipient_id);
-        Ok(())
-    }
-
-    async fn on_disconnect(&self, reason: Option<&str>) -> Result<()> {
-        warn!("🔴 连接断开: {}", reason.unwrap_or("未知原因"));
-        Ok(())
-    }
-
-    async fn on_error(&self, error: &str) -> Result<()> {
-        error!("连接错误: {}", error);
+    async fn on_disconnect(
+        &self,
+        reason: &flare_core::client::link::DisconnectReason,
+    ) -> Result<()> {
+        warn!("🔴 连接断开: {}", reason);
         Ok(())
     }
 }

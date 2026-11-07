@@ -786,6 +786,8 @@ pub struct AccessGatewayMetrics {
     /// 在线状态缓存命中率
     pub online_cache_hit_total: IntCounter,
     pub online_cache_miss_total: IntCounter,
+    /// 通过认证的 CONNECT，按客户端上报的接入清单 serial 与服务端已知值的关系分桶
+    pub connect_access_serial_total: IntCounterVec,
 }
 
 impl AccessGatewayMetrics {
@@ -849,6 +851,15 @@ impl AccessGatewayMetrics {
         )
         .expect("Failed to create online_cache_miss_total metric");
 
+        let connect_access_serial_total = IntCounterVec::new(
+            Opts::new(
+                "connect_access_serial_total",
+                "Authenticated CONNECTs by the client access serial against the projected one",
+            ),
+            &["tenant_id", "state"],
+        )
+        .expect("Failed to create connect_access_serial_total metric");
+
         let _ = REGISTRY.register(Box::new(connections_active.clone()));
         let _ = REGISTRY.register(Box::new(messages_pushed_total.clone()));
         let _ = REGISTRY.register(Box::new(push_success_total.clone()));
@@ -858,6 +869,7 @@ impl AccessGatewayMetrics {
         let _ = REGISTRY.register(Box::new(push_latency_seconds.clone()));
         let _ = REGISTRY.register(Box::new(online_cache_hit_total.clone()));
         let _ = REGISTRY.register(Box::new(online_cache_miss_total.clone()));
+        let _ = REGISTRY.register(Box::new(connect_access_serial_total.clone()));
 
         Self {
             connections_active,
@@ -869,7 +881,28 @@ impl AccessGatewayMetrics {
             push_latency_seconds,
             online_cache_hit_total,
             online_cache_miss_total,
+            connect_access_serial_total,
         }
+    }
+
+    /// 记录一次通过认证的 CONNECT 上报的接入清单 serial：`current` 与投影一致，`behind` 落后，
+    /// `ahead` 领先（投影或缓存还没跟上），`unreported` 没带。
+    /// 采用率 = `current` / (`current` + `behind` + `ahead`)。
+    pub fn record_connect_access_serial(
+        &self,
+        tenant_id: &str,
+        reported: Option<u64>,
+        projected: u64,
+    ) {
+        let state = match reported {
+            None => "unreported",
+            Some(serial) if serial == projected => "current",
+            Some(serial) if serial < projected => "behind",
+            Some(_) => "ahead",
+        };
+        self.connect_access_serial_total
+            .with_label_values(&[tenant_label(tenant_id), state])
+            .inc();
     }
 
     /// 记录一次向某用户的推送投递结果。

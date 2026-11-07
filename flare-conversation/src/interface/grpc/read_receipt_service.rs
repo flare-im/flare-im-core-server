@@ -71,7 +71,7 @@ impl MessageReadReceiptService for ConversationGrpcHandler {
         };
         let conversation_id = req.conversation_id.trim().to_string();
         let server_msg_id = req.server_msg_id.trim().to_string();
-        let page = self
+        let mut page = self
             .query_handler
             .handle_list_message_readers(
                 &ctx,
@@ -85,6 +85,11 @@ impl MessageReadReceiptService for ConversationGrpcHandler {
             )
             .await
             .into_grpc()?;
+        if !self.can_disclose_roster(&ctx, &conversation_id).await? {
+            page.user_ids.clear();
+            page.next_cursor.clear();
+            page.has_more = false;
+        }
         Ok(Response::new(ListMessageReadersResponse {
             summary: page
                 .counts

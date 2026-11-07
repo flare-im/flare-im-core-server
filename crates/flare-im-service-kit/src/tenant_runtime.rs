@@ -1,19 +1,24 @@
-//! 租户运行时缓存：网关 / ingest / sync 读取控制面投影（`tenants` 表）的唯一入口。
+//! 租户运行时缓存：网关 / ingest / sync 读取控制面投影（`tenants`、`tenant_client_policy` 表）的
+//! 唯一入口。
 //!
-//! - 进程内、按租户缓存 `{status, quota, version}` 快照；每租户每个刷新周期（默认 1s）最多
-//!   回源一次，同一租户的并发未命中合并为一次查询。
+//! - 进程内、按租户缓存 `{status, quota, version}` 快照与客户端策略；每张表每租户每个刷新周期
+//!   （默认 1s）最多回源一次，同一租户的并发未命中合并为一次查询。
 //! - 有界（默认 1024 个租户），超出按 LRU 淘汰；未知租户与回源失败同样按周期缓存，
 //!   避免热路径反复打库。
 //! - 回源是一张单行小表的点查，读整行与「只查版本」代价相同，所以直接以整行替代版本轮询。
 //! - 没有配置数据库时为 `disabled`：所有查询返回 [`TenantLookup::Unknown`]，由调用方按
 //!   [`TenantAccessPolicy`] 决定放行或拒绝；限流回落全局配置。
+//! - 客户端策略与租户状态分开缓存：应用可以先有策略后有租户投影，策略读不到也不影响接入，
+//!   只是这段时间报不出 serial。
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
 use flare_im_contracts::domain::tenant::{
-    TenantCoreQuota, TenantQuota, TenantRuntimeSnapshot, TenantStatus,
+    ClientBuildPolicy, TenantClientPolicy, TenantCoreQuota, TenantQuota, TenantRuntimeSnapshot,
+    TenantStatus,
 };
 use flare_im_contracts::utils::normalize_tenant_id;
 use moka::future::Cache;
@@ -94,10 +99,18 @@ impl TenantLookup {
     }
 }
 
-/// 回源接口：默认实现读 PostgreSQL `tenants` 表；测试可注入内存实现。
+/// 回源接口：默认实现读 PostgreSQL `tenants` 与 `tenant_client_policy` 表；测试可注入内存实现。
 #[async_trait]
 pub trait TenantRuntimeSource: Send + Sync + 'static {
     async fn load(&self, tenant_id: &str) -> Result<Option<TenantRuntimeSnapshot>, String>;
+
+    /// 应用的客户端策略；没有这一行返回 `None`。
+    async fn load_client_policy(
+        &self,
+        _tenant_id: &str,
+    ) -> Result<Option<TenantClientPolicy>, String> {
+        Ok(None)
+    }
 }
 
 /// PostgreSQL 回源：`SELECT status, quota, version FROM tenants WHERE tenant_id = $1`。
@@ -158,6 +171,43 @@ impl TenantRuntimeSource for PgTenantRuntimeSource {
             version: u64::try_from(version).unwrap_or(0),
         }))
     }
+
+    async fn load_client_policy(
+        &self,
+        tenant_id: &str,
+    ) -> Result<Option<TenantClientPolicy>, String> {
+        let row = sqlx::query(
+            "SELECT version, access_serial, release_generation, build_policies::text AS build_policies \
+             FROM tenant_client_policy WHERE tenant_id = $1",
+        )
+        .bind(tenant_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| format!("tenant_client_policy lookup failed: {e}"))?;
+
+        let Some(row) = row else {
+            return Ok(None);
+        };
+        let column = |name: &'static str| {
+            row.try_get::<i64, _>(name)
+                .map(|value| u64::try_from(value).unwrap_or(0))
+                .map_err(|e| format!("tenant_client_policy.{name}: {e}"))
+        };
+        let build_policies: String = row
+            .try_get("build_policies")
+            .map_err(|e| format!("tenant_client_policy.build_policies: {e}"))?;
+        let build_policies =
+            serde_json::from_str::<BTreeMap<String, ClientBuildPolicy>>(&build_policies)
+                .map_err(|e| format!("tenant_client_policy.build_policies: {e}"))?;
+
+        Ok(Some(TenantClientPolicy {
+            tenant_id: tenant_id.to_string(),
+            version: column("version")?,
+            access_serial: column("access_serial")?,
+            release_generation: column("release_generation")?,
+            build_policies,
+        }))
+    }
 }
 
 /// 缓存参数。
@@ -181,6 +231,7 @@ impl Default for TenantRuntimeCacheOptions {
 struct Inner {
     source: Arc<dyn TenantRuntimeSource>,
     cache: Cache<String, TenantLookup>,
+    client_policies: Cache<String, Option<Arc<TenantClientPolicy>>>,
     kick_fence: Option<crate::tenant_kick_fence::TenantKickFence>,
 }
 
@@ -216,14 +267,21 @@ impl TenantRuntimeCache {
         options: TenantRuntimeCacheOptions,
         kick_fence: Option<crate::tenant_kick_fence::TenantKickFence>,
     ) -> Self {
+        let capacity = options.capacity.max(1);
+        let time_to_live = options.refresh_interval.max(Duration::from_millis(1));
         let cache = Cache::builder()
-            .max_capacity(options.capacity.max(1))
-            .time_to_live(options.refresh_interval.max(Duration::from_millis(1)))
+            .max_capacity(capacity)
+            .time_to_live(time_to_live)
+            .build();
+        let client_policies = Cache::builder()
+            .max_capacity(capacity)
+            .time_to_live(time_to_live)
             .build();
         Self {
             inner: Some(Arc::new(Inner {
                 source,
                 cache,
+                client_policies,
                 kick_fence,
             })),
         }
@@ -278,10 +336,38 @@ impl TenantRuntimeCache {
         self.lookup(tenant_id).await.core_quota()
     }
 
+    /// 应用的客户端策略；没有投影、缓存未启用或回源失败时为 `None`。回源失败同样按周期缓存。
+    pub async fn client_policy(&self, tenant_id: &str) -> Option<Arc<TenantClientPolicy>> {
+        let inner = self.inner.as_ref()?;
+        let key = normalize_tenant_id(tenant_id);
+        let source = Arc::clone(&inner.source);
+        let load_key = key.clone();
+        inner
+            .client_policies
+            .get_with(key, async move {
+                match source.load_client_policy(&load_key).await {
+                    Ok(policy) => policy.map(Arc::new),
+                    Err(error) => {
+                        tracing::warn!(tenant_id = %load_key, %error, "client policy lookup failed");
+                        None
+                    }
+                }
+            })
+            .await
+    }
+
+    /// 应用已发布的接入清单 serial；读不到为 0（客户端据此不刷新）。
+    pub async fn access_serial(&self, tenant_id: &str) -> u64 {
+        self.client_policy(tenant_id)
+            .await
+            .map_or(0, |policy| policy.access_serial)
+    }
+
     /// 让淘汰 / 过期立即生效（测试与诊断用）。
     pub async fn run_pending_tasks(&self) {
         if let Some(inner) = self.inner.as_ref() {
             inner.cache.run_pending_tasks().await;
+            inner.client_policies.run_pending_tasks().await;
         }
     }
 
@@ -312,6 +398,8 @@ mod tests {
 
     struct MemorySource {
         rows: Mutex<HashMap<String, TenantRuntimeSnapshot>>,
+        policies: Mutex<HashMap<String, TenantClientPolicy>>,
+        policy_loads: AtomicUsize,
         loads: AtomicUsize,
         fail: std::sync::atomic::AtomicBool,
     }
@@ -320,6 +408,8 @@ mod tests {
         fn new() -> Arc<Self> {
             Arc::new(Self {
                 rows: Mutex::new(HashMap::new()),
+                policies: Mutex::new(HashMap::new()),
+                policy_loads: AtomicUsize::new(0),
                 loads: AtomicUsize::new(0),
                 fail: std::sync::atomic::AtomicBool::new(false),
             })
@@ -345,6 +435,26 @@ mod tests {
                 return Err("db down".to_string());
             }
             Ok(self.rows.lock().unwrap().get(tenant_id).cloned())
+        }
+
+        async fn load_client_policy(
+            &self,
+            tenant_id: &str,
+        ) -> Result<Option<TenantClientPolicy>, String> {
+            self.policy_loads.fetch_add(1, Ordering::SeqCst);
+            if self.fail.load(Ordering::SeqCst) {
+                return Err("db down".to_string());
+            }
+            Ok(self.policies.lock().unwrap().get(tenant_id).cloned())
+        }
+    }
+
+    fn policy(tenant_id: &str, access_serial: u64) -> TenantClientPolicy {
+        TenantClientPolicy {
+            tenant_id: tenant_id.to_string(),
+            version: access_serial,
+            access_serial,
+            ..Default::default()
         }
     }
 
@@ -481,6 +591,58 @@ mod tests {
         assert!(!cache.is_enabled());
         assert!(matches!(cache.lookup("t1").await, TenantLookup::Unknown));
         assert_eq!(cache.core_quota("t1").await, TenantCoreQuota::default());
+        assert!(cache.client_policy("t1").await.is_none());
+        assert_eq!(cache.access_serial("t1").await, 0);
+    }
+
+    #[tokio::test]
+    async fn the_client_policy_is_read_at_most_once_per_interval_without_a_tenant_row() {
+        let source = MemorySource::new();
+        source
+            .policies
+            .lock()
+            .unwrap()
+            .insert("t1".into(), policy("t1", 7));
+        let cache = cache(&source, Duration::from_millis(80), 1024);
+
+        for _ in 0..5 {
+            assert_eq!(cache.access_serial("t1").await, 7);
+        }
+        assert_eq!(source.policy_loads.load(Ordering::SeqCst), 1);
+        assert!(matches!(cache.lookup("t1").await, TenantLookup::Unknown));
+
+        source
+            .policies
+            .lock()
+            .unwrap()
+            .insert("t1".into(), policy("t1", 8));
+        assert_eq!(
+            cache.access_serial("t1").await,
+            7,
+            "still inside the interval"
+        );
+        tokio::time::sleep(Duration::from_millis(120)).await;
+        assert_eq!(cache.access_serial("t1").await, 8);
+        assert_eq!(source.policy_loads.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn an_unreadable_client_policy_reads_as_serial_zero_and_is_cached_too() {
+        let source = MemorySource::new();
+        source.fail.store(true, Ordering::SeqCst);
+        let cache = cache(&source, Duration::from_secs(5), 1024);
+
+        assert_eq!(cache.access_serial("t1").await, 0);
+        assert_eq!(cache.access_serial("t1").await, 0);
+        assert_eq!(source.policy_loads.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn an_absent_client_policy_reads_as_serial_zero() {
+        let source = MemorySource::new();
+        let cache = cache(&source, Duration::from_secs(5), 1024);
+        assert!(cache.client_policy("ghost").await.is_none());
+        assert_eq!(cache.access_serial("").await, 0);
     }
 
     #[test]

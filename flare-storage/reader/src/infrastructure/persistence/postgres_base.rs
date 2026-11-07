@@ -467,6 +467,9 @@ impl PostgresBaseStorage {
             extra_map.insert(PLUGIN_SHARED_STATE_VERSION_KEY.to_string(), shared.version);
             extra_map.insert(PLUGIN_SHARED_ENTITY_KEY.to_string(), shared.entity);
         }
+        if extra_map.contains_key("__sync_skip") {
+            extra_map.retain(|key, _| key == "__sync_skip");
+        }
 
         let offline_push_proto = offline_push_info.as_ref().and_then(|v| {
             let o = v.as_object()?;

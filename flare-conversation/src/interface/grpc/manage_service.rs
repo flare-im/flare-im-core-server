@@ -201,6 +201,20 @@ impl ConversationManageService for ConversationGrpcHandler {
         }))
     }
 
+    async fn clear_conversation_history(
+        &self,
+        request: Request<flare_grpc_proto::conversation::ClearConversationHistoryRequest>,
+    ) -> Result<Response<flare_grpc_proto::conversation::ClearConversationHistoryResponse>, Status> {
+        use flare_grpc_proto::conversation::ClearConversationHistoryResponse;
+        let ctx = authorize_purge_history(request.metadata(), self.purge_verifier.as_ref())?;
+        let cleared_through_seq = self
+            .command_handler
+            .handle_clear_history_for_everyone(&ctx, &request.into_inner().conversation_id)
+            .await
+            .into_grpc()?;
+        Ok(Response::new(ClearConversationHistoryResponse { cleared_through_seq }))
+    }
+
     async fn manage_participants(
         &self,
         request: Request<ManageParticipantsRequest>,
@@ -254,7 +268,7 @@ impl ConversationManageService for ConversationGrpcHandler {
             .as_ref()
             .and_then(|p| p.cursor.parse::<usize>().ok())
             .unwrap_or(0);
-        let (summaries, total) = self
+        let (mut summaries, total) = self
             .query_handler
             .handle_search_conversations(
                 &ctx,
@@ -267,6 +281,7 @@ impl ConversationManageService for ConversationGrpcHandler {
             )
             .await
             .into_grpc()?;
+        self.protect_member_previews(&ctx, &mut summaries).await;
         let conversations: Vec<_> = summaries.into_iter().map(proto_summary).collect();
         Ok(Response::new(SearchConversationsResponse {
             conversations,
@@ -337,6 +352,7 @@ impl ConversationManageService for ConversationGrpcHandler {
                     is_archived: req.is_archived,
                     draft: req.draft,
                     base_settings_version: req.base_settings_version,
+                    clear_history_through_seq: req.clear_history_through_seq,
                 },
             )
             .await
@@ -350,6 +366,7 @@ impl ConversationManageService for ConversationGrpcHandler {
                 draft: settings.draft.unwrap_or_default(),
                 settings_version: settings.settings_version,
                 is_mention_only: settings.is_mention_only,
+                history_cleared_through_seq: Some(settings.history_cleared_through_seq),
             }),
         }))
     }

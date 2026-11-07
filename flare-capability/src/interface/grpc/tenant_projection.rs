@@ -5,7 +5,9 @@
 //! - `UpsertFeatureFlags`：核只有能力开关（`CapabilityService.SetTenantCapabilitySwitch`），返回 `Unimplemented`。
 //!
 //! - `UpsertPlugins`：按 version 幂等替换插件授权投影；接受更新的版本后发租户通知
-//!   `plugin.catalog.changed`，在线客户端据此刷新插件目录。
+//!   `flare.plugin.catalog`，在线客户端据此刷新插件目录。
+//! - `UpsertClientPolicy`：按 version 幂等写 `tenant_client_policy`；水位前进时在同一事务里排队
+//!   `flare.access` / `flare.release` 通知，由后台中继发出。
 //!
 //! 所有投影 RPC 均验证平台公钥（`FLARE_PLATFORM_PUBLIC_KEY`）签的 worker 控制断言并绑定租户；
 //! 内网监听不构成授权。员工不经这里：他们的 Staff 上下文只到 admin-gateway 与管理 RPC。
@@ -15,9 +17,11 @@ use std::sync::Arc;
 
 use flare_grpc_proto::control::tenant_projection_server::TenantProjection;
 use flare_grpc_proto::control::{
-    CredentialsProjectionUpsert, FeatureFlagsProjectionUpsert, GetVersionsRequest, ProjectionAck,
-    ProjectionVersions, RoleBundleProjectionUpsert, TenantProjectionUpsert, TenantVersions,
+    ClientPolicyUpsert, CredentialsProjectionUpsert, FeatureFlagsProjectionUpsert,
+    GetVersionsRequest, ProjectionAck, ProjectionVersions, RoleBundleProjectionUpsert,
+    TenantProjectionUpsert, TenantVersions,
 };
+use flare_im_contracts::domain::tenant::{ClientBuildPolicy, ClientBuildRange};
 use flare_im_service_kit::control_auth::{
     PlatformActorKind, PlatformAssertionVerifier, require_platform_assertion,
 };
@@ -27,11 +31,12 @@ use flare_server_core::auth::credential_snapshot::{
 use flare_server_core::error::grpc::IntoGrpc;
 use tonic::{Request, Response, Status};
 
-use crate::application::commands::apply_tenant_projection;
+use crate::application::commands::{apply_client_policy, apply_tenant_projection};
 use crate::application::queries::tenant_projection_versions;
-use crate::domain::model::TenantProjectionRecord;
+use crate::domain::model::{ClientPolicyRecord, TenantProjectionRecord};
 use crate::domain::repository::TenantProjectionRepository;
 use crate::domain::repository::tenant_notice::TenantNotices;
+use flare_im_service_kit::tenant_notice::PLUGIN_CATALOG_TOPIC;
 
 fn credentials_snapshot(req: CredentialsProjectionUpsert) -> Result<CredentialSnapshot, Status> {
     let invalid = || Status::invalid_argument("invalid credential projection");
@@ -60,6 +65,39 @@ fn credentials_snapshot(req: CredentialsProjectionUpsert) -> Result<CredentialSn
         })
         .collect::<Result<Vec<_>, Status>>()?;
     CredentialSnapshot::new(req.app_id, req.version, keys).map_err(|_| invalid())
+}
+
+fn client_policy_record(req: ClientPolicyUpsert) -> Result<ClientPolicyRecord, Status> {
+    let build_policies = req
+        .build_policies
+        .into_iter()
+        .map(|(platform, policy)| {
+            let blocked = policy
+                .blocked
+                .into_iter()
+                .map(|range| ClientBuildRange {
+                    from: range.from,
+                    to: range.to,
+                })
+                .collect();
+            (
+                platform,
+                ClientBuildPolicy {
+                    min_build: policy.min_build,
+                    min_build_effective_from_ms: policy.min_build_effective_from_ms,
+                    blocked,
+                },
+            )
+        })
+        .collect();
+    ClientPolicyRecord::new(
+        req.app_id,
+        req.version,
+        req.access_serial,
+        req.release_generation,
+        build_policies,
+    )
+    .map_err(|e| Status::invalid_argument(e.to_string()))
 }
 
 pub struct TenantProjectionGrpcServer<R: TenantProjectionRepository + 'static> {
@@ -123,10 +161,12 @@ impl<R: TenantProjectionRepository + 'static> TenantProjection for TenantProject
         // Committed above; an older or equal version changes nothing and says nothing.
         if outcome.accepted
             && let Some(notices) = &self.notices
+            && let Err(error) = notices
+                .publish(&snapshot.tenant_id, PLUGIN_CATALOG_TOPIC, snapshot.version)
+                .await
         {
-            notices
-                .plugin_catalog_changed(&snapshot.tenant_id, snapshot.version)
-                .await;
+            // Best effort: clients that miss it refresh their catalog on reconnect.
+            tracing::warn!(%error, tenant_id = %snapshot.tenant_id, "plugin catalog notice not published");
         }
         Ok(Response::new(ProjectionAck {
             accepted: outcome.accepted,
@@ -144,6 +184,22 @@ impl<R: TenantProjectionRepository + 'static> TenantProjection for TenantProject
         let outcome = self
             .repository
             .replace_credentials(&snapshot)
+            .await
+            .into_grpc()?;
+        Ok(Response::new(ProjectionAck {
+            accepted: outcome.accepted,
+            current_version: outcome.current_version,
+        }))
+    }
+    async fn upsert_client_policy(
+        &self,
+        request: Request<ClientPolicyUpsert>,
+    ) -> Result<Response<ProjectionAck>, Status> {
+        let actor = require_platform_assertion(&request, self.control_verifier.as_ref())?;
+        actor.require_kind(PlatformActorKind::ProjectionWorker)?;
+        actor.require_tenant(&request.get_ref().app_id)?;
+        let record = client_policy_record(request.into_inner())?;
+        let outcome = apply_client_policy(self.repository.as_ref(), &record)
             .await
             .into_grpc()?;
         Ok(Response::new(ProjectionAck {
@@ -241,6 +297,7 @@ impl<R: TenantProjectionRepository + 'static> TenantProjection for TenantProject
                         credentials_version: 0,
                         role_bundle_version: 0,
                         plugins_version: 0,
+                        client_policy_version: 0,
                     },
                 )
             })
@@ -255,6 +312,14 @@ impl<R: TenantProjectionRepository + 'static> TenantProjection for TenantProject
         }
         for (app, version) in self.repository.plugin_versions(&ids).await.into_grpc()? {
             versions.entry(app).or_default().plugins_version = version;
+        }
+        for (app, version) in self
+            .repository
+            .client_policy_versions(&ids)
+            .await
+            .into_grpc()?
+        {
+            versions.entry(app).or_default().client_policy_version = version;
         }
         Ok(Response::new(ProjectionVersions { versions }))
     }
@@ -278,6 +343,7 @@ mod tests {
         plugins: Mutex<
             HashMap<String, flare_im_capability_core::plugin::runtime::PluginRuntimeSnapshot>,
         >,
+        client_policies: Mutex<HashMap<String, ClientPolicyRecord>>,
     }
 
     #[async_trait::async_trait]
@@ -332,6 +398,31 @@ mod tests {
                 .iter()
                 .filter(|(id, _)| ids.is_empty() || ids.contains(id))
                 .map(|(id, p)| (id.clone(), p.version() as u64))
+                .collect())
+        }
+        async fn upsert_client_policy(
+            &self,
+            record: &ClientPolicyRecord,
+        ) -> FlareResult<TenantProjectionOutcome> {
+            let mut rows = self.client_policies.lock().unwrap();
+            let current = rows.get(&record.tenant_id).map_or(0, |row| row.version);
+            let accepted = record.version > current;
+            if accepted {
+                rows.insert(record.tenant_id.clone(), record.clone());
+            }
+            Ok(TenantProjectionOutcome {
+                accepted,
+                current_version: current.max(record.version),
+            })
+        }
+        async fn client_policy_versions(&self, ids: &[String]) -> FlareResult<Vec<(String, u64)>> {
+            Ok(self
+                .client_policies
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|(id, _)| ids.is_empty() || ids.contains(id))
+                .map(|(id, row)| (id.clone(), row.version))
                 .collect())
         }
         async fn upsert_if_newer(
@@ -404,8 +495,18 @@ mod tests {
 
     #[async_trait::async_trait]
     impl TenantNotices for RecordedNotices {
-        async fn plugin_catalog_changed(&self, tenant_id: &str, version: u64) {
+        async fn publish(
+            &self,
+            tenant_id: &str,
+            topic: &str,
+            version: u64,
+        ) -> flare_server_core::error::Result<crate::domain::model::NoticeOutcome> {
+            assert_eq!(topic, PLUGIN_CATALOG_TOPIC);
             self.0.lock().unwrap().push((tenant_id.into(), version));
+            Ok(crate::domain::model::NoticeOutcome {
+                accepted: true,
+                current_version: version,
+            })
         }
     }
 
@@ -423,6 +524,7 @@ mod tests {
             app_id: "app-a".into(),
             version,
             snapshot_json: serde_json::to_vec(&PluginRuntimeSnapshot {
+                organization_id: Some("org-1".into()),
                 tenant_id: "app-a".into(),
                 version,
                 issued_at_ms: now,
@@ -457,6 +559,7 @@ mod tests {
         let (_, server) = server();
         let now = chrono::Utc::now().timestamp_millis();
         let snapshot = PluginRuntimeSnapshot {
+            organization_id: Some("org-1".into()),
             tenant_id: "app-a".into(),
             version: 17,
             issued_at_ms: now,
@@ -649,6 +752,110 @@ mod tests {
             .metadata_mut()
             .insert("authorization", format!("Bearer {token}").parse().unwrap());
         request
+    }
+
+    fn client_policy(app_id: &str, version: u64, access_serial: u64) -> ClientPolicyUpsert {
+        use flare_grpc_proto::control::{BuildPolicy, BuildRange};
+        ClientPolicyUpsert {
+            app_id: app_id.into(),
+            version,
+            access_serial,
+            release_generation: 2,
+            build_policies: HashMap::from([(
+                "android".to_string(),
+                BuildPolicy {
+                    min_build: 120,
+                    min_build_effective_from_ms: 1_700_000_000_000,
+                    blocked: vec![BuildRange { from: 130, to: 135 }],
+                },
+            )]),
+        }
+    }
+
+    #[tokio::test]
+    async fn client_policy_is_idempotent_by_version_and_reported_for_reconciliation() {
+        let (repo, server) = server();
+        let upsert = |version, serial| {
+            let server = server.clone();
+            async move {
+                server
+                    .upsert_client_policy(authed(client_policy("app-a", version, serial), "app-a"))
+                    .await
+                    .unwrap()
+                    .into_inner()
+            }
+        };
+        let ack = upsert(5, 40).await;
+        assert!(ack.accepted);
+        assert_eq!(ack.current_version, 5);
+        for (version, serial) in [(5, 41), (4, 42)] {
+            let ack = upsert(version, serial).await;
+            assert!(!ack.accepted, "version {version}");
+            assert_eq!(ack.current_version, 5);
+        }
+        let stored = repo.client_policies.lock().unwrap()["app-a"].clone();
+        assert_eq!(stored.access_serial, 40);
+        assert_eq!(stored.release_generation, 2);
+        assert_eq!(stored.build_policies["android"].min_build, 120);
+        assert_eq!(
+            stored.build_policies["android"].blocked,
+            vec![ClientBuildRange { from: 130, to: 135 }]
+        );
+
+        let versions = server
+            .get_versions(authed(
+                GetVersionsRequest {
+                    im_tenant_ids: vec!["app-a".into()],
+                },
+                "app-a",
+            ))
+            .await
+            .unwrap()
+            .into_inner()
+            .versions;
+        assert_eq!(versions["app-a"].client_policy_version, 5);
+    }
+
+    #[tokio::test]
+    async fn client_policy_requires_the_worker_of_exactly_that_app() {
+        let (repo, server) = server();
+        let denied = [
+            authed(client_policy("app-a", 1, 1), "app-b"),
+            authed(client_policy("app-a", 1, 1), "*"),
+            signed_request(
+                client_policy("app-a", 1, 1),
+                "app-a",
+                flare_im_service_kit::control_auth::SCHEDULER_SUBJECT,
+                flare_im_service_kit::control_auth::CORE_PROJECTION_AUDIENCE,
+            ),
+        ];
+        for request in denied {
+            assert_eq!(
+                server
+                    .upsert_client_policy(request)
+                    .await
+                    .unwrap_err()
+                    .code(),
+                tonic::Code::PermissionDenied
+            );
+        }
+        assert_eq!(
+            server
+                .upsert_client_policy(Request::new(client_policy("app-a", 1, 1)))
+                .await
+                .unwrap_err()
+                .code(),
+            tonic::Code::Unauthenticated
+        );
+        assert_eq!(
+            server
+                .upsert_client_policy(authed(client_policy("app-a", 0, 1), "app-a"))
+                .await
+                .unwrap_err()
+                .code(),
+            tonic::Code::InvalidArgument
+        );
+        assert!(repo.client_policies.lock().unwrap().is_empty());
     }
 
     #[tokio::test]

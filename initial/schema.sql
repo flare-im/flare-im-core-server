@@ -1,0 +1,1242 @@
+-- ============================================================================
+-- Single fresh Core communication schema. Not an existing-database migration.
+-- ============================================================================
+-- 设计依据:
+--   - common/message.proto   (Message, MessageStatus, MessageSource, MessageType, MessageTimeline, MessageReadRecord)
+--   - common/conversation.proto (ConversationDetail, ConversationParticipant, ConversationLight/Summary, DevicePresence)
+--   - common/event.proto     (Event, EventType, *Event payloads)
+--   - common/models.proto    (PinnedMessageInfo, MarkedMessageInfo, EditHistory, Reaction, ThreadInfo)
+--   - common/enums.proto     (DeleteType, MarkType, ReactionAction)
+--   - storage.proto         (StoreMessage, VisibilityStatus)
+--   - flare-capability: hook_configs / hook_executions（Hook 引擎）；capability_*（CapabilityService 策略）
+-- 数据库: PostgreSQL + TimescaleDB
+-- Business directories, subscriptions and product policy do not belong here.
+-- 可选标记 FLARE_EXTRACT:* 仅用于在编辑器中定位第 9 节（Hook+Capability）起止；改该节 DDL 时请保持两标记包住完整 DROP/CREATE。
+-- ============================================================================
+
+CREATE EXTENSION IF NOT EXISTS timescaledb;
+
+-- ============================================================================
+-- 1. 租户与支撑层
+-- ============================================================================
+
+-- 租户投影（真源在控制面；核经 flare.control.v1.TenantProjection 接收，只按 version 幂等写入，业务路径只读）
+CREATE TABLE tenants (
+    tenant_id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    description TEXT,
+    status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'suspended', 'deleting')),
+    config JSONB DEFAULT '{}'::jsonb,
+    quota JSONB DEFAULT '{}'::jsonb,
+    version BIGINT NOT NULL DEFAULT 0,
+    projected_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+);
+COMMENT ON TABLE tenants IS '租户投影表（真源在控制面，核只按 version 幂等写入）';
+COMMENT ON COLUMN tenants.tenant_id IS '明确应用通信命名空间；仅接受权威投影，无默认活跃命名空间';
+COMMENT ON COLUMN tenants.name IS '租户名称';
+COMMENT ON COLUMN tenants.description IS '租户描述';
+COMMENT ON COLUMN tenants.status IS '状态：active / suspended / deleting（suspended 与 deleting 都拒绝新连接）';
+COMMENT ON COLUMN tenants.config IS '控制面透传的 settings_json（品牌 / locale 等，核不解释）';
+COMMENT ON COLUMN tenants.quota IS '上层配额快照；Core仅解释通信预算core命名空间，其余业务字段透传';
+COMMENT ON COLUMN tenants.version IS '控制面全局单调版本；收到的 version 不大于本值即丢弃';
+COMMENT ON COLUMN tenants.projected_at IS '最近一次接受投影的时间';
+COMMENT ON COLUMN tenants.created_at IS '创建时间';
+COMMENT ON COLUMN tenants.updated_at IS '更新时间';
+CREATE INDEX IF NOT EXISTS idx_tenants_status ON tenants(status);
+
+CREATE TABLE alert_rules (
+    rule_id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    metric_name TEXT NOT NULL,
+    condition TEXT NOT NULL,
+    threshold TEXT NOT NULL,
+    duration_seconds INTEGER NOT NULL DEFAULT 300,
+    notification_channels TEXT[],
+    enabled BOOLEAN DEFAULT TRUE,
+    created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+);
+COMMENT ON TABLE alert_rules IS '告警规则表';
+COMMENT ON COLUMN alert_rules.rule_id IS '规则 ID（主键）';
+COMMENT ON COLUMN alert_rules.name IS '规则名称';
+COMMENT ON COLUMN alert_rules.metric_name IS '指标名称';
+COMMENT ON COLUMN alert_rules.condition IS '触发条件';
+COMMENT ON COLUMN alert_rules.threshold IS '阈值';
+COMMENT ON COLUMN alert_rules.duration_seconds IS '持续时长（秒）';
+COMMENT ON COLUMN alert_rules.notification_channels IS '通知渠道列表';
+COMMENT ON COLUMN alert_rules.enabled IS '是否启用';
+COMMENT ON COLUMN alert_rules.created_at IS '创建时间';
+COMMENT ON COLUMN alert_rules.updated_at IS '更新时间';
+CREATE INDEX IF NOT EXISTS idx_alert_rules_enabled ON alert_rules(enabled);
+
+CREATE TABLE alert_history (
+    alert_id TEXT PRIMARY KEY,
+    rule_id TEXT NOT NULL,
+    metric_name TEXT NOT NULL,
+    current_value DOUBLE PRECISION NOT NULL,
+    threshold TEXT NOT NULL,
+    severity TEXT NOT NULL,
+    triggered_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    resolved_at TIMESTAMPTZ
+);
+COMMENT ON TABLE alert_history IS '告警历史表';
+COMMENT ON COLUMN alert_history.alert_id IS '告警 ID（主键）';
+COMMENT ON COLUMN alert_history.rule_id IS '关联规则 ID';
+COMMENT ON COLUMN alert_history.metric_name IS '指标名称';
+COMMENT ON COLUMN alert_history.current_value IS '当前指标值';
+COMMENT ON COLUMN alert_history.threshold IS '阈值';
+COMMENT ON COLUMN alert_history.severity IS '严重程度';
+COMMENT ON COLUMN alert_history.triggered_at IS '触发时间';
+COMMENT ON COLUMN alert_history.resolved_at IS '恢复时间';
+CREATE INDEX IF NOT EXISTS idx_alert_history_triggered_at ON alert_history(triggered_at);
+
+-- ============================================================================
+-- 2. Message 聚合根（common/message.proto Message）
+-- ============================================================================
+-- 与 proto 严格对齐：无 receiver_id，单聊时 channel_id=对方 user_id。
+-- FSM: MESSAGE_STATUS_CREATED → SENT → DELIVERED → READ | RECALLED | DELETED_SOFT | DELETED_HARD
+
+CREATE TABLE messages (
+    tenant_id TEXT NOT NULL,
+    server_id TEXT NOT NULL,
+    conversation_id TEXT NOT NULL,
+    client_msg_id TEXT,
+    sender_id TEXT NOT NULL,
+    sender_name TEXT,
+    sender_avatar TEXT,
+    channel_id TEXT,
+    thread_id TEXT,
+    source INT NOT NULL DEFAULT 1,  -- MessageSource: USER=1, SYSTEM=2, BOT=3, ADMIN=4
+    seq BIGINT NOT NULL,
+    timestamp TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    conversation_type INT NOT NULL DEFAULT 0,  -- ConversationType: SINGLE=1, GROUP=2, AI=3, SYSTEM=4, CUSTOMER=5, TEMP=6
+    message_type INT NOT NULL DEFAULT 0,      -- MessageType 枚举值
+    content BYTEA,
+    status INT NOT NULL DEFAULT 1,  -- MessageStatus: CREATED=1, SENT=2, PERSISTED=3, FAILED=4, RECALLED=5, DELETED=6
+    burn_enabled BOOLEAN NOT NULL DEFAULT FALSE,
+    burn_after_read_seconds BIGINT,
+    burn_status SMALLINT NOT NULL DEFAULT 0, -- BurnStatus: NONE=0 INIT=1 READ=2 BURN_PENDING=3 BURNED=4 HARD_DELETED=5
+    first_read_at BIGINT,
+    burn_at BIGINT,
+    burned_at BIGINT,
+    offline_push_info JSONB,
+    extra JSONB DEFAULT '{}'::jsonb,
+    extensions JSONB DEFAULT '{}'::jsonb,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    persisted_at TIMESTAMPTZ,
+    delivered_at TIMESTAMPTZ,
+    PRIMARY KEY (created_at, server_id)
+);
+COMMENT ON TABLE messages IS 'Message 聚合根（common/message.proto）；一会话一流，seq 主序';
+COMMENT ON COLUMN messages.tenant_id IS '租户 ID（多租户隔离，非 proto 字段）';
+COMMENT ON COLUMN messages.server_id IS '服务端消息 ID（全局唯一）';
+COMMENT ON COLUMN messages.conversation_id IS '会话 ID';
+COMMENT ON COLUMN messages.client_msg_id IS '客户端消息 ID（去重/幂等）';
+COMMENT ON COLUMN messages.sender_id IS '发送者 ID';
+COMMENT ON COLUMN messages.sender_name IS '发送者昵称（展示用，可选）';
+COMMENT ON COLUMN messages.sender_avatar IS '发送者头像 URL（展示用，可选）';
+COMMENT ON COLUMN messages.thread_id IS '话题/线程根消息 ID；普通消息为空';
+COMMENT ON COLUMN messages.channel_id IS '会话频道 ID：单聊=对方 user_id，群聊=群 ID，频道/话题=对应 ID（proto 无 receiver_id）';
+COMMENT ON COLUMN messages.source IS '消息来源：1=USER 2=SYSTEM 3=BOT 4=ADMIN';
+COMMENT ON COLUMN messages.seq IS '会话内序列号（读扩散主序）';
+COMMENT ON COLUMN messages.timestamp IS '消息时间戳';
+COMMENT ON COLUMN messages.conversation_type IS '会话类型：0=UNSPECIFIED 1=SINGLE 2=GROUP 3=AI 4=SYSTEM 5=CUSTOMER 6=TEMP（与 CID 前缀一致）';
+COMMENT ON COLUMN messages.message_type IS '消息类型（MessageType 枚举值，见 message.proto）';
+COMMENT ON COLUMN messages.content IS '消息体 bytes（按 message_type 解析，见 message_content.proto）';
+COMMENT ON COLUMN messages.status IS '协议生命周期：1=CREATED 2=SENT 3=PERSISTED 4=FAILED 5=RECALLED 6=DELETED；投递/已读为用户维度事件';
+COMMENT ON COLUMN messages.burn_enabled IS '是否启用阅后即焚';
+COMMENT ON COLUMN messages.burn_after_read_seconds IS '首次阅读后多少秒焚毁';
+COMMENT ON COLUMN messages.burn_status IS '阅后即焚状态：0=NONE 1=INIT 2=READ 3=BURN_PENDING 4=BURNED 5=HARD_DELETED';
+COMMENT ON COLUMN messages.first_read_at IS '首次真实阅读时间（Unix 秒，服务端写入）';
+COMMENT ON COLUMN messages.burn_at IS '服务端权威焚毁时间（Unix 秒）';
+COMMENT ON COLUMN messages.burned_at IS '实际焚毁时间（Unix 秒）';
+COMMENT ON COLUMN messages.offline_push_info IS '离线推送展示（OfflinePushInfo JSON）';
+COMMENT ON COLUMN messages.extra IS '扩展键值（仅用于非稳定扩展语义）';
+COMMENT ON COLUMN messages.extensions IS '业务扩展（key 建议命名空间）';
+COMMENT ON COLUMN messages.created_at IS '入库时间（Hypertable 分区键）';
+COMMENT ON COLUMN messages.persisted_at IS '持久化完成时间（MessageTimeline.persisted_at）';
+COMMENT ON COLUMN messages.delivered_at IS '投递时间（MessageTimeline.delivered_at）';
+-- TimescaleDB: 唯一索引必须包含分区列 created_at
+CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_tenant_server_id ON messages(tenant_id, server_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_messages_tenant_conv_seq ON messages(tenant_id, conversation_id, seq);
+CREATE INDEX IF NOT EXISTS idx_messages_conversation_ts ON messages(tenant_id, conversation_id, timestamp DESC);
+CREATE INDEX IF NOT EXISTS idx_messages_sender_client ON messages(tenant_id, sender_id, client_msg_id) WHERE client_msg_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_messages_burn_due ON messages(tenant_id, burn_status, burn_at) WHERE burn_status = 3 AND burn_at IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_messages_tenant_timestamp ON messages(tenant_id, timestamp DESC);
+CREATE INDEX IF NOT EXISTS idx_messages_tenant_sender_timestamp ON messages(tenant_id, sender_id, timestamp DESC);
+CREATE INDEX IF NOT EXISTS idx_messages_tenant_message_type_timestamp ON messages(tenant_id, message_type, timestamp DESC);
+CREATE INDEX IF NOT EXISTS idx_messages_tenant_status_timestamp ON messages(tenant_id, status, timestamp DESC);
+CREATE INDEX IF NOT EXISTS idx_messages_tenant_source_timestamp ON messages(tenant_id, source, timestamp DESC);
+CREATE INDEX IF NOT EXISTS idx_messages_tenant_channel_timestamp ON messages(tenant_id, channel_id, timestamp DESC) WHERE channel_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_messages_tenant_thread_seq ON messages(tenant_id, thread_id, seq) WHERE thread_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_messages_tenant_persisted_at ON messages(tenant_id, persisted_at DESC) WHERE persisted_at IS NOT NULL;
+
+SELECT create_hypertable('messages', 'created_at', chunk_time_interval => INTERVAL '1 day', if_not_exists => TRUE);
+
+-- 非 hypertable 的 durable write ledger：Timescale 唯一索引必须包含分区列，
+-- 因此消息 ID 的最终幂等屏障放在普通表中。
+CREATE TABLE message_write_ledger (
+    tenant_id TEXT NOT NULL,
+    server_id TEXT NOT NULL,
+    conversation_id TEXT NOT NULL,
+    seq BIGINT NOT NULL,
+    write_state TEXT NOT NULL DEFAULT 'broker_accepted',
+    archive_persisted_at TIMESTAMPTZ,
+    storage_persisted_at TIMESTAMPTZ,
+    wal_cleaned_at TIMESTAMPTZ,
+    ack_published_at TIMESTAMPTZ,
+    failed_at TIMESTAMPTZ,
+    last_error TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (tenant_id, server_id)
+);
+COMMENT ON TABLE message_write_ledger IS '消息写入幂等账本：保障 server_id 级 durable 去重';
+COMMENT ON COLUMN message_write_ledger.tenant_id IS '租户 ID';
+COMMENT ON COLUMN message_write_ledger.server_id IS '服务端消息 ID';
+COMMENT ON COLUMN message_write_ledger.conversation_id IS '会话 ID';
+COMMENT ON COLUMN message_write_ledger.seq IS '会话内序列号';
+COMMENT ON COLUMN message_write_ledger.write_state IS '写入状态：broker_accepted/archive_persisted/storage_persisted/wal_cleaned/ack_published/*_failed';
+COMMENT ON COLUMN message_write_ledger.last_error IS '最后一次写链路错误，用于恢复和管理端诊断';
+CREATE INDEX IF NOT EXISTS idx_message_write_ledger_conversation_seq
+    ON message_write_ledger(tenant_id, conversation_id, seq);
+CREATE INDEX IF NOT EXISTS idx_message_write_ledger_tenant_updated
+    ON message_write_ledger(tenant_id, updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_message_write_ledger_tenant_state_updated
+    ON message_write_ledger(tenant_id, write_state, updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_message_write_ledger_failed_updated
+    ON message_write_ledger(tenant_id, updated_at DESC)
+    WHERE failed_at IS NOT NULL;
+
+-- ============================================================================
+-- 3. 事件流（common/event.proto Event, EventType）
+-- ============================================================================
+
+CREATE TABLE events (
+    tenant_id TEXT NOT NULL,
+    conversation_id TEXT NOT NULL,
+    seq BIGINT NOT NULL,
+    event_type INT NOT NULL,  -- EventType: EVENT_MESSAGE=1, EVENT_MESSAGE_RECALL=2, ...
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    operator_id TEXT,
+    request_id TEXT,
+    event_seq BIGINT,
+    payload BYTEA,
+    PRIMARY KEY (tenant_id, conversation_id, seq)
+);
+COMMENT ON TABLE events IS '领域事件流（common/event.proto）；Sync 读本表返回 EventEnvelope';
+COMMENT ON COLUMN events.tenant_id IS '租户 ID';
+COMMENT ON COLUMN events.conversation_id IS '会话 ID';
+COMMENT ON COLUMN events.seq IS '会话内事件序列号（主序）';
+COMMENT ON COLUMN events.event_type IS '事件类型：1=EVENT_MESSAGE 2=RECALL 3=EDIT 4=DELETE 5=READ_RECEIPT … 见 EventType';
+COMMENT ON COLUMN events.created_at IS '事件产生时间';
+COMMENT ON COLUMN events.operator_id IS '操作者 user_id';
+COMMENT ON COLUMN events.request_id IS '上行请求 ID（与 OperationResponse 关联）';
+COMMENT ON COLUMN events.event_seq IS '关联消息 seq（如反应/置顶针对的 message）';
+COMMENT ON COLUMN events.payload IS 'Event.payload oneof 序列化（按 event_type 解析为 Message/MessageRecallEvent/...）';
+-- 这里曾经再建一个 idx_events_stream(tenant_id, conversation_id, seq)，
+-- 与上面的 PRIMARY KEY 定义完全相同：同一份索引被维护两遍，白白翻倍写入成本
+-- （events 是本库写入最频繁的表，线上 58 万行里 99.8% 是已读回执）。
+-- 主键索引已经覆盖全部按 (租户, 会话, seq) 的查询，实测高水位查询与增量同步
+-- 都走 idx_events_stream/主键的 Index Only Scan，删掉冗余的那个不影响任何查询。
+CREATE INDEX IF NOT EXISTS idx_events_tenant_conversation_event_seq_type
+    ON events(tenant_id, conversation_id, event_seq, event_type, seq)
+    WHERE event_seq IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_events_created_at ON events(tenant_id, created_at DESC);
+
+CREATE TABLE message_export_tasks (
+    tenant_id TEXT NOT NULL,
+    task_id TEXT NOT NULL,
+    conversation_id TEXT NOT NULL,
+    start_time TIMESTAMPTZ NOT NULL,
+    end_time TIMESTAMPTZ NOT NULL,
+    filters JSONB NOT NULL DEFAULT '[]'::jsonb,
+    requested_by TEXT,
+    request_id TEXT,
+    trace_id TEXT,
+    status TEXT NOT NULL DEFAULT 'pending',
+    object_key TEXT,
+    row_count BIGINT,
+    error_message TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    completed_at TIMESTAMPTZ,
+    PRIMARY KEY (tenant_id, task_id)
+);
+COMMENT ON TABLE message_export_tasks IS 'Admin 消息导出任务；HTTP/gRPC 只登记任务，后续 worker 生成对象文件';
+CREATE INDEX IF NOT EXISTS idx_message_export_tasks_status_created
+    ON message_export_tasks(tenant_id, status, created_at);
+CREATE INDEX IF NOT EXISTS idx_message_export_tasks_conversation_time
+    ON message_export_tasks(tenant_id, conversation_id, start_time, end_time);
+
+-- ============================================================================
+-- 4. Message 旁路表（common/models.proto, MessageReadRecord）
+-- ============================================================================
+
+CREATE TABLE message_edit_history (
+    id BIGSERIAL PRIMARY KEY,
+    tenant_id TEXT NOT NULL,
+    message_id TEXT NOT NULL,
+    edit_version INT NOT NULL,
+    content BYTEA NOT NULL,
+    editor_id TEXT NOT NULL,
+    edited_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    reason TEXT,
+    show_edited_mark BOOLEAN DEFAULT TRUE,
+    UNIQUE(tenant_id, message_id, edit_version)
+);
+COMMENT ON TABLE message_edit_history IS '编辑历史（EditHistory）；QueryMessageEditHistory';
+COMMENT ON COLUMN message_edit_history.id IS '自增主键';
+COMMENT ON COLUMN message_edit_history.tenant_id IS '租户 ID';
+COMMENT ON COLUMN message_edit_history.message_id IS '消息 server_id';
+COMMENT ON COLUMN message_edit_history.edit_version IS '编辑版本号（从 1 递增）';
+COMMENT ON COLUMN message_edit_history.content IS '该版本内容（protobuf 编码）';
+COMMENT ON COLUMN message_edit_history.editor_id IS '编辑者 user_id';
+COMMENT ON COLUMN message_edit_history.edited_at IS '编辑时间';
+COMMENT ON COLUMN message_edit_history.reason IS '编辑原因（可选）';
+COMMENT ON COLUMN message_edit_history.show_edited_mark IS '是否展示「已编辑」';
+CREATE INDEX IF NOT EXISTS idx_message_edit_history_tenant_message ON message_edit_history(tenant_id, message_id);
+
+CREATE TABLE message_read_records (
+    id BIGSERIAL PRIMARY KEY,
+    tenant_id TEXT NOT NULL,
+    message_id TEXT NOT NULL,
+    user_id TEXT NOT NULL,
+    read_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    burned_at TIMESTAMPTZ,
+    UNIQUE(tenant_id, message_id, user_id)
+);
+COMMENT ON TABLE message_read_records IS '已读记录（MessageReadRecord）；QueryMessageReadList';
+COMMENT ON COLUMN message_read_records.id IS '自增主键';
+COMMENT ON COLUMN message_read_records.tenant_id IS '租户 ID';
+COMMENT ON COLUMN message_read_records.message_id IS '消息 server_id';
+COMMENT ON COLUMN message_read_records.user_id IS '已读用户 ID';
+COMMENT ON COLUMN message_read_records.read_at IS '已读时间';
+COMMENT ON COLUMN message_read_records.burned_at IS '阅后即焚已烧毁时间（可选）';
+CREATE INDEX IF NOT EXISTS idx_message_read_records_tenant_message ON message_read_records(tenant_id, message_id);
+
+CREATE TABLE message_visibility (
+    id BIGSERIAL PRIMARY KEY,
+    tenant_id TEXT NOT NULL,
+    message_id TEXT NOT NULL,
+    user_id TEXT NOT NULL DEFAULT '',
+    scope INT NOT NULL DEFAULT 1,           -- DeleteScope: USER_PRIVATE=1, CONVERSATION_GLOBAL=2
+    visibility_status INT NOT NULL DEFAULT 0,  -- VisibilityStatus: VISIBLE=0, HIDDEN=1, DELETED=2
+    changed_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CHECK (
+        (scope = 1 AND user_id <> '')
+        OR (scope = 2 AND user_id = '')
+    ),
+    UNIQUE(tenant_id, message_id, user_id, scope)
+);
+COMMENT ON TABLE message_visibility IS '用户维度消息可见性（storage.proto VisibilityStatus）';
+COMMENT ON COLUMN message_visibility.id IS '自增主键';
+COMMENT ON COLUMN message_visibility.tenant_id IS '租户 ID';
+COMMENT ON COLUMN message_visibility.message_id IS '消息 server_id';
+COMMENT ON COLUMN message_visibility.user_id IS '用户 ID（scope=2 时为空串）';
+COMMENT ON COLUMN message_visibility.scope IS '删除作用域：1=仅自己 2=所有人';
+COMMENT ON COLUMN message_visibility.visibility_status IS '可见性：0=VISIBLE 1=HIDDEN 2=DELETED';
+COMMENT ON COLUMN message_visibility.changed_at IS '状态变更时间';
+CREATE INDEX IF NOT EXISTS idx_message_visibility_tenant_user ON message_visibility(tenant_id, user_id);
+CREATE INDEX IF NOT EXISTS idx_message_visibility_tenant_message_scope ON message_visibility(tenant_id, message_id, scope);
+
+CREATE TABLE message_reactions (
+    id BIGSERIAL PRIMARY KEY,
+    tenant_id TEXT NOT NULL,
+    message_id TEXT NOT NULL,
+    emoji TEXT NOT NULL,
+    user_ids TEXT[] NOT NULL DEFAULT '{}',
+    count INT NOT NULL DEFAULT 0,
+    last_updated TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(tenant_id, message_id, emoji)
+);
+COMMENT ON TABLE message_reactions IS '反应（Reaction）；QueryMessageReactions';
+COMMENT ON COLUMN message_reactions.id IS '自增主键';
+COMMENT ON COLUMN message_reactions.tenant_id IS '租户 ID';
+COMMENT ON COLUMN message_reactions.message_id IS '消息 server_id';
+COMMENT ON COLUMN message_reactions.emoji IS '表情标识（如 👍）';
+COMMENT ON COLUMN message_reactions.user_ids IS '点了该表情的用户 ID 列表';
+COMMENT ON COLUMN message_reactions.count IS '该表情被点击次数';
+COMMENT ON COLUMN message_reactions.last_updated IS '最后更新时间';
+COMMENT ON COLUMN message_reactions.created_at IS '首次添加时间';
+CREATE INDEX IF NOT EXISTS idx_message_reactions_tenant_message ON message_reactions(tenant_id, message_id);
+
+-- 插件实体共享状态（migrations/0016）：实体绑定与每条插件卡片的最新共享状态。
+CREATE TABLE plugin_entity_bindings (
+    tenant_id TEXT NOT NULL,
+    plugin_id TEXT NOT NULL,
+    entity TEXT NOT NULL,
+    server_msg_id TEXT NOT NULL,
+    conversation_id TEXT NOT NULL,
+    contribution_id TEXT NOT NULL,
+    published_version BIGINT NOT NULL DEFAULT 0,
+    recalled_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT plugin_entity_bindings_pkey PRIMARY KEY (tenant_id, plugin_id, entity, server_msg_id),
+    CONSTRAINT plugin_entity_bindings_tenant_check
+        CHECK (char_length(tenant_id) BETWEEN 1 AND 256 AND tenant_id <> '*'),
+    CONSTRAINT plugin_entity_bindings_plugin_check
+        CHECK (char_length(plugin_id) BETWEEN 1 AND 128 AND char_length(contribution_id) BETWEEN 1 AND 160),
+    CONSTRAINT plugin_entity_bindings_entity_check
+        CHECK (entity ~ '^[A-Za-z0-9._:-]{1,128}$'),
+    CONSTRAINT plugin_entity_bindings_message_check
+        CHECK (char_length(server_msg_id) BETWEEN 1 AND 256 AND char_length(conversation_id) BETWEEN 1 AND 256),
+    CONSTRAINT plugin_entity_bindings_version_check
+        CHECK (published_version >= 0)
+);
+CREATE INDEX idx_plugin_entity_bindings_message
+    ON plugin_entity_bindings(tenant_id, server_msg_id);
+CREATE TABLE message_plugin_states (
+    tenant_id TEXT NOT NULL,
+    server_msg_id TEXT NOT NULL,
+    conversation_id TEXT NOT NULL,
+    plugin_id TEXT NOT NULL,
+    entity TEXT NOT NULL,
+    version BIGINT NOT NULL,
+    values_json TEXT NOT NULL,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT message_plugin_states_pkey PRIMARY KEY (tenant_id, server_msg_id),
+    CONSTRAINT message_plugin_states_version_check CHECK (version > 0),
+    CONSTRAINT message_plugin_states_values_check CHECK (octet_length(values_json) <= 8192)
+);
+COMMENT ON TABLE plugin_entity_bindings IS '插件实体绑定（与 migrations/0016 同一结构）：插件卡片落库时由 Storage Writer 按目录投影的 entityPath 登记；Capability 只给已绑定的实体发布共享状态，published_version 以比较并设置单调抬高';
+COMMENT ON TABLE message_plugin_states IS '插件卡片最新共享状态（EVENT_MESSAGE_PLUGIN_STATE，与 migrations/0016 同一结构）：每条消息一行，按版本单调覆盖；读侧挂到 extra.pluginSharedStateJson / pluginSharedStateVersion';
+
+-- Card recall/post failure recovery is part of the current initial model.
+-- Runtime workers must be able to start on a freshly initialized database.
+CREATE TABLE plugin_entity_lifecycle_outbox (
+    id BIGSERIAL PRIMARY KEY,
+    tenant_id TEXT NOT NULL,
+    plugin_id TEXT NOT NULL,
+    contribution_id TEXT NOT NULL,
+    entity TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    server_msg_id TEXT,
+    status TEXT NOT NULL DEFAULT 'pending',
+    attempts INTEGER NOT NULL DEFAULT 0,
+    next_attempt_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    last_error TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    unconfirmed BOOLEAN NOT NULL DEFAULT FALSE
+        CONSTRAINT plugin_entity_lifecycle_outbox_unconfirmed_check
+        CHECK (NOT unconfirmed OR reason = 'post_failed'),
+    CONSTRAINT plugin_entity_lifecycle_outbox_entity_key UNIQUE (tenant_id, plugin_id, entity, reason),
+    CONSTRAINT plugin_entity_lifecycle_outbox_tenant_check
+        CHECK (char_length(tenant_id) BETWEEN 1 AND 256 AND tenant_id <> '*'),
+    CONSTRAINT plugin_entity_lifecycle_outbox_plugin_check
+        CHECK (char_length(plugin_id) BETWEEN 1 AND 128 AND char_length(contribution_id) BETWEEN 1 AND 160),
+    CONSTRAINT plugin_entity_lifecycle_outbox_entity_check
+        CHECK (entity ~ '^[A-Za-z0-9._:-]{1,128}$'),
+    CONSTRAINT plugin_entity_lifecycle_outbox_reason_check CHECK (reason IN ('recalled', 'post_failed')),
+    CONSTRAINT plugin_entity_lifecycle_outbox_message_check
+        CHECK (server_msg_id IS NULL OR char_length(server_msg_id) BETWEEN 1 AND 256),
+    CONSTRAINT plugin_entity_lifecycle_outbox_status_check
+        CHECK (status IN ('pending', 'delivered', 'skipped', 'abandoned')),
+    CONSTRAINT plugin_entity_lifecycle_outbox_error_check CHECK (last_error IS NULL OR char_length(last_error) <= 512)
+);
+CREATE INDEX idx_plugin_entity_lifecycle_outbox_due
+    ON plugin_entity_lifecycle_outbox(next_attempt_at) WHERE status = 'pending';
+
+CREATE TABLE pinned_messages (
+    id BIGSERIAL PRIMARY KEY,
+    tenant_id TEXT NOT NULL,
+    message_id TEXT NOT NULL,
+    conversation_id TEXT NOT NULL,
+    pinned_by TEXT NOT NULL,
+    scope INTEGER NOT NULL DEFAULT 0,
+    owner_user_id TEXT NOT NULL DEFAULT '',
+    pinned_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    expire_at TIMESTAMPTZ,
+    reason TEXT,
+    UNIQUE(tenant_id, conversation_id, message_id, scope, owner_user_id)
+);
+COMMENT ON TABLE pinned_messages IS '置顶消息（PinnedMessageInfo）；PinEvent/UnpinEvent';
+COMMENT ON COLUMN pinned_messages.id IS '自增主键';
+COMMENT ON COLUMN pinned_messages.tenant_id IS '租户 ID';
+COMMENT ON COLUMN pinned_messages.message_id IS '被置顶消息的 server_id';
+COMMENT ON COLUMN pinned_messages.conversation_id IS '会话 ID';
+COMMENT ON COLUMN pinned_messages.pinned_by IS '置顶操作者 user_id';
+COMMENT ON COLUMN pinned_messages.scope IS '置顶作用域：0=会话全员，1=当前用户私有';
+COMMENT ON COLUMN pinned_messages.owner_user_id IS '私有置顶归属用户；会话全员置顶为空';
+COMMENT ON COLUMN pinned_messages.pinned_at IS '置顶时间';
+COMMENT ON COLUMN pinned_messages.expire_at IS '置顶过期时间（空=长期）';
+COMMENT ON COLUMN pinned_messages.reason IS '置顶说明';
+CREATE INDEX IF NOT EXISTS idx_pinned_messages_tenant_conversation ON pinned_messages(tenant_id, conversation_id, scope, owner_user_id);
+
+CREATE TABLE marked_messages (
+    id BIGSERIAL PRIMARY KEY,
+    tenant_id TEXT NOT NULL,
+    message_id TEXT NOT NULL,
+    user_id TEXT NOT NULL,
+    conversation_id TEXT NOT NULL,
+    mark_type INT NOT NULL,  -- MarkType: IMPORTANT=1, TODO=2, DONE=3, CUSTOM=4
+    color TEXT,
+    marked_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(tenant_id, message_id, user_id, mark_type)
+);
+COMMENT ON TABLE marked_messages IS '消息标记（MarkedMessageInfo）；MarkEvent/UnmarkEvent';
+COMMENT ON COLUMN marked_messages.id IS '自增主键';
+COMMENT ON COLUMN marked_messages.tenant_id IS '租户 ID';
+COMMENT ON COLUMN marked_messages.message_id IS '被标记消息的 server_id';
+COMMENT ON COLUMN marked_messages.user_id IS '标记归属用户';
+COMMENT ON COLUMN marked_messages.conversation_id IS '会话 ID';
+COMMENT ON COLUMN marked_messages.mark_type IS '标记类型：1=IMPORTANT 2=TODO 3=DONE 4=CUSTOM';
+COMMENT ON COLUMN marked_messages.color IS '自定义颜色（如 #FF0000）';
+COMMENT ON COLUMN marked_messages.marked_at IS '标记时间';
+CREATE INDEX IF NOT EXISTS idx_marked_messages_tenant_user ON marked_messages(tenant_id, user_id);
+
+CREATE TABLE message_operation_history (
+    id BIGSERIAL PRIMARY KEY,
+    tenant_id TEXT NOT NULL,
+    conversation_id TEXT,
+    seq BIGINT,
+    message_id TEXT NOT NULL,
+    operation_type TEXT NOT NULL,
+    operator_id TEXT NOT NULL DEFAULT '',
+    target_user_id TEXT DEFAULT '',
+    operation_data JSONB DEFAULT '{}'::jsonb,
+    timestamp TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    metadata JSONB DEFAULT '{}'::jsonb
+);
+COMMENT ON TABLE message_operation_history IS '操作历史（Event 序列化/索引）；QueryMessageEvents 等';
+COMMENT ON COLUMN message_operation_history.id IS '自增主键';
+COMMENT ON COLUMN message_operation_history.tenant_id IS '租户 ID';
+COMMENT ON COLUMN message_operation_history.message_id IS '消息 server_id';
+COMMENT ON COLUMN message_operation_history.operation_type IS '操作类型（与 EventType 对应）';
+COMMENT ON COLUMN message_operation_history.operator_id IS '操作者 user_id';
+COMMENT ON COLUMN message_operation_history.target_user_id IS '目标用户 ID（如软删生效用户）';
+COMMENT ON COLUMN message_operation_history.operation_data IS '操作数据（如 event_base64 或 JSON）';
+COMMENT ON COLUMN message_operation_history.timestamp IS '操作时间';
+COMMENT ON COLUMN message_operation_history.metadata IS '扩展元数据';
+CREATE INDEX IF NOT EXISTS idx_message_operation_history_tenant_message ON message_operation_history(tenant_id, message_id);
+CREATE UNIQUE INDEX idx_message_operation_history_event_identity
+ ON message_operation_history(tenant_id,conversation_id,seq,message_id) WHERE seq IS NOT NULL;
+
+-- ============================================================================
+-- 5. 话题/子线程（common/models.proto ThreadInfo）
+-- ============================================================================
+
+CREATE TABLE threads (
+    tenant_id TEXT NOT NULL,
+    id TEXT NOT NULL,
+    conversation_id TEXT NOT NULL,
+    root_message_id TEXT NOT NULL,
+    title TEXT,
+    creator_id TEXT NOT NULL,
+    reply_count INT NOT NULL DEFAULT 0,
+    last_reply_at TIMESTAMPTZ,
+    last_reply_id TEXT,
+    last_reply_user_id TEXT,
+    participant_count INT NOT NULL DEFAULT 0,
+    is_pinned BOOLEAN NOT NULL DEFAULT FALSE,
+    is_locked BOOLEAN NOT NULL DEFAULT FALSE,
+    is_archived BOOLEAN NOT NULL DEFAULT FALSE,
+    extra JSONB NOT NULL DEFAULT '{}'::jsonb,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (tenant_id, id)
+);
+COMMENT ON TABLE threads IS '话题/子线程（ThreadInfo）；与 PostgresThreadRepository 当前查询列对齐';
+COMMENT ON COLUMN threads.tenant_id IS '租户 ID（主键的一部分）';
+COMMENT ON COLUMN threads.id IS '话题 ID，通常等于 root_message_id';
+COMMENT ON COLUMN threads.conversation_id IS '所属会话 ID';
+COMMENT ON COLUMN threads.root_message_id IS '根消息 server_id（话题入口）';
+COMMENT ON COLUMN threads.title IS '话题标题';
+COMMENT ON COLUMN threads.creator_id IS '创建者 user_id';
+COMMENT ON COLUMN threads.reply_count IS '回复数';
+COMMENT ON COLUMN threads.last_reply_at IS '最后回复时间';
+COMMENT ON COLUMN threads.last_reply_id IS '最后回复消息 ID';
+COMMENT ON COLUMN threads.last_reply_user_id IS '最后回复用户 ID';
+COMMENT ON COLUMN threads.participant_count IS '参与用户数';
+COMMENT ON COLUMN threads.is_pinned IS '是否置顶';
+COMMENT ON COLUMN threads.is_locked IS '是否锁定';
+COMMENT ON COLUMN threads.is_archived IS '是否归档';
+COMMENT ON COLUMN threads.extra IS '扩展属性';
+COMMENT ON COLUMN threads.created_at IS '创建时间';
+COMMENT ON COLUMN threads.updated_at IS '更新时间';
+CREATE INDEX IF NOT EXISTS idx_threads_conversation_id ON threads(tenant_id, conversation_id);
+CREATE INDEX IF NOT EXISTS idx_threads_root_message_id ON threads(root_message_id);
+CREATE INDEX IF NOT EXISTS idx_threads_creator_id ON threads(creator_id);
+CREATE INDEX IF NOT EXISTS idx_threads_last_reply_at ON threads(last_reply_at DESC);
+CREATE INDEX IF NOT EXISTS idx_threads_is_pinned ON threads(is_pinned) WHERE is_pinned = TRUE;
+CREATE INDEX IF NOT EXISTS idx_threads_is_archived ON threads(is_archived) WHERE is_archived = FALSE;
+
+CREATE TABLE thread_participants (
+    tenant_id TEXT NOT NULL,
+    thread_id TEXT NOT NULL,
+    user_id TEXT NOT NULL,
+    first_participated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    last_participated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    reply_count INT NOT NULL DEFAULT 0,
+    is_muted BOOLEAN NOT NULL DEFAULT FALSE,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (tenant_id, thread_id, user_id)
+);
+COMMENT ON TABLE thread_participants IS '话题参与者表；用于话题通知、参与者数与静音状态';
+COMMENT ON COLUMN thread_participants.tenant_id IS '租户 ID（主键的一部分）';
+COMMENT ON COLUMN thread_participants.thread_id IS '话题 ID';
+COMMENT ON COLUMN thread_participants.user_id IS '用户 ID';
+COMMENT ON COLUMN thread_participants.first_participated_at IS '首次参与时间';
+COMMENT ON COLUMN thread_participants.last_participated_at IS '最后参与时间';
+COMMENT ON COLUMN thread_participants.reply_count IS '该用户在此话题的回复数';
+COMMENT ON COLUMN thread_participants.is_muted IS '是否静音';
+COMMENT ON COLUMN thread_participants.updated_at IS '更新时间';
+CREATE INDEX IF NOT EXISTS idx_thread_participants_user_id ON thread_participants(tenant_id, user_id);
+CREATE INDEX IF NOT EXISTS idx_thread_participants_last_participated_at ON thread_participants(last_participated_at DESC);
+
+-- ============================================================================
+-- 6. 会话写模型（common/conversation.proto ConversationDetail, ConversationParticipant）
+-- ============================================================================
+
+
+CREATE TABLE conversations (
+    tenant_id TEXT NOT NULL,
+    conversation_id TEXT NOT NULL,
+    conversation_type INT NOT NULL DEFAULT 0,  -- ConversationType: SINGLE=1, GROUP=2, AI=3, SYSTEM=4, CUSTOMER=5, TEMP=6（与 CID 前缀一致）
+    business_type TEXT NOT NULL DEFAULT '',
+    display_name TEXT,
+    avatar_url TEXT,
+    description TEXT,
+    announcement TEXT,
+    announcement_updated_at TIMESTAMPTZ,
+    announcement_updated_by TEXT,
+    visibility INT NOT NULL DEFAULT 0,  -- ConversationVisibility: PRIVATE=1, TENANT=2, PUBLIC=3
+    lifecycle_state TEXT NOT NULL DEFAULT 'active',  -- ConversationLifecycleState
+    policy JSONB DEFAULT '{}'::jsonb,  -- ConversationPolicy
+    attributes JSONB DEFAULT '{}'::jsonb,
+    created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+    last_message_seq BIGINT,
+    history_cleared_through_seq BIGINT NOT NULL DEFAULT 0,
+    member_count INT DEFAULT 0,
+    channel_id TEXT NOT NULL DEFAULT '',
+    PRIMARY KEY (tenant_id, conversation_id)
+);
+COMMENT ON TABLE conversations IS '会话元数据（ConversationDetail）';
+COMMENT ON COLUMN conversations.tenant_id IS '租户 ID';
+COMMENT ON COLUMN conversations.conversation_id IS '会话 ID（主键）';
+COMMENT ON COLUMN conversations.conversation_type IS '会话类型：0=UNSPECIFIED 1=SINGLE 2=GROUP 3=AI 4=SYSTEM 5=CUSTOMER 6=TEMP（与 CID 前缀一致）';
+COMMENT ON COLUMN conversations.business_type IS '业务类型';
+COMMENT ON COLUMN conversations.display_name IS '展示名称';
+COMMENT ON COLUMN conversations.avatar_url IS '头像 URL';
+COMMENT ON COLUMN conversations.description IS '会话描述';
+COMMENT ON COLUMN conversations.announcement IS '会话公告';
+COMMENT ON COLUMN conversations.announcement_updated_at IS '公告更新时间';
+COMMENT ON COLUMN conversations.announcement_updated_by IS '公告更新人 user_id';
+COMMENT ON COLUMN conversations.visibility IS '可见性：0=UNSPECIFIED 1=PRIVATE 2=TENANT 3=PUBLIC';
+COMMENT ON COLUMN conversations.lifecycle_state IS '生命周期：active / suspended / archived / deleted';
+COMMENT ON COLUMN conversations.policy IS 'ConversationPolicy（conflict_resolution, max_devices, allow_*）';
+COMMENT ON COLUMN conversations.attributes IS '会话属性（JSON）';
+COMMENT ON COLUMN conversations.created_at IS '创建时间';
+COMMENT ON COLUMN conversations.updated_at IS '更新时间';
+COMMENT ON COLUMN conversations.last_message_seq IS '最后一条消息的 seq（未读数计算）';
+COMMENT ON COLUMN conversations.history_cleared_through_seq IS '全员历史清除的序列截止；只展示高于此值的消息';
+COMMENT ON COLUMN conversations.member_count IS '⚠️ 未维护，恒为默认值 0——没有任何写入路径会更新它。服务端所有读路径都实时 COUNT(*) conversation_participants 算成员数，不读这一列。别把它当权威数据。';
+COMMENT ON COLUMN conversations.channel_id IS '路由频道：单聊库中为空（读模型组装对端 user_id）；群/频道等为消息 channel_id（如群业务 ID）';
+CREATE INDEX IF NOT EXISTS idx_conversations_tenant_updated ON conversations(tenant_id, updated_at DESC);
+
+CREATE TABLE conversation_participants (
+    tenant_id TEXT NOT NULL,
+    conversation_id TEXT NOT NULL,
+    user_id TEXT NOT NULL,
+    roles TEXT[] DEFAULT '{}',
+    muted BOOLEAN DEFAULT FALSE,
+    pinned BOOLEAN DEFAULT FALSE,
+    attributes JSONB DEFAULT '{}'::jsonb,
+    joined_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+    nickname TEXT,
+    last_read_seq BIGINT DEFAULT 0,
+    last_sync_seq BIGINT DEFAULT 0,
+    unread_count INT DEFAULT 0,
+    is_deleted BOOLEAN DEFAULT FALSE,
+    mute_until TIMESTAMPTZ,
+    is_archived BOOLEAN NOT NULL DEFAULT FALSE,
+    settings_version BIGINT NOT NULL DEFAULT 0,
+    draft TEXT,
+    quit_at TIMESTAMPTZ,
+    visible_from_seq BIGINT NOT NULL DEFAULT 0,
+    history_cleared_through_seq BIGINT NOT NULL DEFAULT 0,
+    mention_only BOOLEAN NOT NULL DEFAULT FALSE,
+    created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (tenant_id, conversation_id, user_id),
+    FOREIGN KEY (tenant_id, conversation_id) REFERENCES conversations(tenant_id, conversation_id) ON DELETE CASCADE
+);
+COMMENT ON TABLE conversation_participants IS '参与者（ConversationParticipant）+ 读模型未读/游标（ConversationLight/Summary）';
+COMMENT ON COLUMN conversation_participants.tenant_id IS '租户 ID';
+COMMENT ON COLUMN conversation_participants.conversation_id IS '会话 ID';
+COMMENT ON COLUMN conversation_participants.user_id IS '用户 ID';
+COMMENT ON COLUMN conversation_participants.roles IS '角色列表（owner, admin, member 等）';
+COMMENT ON COLUMN conversation_participants.muted IS '是否静音';
+COMMENT ON COLUMN conversation_participants.pinned IS '是否置顶';
+COMMENT ON COLUMN conversation_participants.attributes IS '参与者属性（JSON）';
+COMMENT ON COLUMN conversation_participants.joined_at IS '加入时间';
+COMMENT ON COLUMN conversation_participants.nickname IS '群昵称';
+COMMENT ON COLUMN conversation_participants.last_read_seq IS '已读到的 seq（未读数 = max_seq - last_read_seq）';
+COMMENT ON COLUMN conversation_participants.last_sync_seq IS 'Sync 游标 last_seq';
+COMMENT ON COLUMN conversation_participants.unread_count IS '未读数（冗余）';
+COMMENT ON COLUMN conversation_participants.is_deleted IS '用户侧删除会话（软删）';
+COMMENT ON COLUMN conversation_participants.mute_until IS '静音截止时间（空=长期免打扰）';
+COMMENT ON COLUMN conversation_participants.quit_at IS '退出时间（NULL=仍在会话中）';
+COMMENT ON COLUMN conversation_participants.mention_only IS '只接收提到我的消息：其余消息照常投递，但不产生离线推送。与 muted 正交';
+COMMENT ON COLUMN conversation_participants.visible_from_seq IS '该成员可见的历史下限：只能读到 seq > 此值的消息；0=不限。业务层（如群历史可见性策略）决定是否设值';
+COMMENT ON COLUMN conversation_participants.history_cleared_through_seq IS '个人历史清除的序列截止；只展示高于此值的消息';
+COMMENT ON COLUMN conversation_participants.created_at IS '创建时间';
+COMMENT ON COLUMN conversation_participants.updated_at IS '更新时间';
+CREATE INDEX IF NOT EXISTS idx_conversation_participants_tenant_user ON conversation_participants(tenant_id, user_id, updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_conversation_participants_tenant_conv ON conversation_participants(tenant_id, conversation_id);
+-- 成员预览 LATERAL 与成员分页 keyset 游标都按 (joined_at, user_id) 排序取数；
+-- 没有这个索引就会退化成对全会话成员做 top-N heapsort（十万人群实测 106ms/会话）。
+CREATE INDEX IF NOT EXISTS idx_conversation_participants_conv_joined ON conversation_participants(tenant_id, conversation_id, joined_at, user_id);
+
+-- ============================================================================
+-- 7. Sync 游标（common/sync.proto）
+-- ============================================================================
+
+CREATE TABLE user_sync_cursor (
+    tenant_id TEXT NOT NULL,
+    user_id TEXT NOT NULL,
+    conversation_id TEXT NOT NULL,
+    last_synced_seq BIGINT NOT NULL DEFAULT 0,
+    last_synced_ts BIGINT NOT NULL DEFAULT 0,
+    device_id TEXT,
+    version INT DEFAULT 1,
+    created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (tenant_id, user_id, conversation_id)
+);
+COMMENT ON TABLE user_sync_cursor IS '按会话 Sync 游标（last_seq）';
+COMMENT ON COLUMN user_sync_cursor.tenant_id IS '租户 ID';
+COMMENT ON COLUMN user_sync_cursor.user_id IS '用户 ID';
+COMMENT ON COLUMN user_sync_cursor.conversation_id IS '会话 ID';
+COMMENT ON COLUMN user_sync_cursor.last_synced_seq IS '最后同步的 seq';
+COMMENT ON COLUMN user_sync_cursor.last_synced_ts IS '最后同步时间戳（毫秒）';
+COMMENT ON COLUMN user_sync_cursor.device_id IS '设备 ID（可选，设备级游标）';
+COMMENT ON COLUMN user_sync_cursor.version IS '版本号（乐观锁）';
+COMMENT ON COLUMN user_sync_cursor.created_at IS '创建时间';
+COMMENT ON COLUMN user_sync_cursor.updated_at IS '更新时间';
+CREATE INDEX IF NOT EXISTS idx_user_sync_cursor_tenant_user ON user_sync_cursor(tenant_id, user_id);
+
+-- ============================================================================
+-- 8. 媒体资产（common/metadata.proto MediaAttachment 等）
+-- ============================================================================
+
+
+CREATE TABLE media_assets (
+    tenant_id TEXT NOT NULL,
+    file_id TEXT NOT NULL,
+    owner_id TEXT,
+    file_name TEXT NOT NULL,
+    mime_type TEXT NOT NULL,
+    file_size BIGINT NOT NULL,
+    url TEXT NOT NULL,
+    cdn_url TEXT DEFAULT '',
+    md5 TEXT,
+    sha256 TEXT,
+    metadata JSONB,
+    uploaded_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+    reference_count BIGINT DEFAULT 0,
+    status TEXT NOT NULL DEFAULT 'active',
+    grace_expires_at TIMESTAMPTZ,
+    access_type TEXT NOT NULL DEFAULT 'private',
+    PRIMARY KEY (tenant_id, file_id)
+);
+COMMENT ON TABLE media_assets IS '媒体资产元数据';
+COMMENT ON COLUMN media_assets.tenant_id IS '租户 ID';
+COMMENT ON COLUMN media_assets.file_id IS '文件唯一标识（租户内唯一）';
+COMMENT ON COLUMN media_assets.file_name IS '文件名';
+COMMENT ON COLUMN media_assets.mime_type IS 'MIME 类型';
+COMMENT ON COLUMN media_assets.file_size IS '文件大小（字节）';
+COMMENT ON COLUMN media_assets.url IS '访问 URL';
+COMMENT ON COLUMN media_assets.cdn_url IS 'CDN URL';
+COMMENT ON COLUMN media_assets.md5 IS 'MD5 校验';
+COMMENT ON COLUMN media_assets.sha256 IS 'SHA256 校验';
+COMMENT ON COLUMN media_assets.metadata IS '扩展元数据（JSON）';
+COMMENT ON COLUMN media_assets.uploaded_at IS '上传时间';
+COMMENT ON COLUMN media_assets.reference_count IS '引用计数';
+COMMENT ON COLUMN media_assets.status IS '状态（active 等）';
+COMMENT ON COLUMN media_assets.grace_expires_at IS '宽限过期时间';
+COMMENT ON COLUMN media_assets.access_type IS '访问类型（private/public）';
+CREATE INDEX IF NOT EXISTS idx_media_assets_tenant_uploaded ON media_assets(tenant_id, uploaded_at DESC);
+CREATE INDEX idx_media_assets_tenant_orphan_due ON media_assets(tenant_id,grace_expires_at,file_id)
+ WHERE reference_count=0 AND status='pending' AND grace_expires_at IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_media_assets_sha256_active
+    ON media_assets(sha256, uploaded_at DESC)
+    WHERE sha256 IS NOT NULL
+      AND status <> 'soft_deleted';
+CREATE INDEX IF NOT EXISTS idx_media_assets_message_orphan_due
+    ON media_assets(grace_expires_at)
+    WHERE reference_count = 0
+      AND status = 'pending'
+      AND grace_expires_at IS NOT NULL
+      AND (
+            LOWER(COALESCE(metadata->>'media_lifecycle_scope', '')) IN ('message', 'messages', 'im_message', 'im-message')
+         OR LOWER(COALESCE(metadata->>'lifecycle_scope', '')) IN ('message', 'messages', 'im_message', 'im-message')
+         OR LOWER(COALESCE(metadata->>'media_scope', '')) IN ('message', 'messages', 'im_message', 'im-message')
+         OR LOWER(COALESCE(metadata->>'media_usage', '')) IN ('message', 'messages', 'im_message', 'im-message')
+         OR LOWER(COALESCE(metadata->>'usage', '')) IN ('message', 'messages', 'im_message', 'im-message')
+         OR LOWER(COALESCE(metadata->>'namespace', '')) IN ('message', 'messages', 'im_message', 'im-message')
+         OR LOWER(COALESCE(metadata->>'business_tag', '')) IN ('message', 'messages', 'im_message', 'im-message')
+      );
+
+CREATE TABLE media_references (
+    tenant_id TEXT NOT NULL,
+    reference_id TEXT NOT NULL,
+    file_id TEXT NOT NULL,
+    namespace TEXT NOT NULL,
+    owner_id TEXT NOT NULL,
+    business_tag TEXT,
+    metadata JSONB,
+    created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+    expires_at TIMESTAMPTZ,
+    PRIMARY KEY (tenant_id, reference_id),
+    FOREIGN KEY (tenant_id, file_id) REFERENCES media_assets(tenant_id, file_id) ON DELETE CASCADE
+);
+COMMENT ON TABLE media_references IS '媒体引用表';
+COMMENT ON COLUMN media_references.tenant_id IS '租户 ID';
+COMMENT ON COLUMN media_references.reference_id IS '引用 ID（租户内唯一）';
+COMMENT ON COLUMN media_references.file_id IS '关联文件 file_id';
+COMMENT ON COLUMN media_references.namespace IS '命名空间';
+COMMENT ON COLUMN media_references.owner_id IS '拥有者 ID';
+COMMENT ON COLUMN media_references.business_tag IS '业务标签';
+COMMENT ON COLUMN media_references.metadata IS '扩展元数据（JSON）';
+COMMENT ON COLUMN media_references.created_at IS '创建时间';
+COMMENT ON COLUMN media_references.expires_at IS '过期时间';
+CREATE INDEX IF NOT EXISTS idx_media_references_tenant_file ON media_references(tenant_id, file_id);
+CREATE INDEX IF NOT EXISTS idx_media_references_tenant_scope_lookup
+    ON media_references(tenant_id, file_id, namespace, owner_id, business_tag);
+
+-- ============================================================================
+-- 9. ACK 审计归档
+-- ============================================================================
+
+CREATE TABLE ack_archive_records (
+    tenant_id TEXT NOT NULL,
+    id BIGSERIAL NOT NULL,
+    message_id TEXT NOT NULL,
+    user_id TEXT NOT NULL,
+    ack_type TEXT NOT NULL,
+    ack_status TEXT NOT NULL,
+    timestamp BIGINT NOT NULL,
+    importance_level SMALLINT NOT NULL DEFAULT 1 CHECK (importance_level BETWEEN 1 AND 3),
+    metadata JSONB,
+    archived_at BIGINT NOT NULL DEFAULT (EXTRACT(EPOCH FROM NOW())::BIGINT),
+    PRIMARY KEY (tenant_id, id)
+);
+COMMENT ON TABLE ack_archive_records IS 'ACK 归档记录表，用于审计和分析 ACK 日志';
+COMMENT ON COLUMN ack_archive_records.tenant_id IS '租户 ID（主键的一部分）';
+COMMENT ON COLUMN ack_archive_records.message_id IS '消息 ID';
+COMMENT ON COLUMN ack_archive_records.user_id IS '用户 ID';
+COMMENT ON COLUMN ack_archive_records.ack_type IS 'ACK 类型';
+COMMENT ON COLUMN ack_archive_records.ack_status IS 'ACK 状态';
+COMMENT ON COLUMN ack_archive_records.timestamp IS 'ACK 时间戳';
+COMMENT ON COLUMN ack_archive_records.importance_level IS '重要性等级：1=低 2=中 3=高';
+COMMENT ON COLUMN ack_archive_records.metadata IS '扩展元数据';
+COMMENT ON COLUMN ack_archive_records.archived_at IS '归档时间戳';
+CREATE INDEX IF NOT EXISTS idx_ack_archive_message_id ON ack_archive_records(tenant_id, message_id);
+CREATE INDEX IF NOT EXISTS idx_ack_archive_user_id ON ack_archive_records(tenant_id, user_id);
+CREATE INDEX IF NOT EXISTS idx_ack_archive_timestamp_desc ON ack_archive_records(timestamp DESC);
+CREATE INDEX IF NOT EXISTS idx_ack_archive_importance_level ON ack_archive_records(importance_level);
+CREATE INDEX IF NOT EXISTS idx_ack_archive_message_user_type ON ack_archive_records(tenant_id, message_id, user_id, ack_type);
+
+-- ============================================================================
+-- 10. Hook 引擎 + Capability 策略（flare-capability）
+-- ============================================================================
+-- hook_configs 列与 PostgresHookConfigRepository（Rust sqlx::FromRow）一致。
+-- capability_* 与 PostgresCapabilityPolicy、CapabilityService gRPC 一致。
+-- FLARE_EXTRACT:BEGIN_HOOK_CAPABILITY（第 9 节边界标记，勿删改此行）
+
+
+CREATE TABLE hook_configs (
+    id BIGSERIAL PRIMARY KEY,
+    hook_id TEXT UNIQUE,
+    tenant_id TEXT,
+    hook_type TEXT NOT NULL,
+    name TEXT NOT NULL,
+    version TEXT,
+    description TEXT,
+    enabled BOOLEAN NOT NULL DEFAULT TRUE,
+    priority INT NOT NULL DEFAULT 100,
+    group_name TEXT,
+    timeout_ms BIGINT NOT NULL DEFAULT 1000,
+    max_retries INT NOT NULL DEFAULT 0,
+    error_policy TEXT NOT NULL DEFAULT 'fail_fast',
+    require_success BOOLEAN NOT NULL DEFAULT TRUE,
+    selector_config JSONB NOT NULL DEFAULT '{}'::jsonb,
+    transport_config JSONB NOT NULL DEFAULT '{}'::jsonb,
+    metadata JSONB,
+    created_by TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(tenant_id, hook_type, name)
+);
+COMMENT ON TABLE hook_configs IS 'Hook 配置表（动态加载，与 flare-capability postgres_config 对齐）';
+COMMENT ON COLUMN hook_configs.id IS '自增主键';
+COMMENT ON COLUMN hook_configs.hook_id IS '可选外部稳定 ID（UUID 等），与 id 二选一使用';
+COMMENT ON COLUMN hook_configs.tenant_id IS '租户 ID（空=全局）';
+COMMENT ON COLUMN hook_configs.hook_type IS 'Hook 类型（pre_send, post_send, recall 等）';
+COMMENT ON COLUMN hook_configs.name IS 'Hook 名称';
+COMMENT ON COLUMN hook_configs.version IS '版本';
+COMMENT ON COLUMN hook_configs.description IS '描述';
+COMMENT ON COLUMN hook_configs.enabled IS '是否启用';
+COMMENT ON COLUMN hook_configs.priority IS '优先级（越小越高）';
+COMMENT ON COLUMN hook_configs.group_name IS '分组（validation/critical/business）';
+COMMENT ON COLUMN hook_configs.timeout_ms IS '超时（毫秒）';
+COMMENT ON COLUMN hook_configs.max_retries IS '最大重试次数';
+COMMENT ON COLUMN hook_configs.error_policy IS '错误策略（fail_fast, retry, ignore）';
+COMMENT ON COLUMN hook_configs.require_success IS '是否要求成功';
+COMMENT ON COLUMN hook_configs.selector_config IS '选择器配置（JSON）';
+COMMENT ON COLUMN hook_configs.transport_config IS '传输配置（JSON）';
+COMMENT ON COLUMN hook_configs.metadata IS '元数据（JSON）';
+COMMENT ON COLUMN hook_configs.created_by IS '创建者';
+COMMENT ON COLUMN hook_configs.created_at IS '创建时间';
+COMMENT ON COLUMN hook_configs.updated_at IS '更新时间';
+CREATE INDEX IF NOT EXISTS idx_hook_configs_tenant_type ON hook_configs(tenant_id, hook_type, enabled);
+
+CREATE TABLE hook_executions (
+    execution_id TEXT PRIMARY KEY,
+    hook_id TEXT NOT NULL,
+    hook_name TEXT NOT NULL,
+    hook_type TEXT NOT NULL,
+    tenant_id TEXT NOT NULL,
+    message_id TEXT,
+    request_id TEXT,
+    trace_id TEXT,
+    success BOOLEAN NOT NULL,
+    latency_ms INT,
+    error_code TEXT,
+    error_message TEXT,
+    hook_version TEXT,
+    sample_weight integer NOT NULL DEFAULT 1 CHECK(sample_weight>=1),
+    executed_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+COMMENT ON TABLE hook_executions IS 'Hook 执行记录表（审计/排障）';
+COMMENT ON COLUMN hook_executions.execution_id IS '执行 ID（主键）';
+COMMENT ON COLUMN hook_executions.hook_id IS '关联 hook_configs.id 或 hook_id 文本';
+COMMENT ON COLUMN hook_executions.hook_name IS 'Hook 名称';
+COMMENT ON COLUMN hook_executions.hook_type IS 'Hook 类型';
+COMMENT ON COLUMN hook_executions.tenant_id IS '租户 ID';
+COMMENT ON COLUMN hook_executions.message_id IS '关联消息 ID（可选）';
+COMMENT ON COLUMN hook_executions.request_id IS '上游请求 ID（可选）';
+COMMENT ON COLUMN hook_executions.trace_id IS '追踪 ID（可选）';
+COMMENT ON COLUMN hook_executions.success IS '是否成功';
+COMMENT ON COLUMN hook_executions.latency_ms IS '耗时（毫秒）';
+COMMENT ON COLUMN hook_executions.error_code IS '错误码（失败时）';
+COMMENT ON COLUMN hook_executions.error_message IS '错误信息（失败时）';
+COMMENT ON COLUMN hook_executions.executed_at IS '执行时间';
+CREATE INDEX IF NOT EXISTS idx_hook_executions_tenant_executed ON hook_executions(tenant_id, executed_at DESC);
+CREATE INDEX idx_hook_executions_tenant_hook_executed ON hook_executions(tenant_id,hook_type,hook_name,executed_at DESC);
+CREATE INDEX idx_hook_executions_executed_at ON hook_executions(executed_at);
+
+-- 全局总开关（单行）；无行时服务端按「启用」处理
+CREATE TABLE capability_service_settings (
+    id SMALLINT PRIMARY KEY CHECK (id = 1),
+    global_enabled BOOLEAN NOT NULL DEFAULT TRUE,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+COMMENT ON TABLE capability_service_settings IS '能力服务全局开关（与 InMemoryCapabilityGrants.global_enabled 对应）';
+
+
+-- 租户维度关闭某能力；无行表示不额外禁用（与内存策略一致）
+CREATE TABLE capability_tenant_switches (
+    tenant_id TEXT NOT NULL,
+    capability_id TEXT NOT NULL,
+    enabled BOOLEAN NOT NULL DEFAULT TRUE,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (tenant_id, capability_id)
+);
+COMMENT ON TABLE capability_tenant_switches IS '租户级能力开关（显式 false 时拒绝 Dispatch）';
+CREATE INDEX IF NOT EXISTS idx_capability_tenant_switches_tenant ON capability_tenant_switches(tenant_id);
+
+CREATE TABLE capability_user_grants (
+    tenant_id TEXT NOT NULL,
+    user_id TEXT NOT NULL,
+    capability_id TEXT NOT NULL,
+    granted_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    expires_at TIMESTAMPTZ,
+    plan_code TEXT,
+    source TEXT,
+    PRIMARY KEY (tenant_id, user_id, capability_id)
+);
+COMMENT ON TABLE capability_user_grants IS '用户能力授权（付费/运营开通；支持 namespace.* 通配）';
+COMMENT ON COLUMN capability_user_grants.expires_at IS '过期时间，NULL 表示长期有效';
+COMMENT ON COLUMN capability_user_grants.user_id IS '用户 ID；特殊值 * 表示该 tenant_id 下任意用户（仅建议开发/内网；生产按用户灌库后应删除通配行）';
+CREATE INDEX IF NOT EXISTS idx_capability_user_grants_tenant_user ON capability_user_grants(tenant_id, user_id);
+
+-- No tenant, user or RTC wildcard grant is implicitly provisioned.
+
+-- 策略变更审计（Grant / Revoke / SetTenantSwitch；Dispatch 高频路径默认不落库）
+CREATE TABLE capability_audit_log (
+    id BIGSERIAL PRIMARY KEY,
+    occurred_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    action TEXT NOT NULL,
+    tenant_id TEXT NOT NULL,
+    actor_id TEXT,
+    target_user_id TEXT,
+    capability_id TEXT,
+    detail JSONB,
+    trace_id TEXT
+);
+COMMENT ON TABLE capability_audit_log IS '能力策略变更审计（合规/排障）；由 flare-capability 写入';
+COMMENT ON COLUMN capability_audit_log.action IS 'grant | revoke | tenant_switch 等';
+COMMENT ON COLUMN capability_audit_log.actor_id IS '操作者（metadata x-actor-id / x-user-id）';
+COMMENT ON COLUMN capability_audit_log.detail IS '扩展字段 JSON';
+CREATE INDEX IF NOT EXISTS idx_capability_audit_tenant_time ON capability_audit_log(tenant_id, occurred_at DESC);
+CREATE INDEX IF NOT EXISTS idx_capability_audit_action_time ON capability_audit_log(action, occurred_at DESC);
+
+
+-- FLARE_EXTRACT:END_HOOK_CAPABILITY（第 9 节边界标记，勿删改此行）
+-- ============================================================================
+-- 11. TimescaleDB 策略与触发器
+-- ============================================================================
+
+ALTER TABLE messages SET (
+    timescaledb.enable_columnstore = true,
+    timescaledb.segmentby = 'tenant_id, conversation_id',
+    timescaledb.orderby = 'created_at DESC, server_id'
+);
+
+DO $$
+BEGIN
+    BEGIN
+        CALL add_columnstore_policy('messages', after => INTERVAL '2 days');
+    EXCEPTION WHEN undefined_function OR syntax_error THEN
+        RAISE NOTICE 'add_columnstore_policy not available, skip';
+    END;
+END $$;
+
+CREATE OR REPLACE FUNCTION set_updated_at()
+RETURNS TRIGGER AS $$
+BEGIN
+    NEW.updated_at = CURRENT_TIMESTAMP;
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER trigger_conversations_updated_at
+    BEFORE UPDATE ON conversations FOR EACH ROW EXECUTE PROCEDURE set_updated_at();
+
+CREATE TRIGGER trigger_conversation_participants_updated_at
+    BEFORE UPDATE ON conversation_participants FOR EACH ROW EXECUTE PROCEDURE set_updated_at();
+
+CREATE TRIGGER trigger_user_sync_cursor_updated_at
+    BEFORE UPDATE ON user_sync_cursor FOR EACH ROW EXECUTE PROCEDURE set_updated_at();
+
+CREATE TRIGGER trigger_hook_configs_updated_at
+    BEFORE UPDATE ON hook_configs FOR EACH ROW EXECUTE PROCEDURE set_updated_at();
+
+CREATE TRIGGER trigger_capability_tenant_switches_updated_at
+    BEFORE UPDATE ON capability_tenant_switches FOR EACH ROW EXECUTE PROCEDURE set_updated_at();
+
+CREATE TRIGGER trigger_capability_service_settings_updated_at
+    BEFORE UPDATE ON capability_service_settings FOR EACH ROW EXECUTE PROCEDURE set_updated_at();
+
+CREATE TRIGGER trigger_threads_updated_at
+    BEFORE UPDATE ON threads FOR EACH ROW EXECUTE PROCEDURE set_updated_at();
+
+CREATE TRIGGER trigger_thread_participants_updated_at
+    BEFORE UPDATE ON thread_participants FOR EACH ROW EXECUTE PROCEDURE set_updated_at();
+
+
+-- Current generic communication components (single initial version).
+-- Data-plane projection only. Control owns lifecycle; no token/secret/pepper.
+-- No tenant FK: credentials can arrive before a tenant snapshot. Business APIs
+-- must independently require the existing active tenant gate before execution.
+CREATE TABLE IF NOT EXISTS credential_projection_versions (
+    app_id VARCHAR(32) PRIMARY KEY CHECK (app_id ~ '^[A-Za-z0-9_-]{1,32}$'),
+    version BIGINT NOT NULL CHECK (version > 0),
+    projected_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE TABLE IF NOT EXISTS credential_keys (
+    key_id VARCHAR(12) PRIMARY KEY CHECK (key_id ~ '^[A-Z2-7]{12}$'),
+    app_id VARCHAR(32) NOT NULL REFERENCES credential_projection_versions(app_id),
+    payload JSONB NOT NULL CHECK (jsonb_typeof(payload) = 'object' AND octet_length(payload::text) <= 16384)
+);
+CREATE INDEX IF NOT EXISTS credential_keys_app_idx ON credential_keys(app_id);
+
+-- Plugin endpoint registrations (CapabilityService.RegisterPluginEndpoint), shared by every
+-- Capability instance: each loads the table at startup, writes through on register/deregister,
+-- re-reads it periodically and deletes rows neither re-registered nor healthy within its TTL.
+-- Endpoints from configuration (plugin_discovery_endpoints) are process-local and never stored.
+-- Authenticated control-plane plugin snapshots. Empty snapshots retain the
+-- monotonic watermark; invocation never queries the Marketplace.
+CREATE TABLE IF NOT EXISTS plugin_authorization_snapshots (
+ app_id text PRIMARY KEY CHECK(app_id ~ '^[0-9A-Za-z_-]{1,32}$'),
+ version bigint NOT NULL CHECK(version>0),
+ snapshot jsonb NOT NULL CHECK(jsonb_typeof(snapshot)='object' AND octet_length(snapshot::text)<=4194304),
+ valid_until_ms bigint NOT NULL CHECK(valid_until_ms>0),
+ CHECK(snapshot->>'tenantId'=app_id),
+ CHECK((snapshot->>'version')::bigint=version),
+ CHECK((snapshot->>'validUntilMs')::bigint=valid_until_ms)
+);
+
+-- Shared, leased callback quota; no message, config, credential or payload storage.
+CREATE TABLE capability_plugin_resource_calls (
+    tenant_id text NOT NULL CHECK(tenant_id ~ '^[0-9A-Za-z_-]{1,32}$'),
+    plugin_id text NOT NULL CHECK(char_length(plugin_id) BETWEEN 1 AND 128),
+    actor_id text NOT NULL CHECK(char_length(actor_id) BETWEEN 1 AND 192),
+    request_id text NOT NULL CHECK(char_length(request_id) BETWEEN 1 AND 192),
+    calls integer NOT NULL CHECK(calls BETWEEN 1 AND 8),
+    expires_at_ms bigint NOT NULL CHECK(expires_at_ms>0),
+    PRIMARY KEY(tenant_id,plugin_id,actor_id,request_id)
+);
+CREATE INDEX capability_plugin_resource_calls_expiry ON capability_plugin_resource_calls(tenant_id,expires_at_ms);
+CREATE INDEX capability_plugin_resource_calls_global_expiry ON capability_plugin_resource_calls(expires_at_ms);
+
+CREATE TABLE IF NOT EXISTS capability_plugin_endpoints (
+    tenant_id TEXT NOT NULL,
+    plugin_id TEXT NOT NULL,
+    capability_id TEXT NOT NULL,
+    grpc_authority TEXT NOT NULL,
+    labels JSONB NOT NULL DEFAULT '{}'::jsonb,
+    plugin_version TEXT NOT NULL DEFAULT '',
+    api_version TEXT NOT NULL DEFAULT '',
+    manifest_sha256 TEXT NOT NULL DEFAULT '',
+    declared_operations TEXT[] NOT NULL DEFAULT '{}',
+    unverified BOOLEAN NOT NULL,
+    registered_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    last_healthy_at TIMESTAMPTZ,
+    CONSTRAINT capability_plugin_endpoints_pkey PRIMARY KEY (tenant_id, plugin_id),
+    CONSTRAINT capability_plugin_endpoints_tenant_check
+        CHECK (char_length(tenant_id) BETWEEN 1 AND 256 AND tenant_id <> '*'),
+    CONSTRAINT capability_plugin_endpoints_plugin_check
+        CHECK (char_length(plugin_id) BETWEEN 1 AND 128),
+    CONSTRAINT capability_plugin_endpoints_capability_check
+        CHECK (char_length(capability_id) BETWEEN 1 AND 128),
+    CONSTRAINT capability_plugin_endpoints_authority_check
+        CHECK (char_length(grpc_authority) BETWEEN 1 AND 512),
+    CONSTRAINT capability_plugin_endpoints_labels_check
+        CHECK (jsonb_typeof(labels) = 'object' AND octet_length(labels::text) <= 16384),
+    CONSTRAINT capability_plugin_endpoints_manifest_check
+        CHECK (char_length(plugin_version) <= 64 AND char_length(api_version) <= 64
+               AND char_length(manifest_sha256) <= 128),
+    CONSTRAINT capability_plugin_endpoints_operations_check
+        CHECK (cardinality(declared_operations) <= 256
+               AND array_position(declared_operations, NULL) IS NULL),
+    CONSTRAINT capability_plugin_endpoints_unverified_check
+        CHECK (unverified = (cardinality(declared_operations) = 0))
+);
+
+-- Final-development initialization input; applied with the owning Core business schema.
+CREATE TABLE core_audit_outbox (
+    event_id UUID PRIMARY KEY,
+    app_id TEXT NOT NULL CHECK (app_id <> '' AND app_id <> '*'),
+    payload JSONB NOT NULL CHECK (jsonb_typeof(payload) = 'object'),
+    attempts INTEGER NOT NULL DEFAULT 0 CHECK (attempts >= 0),
+    next_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    delivered_at TIMESTAMPTZ
+);
+CREATE INDEX core_audit_outbox_pending ON core_audit_outbox(next_at,event_id) WHERE delivered_at IS NULL;
+CREATE INDEX core_audit_outbox_delivered ON core_audit_outbox(delivered_at) WHERE delivered_at IS NOT NULL;
+
+-- Final initialization input. Application read grants, never bucket/IAM ACLs.
+CREATE TABLE media_read_grants (
+    tenant_id TEXT NOT NULL,
+    file_id TEXT NOT NULL,
+    user_id TEXT NOT NULL CHECK (length(user_id) BETWEEN 1 AND 256),
+    PRIMARY KEY (tenant_id,file_id,user_id),
+    FOREIGN KEY (tenant_id,file_id) REFERENCES media_assets(tenant_id,file_id) ON DELETE CASCADE
+);
+
+-- Durable physical-target command journal. Redis session indexes remain projections.
+CREATE TABLE online_kick_commands (
+ id UUID PRIMARY KEY,
+ app_id TEXT NOT NULL,
+ request_id TEXT NOT NULL,
+ physical_id TEXT NOT NULL,
+ target JSONB NOT NULL,
+ evidence JSONB NOT NULL,
+ next_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+ attempts INTEGER NOT NULL DEFAULT 0,
+ completed_at TIMESTAMPTZ,
+ UNIQUE(app_id,request_id,physical_id)
+);
+CREATE INDEX online_kick_due ON online_kick_commands(next_at) WHERE completed_at IS NULL;
+
+-- Send idempotency ledger: (tenant_id, sender_id, client_msg_id) is unique beyond the Redis dedup
+-- window. Storage Writer claims it in the message's own transaction; Ingest reads it only for a resend
+-- whose client creation time is older than that window. Not a hypertable (its unique constraints must
+-- contain the time column); hash partitions on (tenant_id, sender_id) keep the key globally unique.
+-- Kept 7 days, deleted in bounded batches by created_at. Placed before the runtime grants below.
+CREATE TABLE message_idempotency_ledger (
+ tenant_id TEXT NOT NULL,
+ sender_id TEXT NOT NULL,
+ client_msg_id TEXT NOT NULL,
+ conversation_id TEXT NOT NULL,
+ server_id TEXT NOT NULL,
+ conversation_seq BIGINT NOT NULL,
+ durability SMALLINT NOT NULL,
+ created_at TIMESTAMPTZ NOT NULL,
+ PRIMARY KEY (tenant_id, sender_id, client_msg_id)
+) PARTITION BY HASH (tenant_id, sender_id);
+CREATE TABLE message_idempotency_ledger_p00 PARTITION OF message_idempotency_ledger FOR VALUES WITH (MODULUS 32, REMAINDER 0);
+CREATE TABLE message_idempotency_ledger_p01 PARTITION OF message_idempotency_ledger FOR VALUES WITH (MODULUS 32, REMAINDER 1);
+CREATE TABLE message_idempotency_ledger_p02 PARTITION OF message_idempotency_ledger FOR VALUES WITH (MODULUS 32, REMAINDER 2);
+CREATE TABLE message_idempotency_ledger_p03 PARTITION OF message_idempotency_ledger FOR VALUES WITH (MODULUS 32, REMAINDER 3);
+CREATE TABLE message_idempotency_ledger_p04 PARTITION OF message_idempotency_ledger FOR VALUES WITH (MODULUS 32, REMAINDER 4);
+CREATE TABLE message_idempotency_ledger_p05 PARTITION OF message_idempotency_ledger FOR VALUES WITH (MODULUS 32, REMAINDER 5);
+CREATE TABLE message_idempotency_ledger_p06 PARTITION OF message_idempotency_ledger FOR VALUES WITH (MODULUS 32, REMAINDER 6);
+CREATE TABLE message_idempotency_ledger_p07 PARTITION OF message_idempotency_ledger FOR VALUES WITH (MODULUS 32, REMAINDER 7);
+CREATE TABLE message_idempotency_ledger_p08 PARTITION OF message_idempotency_ledger FOR VALUES WITH (MODULUS 32, REMAINDER 8);
+CREATE TABLE message_idempotency_ledger_p09 PARTITION OF message_idempotency_ledger FOR VALUES WITH (MODULUS 32, REMAINDER 9);
+CREATE TABLE message_idempotency_ledger_p10 PARTITION OF message_idempotency_ledger FOR VALUES WITH (MODULUS 32, REMAINDER 10);
+CREATE TABLE message_idempotency_ledger_p11 PARTITION OF message_idempotency_ledger FOR VALUES WITH (MODULUS 32, REMAINDER 11);
+CREATE TABLE message_idempotency_ledger_p12 PARTITION OF message_idempotency_ledger FOR VALUES WITH (MODULUS 32, REMAINDER 12);
+CREATE TABLE message_idempotency_ledger_p13 PARTITION OF message_idempotency_ledger FOR VALUES WITH (MODULUS 32, REMAINDER 13);
+CREATE TABLE message_idempotency_ledger_p14 PARTITION OF message_idempotency_ledger FOR VALUES WITH (MODULUS 32, REMAINDER 14);
+CREATE TABLE message_idempotency_ledger_p15 PARTITION OF message_idempotency_ledger FOR VALUES WITH (MODULUS 32, REMAINDER 15);
+CREATE TABLE message_idempotency_ledger_p16 PARTITION OF message_idempotency_ledger FOR VALUES WITH (MODULUS 32, REMAINDER 16);
+CREATE TABLE message_idempotency_ledger_p17 PARTITION OF message_idempotency_ledger FOR VALUES WITH (MODULUS 32, REMAINDER 17);
+CREATE TABLE message_idempotency_ledger_p18 PARTITION OF message_idempotency_ledger FOR VALUES WITH (MODULUS 32, REMAINDER 18);
+CREATE TABLE message_idempotency_ledger_p19 PARTITION OF message_idempotency_ledger FOR VALUES WITH (MODULUS 32, REMAINDER 19);
+CREATE TABLE message_idempotency_ledger_p20 PARTITION OF message_idempotency_ledger FOR VALUES WITH (MODULUS 32, REMAINDER 20);
+CREATE TABLE message_idempotency_ledger_p21 PARTITION OF message_idempotency_ledger FOR VALUES WITH (MODULUS 32, REMAINDER 21);
+CREATE TABLE message_idempotency_ledger_p22 PARTITION OF message_idempotency_ledger FOR VALUES WITH (MODULUS 32, REMAINDER 22);
+CREATE TABLE message_idempotency_ledger_p23 PARTITION OF message_idempotency_ledger FOR VALUES WITH (MODULUS 32, REMAINDER 23);
+CREATE TABLE message_idempotency_ledger_p24 PARTITION OF message_idempotency_ledger FOR VALUES WITH (MODULUS 32, REMAINDER 24);
+CREATE TABLE message_idempotency_ledger_p25 PARTITION OF message_idempotency_ledger FOR VALUES WITH (MODULUS 32, REMAINDER 25);
+CREATE TABLE message_idempotency_ledger_p26 PARTITION OF message_idempotency_ledger FOR VALUES WITH (MODULUS 32, REMAINDER 26);
+CREATE TABLE message_idempotency_ledger_p27 PARTITION OF message_idempotency_ledger FOR VALUES WITH (MODULUS 32, REMAINDER 27);
+CREATE TABLE message_idempotency_ledger_p28 PARTITION OF message_idempotency_ledger FOR VALUES WITH (MODULUS 32, REMAINDER 28);
+CREATE TABLE message_idempotency_ledger_p29 PARTITION OF message_idempotency_ledger FOR VALUES WITH (MODULUS 32, REMAINDER 29);
+CREATE TABLE message_idempotency_ledger_p30 PARTITION OF message_idempotency_ledger FOR VALUES WITH (MODULUS 32, REMAINDER 30);
+CREATE TABLE message_idempotency_ledger_p31 PARTITION OF message_idempotency_ledger FOR VALUES WITH (MODULUS 32, REMAINDER 31);
+CREATE INDEX idx_message_idempotency_ledger_created_at ON message_idempotency_ledger(created_at);
+
+CREATE TABLE tenant_client_policy (
+    tenant_id TEXT PRIMARY KEY CHECK (tenant_id ~ '^[0-9A-Za-z_-]{1,32}$'),
+    version BIGINT NOT NULL CHECK (version > 0),
+    access_serial BIGINT NOT NULL CHECK (access_serial >= 0),
+    release_generation BIGINT NOT NULL CHECK (release_generation >= 0),
+    build_policies JSONB NOT NULL
+        CHECK (jsonb_typeof(build_policies) = 'object' AND octet_length(build_policies::text) <= 262144),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE TABLE tenant_notice_outbox (
+    tenant_id TEXT NOT NULL CHECK (tenant_id ~ '^[0-9A-Za-z_-]{1,32}$'),
+    topic TEXT NOT NULL CHECK (topic IN ('flare.access', 'flare.release')),
+    version BIGINT NOT NULL CHECK (version > 0),
+    attempts INTEGER NOT NULL DEFAULT 0 CHECK (attempts >= 0),
+    next_attempt_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    last_error TEXT CHECK (last_error IS NULL OR char_length(last_error) <= 512),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (tenant_id, topic)
+);
+CREATE INDEX idx_tenant_notice_outbox_due ON tenant_notice_outbox(next_attempt_at);
+
+CREATE TABLE core_initial_schema (
+ version smallint PRIMARY KEY CHECK(version=1),
+ schema_sha256 text NOT NULL CHECK(schema_sha256 ~ '^[0-9a-f]{64}$'),
+ initialized_at timestamptz NOT NULL DEFAULT clock_timestamp()
+);
+REVOKE CREATE ON SCHEMA public FROM PUBLIC,core_runtime;
+GRANT USAGE ON SCHEMA public TO core_runtime;
+GRANT SELECT,INSERT,UPDATE,DELETE ON ALL TABLES IN SCHEMA public TO core_runtime;
+GRANT USAGE,SELECT,UPDATE ON ALL SEQUENCES IN SCHEMA public TO core_runtime;
+REVOKE INSERT,UPDATE,DELETE ON core_initial_schema FROM core_runtime;
+

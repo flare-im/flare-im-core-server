@@ -6,6 +6,7 @@ pub mod extensions;
 pub mod hooks;
 pub mod resource_bridge;
 pub mod shared;
+pub mod tenant_notice;
 pub mod tenant_projection;
 
 pub use capability::{
@@ -15,4 +16,5 @@ pub use capability_admin::CapabilityAdminGrpcServer;
 pub use extensions::ExtensionPluginRouter;
 pub use flare_grpc_proto::capability::capability_service_server::CapabilityServiceServer;
 pub use hooks::{HookServiceServer, ImHookPluginServer};
+pub use tenant_notice::TenantNoticeGrpcServer;
 pub use tenant_projection::TenantProjectionGrpcServer;

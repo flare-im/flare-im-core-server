@@ -106,6 +106,64 @@ impl PluginAuthorizationReader for Projection {
     }
 }
 
+#[derive(Clone, Copy)]
+enum ProjectionReadTiming {
+    Renewed,
+    FutureGrant,
+    ExpiredSnapshot,
+    ExpiredGrant,
+}
+
+struct ProjectionChangingDuringRead {
+    snapshot: PluginRuntimeSnapshot,
+    timing: ProjectionReadTiming,
+}
+
+#[async_trait::async_trait]
+impl PluginAuthorizationReader for ProjectionChangingDuringRead {
+    async fn plugin_snapshot(
+        &self,
+        tenant: &str,
+    ) -> flare_server_core::error::Result<Option<PluginRuntimeSnapshot>> {
+        if tenant != self.snapshot.tenant_id {
+            return Ok(None);
+        }
+        let entered_at = chrono::Utc::now().timestamp_millis();
+        // Explicitly cross a clock tick while the read is suspended, so a time
+        // captured before this read cannot accidentally pass the renewal case.
+        let completed_at = tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                tokio::task::yield_now().await;
+                let now = chrono::Utc::now().timestamp_millis();
+                if now > entered_at + 1 {
+                    break now;
+                }
+            }
+        })
+        .await
+        .expect("the clock must advance while reading a projection");
+        let mut snapshot = self.snapshot.clone();
+        snapshot.issued_at_ms = completed_at;
+        snapshot.valid_until_ms = completed_at + 30_000;
+        let grant = &mut snapshot.plugins[0].grant;
+        grant.valid_from_ms = completed_at;
+        grant.valid_until_ms = snapshot.valid_until_ms;
+        match self.timing {
+            ProjectionReadTiming::Renewed => {}
+            ProjectionReadTiming::FutureGrant => grant.valid_from_ms += 5_000,
+            ProjectionReadTiming::ExpiredSnapshot | ProjectionReadTiming::ExpiredGrant => {
+                snapshot.issued_at_ms = entered_at - 1_000;
+                grant.valid_from_ms = snapshot.issued_at_ms;
+                grant.valid_until_ms = entered_at + 1;
+                if matches!(self.timing, ProjectionReadTiming::ExpiredSnapshot) {
+                    snapshot.valid_until_ms = grant.valid_until_ms;
+                }
+            }
+        }
+        Ok(Some(snapshot))
+    }
+}
+
 /// A gateway-signed Staff context for `app-a` with `permission` and the operator's reason,
 /// verified as the admin RPCs do.
 pub(crate) fn staff(permission: &str) -> VerifiedStaff {
@@ -124,6 +182,24 @@ fn staff_attempt(
     reason: Option<&str>,
     request_id: &str,
 ) -> VerifiedStaff {
+    staff_attempt_scoped(
+        staff_id,
+        permission,
+        reason,
+        request_id,
+        Some("org-1"),
+        None,
+    )
+}
+
+fn staff_attempt_scoped(
+    staff_id: &str,
+    permission: &str,
+    reason: Option<&str>,
+    request_id: &str,
+    member_organization: Option<&str>,
+    target_organization: Option<&str>,
+) -> VerifiedStaff {
     let key = SigningKey::from_bytes(&[61; 32]);
     let signer = SignedContextSigner::from_private_key(
         key.to_pkcs8_pem(Default::default()).unwrap().as_str(),
@@ -140,7 +216,14 @@ fn staff_attempt(
     .require_staff_kid(["gateway"]);
     let mut identity =
         SignedContextIdentity::new(SignedActorType::Staff, staff_id, "app-a", request_id)
-            .with_staff_grant(Some("org-1".into()), Some(permission.into()), 1);
+            .with_staff_grant(
+                member_organization.map(str::to_owned),
+                Some(permission.into()),
+                1,
+            );
+    if let Some(target) = target_organization {
+        identity = identity.with_organization_scope(target);
+    }
     if let Some(reason) = reason {
         identity = identity.with_reason(reason);
     }
@@ -208,6 +291,136 @@ fn request(operation: &str, input: Value) -> AdminPluginRequest {
 /// need `manage` and a stated reason, with the poll id as their audited target.
 const READ: &str = "plugin:example.poll:read";
 const MANAGE: &str = "plugin:example.poll:manage";
+
+async fn projection_read_harness(timing: ProjectionReadTiming) -> Harness {
+    let mut h = harness().await;
+    let snapshot = h.reader.0.lock().unwrap().clone().unwrap();
+    h.routes = Arc::new(PluginRouteBook::new().with_runtime_authorization(
+        Arc::new(ProjectionChangingDuringRead { snapshot, timing }),
+        h.routes.invocation_signer.clone(),
+    ));
+    h
+}
+
+#[tokio::test]
+async fn admin_projection_renewed_during_read_is_effective_when_read_completes() {
+    let h = projection_read_harness(ProjectionReadTiming::Renewed).await;
+    let result = dispatch_admin(
+        &staff(READ),
+        &h.routes,
+        AdminCall::Query,
+        request("example.poll.list", json!({})),
+        Duration::from_secs(2),
+        &ALLOW_EVIDENCE,
+    )
+    .await
+    .unwrap();
+    assert!(result.success);
+    assert_eq!(h.plugin.calls().len(), 1);
+}
+
+#[tokio::test]
+async fn admin_projection_future_grant_remains_refused() {
+    let h = projection_read_harness(ProjectionReadTiming::FutureGrant).await;
+    let result = dispatch_admin(
+        &staff(READ),
+        &h.routes,
+        AdminCall::Query,
+        request("example.poll.list", json!({})),
+        Duration::from_secs(2),
+        &ALLOW_EVIDENCE,
+    )
+    .await;
+    assert!(matches!(result, Err(CapabilityError::PolicyDenied(_))));
+    assert!(h.plugin.calls().is_empty());
+}
+
+#[tokio::test]
+async fn admin_projection_expiring_during_read_remains_refused() {
+    for timing in [
+        ProjectionReadTiming::ExpiredSnapshot,
+        ProjectionReadTiming::ExpiredGrant,
+    ] {
+        let h = projection_read_harness(timing).await;
+        let result = dispatch_admin(
+            &staff(READ),
+            &h.routes,
+            AdminCall::Query,
+            request("example.poll.list", json!({})),
+            Duration::from_secs(2),
+            &ALLOW_EVIDENCE,
+        )
+        .await;
+        assert!(matches!(result, Err(CapabilityError::PolicyDenied(_))));
+        assert!(h.plugin.calls().is_empty());
+    }
+}
+
+#[tokio::test]
+async fn organization_operations_require_signed_scope_matching_the_projected_owner() {
+    let h = harness().await;
+    {
+        let mut source = h.reader.0.lock().unwrap();
+        let snapshot = source.as_mut().unwrap();
+        snapshot.organization_id = Some("org-1".into());
+        let projected = &mut snapshot.plugins[0];
+        let mut manifest: Value = serde_json::from_str(&projected.manifest_json).unwrap();
+        for op in manifest["admin"]["operations"].as_array_mut().unwrap() {
+            if op["permission"] == "read" {
+                op["scope"] = json!("organization");
+            }
+        }
+        projected.manifest_json = serde_json::to_string(&manifest).unwrap();
+        let digest = flare_im_capability_core::plugin::runtime::digest_bytes(
+            projected.manifest_json.as_bytes(),
+        );
+        projected.grant.manifest_digest = digest.clone();
+        projected.deployment.manifest_digest = digest;
+    }
+    for caller in [
+        staff(READ),
+        staff_attempt_scoped("platform-1", READ, None, "org-req", None, None),
+        staff_attempt_scoped("platform-1", READ, None, "org-req", None, Some("other-org")),
+    ] {
+        assert!(
+            dispatch_admin(
+                &caller,
+                &h.routes,
+                AdminCall::Query,
+                request(
+                    "example.poll.list",
+                    json!({"scope":"organization","organizationId":"org-1"})
+                ),
+                Duration::from_secs(2),
+                &ALLOW_EVIDENCE
+            )
+            .await
+            .is_err()
+        );
+    }
+    let caller = staff_attempt_scoped("platform-1", READ, None, "org-req", None, Some("org-1"));
+    assert!(
+        dispatch_admin(
+            &caller,
+            &h.routes,
+            AdminCall::Query,
+            request("example.poll.list", json!({})),
+            Duration::from_secs(2),
+            &ALLOW_EVIDENCE
+        )
+        .await
+        .unwrap()
+        .success
+    );
+    let calls = h.plugin.calls();
+    assert_eq!(calls.len(), 1);
+    let claims = h
+        .verifier
+        .verify_staff(&calls[0].ticket, chrono::Utc::now().timestamp_millis())
+        .unwrap();
+    assert_eq!(claims.scope.organization_id(), Some("org-1"));
+    assert!(claims.org_id.is_none());
+}
 
 #[tokio::test]
 async fn staff_reads_and_acts_through_a_staff_ticket_without_a_conversation() {

@@ -91,6 +91,7 @@ fn fixture() -> (
     let now = chrono::Utc::now().timestamp_millis();
     let config = configuration_digest(&json!({})).unwrap();
     let projection = Arc::new(Projection(Mutex::new(PluginRuntimeSnapshot {
+        organization_id: Some("org-1".into()),
         tenant_id: "201".into(),
         version: 1,
         issued_at_ms: now,

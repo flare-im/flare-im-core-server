@@ -477,8 +477,9 @@ pub(crate) fn core_info_to_domain(
 }
 
 /// 客户端在 CONNECT 的 `DeviceInfo.metadata` 里带构建号（`app_build`）与分发渠道（`distribution`），
-/// 用于按版本排查连接问题。只取这两个键并校验格式：其余客户端自报的键不进连接元数据（里面还有
-/// 租户等服务端写入的键，不能被客户端覆盖），连接元数据里已有同名键时也不覆盖。
+/// 用于按版本排查连接问题；链路监督者还带上连接代数（`connection_epoch`）与接入清单 serial
+/// （`access_serial`），用于排查切换与清单下发。只取这几个键并校验格式：其余客户端自报的键不进连接
+/// 元数据（里面还有租户等服务端写入的键，不能被客户端覆盖），连接元数据里已有同名键时也不覆盖。
 fn merge_client_build_metadata(
     metadata: &mut HashMap<String, String>,
     device_metadata: &HashMap<String, String>,
@@ -486,6 +487,8 @@ fn merge_client_build_metadata(
     for (key, valid) in [
         ("app_build", is_app_build as fn(&str) -> bool),
         ("distribution", is_distribution),
+        ("connection_epoch", is_app_build),
+        ("access_serial", is_app_build),
     ] {
         if !metadata.contains_key(key)
             && let Some(value) = device_metadata.get(key).map(|value| value.trim())
@@ -579,9 +582,22 @@ mod static_route_tests {
         );
         assert_eq!(metadata.get("tenant_id").map(String::as_str), Some("acme"));
 
+        let link: HashMap<String, String> = [("connection_epoch", "7"), ("access_serial", "0")]
+            .into_iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        let mut metadata = HashMap::new();
+        merge_client_build_metadata(&mut metadata, &link);
+        assert_eq!(
+            metadata.get("connection_epoch").map(String::as_str),
+            Some("7")
+        );
+        assert_eq!(metadata.get("access_serial").map(String::as_str), Some("0"));
+
         let invalid: HashMap<String, String> = [
             ("app_build", "1.2.3"),
             ("distribution", "app store\nforged=1"),
+            ("connection_epoch", "-1"),
         ]
         .into_iter()
         .map(|(k, v)| (k.to_string(), v.to_string()))

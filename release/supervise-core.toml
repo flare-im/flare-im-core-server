@@ -47,6 +47,7 @@ inherit_env_prefixes = ["SIGNALING_ONLINE_"]
 # (kid=gateway); the platform public key verifies only the scheduler's KickTenant assertion.
 inherit_env = [
   "FLARE_INTERNAL_CTX_PUBLIC_KEY", "FLARE_INTERNAL_CTX_PUBLIC_KEYS", "FLARE_PLATFORM_PUBLIC_KEY",
+  "FLARE_AUDIT_NATS_URL",
 ]
 required_env = ["FLARE_INTERNAL_CTX_PUBLIC_KEY"]
 tcp_health = "127.0.0.1:50061"
@@ -79,6 +80,7 @@ inherit_env_prefixes = ["CAPABILITY_", "FLARE_CAPABILITY_", "PLUGIN_"]
 inherit_env = [
   "FLARE_INTERNAL_CTX_PUBLIC_KEY", "FLARE_INTERNAL_CTX_PUBLIC_KEYS", "FLARE_PLATFORM_PUBLIC_KEY",
   "CONFIG_CENTER_ENDPOINT", "TENANT_ID",
+  "FLARE_AUDIT_NATS_URL", "FLARE_TENANT_NOTICE_PUBLISHERS",
   "FLARE_PLUGIN_CARD_INGEST_URL", "FLARE_PLUGIN_STATE_EVENT_URL",
   "FLARE_PLUGIN_RESOURCE_CONVERSATION_URL", "FLARE_PLUGIN_RESOURCE_SOCIAL_GROUP_URL",
   "FLARE_PLUGIN_REALTIME_PUSH_URL",
@@ -128,6 +130,7 @@ inherit_env_prefixes = ["MESSAGE_INGEST_", "INGEST_", "FLARE_USAGE_"]
 inherit_env = [
   "FLARE_INTERNAL_CTX_PUBLIC_KEY", "FLARE_INTERNAL_CTX_PUBLIC_KEYS", "FLARE_INTERNAL_CTX_PRIVATE_KEY",
   "FLARE_CAPABILITY_GRPC_URI",
+  "FLARE_WRITE_PROOF_PRIVATE_KEY", "FLARE_WRITE_PROOF_PUBLIC_KEY",
 ]
 required_env = ["FLARE_INTERNAL_CTX_PUBLIC_KEY", "MESSAGE_INGEST_HOOKS_CONFIG"]
 tcp_health = "127.0.0.1:50182"
@@ -155,7 +158,7 @@ tcp_health = "127.0.0.1:50181"
 name = "storage-writer"
 command = "/usr/local/bin/flare-storage-writer"
 inherit_env_prefixes = ["STORAGE_", "FLARE_USAGE_"]
-inherit_env = ["POSTGRES_URL", "MEDIA_SERVICE_ENDPOINT"]
+inherit_env = ["POSTGRES_URL", "MEDIA_SERVICE_ENDPOINT", "FLARE_WRITE_PROOF_PUBLIC_KEY", "FLARE_AUDIT_NATS_URL"]
 
 [[services]]
 name = "storage-reader"
@@ -166,6 +169,7 @@ inherit_env_prefixes = ["STORAGE_"]
 inherit_env = [
   "POSTGRES_URL", "MEDIA_SERVICE_ENDPOINT",
   "FLARE_INTERNAL_CTX_PUBLIC_KEY", "FLARE_INTERNAL_CTX_PUBLIC_KEYS", "FLARE_REQUIRE_SIGNED_READ_CTX",
+  "FLARE_AUDIT_NATS_URL", "CONVERSATION_ROSTER_POLICY_GRPC_URL",
 ]
 required_env = ["FLARE_INTERNAL_CTX_PUBLIC_KEY"]
 tcp_health = "127.0.0.1:60083"
@@ -231,7 +235,7 @@ command = "/usr/local/bin/flare-media"
 inherit_env_prefixes = ["MEDIA_", "DIRECT_", "EXTERNAL_", "FLARE_S3_", "FLARE_USAGE_"]
 # Media gRPC admits only Cell-signed internal context (verify-only public key set; Admin
 # Gateway signs its media calls as kid=admin-gateway).
-inherit_env = ["FLARE_OBJECT_STORE_PROFILE", "FLARE_INTERNAL_CTX_PUBLIC_KEY", "FLARE_INTERNAL_CTX_PUBLIC_KEYS"]
+inherit_env = ["FLARE_OBJECT_STORE_PROFILE", "FLARE_INTERNAL_CTX_PUBLIC_KEY", "FLARE_INTERNAL_CTX_PUBLIC_KEYS", "FLARE_AUDIT_NATS_URL"]
 required_env = [
   "FLARE_S3_ENDPOINT", "FLARE_S3_ACCESS_KEY", "FLARE_S3_SECRET_KEY",
   "FLARE_INTERNAL_CTX_PUBLIC_KEY",
@@ -244,9 +248,13 @@ command = "/usr/local/bin/flare-api-gateway"
 inherit_env_prefixes = ["FLARE_API_GATEWAY_", "GRPC_", "FLARE_USAGE_"]
 inherit_env = [
   "FLARE_INTERNAL_CTX_PRIVATE_KEY",
+  "FLARE_INTERNAL_CTX_PUBLIC_KEYS",
   "FLARE_API_KEY_PEPPER", "FLARE_PLATFORM_API_ENABLED", "FLARE_PLATFORM_TRUSTED_PROXY_CIDRS",
 ]
 required_env = ["FLARE_API_GATEWAY_TOKEN_SECRET", "FLARE_INTERNAL_CTX_PRIVATE_KEY"]
+required_env_unless = [
+  { name = "FLARE_API_GATEWAY_TOKEN_SECRET", when_env = "FLARE_API_GATEWAY_AUTH_MODE", equals = "http_hook" },
+]
 tcp_health = "127.0.0.1:50050"
 [services.environment]
 FLARE_API_GATEWAY_AUTH_DEV_ISSUE = "false"
@@ -277,6 +285,9 @@ inherit_env = [
   "FLARE_QUIC_TLS_CERT", "FLARE_QUIC_TLS_KEY",
 ]
 required_env = ["ACCESS_GATEWAY_TOKEN_SECRET", "FLARE_INTERNAL_CTX_PRIVATE_KEY", "FLARE_INTERNAL_CTX_PUBLIC_KEY"]
+required_env_unless = [
+  { name = "ACCESS_GATEWAY_TOKEN_SECRET", when_env = "ACCESS_GATEWAY_AUTH_MODE", equals = "http_hook" },
+]
 tcp_health = "127.0.0.1:60051"
 [services.environment]
 ACCESS_GATEWAY_TENANT_POLICY = "strict"
@@ -298,6 +309,7 @@ inherit_env_prefixes = ["FLARE_ADMIN_GATEWAY_"]
 inherit_env = [
   "FLARE_INTERNAL_CTX_PUBLIC_KEY", "FLARE_INTERNAL_CTX_PUBLIC_KEYS", "FLARE_INTERNAL_CTX_PRIVATE_KEY",
   "FLARE_AUDIT_NATS_URL",
+  "FLARE_OPS_READ_TOKEN",
 ]
 required_env = ["FLARE_INTERNAL_CTX_PUBLIC_KEY", "FLARE_INTERNAL_CTX_PRIVATE_KEY"]
 tcp_health = "127.0.0.1:50051"

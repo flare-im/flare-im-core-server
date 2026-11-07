@@ -5,9 +5,19 @@
 # `failed to load manifest`（注意它不会退回 registry —— `{ version, path }` 双写
 # 只在 cargo publish 时才换成 registry 版本）。
 #
-# 代价是整个工作区默认都会被送进 daemon。2026-08-20 实测：只排除
-# .git/target/node_modules 时上下文约 30GB，一次构建把宿主机从 15Gi 吃到 3Gi。
-# 所以这里既挡运行时垃圾，也**整仓排除本镜像用不到的仓**。
+# 默认拒绝，只有五个 COPY 输入进入上下文。尤其不发送 Deploy 的私有
+# .local 证据、运行凭据或工作区根 capture 文件；下方再排除允许仓中的运行产物。
+**
+!flare-protocol/
+!flare-protocol/**
+!flare-protocol-grpc/
+!flare-protocol-grpc/**
+!flare-transport/
+!flare-transport/**
+!flare-server-runtime/
+!flare-server-runtime/**
+!flare-core-server/
+!flare-core-server/**
 
 # ── 版本控制与编译产物 ──
 .git
@@ -38,6 +48,18 @@ certs
 **/*.pem
 **/*.key
 **/.env
+**/.env.*
+**/*.env
+!**/.env.example
+!**/*.env.example
+**/*.p8
+**/*.p12
+**/*.pfx
+**/*.jks
+**/*.keystore
+**/.local
+**/secrets
+**/*.pcap
 **/.dev-token-secret
 
 # ── 工具目录 ──

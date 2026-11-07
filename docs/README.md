@@ -12,6 +12,7 @@
 | 接入指南 | [INTEGRATION.md](INTEGRATION.md)（[中文](INTEGRATION.zh-CN.md)） | 把 Core 接进自己的业务：用户体系、客户端、部署、E2EE、Hook 扩展点。 |
 | 管理 API | [admin-api.md](admin-api.md) | Admin Gateway 的内网管理接口：Staff 上下文与应用、权限码、写操作审计头与效果事件、会话/在线/踢线/租户运行时/能力/插件/Hook 路由、错误映射与契约测试。 |
 | 用量事件 | [usage-events.md](usage-events.md) | 进程内窗口预聚合的用量事件 `flare.usage.window.v1`：六个计量点、流与配置、事件形状与幂等键、投递语义与内存上限、平台消费方要求、指标。 |
+| 租户通知 | [tenant-notices.md](tenant-notices.md) | 租户级配置变化时通知该租户在线客户端立即重读：`TenantNotice` 模型、发布者命名空间登记、`TenantNoticeService.Publish`、下行 `DataPacket.tenant_notice` 与分散窗口、SDK 扩展事件。 |
 
 ## 阅读顺序
 

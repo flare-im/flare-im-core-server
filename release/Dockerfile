@@ -113,6 +113,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
         -p flare-push-worker \
         -p flare-media \
         -p flare-supervise \
+        -p flare-core-initialize \
     # flare-capability comes from its own workspace, which links the plugin service router;
     # the open workspace's flare-capability (service calls refused) is not shipped.
     && cargo build --locked --release \
@@ -122,8 +123,15 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     # still mounted. Forgetting this yields an image with an empty /out and a build
     # that "succeeded".
     && mkdir -p /out \
-    && find target/release -maxdepth 1 -type f -perm -111 \
-         ! -name '*.d' ! -name '*.so' -exec cp {} /out/ \;
+    # Explicit products only: shared cache may also contain old tools/examples.
+    && for bin in flare-api-gateway flare-admin-gateway flare-signaling-gateway \
+                  flare-signaling-online flare-signaling-route flare-message-ingest \
+                  flare-orchestrator flare-conversation flare-sync-orchestrator \
+                  flare-storage-writer flare-storage-reader flare-push-server \
+                  flare-push-proxy flare-push-worker flare-capability flare-media \
+                  flare-supervise flare-core-initialize; do \
+         install -m 0755 "target/release/$bin" "/out/$bin"; \
+       done
 
 # ── Stage 2: runtime ─────────────────────────────────────────────────────────
 FROM ${RUNTIME_IMAGE}
@@ -141,7 +149,9 @@ RUN if [ "$APT_MIRROR" != "deb.debian.org" ]; then \
     && apt-get install -y --no-install-recommends \
         ca-certificates libssl3 curl netcat-openbsd \
     && rm -rf /var/lib/apt/lists/* \
-    && useradd -r -u 10001 -m flare
+    && groupadd -r -g 10001 flare \
+    && useradd -r -u 10001 -g 10001 -m flare \
+    && install -d -o 10001 -g 10001 -m 0700 /home/flare/data
 
 COPY --from=builder /out/ /usr/local/bin/
 COPY flare-core-server/config /etc/flare/config
