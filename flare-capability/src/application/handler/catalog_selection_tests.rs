@@ -1,6 +1,8 @@
 use super::*;
 use flare_im_capability_core::plugin::manifest::ClientPlatform;
-use flare_im_capability_core::plugin::ui::{BundleRuntime, engine_vocabulary};
+use flare_im_capability_core::plugin::ui::{
+    BundleRuntime, MAX_UI_DESCRIPTOR_BYTES, engine_vocabulary,
+};
 
 fn descriptor(bundle: bool) -> ClientUiDescriptor {
     ClientUiDescriptor::new(
@@ -110,6 +112,33 @@ fn the_selection_cache_is_keyed_by_tenant_version_and_descriptor_and_bounded() {
     let tenant_b = selection.selection("app-b", &snapshot("app-b", 1), &with, &with.hash());
     assert!(!Arc::ptr_eq(&first, &tenant_b));
     assert_eq!(selection.cached(), 2);
+}
+
+#[test]
+fn one_tenant_cycling_builds_evicts_only_its_own_selections() {
+    let selection = CatalogSelection::new(true, SELECTION_CACHE_PER_TENANT * 4);
+    let steady = descriptor(false);
+    let kept = selection.selection("app-b", &snapshot("app-b", 1), &steady, &steady.hash());
+    for build in 0..(SELECTION_CACHE_PER_TENANT as u64 * 3) {
+        let mut cycled = descriptor(false);
+        cycled.app_build = build + 2;
+        let _ = selection.selection("app-a", &snapshot("app-a", 1), &cycled, &cycled.hash());
+    }
+    assert_eq!(selection.cached(), SELECTION_CACHE_PER_TENANT + 1);
+    let again = selection.selection("app-b", &snapshot("app-b", 1), &steady, &steady.hash());
+    assert!(
+        Arc::ptr_eq(&kept, &again),
+        "another tenant's selection survives"
+    );
+}
+
+#[test]
+fn the_descriptor_size_bound_counts_what_was_sent() {
+    let mut padded = serde_json::to_value(descriptor(false)).unwrap();
+    padded["padding"] = serde_json::json!("x".repeat(MAX_UI_DESCRIPTOR_BYTES));
+    let error =
+        read_descriptor(Some(&serde_json::json!({"descriptor": padded})), true).unwrap_err();
+    assert!(is_invalid_argument(&error));
 }
 
 #[test]

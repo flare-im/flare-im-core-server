@@ -427,7 +427,11 @@ async fn ui_catalog_requires_a_valid_client_ui_descriptor() {
     let backend: Arc<dyn CapabilityPolicyBackend> = policy();
     let mut bad = serde_json::to_value(catalog_descriptor(false)).unwrap();
     bad["appBuild"] = serde_json::json!(-1);
+    // Unknown fields are ignored but still count toward the size bound.
+    let mut padded = serde_json::to_value(catalog_descriptor(false)).unwrap();
+    padded["padding"] = serde_json::json!("x".repeat(5000));
     for payload in [
+        Some(serde_json::json!({"descriptor": padded})),
         None,
         Some(Value::Null),
         Some(serde_json::json!({})),
@@ -546,7 +550,13 @@ async fn ui_catalog_selects_contribution_variants_per_client_descriptor() {
     );
     *reader.0.lock().unwrap() = Some(floored);
     let placeholder = catalog(routes.clone(), true).await;
-    assert_eq!(placeholder.upgrade, Some(UiUpgrade { min_build: Some(5) }));
+    assert_eq!(
+        placeholder.upgrade,
+        Some(UiUpgrade {
+            min_build: Some(5),
+            unsupported: false
+        })
+    );
     assert_eq!(placeholder.id, "example.echo.board");
     assert_eq!(placeholder.schema.title, "Echo");
     assert_eq!(placeholder.schema.translations["en-US"].title, "Echo board");

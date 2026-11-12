@@ -17,7 +17,6 @@ use flare_im_service_kit::metrics::REGISTRY;
 use flare_server_core::error::{ErrorCode, FlareError};
 use once_cell::sync::Lazy;
 use prometheus::{IntCounterVec, Opts};
-use serde::Deserialize;
 use serde_json::Value;
 
 use crate::domain::capability::{CapabilityError, Result};
@@ -25,16 +24,12 @@ use crate::domain::capability::{CapabilityError, Result};
 /// Selections kept: one per tenant, projection version and descriptor; the least recently used
 /// goes first.
 pub const SELECTION_CACHE_CAPACITY: usize = 1024;
+/// Selections kept for one tenant: its clients' distinct builds and kits, with room to spare.
+pub const SELECTION_CACHE_PER_TENANT: usize = 64;
 /// Distinct `descriptor_hash` label values; later descriptors count under `other`.
 const MAX_DESCRIPTOR_LABELS: usize = 256;
 /// Hex digits of the descriptor hash used as its label.
 const DESCRIPTOR_LABEL_HEX: usize = 12;
-
-/// The catalog request payload. Unknown fields are ignored: a newer client may send more.
-#[derive(Deserialize)]
-struct CatalogRequest {
-    descriptor: ClientUiDescriptor,
-}
 
 /// A missing, unreadable or out-of-bounds descriptor: `INVALID_ARGUMENT`. There is no catalog
 /// without one.
@@ -55,9 +50,9 @@ pub(crate) fn read_descriptor(
     let payload = payload
         .filter(|payload| !payload.is_null())
         .ok_or_else(invalid_descriptor)?;
-    let CatalogRequest { mut descriptor } =
-        CatalogRequest::deserialize(payload).map_err(|_| invalid_descriptor())?;
-    descriptor.validate().map_err(|_| invalid_descriptor())?;
+    // The size bound applies to the descriptor as sent, before it is parsed.
+    let raw = payload.get("descriptor").ok_or_else(invalid_descriptor)?;
+    let mut descriptor = ClientUiDescriptor::from_value(raw).map_err(|_| invalid_descriptor())?;
     if !web_bundles {
         descriptor.bundle = None;
     }
@@ -65,7 +60,7 @@ pub(crate) fn read_descriptor(
 }
 
 /// A contribution as one client gets it, with how it was chosen (`variant`, `fallback`,
-/// `upgrade`; [`flare_im_capability_core::plugin::ui::Selected::outcome`]).
+/// `upgrade`, `unsupported`; [`flare_im_capability_core::plugin::ui::Selected::outcome`]).
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct SelectedContribution {
     pub contribution: UiContribution,
@@ -188,14 +183,21 @@ impl CatalogSelection {
         let mut cache = self.lock();
         cache.tick += 1;
         let tick = cache.tick;
-        if !cache.entries.contains_key(&key) && cache.entries.len() >= self.capacity {
-            let oldest = cache
-                .entries
-                .iter()
-                .min_by_key(|(_, entry)| entry.used)
-                .map(|(key, _)| key.clone());
-            if let Some(oldest) = oldest {
-                cache.entries.remove(&oldest);
+        if !cache.entries.contains_key(&key) {
+            // A tenant whose clients cycle descriptors (every `appBuild` is a new key) evicts
+            // its own selections first, never more than its share of everyone else's.
+            let tenant_entries = cache.entries.keys().filter(|k| k.0 == key.0).count();
+            let tenant_full = tenant_entries >= SELECTION_CACHE_PER_TENANT.min(self.capacity);
+            if tenant_full || cache.entries.len() >= self.capacity {
+                let oldest = cache
+                    .entries
+                    .iter()
+                    .filter(|(k, _)| !tenant_full || k.0 == key.0)
+                    .min_by_key(|(_, entry)| entry.used)
+                    .map(|(key, _)| key.clone());
+                if let Some(oldest) = oldest {
+                    cache.entries.remove(&oldest);
+                }
             }
         }
         cache.entries.insert(
@@ -210,7 +212,7 @@ impl CatalogSelection {
 }
 
 /// `plugin_catalog_selection_total{outcome}`: contributions served by how they were chosen
-/// (`variant`, `fallback`, `upgrade`); `plugin_catalog_descriptor_total{descriptor_hash}`:
+/// (`variant`, `fallback`, `upgrade`, `unsupported`); `plugin_catalog_descriptor_total{descriptor_hash}`:
 /// catalog requests by descriptor (the first 12 hex digits of its hash; at most 256 values,
 /// then `other`).
 pub struct CatalogSelectionMetrics {
