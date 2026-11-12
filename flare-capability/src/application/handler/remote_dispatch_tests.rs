@@ -633,6 +633,54 @@ async fn ui_catalog_query_operations_are_only_authorized_signed_queries() {
     );
 }
 
+#[tokio::test]
+async fn ui_catalog_lists_the_authorized_transient_operations() {
+    let (ctx, _, _) = identity(SignedActorType::User);
+    let mut raw: Value = serde_json::from_str(&echo_manifest()).unwrap();
+    raw["clientExtensions"] = serde_json::json!({"platforms":["web"],"contributions":[{"kind":"message-content","id":"example.echo.card","schemaVersion":1,"requiredPermissions":[],"schema":{"title":"Echo","actions":[{"id":"run","label":"Run","target":{"kind":"operation","operation":"example.echo.run"}}]}}]});
+    let original = raw["capabilities"][0]["operations"][0].clone();
+    for id in ["pay", "unapproved-pay"] {
+        let mut transient = original.clone();
+        transient["id"] = serde_json::json!(id);
+        transient["mode"] = serde_json::json!("command");
+        transient["transient"] = serde_json::json!(true);
+        raw["capabilities"][0]["operations"]
+            .as_array_mut()
+            .unwrap()
+            .push(transient);
+    }
+    let mut projected = snapshot("http://127.0.0.1:1".into());
+    projected.plugins[0] =
+        with_manifest(&projected.plugins[0], &serde_json::to_string(&raw).unwrap());
+    projected.plugins[0]
+        .grant
+        .approved_operations
+        .insert("example.echo.pay".into());
+    let reader = Arc::new(Projection(Mutex::new(Some(projected))));
+    let routes = Arc::new(PluginRouteBook::new().with_runtime_authorization(reader, None));
+    let backend: Arc<dyn CapabilityPolicyBackend> = policy();
+    let mut request = command();
+    request.capability_id = flare_im_capability_core::plugin::ui::UI_CATALOG_OPERATION.into();
+    request.payload = Some(catalog_payload(false));
+    let result = dispatch_remote(&ctx, &request, &routes, &backend, Duration::from_secs(1))
+        .await
+        .unwrap();
+    assert_eq!(
+        result.data["plugins"][0]["transientOperations"],
+        serde_json::json!(["example.echo.pay"])
+    );
+    let catalog: flare_im_capability_core::plugin::ui::UiCatalog =
+        serde_json::from_value(result.data).unwrap();
+    let plugin = &catalog.plugins[0];
+    assert_eq!(
+        plugin.transient_operations,
+        ["example.echo.pay".into()].into()
+    );
+    assert!(plugin.transient_operations.is_subset(&plugin.operations));
+    assert!(!plugin.transient_operations.contains("example.echo.run"));
+    assert!(plugin.query_operations.is_empty());
+}
+
 /// Design 6.3: an action whose operation a closed feature gates leaves every surface, including a
 /// page that stays open (the wallet's 「开户」 on its home page, V5c-W5); reopening brings it back.
 #[tokio::test]

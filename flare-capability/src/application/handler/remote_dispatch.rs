@@ -925,6 +925,12 @@ async fn client_ui_catalog(
                 })
                 .cloned()
                 .collect();
+            // Reached only through a host confirmation (a payment order's operation).
+            let transient_operations: std::collections::BTreeSet<String> = operations
+                .iter()
+                .filter(|operation| manifest.operation(operation).is_some_and(|op| op.transient))
+                .cloned()
+                .collect();
             let configuration = client_configuration(manifest, projected);
             // The variant this client renders, or its upgrade placeholder; identity, permissions
             // and the feature a contribution belongs to are the same in every variant.
@@ -977,6 +983,7 @@ async fn client_ui_catalog(
                 extensions,
                 operations,
                 query_operations,
+                transient_operations,
                 configuration,
             });
         }
