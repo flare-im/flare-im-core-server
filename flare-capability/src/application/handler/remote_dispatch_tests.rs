@@ -458,11 +458,12 @@ async fn ui_catalog_selects_contribution_variants_per_client_descriptor() {
     let manifest = |min_client: Option<Value>| {
         let mut raw: Value = serde_json::from_str(&echo_manifest()).unwrap();
         raw["clientExtensions"] = serde_json::json!({"platforms":["web"],"nativeCapabilities":[],
-            "contributions":[{"kind":"message-content","id":"example.echo.card","schemaVersion":1,
+            // A page: message cards stay declarative and never take a bundle variant.
+            "contributions":[{"kind":"page","id":"example.echo.board","schemaVersion":1,
                 "requiredPermissions":["example.echo.run"],
                 "schema":{"title":"Echo","fields":[],"actions":[{"id":"run","label":"Run",
                     "target":{"kind":"operation","operation":"example.echo.run"}}],
-                    "translations":{"en-US":{"title":"Echo card","fields":[],"actions":{"run":"Run"}}}},
+                    "translations":{"en-US":{"title":"Echo board","fields":[],"actions":{"run":"Run"}}}},
                 "variants":[
                     {"id":"board","requires":{"bundle":{"id":"board","bridge":1}},
                      "bundle":{"id":"board","route":"/"}},
@@ -546,9 +547,9 @@ async fn ui_catalog_selects_contribution_variants_per_client_descriptor() {
     *reader.0.lock().unwrap() = Some(floored);
     let placeholder = catalog(routes.clone(), true).await;
     assert_eq!(placeholder.upgrade, Some(UiUpgrade { min_build: Some(5) }));
-    assert_eq!(placeholder.id, "example.echo.card");
+    assert_eq!(placeholder.id, "example.echo.board");
     assert_eq!(placeholder.schema.title, "Echo");
-    assert_eq!(placeholder.schema.translations["en-US"].title, "Echo card");
+    assert_eq!(placeholder.schema.translations["en-US"].title, "Echo board");
     assert!(placeholder.schema.actions.is_empty() && placeholder.bundle.is_none());
     assert_eq!(routes.catalog_selection.cached(), 3);
 }
