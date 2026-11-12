@@ -19,6 +19,9 @@ use flare_grpc_proto::storage::{
 use flare_im_contracts::Ctx;
 use flare_im_contracts::service_names::{CONVERSATION, STORAGE_READER, get_service_name};
 use flare_im_contracts::utils::normalize_optional_tenant_id;
+use flare_im_service_kit::config::FlareAppConfig;
+#[cfg(test)]
+use flare_im_service_kit::config::ServiceRuntimeConfig;
 use flare_proto::Message;
 use flare_server_core::error::{ErrorBuilder, ErrorCode, FlareError};
 use redis::aio::ConnectionManager;
@@ -52,54 +55,91 @@ fn request_with_context<T>(payload: T, ctx: &Ctx) -> tonic::Request<T> {
 #[derive(Clone, Copy, Default)]
 pub struct GrpcSyncAdapters;
 
+fn static_sync_endpoint(
+    app: &FlareAppConfig,
+    static_registry_mode: bool,
+    service_name: &str,
+) -> Result<Option<String>, FlareError> {
+    if !static_registry_mode {
+        return Ok(None);
+    }
+    if !matches!(service_name, CONVERSATION | STORAGE_READER) {
+        return Err(ErrorBuilder::new(
+            ErrorCode::ConfigurationError,
+            format!("unsupported static sync dependency: {service_name}"),
+        )
+        .build_error());
+    }
+    flare_im_service_kit::discovery::static_grpc_endpoint_from_app_config(app, service_name)
+        .map(Some)
+}
+
+#[cfg(test)]
+#[path = "sync_static_endpoint_tests.rs"]
+mod static_endpoint_tests;
+
 impl GrpcSyncAdapters {
     fn channel_cache() -> &'static Mutex<HashMap<String, Channel>> {
         static CACHE: OnceLock<Mutex<HashMap<String, Channel>>> = OnceLock::new();
         CACHE.get_or_init(|| Mutex::new(HashMap::new()))
     }
 
-    async fn create_channel(service_name: &str) -> Result<Channel, FlareError> {
-        if let Some(channel) = Self::channel_cache()
-            .lock()
+    async fn create_channel(dependency: &str) -> Result<Channel, FlareError> {
+        let app = flare_im_service_kit::config::app_config();
+        let service_name = get_service_name(dependency);
+        Self::create_channel_with_config(app, app.uses_static_registry(), dependency, &service_name)
             .await
-            .get(service_name)
-            .cloned()
-        {
+    }
+
+    async fn create_channel_with_config(
+        app: &FlareAppConfig,
+        static_registry_mode: bool,
+        dependency: &str,
+        service_name: &str,
+    ) -> Result<Channel, FlareError> {
+        let static_endpoint = static_sync_endpoint(app, static_registry_mode, dependency)?;
+        let cache_key = static_endpoint.as_deref().unwrap_or(service_name);
+        if let Some(channel) = Self::channel_cache().lock().await.get(cache_key).cloned() {
             return Ok(channel);
         }
 
-        let fallback = flare_im_service_kit::discovery::default_static_grpc_fallback(service_name);
-        let channel = flare_im_service_kit::discovery::connect_grpc_channel_with_fallback(
-            service_name,
-            fallback,
-        )
-        .await
+        let channel = match static_endpoint.as_deref() {
+            Some(endpoint) => {
+                flare_im_service_kit::discovery::connect_static_channel(endpoint).await
+            }
+            None => {
+                let fallback =
+                    flare_im_service_kit::discovery::default_static_grpc_fallback(service_name);
+                flare_im_service_kit::discovery::connect_grpc_channel_with_fallback(
+                    service_name,
+                    fallback,
+                )
+                .await
+            }
+        }
         .map_err(|e| discovery_unavailable(service_name, e))?;
 
         let mut cache = Self::channel_cache().lock().await;
         Ok(cache
-            .entry(service_name.to_string())
+            .entry(cache_key.to_string())
             .or_insert_with(|| channel.clone())
             .clone())
     }
 
     async fn conversation_read_client() -> Result<ConversationReadServiceClient<Channel>, FlareError>
     {
-        let name = get_service_name(CONVERSATION);
-        let ch = Self::create_channel(&name).await?;
+        let ch = Self::create_channel(CONVERSATION).await?;
         Ok(ConversationReadServiceClient::new(ch))
     }
 
     async fn conversation_manage_client()
     -> Result<ConversationManageServiceClient<Channel>, FlareError> {
-        let name = get_service_name(CONVERSATION);
-        let ch = Self::create_channel(&name).await?;
+        let ch = Self::create_channel(CONVERSATION).await?;
         Ok(ConversationManageServiceClient::new(ch))
     }
 
     async fn storage_client() -> Result<StorageReaderServiceClient<Channel>, FlareError> {
-        let name = get_service_name(STORAGE_READER);
-        let ch = Self::create_channel(&name).await?;
+        let ch = Self::create_channel(STORAGE_READER).await?;
         Ok(StorageReaderServiceClient::new(ch))
     }
 

@@ -11,8 +11,13 @@ use std::sync::Arc;
 use tonic::transport::Channel;
 
 use crate::ServiceClient;
-use crate::config::FlareAppConfig;
+use crate::config::{FlareAppConfig, ServiceRuntimeConfig};
 use crate::gateway::{GatewayRouter, GatewayRouterConfig};
+use crate::service_names::{
+    CAPABILITY, CONVERSATION, MEDIA, MESSAGE_INGEST, ORCHESTRATOR, SIGNALING_ONLINE,
+    SIGNALING_ROUTE, STORAGE_READER, SYNC_ORCHESTRATOR,
+};
+use flare_server_core::error::{ErrorBuilder, ErrorCode};
 
 use super::channel_resolve::{
     DISCOVERY_CHANNEL_TIMEOUT, STATIC_ACCESS_GATEWAY_GRPC_URI, StaticChannelPolicy,
@@ -31,12 +36,113 @@ fn connect_static_lazy(
     )?)
 }
 
+/// Resolve a same-Cell dependency from its canonical typed listener configuration.
+/// Logical registry aliases must never select the service's runtime section.
+/// Missing explicit configuration is an error, rather than another Cell's default port.
+pub fn static_grpc_endpoint_from_app_config(
+    app: &FlareAppConfig,
+    dependency: &str,
+) -> flare_server_core::error::Result<String> {
+    let (runtime, prefix): (Option<&ServiceRuntimeConfig>, &str) = match dependency {
+        CONVERSATION => (
+            app.services.conversation.as_ref().map(|s| &s.runtime),
+            "CONVERSATION",
+        ),
+        STORAGE_READER => (
+            app.services.storage_reader.as_ref().map(|s| &s.runtime),
+            "STORAGE_READER",
+        ),
+        SIGNALING_ONLINE => (
+            app.services.signaling_online.as_ref().map(|s| &s.runtime),
+            "SIGNALING_ONLINE",
+        ),
+        SIGNALING_ROUTE => (
+            app.services.signaling_route.as_ref().map(|s| &s.runtime),
+            "SIGNALING_ROUTE",
+        ),
+        SYNC_ORCHESTRATOR => (
+            app.services.sync_orchestrator.as_ref().map(|s| &s.runtime),
+            "SYNC_ORCHESTRATOR",
+        ),
+        MESSAGE_INGEST => (
+            app.services.message_ingest.as_ref().map(|s| &s.runtime),
+            "MESSAGE_INGEST",
+        ),
+        ORCHESTRATOR => (
+            app.services
+                .message_orchestrator
+                .as_ref()
+                .map(|s| &s.runtime),
+            "MESSAGE_ORCHESTRATOR",
+        ),
+        MEDIA => (app.services.media.as_ref().map(|s| &s.runtime), "MEDIA"),
+        CAPABILITY => (
+            app.services.capability.as_ref().map(|s| &s.runtime),
+            "CAPABILITY",
+        ),
+        _ => {
+            return Err(ErrorBuilder::new(
+                ErrorCode::ConfigurationError,
+                format!("unsupported static gRPC dependency: {dependency}"),
+            )
+            .build_error());
+        }
+    };
+    let runtime = runtime
+        .filter(|runtime| runtime.server.as_ref().and_then(|s| s.port).is_some())
+        .ok_or_else(|| {
+            ErrorBuilder::new(
+                ErrorCode::ConfigurationError,
+                format!("static {dependency} requires an explicit service listener port"),
+            )
+            .build_error()
+        })?;
+    let mut address =
+        crate::build_service_runtime_plan(app, runtime, dependency, prefix, 0)?.address;
+    if address.port() == 0 {
+        return Err(ErrorBuilder::new(
+            ErrorCode::ConfigurationError,
+            format!("static {dependency} requires a nonzero listener port"),
+        )
+        .build_error());
+    }
+    if address.ip().is_unspecified() {
+        address.set_ip(if address.is_ipv4() {
+            std::net::Ipv4Addr::LOCALHOST.into()
+        } else {
+            std::net::Ipv6Addr::LOCALHOST.into()
+        });
+    }
+    Ok(format!("http://{address}"))
+}
+
 /// 启动期连接：立即返回 lazy Channel，**不**等待 Consul / 对端进程。
 pub fn connect_grpc_channel_lazy_from_app_config(
-    _app_config: &FlareAppConfig,
+    app_config: &FlareAppConfig,
+    dependency: &str,
+    service_type: &str,
+    static_fallback_uri: &str,
+) -> Result<Channel, Box<dyn std::error::Error + Send + Sync>> {
+    connect_grpc_channel_lazy_in_mode(
+        app_config,
+        app_config.uses_static_registry(),
+        dependency,
+        service_type,
+        static_fallback_uri,
+    )
+}
+
+fn connect_grpc_channel_lazy_in_mode(
+    app_config: &FlareAppConfig,
+    static_registry_mode: bool,
+    dependency: &str,
     _service_type: &str,
     static_fallback_uri: &str,
 ) -> Result<Channel, Box<dyn std::error::Error + Send + Sync>> {
+    if static_registry_mode {
+        let endpoint = static_grpc_endpoint_from_app_config(app_config, dependency)?;
+        return connect_static_lazy(&endpoint, StaticChannelPolicy::DEFAULT);
+    }
     connect_static_lazy(static_fallback_uri, StaticChannelPolicy::DEFAULT)
 }
 
@@ -44,11 +150,13 @@ pub fn connect_grpc_channel_lazy_from_app_config(
 /// 静态回退按 [`StaticChannelPolicy::DEFAULT`] 建连。
 pub async fn connect_grpc_channel_from_app_config(
     app_config: &FlareAppConfig,
+    dependency: &str,
     service_type: &str,
     static_fallback_uri: &str,
 ) -> Result<Channel, Box<dyn std::error::Error + Send + Sync>> {
     connect_grpc_channel_from_app_config_with_policy(
         app_config,
+        dependency,
         service_type,
         static_fallback_uri,
         StaticChannelPolicy::DEFAULT,
@@ -60,12 +168,15 @@ pub async fn connect_grpc_channel_from_app_config(
 /// `GRPC_CONNECT_TIMEOUT_SECS`）；注册中心发现到的通道不受该策略影响。
 pub async fn connect_grpc_channel_from_app_config_with_policy(
     app_config: &FlareAppConfig,
+    dependency: &str,
     service_type: &str,
     static_fallback_uri: &str,
     policy: StaticChannelPolicy,
 ) -> Result<Channel, Box<dyn std::error::Error + Send + Sync>> {
     connect_grpc_channel_from_app_config_inner(
         app_config,
+        app_config.uses_static_registry(),
+        dependency,
         service_type,
         static_fallback_uri,
         policy,
@@ -75,10 +186,16 @@ pub async fn connect_grpc_channel_from_app_config_with_policy(
 
 async fn connect_grpc_channel_from_app_config_inner(
     app_config: &FlareAppConfig,
+    static_registry_mode: bool,
+    dependency: &str,
     service_type: &str,
     static_fallback_uri: &str,
     policy: StaticChannelPolicy,
 ) -> Result<Channel, Box<dyn std::error::Error + Send + Sync>> {
+    if static_registry_mode {
+        let endpoint = static_grpc_endpoint_from_app_config(app_config, dependency)?;
+        return connect_static_lazy(&endpoint, policy);
+    }
     match create_discover_from_config(app_config, service_type).await? {
         Some(discover) => {
             let mut client = ServiceClient::new(discover);
@@ -174,3 +291,7 @@ async fn build_gateway_router_without_lease(
         }
     }
 }
+
+#[cfg(test)]
+#[path = "grpc_connect_tests.rs"]
+pub(crate) mod tests;

@@ -83,6 +83,38 @@ impl DownstreamGrpcResolver {
         route: &str,
         static_fallback: &str,
     ) -> Result<Channel> {
+        self.connect_route_in_mode(
+            label,
+            service_name,
+            route,
+            static_fallback,
+            self.app_config.uses_static_registry(),
+        )
+        .await
+    }
+
+    async fn connect_route_in_mode(
+        &self,
+        label: &str,
+        service_name: &str,
+        route: &str,
+        static_fallback: &str,
+        static_registry_mode: bool,
+    ) -> Result<Channel> {
+        // A URI override is explicit. All logical/discovery routes in static mode
+        // instead name this Cell's typed dependency, never the registry alias.
+        if static_registry_mode && !(route.starts_with("http://") || route.starts_with("https://"))
+        {
+            let endpoint = crate::discovery::static_grpc_endpoint_from_app_config(
+                &self.app_config,
+                service_name,
+            )?;
+            return crate::discovery::connect_static_channel_lazy_with_policy(
+                &endpoint,
+                self.static_channel_policy(),
+            )
+            .map_err(|e| flare_server_core::error::FlareError::system(e.to_string()));
+        }
         if is_discovery_route_authority(route) {
             info!(
                 service = label,
@@ -122,6 +154,7 @@ impl DownstreamGrpcResolver {
             );
             connect_grpc_channel_from_app_config_with_policy(
                 &self.app_config,
+                service_name,
                 service_name,
                 static_fallback,
                 self.static_channel_policy(),
@@ -313,5 +346,50 @@ mod static_policy_tests {
             "gave up after {elapsed:?}: the default 2 s connect bound was used"
         );
         assert!(elapsed < Duration::from_secs(10), "{elapsed:?}");
+    }
+
+    #[tokio::test]
+    async fn shared_static_discovery_uri_uses_canonical_typed_endpoint() {
+        use crate::discovery::grpc_connect::tests::{configured, probe, probe_server};
+        use std::sync::atomic::Ordering;
+        let server = probe_server().await;
+        let resolver = DownstreamGrpcResolver::new(
+            Arc::new(configured("127.0.0.1", server.port)),
+            downstream(3),
+        );
+        let channel = resolver
+            .connect_route_in_mode(
+                "conversation",
+                CONVERSATION,
+                "discovery://alias-conversation",
+                "http://127.0.0.1:1",
+                true,
+            )
+            .await
+            .unwrap();
+        probe(channel).await;
+        assert_eq!(server.calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn shared_static_explicit_uri_override_keeps_precedence() {
+        use crate::discovery::grpc_connect::tests::{probe, probe_server};
+        use std::sync::atomic::Ordering;
+        let server = probe_server().await;
+        let resolver =
+            DownstreamGrpcResolver::new(Arc::new(app_config_without_registry()), downstream(3));
+        let endpoint = format!("http://127.0.0.1:{}", server.port);
+        let channel = resolver
+            .connect_route_in_mode(
+                "conversation",
+                CONVERSATION,
+                &endpoint,
+                "http://127.0.0.1:1",
+                true,
+            )
+            .await
+            .unwrap();
+        probe(channel).await;
+        assert_eq!(server.calls.load(Ordering::SeqCst), 1);
     }
 }

@@ -115,3 +115,7 @@ impl AdminImageUploadPolicy {
         Ok(())
     }
 }
+
+/// Only server-validated user avatar bytes are written under this anonymous GET prefix.
+pub const PUBLIC_AVATAR_OBJECT_PREFIX: &str = "avatars";
+pub const PUBLIC_AVATAR_METADATA_KEY: &str = "public_avatar";

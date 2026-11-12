@@ -264,6 +264,7 @@ impl EntityLifecycleWorker {
                     trace_id: "",
                     payload: &input,
                     ticket: &ticket,
+                    reauthentication_proof: None,
                 },
                 timeout,
             ),

@@ -114,7 +114,7 @@ impl DevRegistration {
                 },
                 readme: None,
                 changelog: None,
-                namespaces: manifest.capabilities.iter().map(|c| c.id.clone()).collect(),
+                namespaces: manifest.claimed_namespaces().into_iter().collect(),
                 assets: Vec::new(),
             },
             deployment,

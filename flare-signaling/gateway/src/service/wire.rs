@@ -194,7 +194,10 @@ pub async fn initialize(
             connection_manager.clone() as Arc<dyn ConnectionManagerTrait>,
             access_config.default_tenant_id.clone(),
         )
-        .with_static_registry_mode(app_config.uses_static_registry())
+        .with_static_online_endpoint(ConnectionRepository::resolve_online_static_endpoint(
+            app_config,
+            app_config.uses_static_registry(),
+        )?)
         .with_signer(message_signer.clone()),
     );
 
@@ -212,8 +215,13 @@ pub async fn initialize(
     let conversation_subscriptions =
         Arc::new(crate::domain::service::ConversationSubscriptionRegistry::new());
     // Conversation 读客户端池：登录 eager 订阅用户会话列表。
+    let static_read_endpoints = crate::infrastructure::ports::StaticReadEndpoints::resolve(
+        app_config,
+        app_config.uses_static_registry(),
+    )?;
     let conversation_read_pool = Arc::new(
         crate::infrastructure::ports::ConversationReadGrpcPool::new()
+            .with_static_endpoint(static_read_endpoints.conversation)
             .with_signer(message_signer.clone()),
     );
 
@@ -237,8 +245,12 @@ pub async fn initialize(
         Arc::new(PushRepository::new(push_handle_slot.clone()));
 
     // 8. gRPC 连接池
-    let route_grpc_pool = Arc::new(SignalingRouteGrpcPool::new());
-    let storage_sync_pool = Arc::new(StorageSyncGrpcPool::new());
+    let route_grpc_pool =
+        Arc::new(SignalingRouteGrpcPool::new().with_static_endpoint(static_read_endpoints.route));
+    let storage_sync_pool = Arc::new(StorageSyncGrpcPool::new().with_static_endpoints(
+        static_read_endpoints.storage_reader,
+        static_read_endpoints.sync,
+    ));
 
     // 8.5 轻量信令直转：一份实现，上行路径与对等节点的 RelayRealtimeControl 共用。
     let realtime_relay = Arc::new(crate::domain::service::RealtimeControlRelay::new(

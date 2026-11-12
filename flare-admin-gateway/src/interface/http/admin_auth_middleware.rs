@@ -147,6 +147,7 @@ pub async fn admin_auth_middleware(
         keys::DEVICE_ID,
         keys::SESSION_ID,
         "authorization",
+        flare_plugin_protocol::staff_reauth::STAFF_REAUTH_HEADER,
     ] {
         request.headers_mut().remove(name);
     }
@@ -224,12 +225,20 @@ fn verified_staff(
                 "the verified context is not a staff context",
             )
         })?;
-    VerifiedStaff::from_verified(&claims, ctx).map_err(|_| {
+    let staff = VerifiedStaff::from_verified(&claims, ctx).map_err(|_| {
         forbidden(
             "ADMIN_IDENTITY_REQUIRED",
             "staff context must name one concrete application",
         )
-    })
+    })?;
+    staff
+        .with_reauthentication_metadata(&metadata)
+        .map_err(|_| {
+            unauthenticated(
+                "ADMIN_STAFF_REAUTH_INVALID",
+                "one bounded staff reauthentication credential required",
+            )
+        })
 }
 
 /// 进审计日志的请求头（原因、请求号、幂等键）与各自原始头值的长度上限（字节）。原因另有
@@ -467,6 +476,44 @@ mod tests {
         assert_eq!(
             status_of(&verified_staff(&verifier, &headers_with(&platform_scoped)).unwrap_err()),
             StatusCode::FORBIDDEN
+        );
+    }
+
+    #[tokio::test]
+    async fn http_staff_proof_is_private_single_and_admitted_before_forwarding() {
+        use axum::{Extension, Router, body::Body, routing::get};
+        use flare_plugin_protocol::staff_reauth::STAFF_REAUTH_HEADER;
+        use tower::ServiceExt;
+        let (gateway, _, verifier) = keys();
+        let token = gateway
+            .sign(&identity("tenant-a", "core:users:read", None))
+            .unwrap();
+        let app = Router::new().route("/users/u1/devices", get(|headers: HeaderMap, Extension(staff): Extension<VerifiedStaffContext>| async move {
+            assert!(headers.get(STAFF_REAUTH_HEADER).is_none());
+            assert_eq!(staff.staff().reauthentication_proof(), Some("header.payload.signature"));
+            assert!(!format!("{staff:?}").contains("header.payload.signature"));
+            StatusCode::NO_CONTENT
+        })).layer(axum::middleware::from_fn(admin_auth_middleware)).layer(Extension(Arc::new(verifier)));
+        let mut request = axum::http::Request::builder()
+            .uri("/users/u1/devices")
+            .header(SIGNED_CONTEXT_HEADER, token.as_str())
+            .header(STAFF_REAUTH_HEADER, "header.payload.signature")
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(
+            app.clone().oneshot(request).await.unwrap().status(),
+            StatusCode::NO_CONTENT
+        );
+        request = axum::http::Request::builder()
+            .uri("/users/u1/devices")
+            .header(SIGNED_CONTEXT_HEADER, token.as_str())
+            .header(STAFF_REAUTH_HEADER, "header.payload.signature")
+            .header(STAFF_REAUTH_HEADER, "other.payload.signature")
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(
+            app.oneshot(request).await.unwrap().status(),
+            StatusCode::UNAUTHORIZED
         );
     }
 

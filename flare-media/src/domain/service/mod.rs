@@ -117,6 +117,7 @@ impl MediaService {
 }
 
 mod admin_upload;
+mod public_avatar;
 mod attachment_read;
 #[cfg(test)]
 mod cdn_url_tests;

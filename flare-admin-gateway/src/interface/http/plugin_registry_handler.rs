@@ -118,7 +118,7 @@ async fn call(
 ) -> Result<Json<ApiResponse<AdminPluginRegistryHttp>>> {
     let mut client = capability.client().await?;
     let response = clients
-        .bounded(client.administer_json(staff.token(), operation, payload, staff.request_id()))
+        .bounded(client.administer_json(staff.staff(), operation, payload, staff.request_id()))
         .await
         .map_err(|err| admin_rpc_error(err, FAILED))?;
     let answer = response

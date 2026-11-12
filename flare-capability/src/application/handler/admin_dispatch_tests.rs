@@ -453,6 +453,48 @@ async fn organization_operations_require_signed_scope_matching_the_projected_own
 }
 
 #[tokio::test]
+async fn staff_reauthentication_reaches_only_transport_metadata_and_never_json_input() {
+    use flare_im_capability_core::plugin::staff_reauth::STAFF_REAUTH_HEADER;
+    let h = harness().await;
+    let ordinary = staff(READ);
+    dispatch_admin(
+        &ordinary,
+        &h.routes,
+        AdminCall::Query,
+        request(
+            "example.poll.list",
+            json!({"reauthProof":"input-cannot-admit-proof"}),
+        ),
+        Duration::from_secs(2),
+        &ALLOW_EVIDENCE,
+    )
+    .await
+    .unwrap();
+    assert_eq!(h.plugin.calls()[0].reauthentication_proof, None);
+    let mut metadata = tonic::metadata::MetadataMap::new();
+    let proof = "header.payload.signature";
+    metadata.insert(STAFF_REAUTH_HEADER, proof.parse().unwrap());
+    let caller = staff(READ)
+        .with_reauthentication_metadata(&metadata)
+        .unwrap();
+    dispatch_admin(
+        &caller,
+        &h.routes,
+        AdminCall::Query,
+        request("example.poll.list", json!({"cursor":""})),
+        Duration::from_secs(2),
+        &ALLOW_EVIDENCE,
+    )
+    .await
+    .unwrap();
+    let calls = h.plugin.calls();
+    assert_eq!(calls[1].reauthentication_proof.as_deref(), Some(proof));
+    assert!(!calls[1].payload.to_string().contains(proof));
+    assert!(!calls[1].metadata.values().any(|v| v == proof));
+    assert!(!format!("{:?}", calls[1]).contains(proof));
+}
+
+#[tokio::test]
 async fn staff_reads_and_acts_through_a_staff_ticket_without_a_conversation() {
     let h = harness().await;
     let reader = staff(READ);

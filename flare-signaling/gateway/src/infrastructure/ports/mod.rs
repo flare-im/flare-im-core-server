@@ -13,6 +13,7 @@ mod message_port;
 mod push_port;
 mod realtime_broadcast_port;
 mod route_grpc_pool;
+mod static_read_endpoints;
 mod storage_sync_grpc_pool;
 mod storage_sync_port;
 
@@ -27,5 +28,6 @@ pub use message_port::RouterMessageCommandPort;
 pub use push_port::PushRepository;
 pub use realtime_broadcast_port::GatewayRealtimeBroadcast;
 pub use route_grpc_pool::SignalingRouteGrpcPool;
+pub(crate) use static_read_endpoints::StaticReadEndpoints;
 pub use storage_sync_grpc_pool::StorageSyncGrpcPool;
 pub use storage_sync_port::StorageSyncPort;

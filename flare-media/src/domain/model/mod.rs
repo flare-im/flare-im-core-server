@@ -4,7 +4,7 @@ use std::str::FromStr;
 use chrono::{DateTime, Utc};
 
 mod ownership;
-pub use ownership::{AdminImageUploadPolicy, MediaOwnerKind, MediaPurpose, UploadActorKind};
+pub use ownership::{AdminImageUploadPolicy, MediaOwnerKind, MediaPurpose, UploadActorKind,PUBLIC_AVATAR_METADATA_KEY,PUBLIC_AVATAR_OBJECT_PREFIX};
 
 pub const STORAGE_PATH_METADATA_KEY: &str = "storage_path";
 pub const STORAGE_BUCKET_METADATA_KEY: &str = "storage_bucket";

@@ -217,7 +217,14 @@ impl S3ObjectStore {
     }
 
     fn build_object_key(&self, context: &UploadContext<'_>) -> String {
-        let mut segments: Vec<String> = Vec::with_capacity(9);
+        let mut segments: Vec<String> = Vec::with_capacity(10);
+        if context
+            .metadata
+            .get(crate::domain::model::PUBLIC_AVATAR_METADATA_KEY)
+            .is_some_and(|v| v == "true")
+        {
+            segments.push(crate::domain::model::PUBLIC_AVATAR_OBJECT_PREFIX.into());
+        }
         segments.push(crate::domain::model::tenant_storage_segment(
             context.tenant_id,
         ));

@@ -11,6 +11,8 @@
 
 use flare_im_contracts::domain::tenant::is_valid_tenant_id;
 use flare_im_contracts::utils::normalize_tenant_id;
+pub use flare_plugin_protocol::staff_reauth::STAFF_REAUTH_HEADER;
+use flare_plugin_protocol::staff_reauth::valid_staff_reauth_token;
 use flare_server_core::SignedContextVerifier;
 use flare_server_core::auth::{
     INTERNAL_CTX_PUBLIC_KEY_ENV, INTERNAL_CTX_PUBLIC_KEYS_ENV, KeySet, SignedContextClaims, kid,
@@ -19,6 +21,7 @@ use flare_server_core::context::{Ctx, keys};
 use flare_server_core::error::{ErrorBuilder, ErrorCode, Result};
 use flare_server_core::grpc::middleware::signed_context::verify_signed_context_metadata;
 use flare_server_core::{require_staff_permission, require_staff_permission_any, staff_claims};
+use std::sync::Arc;
 use tonic::metadata::MetadataMap;
 use tonic::{Request, Status};
 
@@ -73,6 +76,15 @@ fn env_source(service: &str, name: &str) -> Result<Option<String>> {
     }
 }
 
+/// Ephemeral transport credential. Never serialized or added to context metadata/audit.
+#[derive(Clone)]
+struct StaffReauthenticationProof(Arc<str>);
+impl std::fmt::Debug for StaffReauthenticationProof {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("StaffReauthenticationProof(<redacted>)")
+    }
+}
+
 /// A verified Staff caller of one admin operation. The fields mirror the signed claims; `ctx`
 /// is the context the verifier built, carrying the `VerifiedContext` marker (and so the token)
 /// for forwarding and for audit effects.
@@ -114,6 +126,36 @@ impl VerifiedStaff {
             .get_data::<flare_server_core::VerifiedContext>()
             .and_then(flare_server_core::VerifiedContext::token)
             .unwrap_or_default()
+    }
+
+    /// The opaque proof carried on this verified Staff transport, never an input field.
+    pub fn reauthentication_proof(&self) -> Option<&str> {
+        self.ctx
+            .get_data::<StaffReauthenticationProof>()
+            .map(|value| value.0.as_ref())
+    }
+
+    /// Attach at most one bounded header only after authenticating this Staff caller.
+    pub fn with_reauthentication_metadata(
+        mut self,
+        metadata: &MetadataMap,
+    ) -> std::result::Result<Self, Status> {
+        let mut values = metadata.get_all(STAFF_REAUTH_HEADER).iter();
+        if let Some(value) = values.next() {
+            let token = value.to_str().map_err(|_| {
+                Status::unauthenticated("invalid staff reauthentication credential")
+            })?;
+            if values.next().is_some() || !valid_staff_reauth_token(token) {
+                return Err(Status::unauthenticated(
+                    "one bounded staff reauthentication credential required",
+                ));
+            }
+            self.ctx = Arc::new(
+                self.ctx
+                    .insert_data(StaffReauthenticationProof(Arc::from(token))),
+            );
+        }
+        Ok(self)
     }
 
     /// Whether the caller is platform staff (no organization).
@@ -170,7 +212,7 @@ pub fn verify_staff_metadata(
 ) -> std::result::Result<VerifiedStaff, Status> {
     let ctx = verify_staff_context(metadata, verifier)?;
     let claims = require_staff_permission(&ctx, permission)?.clone();
-    VerifiedStaff::from_verified(&claims, ctx)
+    VerifiedStaff::from_verified(&claims, ctx)?.with_reauthentication_metadata(metadata)
 }
 
 /// [`verify_staff_metadata`] admitting any of `codes`.
@@ -181,7 +223,7 @@ pub fn verify_staff_metadata_any(
 ) -> std::result::Result<VerifiedStaff, Status> {
     let ctx = verify_staff_context(metadata, verifier)?;
     let claims = require_staff_permission_any(&ctx, codes)?.clone();
-    VerifiedStaff::from_verified(&claims, ctx)
+    VerifiedStaff::from_verified(&claims, ctx)?.with_reauthentication_metadata(metadata)
 }
 
 /// A missing context gets its own message, so a receiver behind a signed-context layer can tell
@@ -242,6 +284,24 @@ pub fn staff_context_request<T>(payload: T, token: &str) -> Result<Request<T>> {
     }
     let mut request = Request::new(payload);
     flare_server_core::set_signed_context_token(&mut request, token).map_err(|_| rejected())?;
+    Ok(request)
+}
+
+/// A Staff-only sensitive admin transport. The credential remains separate from the body.
+pub fn staff_reauthenticated_request<T>(payload: T, staff: &VerifiedStaff) -> Result<Request<T>> {
+    let mut request = staff_traced_request(payload, staff.token(), &staff.ctx)?;
+    if let Some(proof) = staff.reauthentication_proof() {
+        let mut value: tonic::metadata::MetadataValue<tonic::metadata::Ascii> =
+            proof.parse().map_err(|_| {
+                ErrorBuilder::new(
+                    ErrorCode::AuthenticationRequired,
+                    "invalid staff reauthentication credential",
+                )
+                .build_error()
+            })?;
+        value.set_sensitive(true);
+        request.metadata_mut().insert(STAFF_REAUTH_HEADER, value);
+    }
     Ok(request)
 }
 
@@ -362,6 +422,82 @@ mod tests {
         )
         .unwrap();
         assert_eq!(any.permission.as_deref(), Some("core:conversations:read"));
+    }
+
+    #[test]
+    fn staff_reauthentication_is_bounded_private_and_forwarded_separately() {
+        let (gateway, _, verifier) = keyed();
+        let token = gateway.sign(&staff("tenant-a", "core:users:read")).unwrap();
+        let proof = "header.payload.signature";
+        let mut request = with_token((), &token);
+        request
+            .metadata_mut()
+            .insert(STAFF_REAUTH_HEADER, proof.parse().unwrap());
+        let staff = require_staff(&request, &verifier, "core:users:read").unwrap();
+        assert_eq!(staff.reauthentication_proof(), Some(proof));
+        assert!(!format!("{staff:?} {:?}", staff.ctx).contains(proof));
+        let forwarded =
+            staff_reauthenticated_request(serde_json::json!({"input":"ordinary"}), &staff).unwrap();
+        let value = forwarded.metadata().get(STAFF_REAUTH_HEADER).unwrap();
+        assert_eq!(value.to_str().unwrap(), proof);
+        assert!(value.is_sensitive());
+        assert_eq!(
+            forwarded.get_ref(),
+            &serde_json::json!({"input":"ordinary"})
+        );
+        assert_eq!(
+            forwarded
+                .metadata()
+                .get("x-flare-ctx")
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            token
+        );
+    }
+
+    #[test]
+    fn staff_reauthentication_rejects_ambiguous_or_unbounded_metadata() {
+        let (gateway, _, verifier) = keyed();
+        let token = gateway.sign(&staff("tenant-a", "core:users:read")).unwrap();
+        for proof in [
+            "".to_owned(),
+            "not-a-jwt".into(),
+            "a.b.c,d.e.f".into(),
+            format!(
+                "a.b.{}",
+                "c".repeat(flare_plugin_protocol::staff_reauth::MAX_STAFF_REAUTH_TOKEN_BYTES)
+            ),
+        ] {
+            let mut request = with_token((), &token);
+            request
+                .metadata_mut()
+                .insert(STAFF_REAUTH_HEADER, proof.parse().unwrap());
+            assert_eq!(
+                code(require_staff(&request, &verifier, "core:users:read")),
+                Code::Unauthenticated
+            );
+        }
+        let mut request = with_token((), &token);
+        request
+            .metadata_mut()
+            .append(STAFF_REAUTH_HEADER, "a.b.c".parse().unwrap());
+        request
+            .metadata_mut()
+            .append(STAFF_REAUTH_HEADER, "d.e.f".parse().unwrap());
+        assert_eq!(
+            code(require_staff(&request, &verifier, "core:users:read")),
+            Code::Unauthenticated
+        );
+        let clean = require_staff(&with_token((), &token), &verifier, "core:users:read").unwrap();
+        assert_eq!(clean.reauthentication_proof(), None);
+        assert!(
+            staff_reauthenticated_request((), &clean)
+                .unwrap()
+                .metadata()
+                .get(STAFF_REAUTH_HEADER)
+                .is_none()
+        );
     }
 
     #[test]

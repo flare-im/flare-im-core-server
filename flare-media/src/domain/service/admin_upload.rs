@@ -161,7 +161,7 @@ impl MediaService {
         session: &UploadSession,
         object_key: &str,
     ) -> Result<String> {
-        if session.actor_kind != UploadActorKind::Staff {
+        if session.actor_kind != UploadActorKind::Staff && session.purpose != MediaPurpose::Avatar {
             return Ok(object_key.to_owned());
         }
         let policy = &self.config.admin_image_upload;
@@ -239,7 +239,7 @@ impl MediaService {
     }
 }
 
-fn validate_image_bytes(
+pub(super) fn validate_image_bytes(
     bytes: &[u8],
     declared_mime: &str,
     policy: &AdminImageUploadPolicy,

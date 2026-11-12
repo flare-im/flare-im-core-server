@@ -14,6 +14,14 @@ impl MediaService {
         ctx.ensure_not_cancelled().map_err(map_context_error)?;
         let tenant_id = require_tenant(ctx)?;
         let owner_id = tenant::require_owner(ctx)?;
+        let purpose = Self::user_upload_purpose(
+            &init.metadata,
+            init.namespace.as_deref(),
+            init.business_tag.as_deref(),
+        )?;
+        if purpose == MediaPurpose::Avatar {
+            self.public_avatar_policy(&init.mime_type, init.file_size.unwrap_or(0))?;
+        }
         init.metadata
             .insert("tenant_id".to_string(), tenant_id.to_string());
 
@@ -56,7 +64,7 @@ impl MediaService {
             total_parts: None,
             actor_id: owner_id.to_string(),
             actor_kind: UploadActorKind::User,
-            purpose: MediaPurpose::General,
+            purpose,
             namespace: init.namespace,
             business_tag: init.business_tag,
             trace_id: init.trace_id,

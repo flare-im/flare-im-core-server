@@ -107,7 +107,7 @@ impl NewPluginVersion {
             },
             readme: text(package.readme()),
             changelog: text(package.changelog()),
-            namespaces: manifest.capabilities.iter().map(|c| c.id.clone()).collect(),
+            namespaces: manifest.claimed_namespaces().into_iter().collect(),
             assets: package
                 .assets()
                 .iter()

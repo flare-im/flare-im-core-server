@@ -19,6 +19,14 @@ impl MediaService {
         full_sha256: Option<String>,
     ) -> Result<DirectUploadSessionState> {
         let actor_id = tenant::require_owner(ctx)?.to_owned();
+        let purpose = Self::user_upload_purpose(
+            &metadata.metadata,
+            Some(&metadata.namespace),
+            Some(&metadata.business_tag),
+        )?;
+        if purpose == MediaPurpose::Avatar {
+            self.public_avatar_policy(&metadata.mime_type, metadata.file_size)?;
+        }
         self.initiate_direct_upload_as(
             ctx,
             metadata,
@@ -28,7 +36,7 @@ impl MediaService {
             full_sha256,
             actor_id,
             UploadActorKind::User,
-            MediaPurpose::General,
+            purpose,
         )
         .await
     }
@@ -76,7 +84,13 @@ impl MediaService {
             &metadata.file_name,
             &file_category,
         );
-        if actor_kind == UploadActorKind::Staff {
+        if actor_kind == UploadActorKind::User && purpose == MediaPurpose::Avatar {
+            object_key = format!(
+                "{}/{object_key}",
+                crate::domain::model::PUBLIC_AVATAR_OBJECT_PREFIX
+            );
+        }
+        if actor_kind == UploadActorKind::Staff || purpose == MediaPurpose::Avatar {
             object_key = format!("staging/{object_key}");
         }
 
@@ -498,7 +512,10 @@ impl MediaService {
                     ctx, &session, &bucket, &final_key, &file_id, file_size,
                 )
                 .await;
-            if session.actor_kind == UploadActorKind::Staff && persisted.is_ok() {
+            if (session.actor_kind == UploadActorKind::Staff
+                || session.purpose == MediaPurpose::Avatar)
+                && persisted.is_ok()
+            {
                 if let Err(err) = object_repo.delete_object(&object_key).await {
                     tracing::warn!(error = %err, "failed to remove administrative upload temporary object");
                 }
@@ -630,6 +647,21 @@ impl MediaService {
             return Err(flare_server_core::flare_err!(
                 ErrorCode::PermissionDenied,
                 "registered upload ownership differs"
+            ));
+        }
+        if session.actor_kind == UploadActorKind::User
+            && session.purpose == MediaPurpose::Avatar
+            && (metadata.owner_kind != MediaOwnerKind::User
+                || metadata.owner_id.as_deref() != Some(session.actor_id.as_str())
+                || metadata.purpose != MediaPurpose::Avatar
+                || !matches!(metadata.access_type, FileAccessType::Public)
+                || !metadata
+                    .storage_path()
+                    .is_some_and(|key| key.starts_with("avatars/")))
+        {
+            return Err(flare_server_core::flare_err!(
+                ErrorCode::PermissionDenied,
+                "registered avatar publication differs"
             ));
         }
         Ok(())

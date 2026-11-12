@@ -600,6 +600,7 @@ async fn invoke_once(
             trace_id: ctx.trace_id(),
             payload: req.payload.as_ref().unwrap_or(&Value::Null),
             ticket,
+            reauthentication_proof: None,
         },
         timeout,
     )
@@ -620,6 +621,7 @@ pub(crate) struct PluginCall<'a> {
     pub trace_id: &'a str,
     pub payload: &'a Value,
     pub ticket: &'a str,
+    pub reauthentication_proof: Option<&'a str>,
 }
 
 /// Sends `call` once. A plugin rejection is `success: false` with its `errorCode`, whether the
@@ -703,6 +705,23 @@ pub(crate) async fn call_plugin_answer(
         flare_im_capability_core::plugin::invocation::PLUGIN_CALL_HEADER,
         credential,
     );
+
+    if let Some(proof) = call.reauthentication_proof {
+        use flare_im_capability_core::plugin::staff_reauth::{
+            STAFF_REAUTH_HEADER, valid_staff_reauth_token,
+        };
+        if call.user_id.is_some() || !valid_staff_reauth_token(proof) {
+            return Err(CapabilityError::PolicyDenied(
+                "invalid staff reauthentication transport".into(),
+            ));
+        }
+        let mut value: tonic::metadata::MetadataValue<tonic::metadata::Ascii> =
+            proof.parse().map_err(|_| {
+                CapabilityError::PolicyDenied("invalid staff reauthentication transport".into())
+            })?;
+        value.set_sensitive(true);
+        grpc_req.metadata_mut().insert(STAFF_REAUTH_HEADER, value);
+    }
 
     let response = match tokio::time::timeout(timeout, client.call(grpc_req))
         .await
@@ -809,6 +828,19 @@ fn plugin_status_outcome(call: &PluginCall<'_>, status: Status) -> Result<Plugin
     }
 }
 
+// Fail closed for command identities declared through properties, required,
+// references or composed schemas. Payload keys are checked again by the host authority.
+fn schema_has_command_identity(value: &Value) -> bool {
+    match value {
+        Value::Object(fields) => fields.iter().any(|(key, value)| {
+            matches!(key.as_str(), "commandId" | "command_id") || schema_has_command_identity(value)
+        }),
+        Value::Array(items) => items.iter().any(schema_has_command_identity),
+        Value::String(value) => matches!(value.as_str(), "commandId" | "command_id"),
+        _ => false,
+    }
+}
+
 /// Leased data from the local control projection; never from the marketplace.
 ///
 /// Every authenticated user of the tenant sees the same catalog: each enabled plugin with the user
@@ -844,6 +876,10 @@ async fn client_ui_catalog(
         unavailable: vec![],
     };
     let mut authorized_queries: std::collections::BTreeMap<
+        String,
+        std::collections::BTreeSet<String>,
+    > = Default::default();
+    let mut authorized_transients: std::collections::BTreeMap<
         String,
         std::collections::BTreeSet<String>,
     > = Default::default();
@@ -913,6 +949,18 @@ async fn client_ui_catalog(
                 .cloned()
                 .collect();
             authorized_queries.insert(manifest.plugin_id.clone(), query_operations);
+            authorized_transients.insert(
+                manifest.plugin_id.clone(),
+                operations
+                    .iter()
+                    .filter(|operation| {
+                        manifest.operation(operation).is_some_and(|op|
+                    op.mode == flare_im_capability_core::plugin::manifest::OperationMode::Command
+                        && !schema_has_command_identity(&op.input_schema))
+                    })
+                    .cloned()
+                    .collect(),
+            );
             let configuration = client_configuration(manifest, projected);
             let mut extensions = manifest.client_extensions.clone();
             // Marketplace samples are not part of the running client surface.
@@ -950,6 +998,7 @@ async fn client_ui_catalog(
                 extensions,
                 operations,
                 query_operations: Default::default(),
+                transient_operations: Default::default(),
                 configuration,
             });
         }
@@ -983,16 +1032,28 @@ async fn client_ui_catalog(
             });
         }
         // Older catalog readers reject unknown fields. Only a plugin actually
-        // offering the new read-only recovery mode needs this authority; all
+        // offering read-only recovery or scan resolution needs this authority; all
         // existing plugins retain the previous serialized catalog shape.
         if plugin.extensions.contributions.iter().any(|contribution| {
-            contribution.schema.actions.iter().any(|action| {
-                action.command.as_ref().is_some_and(|command| {
-                    command.mode == flare_im_capability_core::plugin::ui::UiPageCommandMode::Observe
+            contribution.kind
+                == flare_im_capability_core::plugin::manifest::UiContributionKind::ScanHandler
+                || contribution.schema.actions.iter().any(|action| {
+                    action.command.as_ref().is_some_and(|command| {
+                        command.mode
+                            == flare_im_capability_core::plugin::ui::UiPageCommandMode::Observe
+                    })
                 })
-            })
         }) {
             plugin.query_operations = authorized_queries
+                .remove(&plugin.plugin_id)
+                .unwrap_or_default();
+        }
+        if plugin
+            .extensions
+            .native_capabilities
+            .contains(&flare_im_capability_core::plugin::ui::NativeCapability::Reauthenticate)
+        {
+            plugin.transient_operations = authorized_transients
                 .remove(&plugin.plugin_id)
                 .unwrap_or_default();
         }

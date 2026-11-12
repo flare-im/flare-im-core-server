@@ -121,6 +121,13 @@ impl MediaService {
         file_size: i64,
     ) -> Result<MediaFileMetadata> {
         let mut metadata_map = session.metadata.clone();
+        metadata_map.remove(crate::domain::model::PUBLIC_AVATAR_METADATA_KEY);
+        if session.actor_kind == UploadActorKind::User && session.purpose == MediaPurpose::Avatar {
+            metadata_map.insert(
+                crate::domain::model::PUBLIC_AVATAR_METADATA_KEY.into(),
+                "true".into(),
+            );
+        }
         metadata_map.insert(STORAGE_BUCKET_METADATA_KEY.to_string(), bucket.to_string());
         metadata_map.insert(
             STORAGE_PATH_METADATA_KEY.to_string(),
@@ -211,7 +218,13 @@ impl MediaService {
             reference_count,
             status,
             grace_expires_at,
-            access_type: FileAccessType::default(),
+            access_type: if session.actor_kind == UploadActorKind::User
+                && session.purpose == MediaPurpose::Avatar
+            {
+                FileAccessType::Public
+            } else {
+                FileAccessType::Private
+            },
             storage_bucket: Some(bucket.to_string()),
             storage_path: Some(object_key.to_string()),
         };

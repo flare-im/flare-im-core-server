@@ -59,14 +59,15 @@ pub async fn initialize(
         "Resolving Online gRPC (registry or static fallback)"
     );
     let online_fallback = config.online_service_endpoint.as_str();
-    let online_channel =
-        connect_grpc_channel_lazy_from_app_config(app_config, &online_service, online_fallback)
-            .map_err(|e| {
-                flare_server_core::error::FlareError::system(format!(
-                    "Online gRPC lazy channel: {}",
-                    e
-                ))
-            })?;
+    let online_channel = connect_grpc_channel_lazy_from_app_config(
+        app_config,
+        SIGNALING_ONLINE,
+        &online_service,
+        online_fallback,
+    )
+    .map_err(|e| {
+        flare_server_core::error::FlareError::system(format!("Online gRPC lazy channel: {}", e))
+    })?;
     let online_client = Arc::new(OnlineServiceClient::from_channel(online_channel));
 
     // 3. 创建 Gateway Router

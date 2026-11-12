@@ -2,7 +2,7 @@
 
 use flare_grpc_proto::signaling::router::router_upstream_service_client::RouterUpstreamServiceClient;
 use flare_im_contracts::service_names::{SIGNALING_ROUTE, get_service_name};
-use flare_im_service_kit::discovery::connect_grpc_channel_resilient;
+use flare_im_service_kit::discovery::{connect_grpc_channel_resilient, connect_static_channel};
 use flare_server_core::error::{ErrorBuilder, ErrorCode, Result};
 use tokio::sync::Mutex;
 use tonic::transport::Channel;
@@ -13,14 +13,25 @@ const DEFAULT_SIGNALING_ROUTE_URI: &str = "http://127.0.0.1:50062";
 pub struct SignalingRouteGrpcPool {
     service_name: String,
     grpc: Mutex<Option<RouterUpstreamServiceClient<Channel>>>,
+    static_endpoint: Option<String>,
 }
 
 impl SignalingRouteGrpcPool {
     pub fn new() -> Self {
+        Self::new_with_service_name(get_service_name(SIGNALING_ROUTE))
+    }
+
+    pub(super) fn new_with_service_name(service_name: String) -> Self {
         Self {
-            service_name: get_service_name(SIGNALING_ROUTE),
+            service_name,
             grpc: Mutex::new(None),
+            static_endpoint: None,
         }
+    }
+
+    pub(crate) fn with_static_endpoint(mut self, endpoint: Option<String>) -> Self {
+        self.static_endpoint = endpoint;
+        self
     }
 
     pub async fn ensure_client(&self) -> Result<RouterUpstreamServiceClient<Channel>> {
@@ -29,14 +40,18 @@ impl SignalingRouteGrpcPool {
             return Ok(c.clone());
         }
 
-        let channel =
-            connect_grpc_channel_resilient(&self.service_name, DEFAULT_SIGNALING_ROUTE_URI)
-                .await
-                .map_err(|e| {
-                    ErrorBuilder::new(ErrorCode::ServiceUnavailable, "signaling route unavailable")
-                        .details(e)
-                        .build_error()
-                })?;
+        let channel = match self.static_endpoint.as_deref() {
+            Some(endpoint) => connect_static_channel(endpoint).await,
+            None => {
+                connect_grpc_channel_resilient(&self.service_name, DEFAULT_SIGNALING_ROUTE_URI)
+                    .await
+            }
+        }
+        .map_err(|e| {
+            ErrorBuilder::new(ErrorCode::ServiceUnavailable, "signaling route unavailable")
+                .details(e)
+                .build_error()
+        })?;
 
         let client = RouterUpstreamServiceClient::new(channel);
         *guard = Some(client.clone());

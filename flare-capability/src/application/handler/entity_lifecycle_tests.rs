@@ -213,6 +213,7 @@ async fn a_recall_reaches_the_declared_unbound_operation_with_a_system_ticket() 
     // The system ticket is no user or staff ticket.
     assert!(verifier().verify(&call.ticket, now).is_err());
     assert!(verifier().verify_staff(&call.ticket, now).is_err());
+    assert_eq!(call.reauthentication_proof, None);
 
     // post_failed carries no message id.
     assert_eq!(

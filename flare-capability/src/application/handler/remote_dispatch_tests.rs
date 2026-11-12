@@ -457,6 +457,165 @@ async fn ui_catalog_query_operations_are_only_authorized_signed_queries() {
     );
 }
 
+#[tokio::test]
+async fn scan_catalog_authorizes_its_resolver_without_an_observe_action() {
+    let (ctx, _, _) = identity(SignedActorType::User);
+    let mut raw: Value = serde_json::from_str(&echo_manifest()).unwrap();
+    let mut query = raw["capabilities"][0]["operations"][0].clone();
+    query["id"] = serde_json::json!("resolve");
+    query["mode"] = serde_json::json!("query");
+    raw["capabilities"][0]["operations"]
+        .as_array_mut()
+        .unwrap()
+        .push(query);
+    raw["clientExtensions"] = serde_json::json!({"platforms":["web"],"contributions":[
+        {"kind":"page","id":"example.echo.scan-page","schemaVersion":1,
+         "requiredPermissions":[],"schema":{"title":"Preview"}},
+        {"kind":"scan-handler","id":"example.echo.scan-handler","schemaVersion":1,
+         "requiredPermissions":[],"schema":{"title":"Scan"},"scan":{
+            "routeKey":"echo","resolve":"example.echo.resolve",
+            "pages":["example.echo.scan-page"],"sources":["camera","album"]}}
+    ]});
+    let mut projected = snapshot("http://127.0.0.1:1".into());
+    projected.plugins[0] =
+        with_manifest(&projected.plugins[0], &serde_json::to_string(&raw).unwrap());
+    projected.plugins[0]
+        .grant
+        .approved_operations
+        .insert("example.echo.resolve".into());
+    let reader = Arc::new(Projection(Mutex::new(Some(projected))));
+    let routes = Arc::new(PluginRouteBook::new().with_runtime_authorization(reader, None));
+    let backend_config = policy();
+    let backend: Arc<dyn CapabilityPolicyBackend> = backend_config.clone();
+    let mut request = command();
+    request.capability_id = flare_im_capability_core::plugin::ui::UI_CATALOG_OPERATION.into();
+    let result = dispatch_remote(&ctx, &request, &routes, &backend, Duration::from_secs(1))
+        .await
+        .unwrap();
+    let catalog: flare_im_capability_core::plugin::ui::UiCatalog =
+        serde_json::from_value(result.data).unwrap();
+    assert_eq!(
+        catalog.plugins[0].query_operations,
+        ["example.echo.resolve".into()].into()
+    );
+    assert!(
+        catalog.plugins[0]
+            .extensions
+            .contributions
+            .iter()
+            .any(|c| c.scan.is_some())
+    );
+
+    backend_config.set_tenant_capability("app-a", "example.echo.resolve", false);
+    let closed = dispatch_remote(&ctx, &request, &routes, &backend, Duration::from_secs(1))
+        .await
+        .unwrap();
+    let catalog: flare_im_capability_core::plugin::ui::UiCatalog =
+        serde_json::from_value(closed.data).unwrap();
+    assert!(catalog.plugins[0].query_operations.is_empty());
+    assert!(
+        catalog.plugins[0]
+            .extensions
+            .contributions
+            .iter()
+            .all(|c| c.scan.is_none())
+    );
+}
+
+#[tokio::test]
+async fn native_catalog_exposes_only_approved_transient_commands() {
+    let (ctx, _, _) = identity(SignedActorType::User);
+    let mut raw: Value = serde_json::from_str(&echo_manifest()).unwrap();
+    let original = raw["capabilities"][0]["operations"][0].clone();
+    for id in [
+        "challenge",
+        "durable",
+        "nested",
+        "query",
+        "unapproved",
+        "private",
+        "stopped",
+    ] {
+        let mut op = original.clone();
+        op["id"] = serde_json::json!(id);
+        if id == "query" {
+            op["mode"] = serde_json::json!("query");
+        }
+        if id == "durable" {
+            op["inputSchema"] =
+                serde_json::json!({"type":"object","properties":{"commandId":{"type":"string"}}});
+        }
+        if id == "nested" {
+            op["inputSchema"] = serde_json::json!({"type":"object","allOf":[{"type":"object","required":["command_id"]}]});
+        }
+        if id == "private" {
+            op["permissionIds"] = serde_json::json!(["example.echo.private"]);
+        }
+        raw["capabilities"][0]["operations"]
+            .as_array_mut()
+            .unwrap()
+            .push(op);
+    }
+    let mut private = raw["permissions"][0].clone();
+    private["id"] = serde_json::json!("example.echo.private");
+    raw["permissions"].as_array_mut().unwrap().push(private);
+    raw["clientExtensions"] = serde_json::json!({"platforms":["web"],"nativeCapabilities":["reauthenticate"],
+        "contributions":[{"kind":"page","id":"example.echo.security","schemaVersion":1,"requiredPermissions":[],
+        "schema":{"title":"Security","actions":[{"id":"verify","label":"Verify",
+            "target":{"kind":"native","capability":"reauthenticate"}}]}}]});
+    let mut projected = snapshot("http://127.0.0.1:1".into());
+    projected.plugins[0] =
+        with_manifest(&projected.plugins[0], &serde_json::to_string(&raw).unwrap());
+    // The legacy command has no durable identity, but remains independently authorized.
+    for id in [
+        "challenge",
+        "durable",
+        "nested",
+        "query",
+        "private",
+        "stopped",
+    ] {
+        projected.plugins[0]
+            .grant
+            .approved_operations
+            .insert(format!("example.echo.{id}"));
+    }
+    let reader = Arc::new(Projection(Mutex::new(Some(projected.clone()))));
+    let routes = Arc::new(PluginRouteBook::new().with_runtime_authorization(reader.clone(), None));
+    let backend_config = policy();
+    backend_config.set_tenant_capability("app-a", "example.echo.stopped", false);
+    let backend: Arc<dyn CapabilityPolicyBackend> = backend_config;
+    let mut request = command();
+    request.capability_id = flare_im_capability_core::plugin::ui::UI_CATALOG_OPERATION.into();
+    let result = dispatch_remote(&ctx, &request, &routes, &backend, Duration::from_secs(1))
+        .await
+        .unwrap();
+    let catalog: flare_im_capability_core::plugin::ui::UiCatalog =
+        serde_json::from_value(result.data).unwrap();
+    assert_eq!(
+        catalog.plugins[0].transient_operations,
+        ["example.echo.challenge".into(), "example.echo.run".into()].into()
+    );
+    assert!(
+        catalog.plugins[0]
+            .transient_operations
+            .is_subset(&catalog.plugins[0].operations)
+    );
+    raw["clientExtensions"]["nativeCapabilities"] = serde_json::json!([]);
+    raw["clientExtensions"]["contributions"][0]["schema"]["actions"] = serde_json::json!([]);
+    projected.plugins[0] =
+        with_manifest(&projected.plugins[0], &serde_json::to_string(&raw).unwrap());
+    *reader.0.lock().unwrap() = Some(projected);
+    let result = dispatch_remote(&ctx, &request, &routes, &backend, Duration::from_secs(1))
+        .await
+        .unwrap();
+    assert!(
+        result.data["plugins"][0]
+            .get("transientOperations")
+            .is_none()
+    );
+}
+
 /// Design 6.3: an action whose operation a closed feature gates leaves every surface, including a
 /// page that stays open (the wallet's 「开户」 on its home page, V5c-W5); reopening brings it back.
 #[tokio::test]

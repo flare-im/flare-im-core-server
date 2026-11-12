@@ -142,7 +142,7 @@ async fn call(
     let body = capability_body(&plugin_id, &permission, request, idempotency_key)?;
     let mut client = capability.client().await?;
     let response = clients
-        .bounded(client.administer_json(staff.token(), operation, body, staff.request_id()))
+        .bounded(client.administer_json(staff.staff(), operation, body, staff.request_id()))
         .await
         .map_err(|err| admin_rpc_error(err, failure_reason))?;
     let answer = response
@@ -174,11 +174,12 @@ async fn call(
     params(
         ("plugin_id" = String, Path, description = "Plugin id"),
         ("permission" = String, Path, description = "The staff permission the operation declares (admin.permissions id); the signed permission must be plugin:<plugin_id>:<permission>"),
+        ("x-flare-staff-reauth" = Option<String>, Header, description = "Optional independent Staff reauthentication JWT; exactly one header, at most 8192 bytes. Passed only as private transport metadata; never place it in input or a command journal."),
     ),
     responses(
         (status = 200, description = "The plugin answered one of its admin query operations; `success=false` with `error_code` when the plugin rejected it", body = ApiResponse<AdminPluginCallHttp>),
         (status = 400, description = "plugin_id and permission too long for their permission code, operation blank or over 128 bytes, input not an object (ADMIN_PLUGIN_FIELD_INVALID), input over 16 KiB (ADMIN_PLUGIN_INPUT_TOO_LARGE), or Capability refused an argument (BAD_REQUEST)"),
-        (status = 401, description = "Staff context is missing or invalid"),
+        (status = 401, description = "Staff context is missing or invalid, or its optional reauthentication header is malformed, repeated, or too large"),
         (status = 403, description = "Signed permission is not plugin:<plugin_id>:<permission> (ADMIN_PERMISSION_DENIED), or Capability refused: the plugin is not enabled for the application, or the operation is not an admin query declaring this permission (FORBIDDEN)"),
         (status = 500, description = "Capability downstream failed (ADMIN_PLUGIN_QUERY_FAILED); its error text is not returned"),
         (status = 502, description = "Capability downstream refused the forwarded staff context as unauthenticated, a deployment error (ADMIN_UPSTREAM_REJECTED_ASSERTION)"),
@@ -218,6 +219,7 @@ pub async fn query_plugin_admin(
     params(
         ("plugin_id" = String, Path, description = "Plugin id"),
         ("permission" = String, Path, description = "The staff permission the operation declares (admin.permissions id); the signed permission must be plugin:<plugin_id>:<permission>"),
+        ("x-flare-staff-reauth" = Option<String>, Header, description = "Optional independent Staff reauthentication JWT; exactly one header, at most 8192 bytes. Passed only as private transport metadata; never place it in input or a command journal."),
         ("x-audit-reason" = String, Header, description = "Operator reason as percent-encoded UTF-8 (encodeURIComponent; plain ASCII may be sent as is), at most 512 bytes decoded and 1536 bytes as sent; recorded decoded in the audit log; the plugin receives the one the admin partition signed into the staff context"),
         ("idempotency-key" = Option<String>, Header, description = "Required unless x-request-id is present; the command id of the staff member's intent is derived from it, so a retry under the same key runs the plugin command once"),
         ("x-request-id" = Option<String>, Header, description = "Required unless idempotency-key is present"),
@@ -225,7 +227,7 @@ pub async fn query_plugin_admin(
     responses(
         (status = 200, description = "The plugin ran one of its admin command operations; `success=false` with `error_code` when the plugin rejected it", body = ApiResponse<AdminPluginCallHttp>),
         (status = 400, description = "plugin_id and permission too long for their permission code, operation blank or over 128 bytes, input not an object (ADMIN_PLUGIN_FIELD_INVALID), input over 16 KiB (ADMIN_PLUGIN_INPUT_TOO_LARGE), or Capability refused an argument (BAD_REQUEST)"),
-        (status = 401, description = "Staff context is missing or invalid"),
+        (status = 401, description = "Staff context is missing or invalid, or its optional reauthentication header is malformed, repeated, or too large"),
         (status = 403, description = "Signed permission is not plugin:<plugin_id>:<permission> (ADMIN_PERMISSION_DENIED), audit reason / idempotency header missing (FORBIDDEN), or Capability refused: the plugin is not enabled for the application, the operation is not an admin command declaring this permission, or it requires a reason the staff context does not carry (FORBIDDEN)"),
         (status = 500, description = "Capability downstream failed (ADMIN_PLUGIN_DISPATCH_FAILED); its error text is not returned"),
         (status = 502, description = "Capability downstream refused the forwarded staff context as unauthenticated, a deployment error (ADMIN_UPSTREAM_REJECTED_ASSERTION)"),

@@ -29,6 +29,10 @@ impl MediaService {
                 "upload identity does not match authenticated context"
             ));
         }
+        let purpose =
+            Self::user_upload_purpose(&context.metadata, context.namespace, context.business_tag)?;
+        self.validate_public_avatar_payload(&mut context, purpose)
+            .await?;
         context
             .metadata
             .insert("tenant_id".to_string(), tenant_id.to_string());
@@ -77,6 +81,13 @@ impl MediaService {
                     .or_insert_with(|| category.clone());
                 if Self::can_reuse_hash_match(&existing, message_managed)
                     && existing.owner_id.as_deref() == Some(owner_id)
+                    && existing.owner_kind == MediaOwnerKind::User
+                    && existing.purpose == purpose
+                    && matches!(
+                        (existing.access_type, purpose),
+                        (FileAccessType::Public, MediaPurpose::Avatar)
+                            | (FileAccessType::Private, MediaPurpose::General)
+                    )
                 {
                     if let Some(scope) = scope.as_ref() {
                         tracing::trace!(file_id = context.file_id, "为已存在的文件创建引用");
@@ -263,7 +274,7 @@ impl MediaService {
         let mut metadata = MediaFileMetadata {
             owner_id: Some(owner_id.to_string()),
             owner_kind: MediaOwnerKind::User,
-            purpose: MediaPurpose::General,
+            purpose,
             file_id: context.file_id.to_string(),
             file_name: context.file_name.to_string(),
             mime_type: context.mime_type.to_string(),
@@ -277,7 +288,11 @@ impl MediaService {
             reference_count,
             status,
             grace_expires_at,
-            access_type: FileAccessType::default(), // 默认使用私有访问类型
+            access_type: if purpose == MediaPurpose::Avatar {
+                FileAccessType::Public
+            } else {
+                FileAccessType::Private
+            },
             storage_bucket: storage_bucket.clone(),
             storage_path: storage_path.clone(),
         };

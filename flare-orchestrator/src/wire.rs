@@ -93,6 +93,7 @@ pub async fn initialize(
     let conversation_channel =
         flare_im_service_kit::discovery::connect_grpc_channel_lazy_from_app_config(
             app_config,
+            CONVERSATION,
             conversation_service_type,
             flare_im_service_kit::discovery::default_static_grpc_fallback(
                 conversation_service_type,
@@ -121,6 +122,7 @@ pub async fn initialize(
     let storage_reader_channel =
         flare_im_service_kit::discovery::connect_grpc_channel_lazy_from_app_config(
             app_config,
+            flare_im_contracts::service_names::STORAGE_READER,
             &storage_reader_name,
             flare_im_service_kit::discovery::default_static_grpc_fallback(
                 flare_im_contracts::service_names::STORAGE_READER,

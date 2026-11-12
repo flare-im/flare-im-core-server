@@ -38,15 +38,53 @@ pub struct ConnectionRepository {
     client: Mutex<Option<OnlineServiceClient<Channel>>>,
     default_tenant_id: String,
     signer: Option<SignedContextSigner>,
-    static_registry_mode: bool,
+    static_online_endpoint: Option<String>,
 }
 
-fn static_online_fallback(service_name: &str, static_registry_mode: bool) -> Option<&'static str> {
-    (static_registry_mode && service_name == SIGNALING_ONLINE)
-        .then(|| flare_im_service_kit::discovery::default_static_grpc_fallback(SIGNALING_ONLINE))
+fn static_online_fallback<'a>(service_name: &str, endpoint: Option<&'a str>) -> Option<&'a str> {
+    if service_name == SIGNALING_ONLINE {
+        endpoint
+    } else {
+        None
+    }
 }
 
 impl ConnectionRepository {
+    pub(crate) fn resolve_online_static_endpoint(
+        app: &flare_im_service_kit::config::FlareAppConfig,
+        static_registry_mode: bool,
+    ) -> Result<Option<String>> {
+        if !static_registry_mode {
+            return Ok(None);
+        }
+        // Resolve the same typed service and environment precedence as Online's
+        // listener; its generic development port is only the final default.
+        let service = app.signaling_online_service();
+        let mut address = flare_im_service_kit::build_service_runtime_plan(
+            app,
+            &service.runtime,
+            SIGNALING_ONLINE,
+            "SIGNALING_ONLINE",
+            50061,
+        )?
+        .address;
+        if address.port() == 0 {
+            return Err(ErrorBuilder::new(
+                ErrorCode::ConfigurationError,
+                "static Signaling Online requires a nonzero port",
+            )
+            .build_error());
+        }
+        if address.ip().is_unspecified() {
+            address.set_ip(if address.is_ipv4() {
+                std::net::Ipv4Addr::LOCALHOST.into()
+            } else {
+                std::net::Ipv6Addr::LOCALHOST.into()
+            });
+        }
+        Ok(Some(format!("http://{address}")))
+    }
+
     pub fn new(
         connection_manager: Arc<dyn ConnectionManagerTrait>,
         default_tenant_id: String,
@@ -59,7 +97,7 @@ impl ConnectionRepository {
             client: Mutex::new(None),
             default_tenant_id,
             signer: None,
-            static_registry_mode: false,
+            static_online_endpoint: None,
         }
     }
 
@@ -76,12 +114,12 @@ impl ConnectionRepository {
             client: Mutex::new(None),
             default_tenant_id,
             signer: None,
-            static_registry_mode: false,
+            static_online_endpoint: None,
         }
     }
 
-    pub fn with_static_registry_mode(mut self, enabled: bool) -> Self {
-        self.static_registry_mode = enabled;
+    pub fn with_static_online_endpoint(mut self, endpoint: Option<String>) -> Self {
+        self.static_online_endpoint = endpoint;
         self
     }
 
@@ -129,7 +167,11 @@ impl ConnectionRepository {
             origin.connection_id(),
         )
         .with_credential_id("signaling-gateway");
-        let identity=if let Some(sid)=origin.identity_session_id() {identity.with_session_id(sid)} else {identity};
+        let identity = if let Some(sid) = origin.identity_session_id() {
+            identity.with_session_id(sid)
+        } else {
+            identity
+        };
         let token = signer.sign(&identity).map_err(|_| {
             ErrorBuilder::new(
                 ErrorCode::PermissionDenied,
@@ -153,7 +195,23 @@ impl ConnectionRepository {
         if let Some(client) = guard.as_ref() {
             return Ok(client.clone());
         }
-
+        if let Some(uri) =
+            static_online_fallback(&self.service_name, self.static_online_endpoint.as_deref())
+        {
+            let channel = flare_im_service_kit::discovery::connect_static_channel(uri)
+                .await
+                .map_err(|e| {
+                    ErrorBuilder::new(
+                        ErrorCode::ServiceUnavailable,
+                        "signaling online unavailable",
+                    )
+                    .details(format!("Failed to connect to static Signaling Online: {e}"))
+                    .build_error()
+                })?;
+            let client = OnlineServiceClient::new(channel);
+            *guard = Some(client.clone());
+            return Ok(client);
+        }
         let mut service_client_guard = self.service_client.lock().await;
         if service_client_guard.is_none() {
             let discover = flare_im_service_kit::discovery::create_discover(&self.service_name)
@@ -169,37 +227,13 @@ impl ConnectionRepository {
                     ))
                     .build_error()
                 })?;
-
-            if let Some(discover) = discover {
-                *service_client_guard = Some(ServiceClient::new(discover));
-            } else {
-                let Some(uri) =
-                    static_online_fallback(&self.service_name, self.static_registry_mode)
-                else {
-                    return Err(flare_server_core::error::FlareError::system(
-                        "Service discovery not configured; explicit static Signaling Online route unavailable",
-                    ));
-                };
-                drop(service_client_guard);
-                let channel = flare_im_service_kit::discovery::connect_grpc_channel_with_fallback(
-                    &self.service_name,
-                    uri,
-                )
-                .await
-                .map_err(|e| {
-                    ErrorBuilder::new(
-                        ErrorCode::ServiceUnavailable,
-                        "signaling online unavailable",
-                    )
-                    .details(format!("Failed to connect to static Signaling Online: {e}"))
-                    .build_error()
-                })?;
-                let client = OnlineServiceClient::new(channel);
-                *guard = Some(client.clone());
-                return Ok(client);
-            }
+            let Some(discover) = discover else {
+                return Err(flare_server_core::error::FlareError::system(
+                    "Service discovery not configured; explicit static Signaling Online route unavailable",
+                ));
+            };
+            *service_client_guard = Some(ServiceClient::new(discover));
         }
-
         let service_client = service_client_guard.as_mut().ok_or_else(|| {
             flare_server_core::error::FlareError::system(
                 "Service client not initialized".to_string(),
@@ -218,12 +252,7 @@ impl ConnectionRepository {
             .details(format!("Failed to get channel: {}", e))
             .build_error()
         })?;
-
-        tracing::trace!(
-            service_name = %self.service_name,
-            "ConnectionRepository: got channel from service discovery"
-        );
-
+        tracing::trace!(service_name = %self.service_name, "ConnectionRepository: got channel from service discovery");
         let client = OnlineServiceClient::new(channel);
         *guard = Some(client.clone());
         Ok(client)
@@ -243,7 +272,11 @@ impl IConnectionPort for ConnectionRepository {
                 .build_error()
             })?;
         if request.metadata.get("connection_id").map(String::as_str) != Some(origin.connection_id())
-            || request.metadata.get("identity_session_id").map(String::as_str) != origin.identity_session_id()
+            || request
+                .metadata
+                .get("identity_session_id")
+                .map(String::as_str)
+                != origin.identity_session_id()
         {
             return Err(ErrorBuilder::new(
                 ErrorCode::PermissionDenied,
@@ -421,13 +454,16 @@ impl IConnectionPort for ConnectionRepository {
             &connection_info,
             &self.default_tenant_id,
         );
-        Ok(Arc::new((*ctx).clone().insert_data(
-            crate::infrastructure::connection_context::AuthenticatedConnectionOrigin::new(
-                connection_id.to_owned(),
-                user_id.to_owned(),
-                tenant_id.to_owned(),
-            ).with_identity_session_id(core_info.metadata.get("identity_session_id").cloned()),
-        )))
+        Ok(Arc::new(
+            (*ctx).clone().insert_data(
+                crate::infrastructure::connection_context::AuthenticatedConnectionOrigin::new(
+                    connection_id.to_owned(),
+                    user_id.to_owned(),
+                    tenant_id.to_owned(),
+                )
+                .with_identity_session_id(core_info.metadata.get("identity_session_id").cloned()),
+            ),
+        ))
     }
 }
 
@@ -618,13 +654,17 @@ mod static_route_tests {
     #[test]
     fn static_online_route_requires_explicit_mode_and_exact_service_name() {
         assert_eq!(
-            static_online_fallback(SIGNALING_ONLINE, true),
+            static_online_fallback(SIGNALING_ONLINE, Some("http://127.0.0.1:50061")),
             Some("http://127.0.0.1:50061")
         );
-        assert_eq!(static_online_fallback(SIGNALING_ONLINE, false), None);
+        assert_eq!(static_online_fallback(SIGNALING_ONLINE, None), None);
         assert_eq!(
-            static_online_fallback("renamed-signaling-online", true),
+            static_online_fallback("renamed-signaling-online", Some("http://127.0.0.1:50061")),
             None
         );
     }
 }
+
+#[cfg(test)]
+#[path = "connection_static_endpoint_tests.rs"]
+mod connection_static_endpoint_tests;

@@ -2,7 +2,7 @@
 
 use flare_grpc_proto::conversation::conversation_read_service_client::ConversationReadServiceClient;
 use flare_im_contracts::service_names::{ACCESS_GATEWAY, CONVERSATION, get_service_name};
-use flare_im_service_kit::discovery::connect_grpc_channel_resilient;
+use flare_im_service_kit::discovery::{connect_grpc_channel_resilient, connect_static_channel};
 use flare_server_core::error::{ErrorBuilder, ErrorCode, Result};
 use tokio::sync::Mutex;
 use tonic::transport::Channel;
@@ -14,15 +14,26 @@ pub struct ConversationReadGrpcPool {
     client: Mutex<Option<ConversationReadServiceClient<Channel>>>,
     /// 代已认证连接读会话列表、以网关服务身份读成员时签 `x-flare-ctx`（Cell 私钥）。
     signer: Option<flare_server_core::SignedContextSigner>,
+    static_endpoint: Option<String>,
 }
 
 impl ConversationReadGrpcPool {
     pub fn new() -> Self {
+        Self::new_with_service_name(get_service_name(CONVERSATION))
+    }
+
+    pub(super) fn new_with_service_name(service_name: String) -> Self {
         Self {
-            service_name: get_service_name(CONVERSATION),
+            service_name,
             client: Mutex::new(None),
             signer: None,
+            static_endpoint: None,
         }
+    }
+
+    pub(crate) fn with_static_endpoint(mut self, endpoint: Option<String>) -> Self {
+        self.static_endpoint = endpoint;
+        self
     }
 
     pub fn with_signer(mut self, signer: Option<flare_server_core::SignedContextSigner>) -> Self {
@@ -92,16 +103,20 @@ impl ConversationReadGrpcPool {
         if let Some(c) = guard.as_ref() {
             return Ok(c.clone());
         }
-        let channel = connect_grpc_channel_resilient(&self.service_name, DEFAULT_CONVERSATION_URI)
-            .await
-            .map_err(|e| {
-                ErrorBuilder::new(
-                    ErrorCode::ServiceUnavailable,
-                    "conversation read unavailable",
-                )
-                .details(e)
-                .build_error()
-            })?;
+        let channel = match self.static_endpoint.as_deref() {
+            Some(endpoint) => connect_static_channel(endpoint).await,
+            None => {
+                connect_grpc_channel_resilient(&self.service_name, DEFAULT_CONVERSATION_URI).await
+            }
+        }
+        .map_err(|e| {
+            ErrorBuilder::new(
+                ErrorCode::ServiceUnavailable,
+                "conversation read unavailable",
+            )
+            .details(e)
+            .build_error()
+        })?;
         let client = ConversationReadServiceClient::new(channel);
         *guard = Some(client.clone());
         Ok(client)

@@ -23,6 +23,7 @@ flare-core-runtime = { workspace = true }
 flare-grpc-proto = { workspace = true }
 flare-im-contracts = { version = "1.0.3", path = "../flare-im-contracts" }
 flare-proto = { workspace = true }
+flare-plugin-protocol = { version = "0.1.0", path = "../../../flare-protocol/flare-plugin-protocol" }
 flare-server-core = { workspace = true, features = ["proto", "discovery", "grpc", "nats"] }
 futures = { workspace = true }
 hex = { workspace = true }

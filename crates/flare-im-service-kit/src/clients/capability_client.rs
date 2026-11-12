@@ -2,8 +2,8 @@
 //!
 //! 只有 admin-gateway 需要读租户能力开关、租户运行时投影、能力目录与插件簿，并经
 //! `CapabilityService.Administer` 治理 Hook 配置；api-gateway 启动时不加载这份配置，也不会去
-//! 连 Capability。每次调用只带中间件验过后原样转发的 Staff `x-flare-ctx`（`staff_token`），
-//! Capability 按 RPC 族复核签名里的权限码。
+//! 连 Capability。调用原样转发中间件验证过的 Staff `x-flare-ctx`；插件管理的 JSON 调用还可
+//! 转发私有上下文中的独立二次验证凭据。Capability 按 RPC 族复核签名里的权限码。
 
 use flare_server_core::error::Result;
 use prost::Message;
@@ -176,10 +176,11 @@ impl CapabilityAdminClientWrapper {
     }
 
     /// `CapabilityService.Administer` with a `PayloadJson` body (plugin admin pages:
-    /// `flare.plugin.v1.admin.query` / `.dispatch`), forwarding the verified Staff token.
+    /// `flare.plugin.v1.admin.query` / `.dispatch`), forwarding the verified Staff token and
+    /// its optional opaque reauthentication credential as separate sensitive metadata.
     pub async fn administer_json(
         &mut self,
-        staff_token: &str,
+        staff: &crate::staff_context::VerifiedStaff,
         operation: &str,
         payload_json: Vec<u8>,
         request_id: &str,
@@ -195,7 +196,9 @@ impl CapabilityAdminClientWrapper {
         };
         let response = self
             .service
-            .administer(staff_context_request(request, staff_token)?)
+            .administer(crate::staff_context::staff_reauthenticated_request(
+                request, staff,
+            )?)
             .await?;
         Ok(response.into_inner())
     }

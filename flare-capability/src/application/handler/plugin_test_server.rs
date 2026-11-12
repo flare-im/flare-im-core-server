@@ -13,12 +13,23 @@ use tonic::{Request, Response, Status};
 
 pub(crate) type Respond = dyn Fn(&str, &Value) -> Result<Value, String> + Send + Sync;
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub(crate) struct RecordedCall {
     pub operation: String,
     pub ticket: String,
+    pub reauthentication_proof: Option<String>,
     pub payload: Value,
     pub metadata: std::collections::HashMap<String, String>,
+}
+
+impl std::fmt::Debug for RecordedCall {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RecordedCall")
+            .field("operation", &self.operation)
+            .field("payload", &self.payload)
+            .field("metadata", &self.metadata)
+            .finish_non_exhaustive()
+    }
 }
 
 struct Endpoint {
@@ -38,6 +49,11 @@ impl ExtensionPlugin for Endpoint {
             .and_then(|v| v.to_str().ok())
             .unwrap_or_default()
             .to_string();
+        let reauthentication_proof = request
+            .metadata()
+            .get(flare_im_capability_core::plugin::staff_reauth::STAFF_REAUTH_HEADER)
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_owned);
         let body = request.into_inner();
         let payload: Value = body
             .payload
@@ -47,6 +63,7 @@ impl ExtensionPlugin for Endpoint {
         self.calls.lock().unwrap().push(RecordedCall {
             operation: body.operation.clone(),
             ticket,
+            reauthentication_proof,
             payload: payload.clone(),
             metadata: body.metadata.clone(),
         });

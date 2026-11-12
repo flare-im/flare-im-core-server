@@ -78,15 +78,8 @@ pub struct AdminPluginRequest {
 /// The command id of the intent `idempotency_key` names for staff member `staff_id`:
 /// `intent-<sha256 hex>` of the two, the same on every attempt and never the same for two staff
 /// members or two keys. It fits a plugin command id (`[A-Za-z0-9_:-]{1,128}`).
-pub fn staff_command_id(staff_id: &str, idempotency_key: &str) -> String {
-    use sha2::{Digest, Sha256};
-    let mut digest = Sha256::new();
-    digest.update(b"flare.plugin.admin.command\0");
-    digest.update(staff_id.as_bytes());
-    digest.update(b"\0");
-    digest.update(idempotency_key.as_bytes());
-    format!("intent-{}", hex::encode(digest.finalize()))
-}
+pub use flare_im_capability_core::plugin::staff_reauth::staff_command_id;
+
 fn valid_idempotency_key(key: &str) -> bool {
     !key.is_empty()
         && key.len() <= 128
@@ -405,6 +398,7 @@ pub async fn dispatch_admin(
                 trace_id: &trace_id,
                 payload: &request.input,
                 ticket: &ticket,
+                reauthentication_proof: staff.reauthentication_proof(),
             },
             timeout,
         ),

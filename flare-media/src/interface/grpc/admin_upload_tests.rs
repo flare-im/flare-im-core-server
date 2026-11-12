@@ -528,3 +528,158 @@ async fn application_validator_is_explicit_narrow_and_tenant_bound() {
         Code::PermissionDenied
     );
 }
+
+#[tokio::test]
+async fn user_avatar_publication_seals_validated_bytes_and_returns_a_stable_url() {
+    let objects = Arc::new(Objects::default());
+    let h = serve_with(Some(objects.clone()), Vec::new()).await;
+    let mut client = MediaServiceClient::new(h.channel.clone());
+    let owner = token(&h.signer, SignedActorType::User, "tenant-a", "owner");
+    let stranger = token(&h.signer, SignedActorType::User, "tenant-a", "stranger");
+    let bytes = image();
+    let request = InitiateDirectUploadRequest {
+        metadata: Some(UploadFileMetadata {
+            file_name: "avatar.png".into(),
+            mime_type: "image/png".into(),
+            file_size: bytes.len() as i64,
+            namespace: "profile".into(),
+            business_tag: "avatar".into(),
+            metadata: HashMap::from([("purpose".into(), "avatar".into())]),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let session = client
+        .initiate_direct_upload(raw(request.clone(), Some(&owner), "spoofed", "spoofed"))
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(session.object_key.starts_with("staging/avatars/"));
+    objects
+        .bytes
+        .lock()
+        .unwrap()
+        .insert(session.object_key.clone(), bytes.clone());
+    let complete = client
+        .complete_direct_upload(raw(
+            CompleteDirectUploadRequest {
+                upload_id: session.upload_id.clone(),
+            },
+            Some(&owner),
+            "tenant-a",
+            "owner",
+        ))
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(complete.url.contains("/avatars/"));
+    assert!(!complete.url.contains('?'));
+    let metadata = h
+        .metadata
+        .load_metadata(
+            &Context::root().with_tenant_id("tenant-a"),
+            &session.file_id,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(metadata.owner_kind, MediaOwnerKind::User);
+    assert_eq!(metadata.purpose, MediaPurpose::Avatar);
+    assert!(matches!(
+        metadata.access_type,
+        crate::domain::model::FileAccessType::Public
+    ));
+    let final_key = metadata.storage_path.as_ref().unwrap();
+    assert!(final_key.starts_with("avatars/"));
+    assert_eq!(
+        objects.bytes.lock().unwrap().get(final_key).unwrap(),
+        &bytes
+    );
+    objects
+        .bytes
+        .lock()
+        .unwrap()
+        .insert(session.object_key.clone(), b"changed staging".to_vec());
+    assert_eq!(
+        objects.bytes.lock().unwrap().get(final_key).unwrap(),
+        &bytes
+    );
+    let mut urls = Vec::new();
+    for expiry in [5, 7200] {
+        urls.push(
+            client
+                .get_file_url(raw(
+                    GetFileUrlRequest {
+                        file_id: session.file_id.clone(),
+                        expires_in: expiry,
+                        ..Default::default()
+                    },
+                    Some(&stranger),
+                    "tenant-a",
+                    "stranger",
+                ))
+                .await
+                .unwrap()
+                .into_inner()
+                .url,
+        );
+    }
+    assert_eq!(urls[0], urls[1]);
+    assert!(!urls[0].contains("signature"));
+    let mut invalid = request;
+    invalid.metadata.as_mut().unwrap().namespace = "im.message".into();
+    assert_eq!(
+        client
+            .initiate_direct_upload(raw(invalid, Some(&owner), "tenant-a", "owner"))
+            .await
+            .unwrap_err()
+            .code(),
+        Code::InvalidArgument
+    );
+    let fresh = client
+        .initiate_direct_upload(raw(
+            InitiateDirectUploadRequest {
+                metadata: Some(UploadFileMetadata {
+                    file_name: "bad.png".into(),
+                    mime_type: "image/png".into(),
+                    file_size: bytes.len() as i64,
+                    namespace: "profile".into(),
+                    business_tag: "avatar".into(),
+                    metadata: HashMap::from([("purpose".into(), "avatar".into())]),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+            Some(&owner),
+            "tenant-a",
+            "owner",
+        ))
+        .await
+        .unwrap()
+        .into_inner();
+    objects
+        .bytes
+        .lock()
+        .unwrap()
+        .insert(fresh.object_key.clone(), vec![0; bytes.len()]);
+    assert!(
+        client
+            .complete_direct_upload(raw(
+                CompleteDirectUploadRequest {
+                    upload_id: fresh.upload_id
+                },
+                Some(&owner),
+                "tenant-a",
+                "owner"
+            ))
+            .await
+            .is_err()
+    );
+    assert!(
+        h.metadata
+            .load_metadata(&Context::root().with_tenant_id("tenant-a"), &fresh.file_id)
+            .await
+            .unwrap()
+            .is_none()
+    );
+}

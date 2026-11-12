@@ -48,6 +48,7 @@ pub use channel_resolve::{
 pub use grpc_connect::{
     build_gateway_router_from_app_config, connect_grpc_channel_from_app_config,
     connect_grpc_channel_from_app_config_with_policy, connect_grpc_channel_lazy_from_app_config,
+    static_grpc_endpoint_from_app_config,
 };
 
 // Re-exports
