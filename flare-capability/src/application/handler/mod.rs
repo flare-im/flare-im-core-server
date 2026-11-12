@@ -9,6 +9,7 @@ pub use hook_query::HookQueryHandler;
 pub(crate) use remote_dispatch::VerifiedDispatchOrigin;
 pub(crate) use remote_dispatch::dispatch_remote;
 pub mod admin_dispatch;
+pub mod catalog_selection;
 pub mod entity_lifecycle;
 pub mod message_events;
 #[cfg(test)]

@@ -5,6 +5,7 @@ pub mod hook_retention;
 pub mod plugin_config_key;
 pub mod plugin_development;
 pub mod plugin_publishers;
+pub mod plugin_web_bundles;
 
 pub use capability_runtime::CapabilityRuntimeConfig;
 pub use hook_retention::HookRetentionConfig;

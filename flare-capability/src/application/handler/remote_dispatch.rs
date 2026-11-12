@@ -208,7 +208,11 @@ async fn invoke_authorized(
         .require_user_binding(&tenant, user, request_id)
         .map_err(|_| denied(()))?;
     if req.capability_id == flare_im_capability_core::plugin::ui::UI_CATALOG_OPERATION {
-        return client_ui_catalog(&tenant, request_id, routes, policy)
+        let descriptor = super::catalog_selection::read_descriptor(
+            req.payload.as_ref(),
+            routes.catalog_selection.web_bundles(),
+        )?;
+        return client_ui_catalog(&tenant, request_id, routes, policy, &descriptor)
             .await
             .map(Invoked::Answered);
     }
@@ -818,16 +822,25 @@ fn plugin_status_outcome(call: &PluginCall<'_>, status: Status) -> Result<Plugin
 /// tenant has but the viewer cannot use are listed in `unavailable` with the reason (disabled,
 /// not installed after a revocation, nothing offered), so a card of one
 /// says why it is inert. One plugin's problem never fails the catalog.
+///
+/// Each contribution goes out as the first variant the client's `descriptor` satisfies, or as
+/// an upgrade placeholder ([`super::catalog_selection`]); the selection is cached per projection
+/// version and descriptor, the checks above run on every request.
 async fn client_ui_catalog(
     tenant: &str,
     request_id: &str,
     routes: &PluginRouteBook,
     policy: &Arc<dyn CapabilityPolicyBackend>,
+    descriptor: &flare_im_capability_core::plugin::ui::ClientUiDescriptor,
 ) -> Result<CapabilityDispatchResult> {
+    use super::catalog_selection::{CatalogSelectionMetrics, select_contributions};
     use flare_im_capability_core::plugin::ui::{
         ClientPlugin, UI_CATALOG_OPERATION, UiActionTarget, UiCatalog, UiUnavailablePlugin,
         UiUnavailableReason,
     };
+    let metrics = CatalogSelectionMetrics::registered();
+    let descriptor_hash = descriptor.hash();
+    metrics.record_descriptor(&descriptor_hash);
     let now = chrono::Utc::now().timestamp_millis();
     let snapshot = match &routes.authorization {
         Some(reader) => reader
@@ -843,10 +856,6 @@ async fn client_ui_catalog(
         plugins: vec![],
         unavailable: vec![],
     };
-    let mut authorized_queries: std::collections::BTreeMap<
-        String,
-        std::collections::BTreeSet<String>,
-    > = Default::default();
     let mut unavailable: std::collections::BTreeMap<String, UiUnavailableReason> =
         Default::default();
     let mut note = |plugin_id: &str, reason: UiUnavailableReason| {
@@ -862,6 +871,10 @@ async fn client_ui_catalog(
             .map_err(|_| CapabilityError::PolicyDenied("plugin catalog expired".into()))?;
         result.version = snapshot.version;
         result.valid_until_ms = snapshot.valid_until_ms.min(now.saturating_add(30000));
+        let selection =
+            routes
+                .catalog_selection
+                .selection(tenant, &snapshot, descriptor, &descriptor_hash);
         for projected in &snapshot.plugins {
             let grant = &projected.grant;
             if grant.revoked {
@@ -903,7 +916,7 @@ async fn client_ui_catalog(
                 }
                 operations.insert(operation);
             }
-            let query_operations = operations
+            let query_operations: std::collections::BTreeSet<String> = operations
                 .iter()
                 .filter(|operation| {
                     manifest.operation(operation).is_some_and(|op| {
@@ -912,22 +925,33 @@ async fn client_ui_catalog(
                 })
                 .cloned()
                 .collect();
-            authorized_queries.insert(manifest.plugin_id.clone(), query_operations);
             let configuration = client_configuration(manifest, projected);
+            // The variant this client renders, or its upgrade placeholder; identity, permissions
+            // and the feature a contribution belongs to are the same in every variant.
+            let selected = selection
+                .get(&(grant.plugin_id.clone(), grant.manifest_digest.clone()))
+                .cloned()
+                .unwrap_or_else(|| {
+                    select_contributions(&manifest.client_extensions.contributions, descriptor)
+                        .into()
+                });
+            let declared_client_surfaces = !selected.is_empty();
+            let mut outcomes = Vec::new();
             let mut extensions = manifest.client_extensions.clone();
-            // Marketplace samples are not part of the running client surface.
-            for contribution in &mut extensions.contributions {
-                contribution.preview = None;
-            }
-            let declared_client_surfaces = !extensions.contributions.is_empty();
-            // Every reference to an action the viewer may not invoke goes with it (choices,
-            // rows, translations, a detail whose operation is not offered).
-            extensions.contributions.retain(|c| {
-                !closed.contributions.contains(&c.id)
-                    && c.required_permissions
-                        .iter()
-                        .all(|p| permissions.contains(p))
-            });
+            extensions.contributions = selected
+                .iter()
+                .filter(|s| {
+                    !closed.contributions.contains(&s.contribution.id)
+                        && s.contribution
+                            .required_permissions
+                            .iter()
+                            .all(|p| permissions.contains(p))
+                })
+                .map(|s| {
+                    outcomes.push(s.outcome);
+                    s.contribution.clone()
+                })
+                .collect();
             if extensions.contributions.is_empty() {
                 if declared_client_surfaces {
                     note(
@@ -941,6 +965,9 @@ async fn client_ui_catalog(
                 }
                 continue;
             }
+            for outcome in outcomes {
+                metrics.record_outcome(outcome);
+            }
             result.valid_until_ms = result.valid_until_ms.min(grant.valid_until_ms);
             result.plugins.push(ClientPlugin {
                 plugin_id: manifest.plugin_id.clone(),
@@ -949,7 +976,7 @@ async fn client_ui_catalog(
                 grant_revision: grant.revision,
                 extensions,
                 operations,
-                query_operations: Default::default(),
+                query_operations,
                 configuration,
             });
         }
@@ -979,22 +1006,9 @@ async fn client_ui_catalog(
                     plugin_id.as_ref().unwrap_or(&plugin.plugin_id).clone(),
                     page.clone(),
                 )),
+                // Selection already required every native capability of the variant.
                 UiActionTarget::Native { .. } => true,
             });
-        }
-        // Older catalog readers reject unknown fields. Only a plugin actually
-        // offering the new read-only recovery mode needs this authority; all
-        // existing plugins retain the previous serialized catalog shape.
-        if plugin.extensions.contributions.iter().any(|contribution| {
-            contribution.schema.actions.iter().any(|action| {
-                action.command.as_ref().is_some_and(|command| {
-                    command.mode == flare_im_capability_core::plugin::ui::UiPageCommandMode::Observe
-                })
-            })
-        }) {
-            plugin.query_operations = authorized_queries
-                .remove(&plugin.plugin_id)
-                .unwrap_or_default();
         }
     }
     let available: std::collections::BTreeSet<&str> = result

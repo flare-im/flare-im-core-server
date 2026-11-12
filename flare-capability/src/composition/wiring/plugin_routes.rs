@@ -37,7 +37,7 @@ pub(super) fn runtime_authorization(
     let cipher = Arc::new(
         crate::infrastructure::config::plugin_config_key::PluginConfigCipher::from_env()?,
     );
-    Ok(match pool{Some(pool)=>routes.with_runtime_authorization(Arc::new(crate::infrastructure::persistence::postgres_plugin_authorization::PostgresPluginAuthorization::new(pool.clone()).with_cipher(cipher).with_development(crate::infrastructure::config::plugin_development::plugin_development_enabled())),signer),None=>routes}.with_state_publisher(publisher))
+    Ok(match pool{Some(pool)=>routes.with_runtime_authorization(Arc::new(crate::infrastructure::persistence::postgres_plugin_authorization::PostgresPluginAuthorization::new(pool.clone()).with_cipher(cipher).with_development(crate::infrastructure::config::plugin_development::plugin_development_enabled())),signer),None=>routes}.with_state_publisher(publisher).with_web_bundles(crate::infrastructure::config::plugin_web_bundles::plugin_web_bundles_enabled()))
 }
 
 /// The platform card path and the entity lifecycle outbox (plugin platform v2 §1, §3), on a

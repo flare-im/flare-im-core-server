@@ -26,6 +26,9 @@ pub struct PluginRouteBook {
     /// The entity lifecycle outbox (`post_failed` and `recalled` notifications to plugins).
     pub(crate) lifecycle:
         Option<Arc<dyn crate::domain::repository::entity_lifecycle::EntityLifecycleOutbox>>,
+    /// The deployment's web bundle switch and the client catalog's variant selection cache.
+    pub(crate) catalog_selection:
+        Arc<crate::application::handler::catalog_selection::CatalogSelection>,
 }
 
 impl PluginRouteBook {
@@ -65,6 +68,17 @@ impl PluginRouteBook {
     ) -> Self {
         self.card_poster = poster;
         self.lifecycle = lifecycle;
+        self
+    }
+    /// `plugin.webBundles.enabled` of the deployment: when off, catalogs select declarative
+    /// variants only (the client's bundle runtime is ignored).
+    pub fn with_web_bundles(mut self, enabled: bool) -> Self {
+        self.catalog_selection = Arc::new(
+            crate::application::handler::catalog_selection::CatalogSelection::new(
+                enabled,
+                crate::application::handler::catalog_selection::SELECTION_CACHE_CAPACITY,
+            ),
+        );
         self
     }
     pub fn new() -> Self {
