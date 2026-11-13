@@ -51,10 +51,10 @@ async fn initialize_sql(connection: &mut PgConnection, sql: &str) -> Result<bool
         sqlx::raw_sql(sql).execute(&mut *tx).await.map_err(|_|FlareError::system("Core initial schema failed; transaction rolled back"))?;
         sqlx::raw_sql(SEEDS).execute(&mut *tx).await.map_err(|_|FlareError::system("Core initial system seed failed; transaction rolled back"))?;
         sqlx::raw_sql("SET LOCAL search_path=pg_catalog,public,pg_temp;").execute(&mut *tx).await.map_err(|_|FlareError::system("Core initial catalog schema unavailable"))?;
-        sqlx::query("INSERT INTO public.core_initial_schema(version,schema_sha256) VALUES(2,$1)")
-            .bind(digest()).execute(&mut *tx).await.map_err(|_|FlareError::system("Core initial version failed; transaction rolled back"))?;
-        sqlx::query("INSERT INTO public.core_initial_history(to_version,from_version,to_sha256,transition,ddl_sha256) VALUES(2,0,$1,'fresh',$1)")
-            .bind(digest()).execute(&mut *tx).await.map_err(|_|FlareError::system("Core initial provenance failed; transaction rolled back"))?;
+        sqlx::query("INSERT INTO public.core_initial_schema(version,schema_sha256) VALUES($1,$2)")
+            .bind(model::CURRENT_VERSION).bind(digest()).execute(&mut *tx).await.map_err(|_|FlareError::system("Core initial version failed; transaction rolled back"))?;
+        sqlx::query("INSERT INTO public.core_initial_history(to_version,from_version,to_sha256,transition,ddl_sha256) VALUES($1,0,$2,'fresh',$2)")
+            .bind(model::CURRENT_VERSION).bind(digest()).execute(&mut *tx).await.map_err(|_|FlareError::system("Core initial provenance failed; transaction rolled back"))?;
         model::verify_current(&mut tx).await?;
         Ok(true)
     }.await;
@@ -88,6 +88,8 @@ mod tests {
         assert!(SQL.contains("CREATE TABLE core_audit_outbox"));
         assert!(SQL.contains("CREATE TABLE online_kick_commands"));
         assert!(SQL.contains("sample_weight integer NOT NULL DEFAULT 1"));
+        assert!(SQL.contains("CREATE TABLE IF NOT EXISTS plugin_web_bundles"));
+        assert!(SQL.contains("CHECK(version=3)"));
         assert_eq!(digest().len(), 64);
     }
     #[tokio::test]

@@ -1319,18 +1319,19 @@ CREATE TABLE tenant_notice_outbox (
 CREATE INDEX idx_tenant_notice_outbox_due ON tenant_notice_outbox(next_attempt_at);
 
 CREATE TABLE core_initial_history (
-    to_version smallint PRIMARY KEY CHECK (to_version = 2),
-    from_version smallint NOT NULL CHECK (from_version IN (0, 1)),
+    to_version smallint PRIMARY KEY CHECK (to_version IN (2, 3)),
+    from_version smallint NOT NULL CHECK (from_version IN (0, 1, 2)),
     from_sha256 text CHECK (from_sha256 ~ '^[0-9a-f]{64}$'),
     to_sha256 text NOT NULL CHECK (to_sha256 ~ '^[0-9a-f]{64}$'),
-    transition text NOT NULL CHECK (transition IN ('fresh', 'application-media-v2')),
+    transition text NOT NULL CHECK (transition IN ('fresh', 'application-media-v2', 'plugin-web-bundles-v3')),
     ddl_sha256 text NOT NULL CHECK (ddl_sha256 ~ '^[0-9a-f]{64}$'),
     applied_at timestamptz NOT NULL DEFAULT clock_timestamp(),
     CHECK ((from_version = 0 AND from_sha256 IS NULL AND transition = 'fresh')
-        OR (from_version = 1 AND from_sha256 IS NOT NULL AND transition = 'application-media-v2'))
+        OR (from_version = 1 AND to_version = 2 AND from_sha256 IS NOT NULL AND transition = 'application-media-v2')
+        OR (from_version = 2 AND to_version = 3 AND from_sha256 IS NOT NULL AND transition = 'plugin-web-bundles-v3'))
 );
 CREATE TABLE core_initial_schema (
- version smallint PRIMARY KEY CHECK(version=2),
+ version smallint PRIMARY KEY CHECK(version=3),
  schema_sha256 text NOT NULL CHECK(schema_sha256 ~ '^[0-9a-f]{64}$'),
  initialized_at timestamptz NOT NULL DEFAULT clock_timestamp()
 );
