@@ -8,6 +8,22 @@ ALTER TABLE public.media_assets ADD CONSTRAINT media_assets_application_owner
 COMMENT ON COLUMN public.media_assets.owner_kind IS 'Authenticated User owner or explicitly application-owned managed asset';
 COMMENT ON COLUMN public.media_assets.purpose IS 'Authoritative media purpose, never read from client metadata';
 
+-- Version-level review state of plugin web bundles (also in the fresh v2 schema).
+CREATE TABLE public.plugin_web_bundles (
+ plugin_id varchar(128) NOT NULL,
+ plugin_version varchar(64) NOT NULL,
+ bundle_id varchar(64) NOT NULL CHECK(bundle_id ~ '^[a-z0-9][a-z0-9-]{0,63}$'),
+ sha256 text NOT NULL CHECK(sha256 ~ '^[0-9a-f]{64}$'),
+ size bigint NOT NULL CHECK(size BETWEEN 1 AND 10485760),
+ approved_at bigint NOT NULL DEFAULT (extract(epoch FROM clock_timestamp())*1000)::bigint,
+ withdrawn_at bigint,
+ updated_at bigint NOT NULL DEFAULT (extract(epoch FROM clock_timestamp())*1000)::bigint,
+ PRIMARY KEY(plugin_id,plugin_version,bundle_id),
+ FOREIGN KEY(plugin_id,plugin_version) REFERENCES public.plugin_versions(plugin_id,plugin_version),
+ CHECK(withdrawn_at IS NULL OR withdrawn_at>=approved_at)
+);
+GRANT SELECT, INSERT, UPDATE, DELETE ON public.plugin_web_bundles TO core_runtime;
+
 CREATE TABLE public.core_initial_history (
     to_version smallint PRIMARY KEY CHECK (to_version = 2),
     from_version smallint NOT NULL CHECK (from_version IN (0, 1)),

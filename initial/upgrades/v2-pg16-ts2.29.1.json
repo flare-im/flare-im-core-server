@@ -1,5 +1,5 @@
 {
-  "bundleSha256": "3e882365f055b204d38c8667bed194ee8393d7cf25dfe670fc7401fdba808f4f",
+  "bundleSha256": "54f97d87409f5e56aca77dc220d6e40a6fa6122952b599753fc0e6159316203a",
   "environment": {
     "postgresMajor": 16,
     "timescaledb": "2.29.1"
@@ -5904,6 +5904,80 @@
         }
       ],
       "kind": "relation_authority",
+      "name": "plugin_web_bundles",
+      "owner": "core_initialize",
+      "schema": "public"
+    },
+    {
+      "acl": [
+        {
+          "grantable": false,
+          "grantee": "core_initialize",
+          "grantor": "core_initialize",
+          "privilege": "DELETE"
+        },
+        {
+          "grantable": false,
+          "grantee": "core_initialize",
+          "grantor": "core_initialize",
+          "privilege": "INSERT"
+        },
+        {
+          "grantable": false,
+          "grantee": "core_initialize",
+          "grantor": "core_initialize",
+          "privilege": "REFERENCES"
+        },
+        {
+          "grantable": false,
+          "grantee": "core_initialize",
+          "grantor": "core_initialize",
+          "privilege": "SELECT"
+        },
+        {
+          "grantable": false,
+          "grantee": "core_initialize",
+          "grantor": "core_initialize",
+          "privilege": "TRIGGER"
+        },
+        {
+          "grantable": false,
+          "grantee": "core_initialize",
+          "grantor": "core_initialize",
+          "privilege": "TRUNCATE"
+        },
+        {
+          "grantable": false,
+          "grantee": "core_initialize",
+          "grantor": "core_initialize",
+          "privilege": "UPDATE"
+        },
+        {
+          "grantable": false,
+          "grantee": "core_runtime",
+          "grantor": "core_initialize",
+          "privilege": "DELETE"
+        },
+        {
+          "grantable": false,
+          "grantee": "core_runtime",
+          "grantor": "core_initialize",
+          "privilege": "INSERT"
+        },
+        {
+          "grantable": false,
+          "grantee": "core_runtime",
+          "grantor": "core_initialize",
+          "privilege": "SELECT"
+        },
+        {
+          "grantable": false,
+          "grantee": "core_runtime",
+          "grantor": "core_initialize",
+          "privilege": "UPDATE"
+        }
+      ],
+      "kind": "relation_authority",
       "name": "tenant_client_policy",
       "owner": "core_initialize",
       "schema": "public"
@@ -7891,6 +7965,18 @@
       "default": null,
       "kind": "type",
       "labels": null,
+      "name": "plugin_web_bundles",
+      "notNull": false,
+      "owner": "core_initialize",
+      "schema": "public",
+      "type": "c"
+    },
+    {
+      "acl": null,
+      "base": "-",
+      "default": null,
+      "kind": "type",
+      "labels": null,
       "name": "tenant_client_policy",
       "notNull": false,
       "owner": "core_initialize",
@@ -8259,6 +8345,17 @@
     },
     {
       "collation": null,
+      "default": "((EXTRACT(epoch FROM clock_timestamp()) * (1000)::numeric))::bigint",
+      "generated": "",
+      "identity": "",
+      "kind": "column",
+      "name": "approved_at",
+      "not_null": true,
+      "table": "plugin_web_bundles",
+      "type": "bigint"
+    },
+    {
+      "collation": null,
       "default": null,
       "generated": "",
       "identity": "",
@@ -8388,6 +8485,17 @@
       "not_null": true,
       "table": "tenant_client_policy",
       "type": "jsonb"
+    },
+    {
+      "collation": "default",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "kind": "column",
+      "name": "bundle_id",
+      "not_null": true,
+      "table": "plugin_web_bundles",
+      "type": "character varying(64)"
     },
     {
       "collation": null,
@@ -13028,6 +13136,17 @@
       "kind": "column",
       "name": "plugin_id",
       "not_null": true,
+      "table": "plugin_web_bundles",
+      "type": "character varying(128)"
+    },
+    {
+      "collation": "default",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "kind": "column",
+      "name": "plugin_id",
+      "not_null": true,
       "table": "capability_plugin_resource_calls",
       "type": "text"
     },
@@ -13106,6 +13225,17 @@
       "name": "plugin_version",
       "not_null": true,
       "table": "plugin_versions",
+      "type": "character varying(64)"
+    },
+    {
+      "collation": "default",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "kind": "column",
+      "name": "plugin_version",
+      "not_null": true,
+      "table": "plugin_web_bundles",
       "type": "character varying(64)"
     },
     {
@@ -14605,6 +14735,17 @@
       "type": "text"
     },
     {
+      "collation": "default",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "kind": "column",
+      "name": "sha256",
+      "not_null": true,
+      "table": "plugin_web_bundles",
+      "type": "text"
+    },
+    {
       "collation": null,
       "default": "true",
       "generated": "",
@@ -14625,6 +14766,17 @@
       "not_null": true,
       "table": "plugin_versions",
       "type": "character varying(128)"
+    },
+    {
+      "collation": null,
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "kind": "column",
+      "name": "size",
+      "not_null": true,
+      "table": "plugin_web_bundles",
+      "type": "bigint"
     },
     {
       "collation": null,
@@ -15772,6 +15924,17 @@
     },
     {
       "collation": null,
+      "default": "((EXTRACT(epoch FROM clock_timestamp()) * (1000)::numeric))::bigint",
+      "generated": "",
+      "identity": "",
+      "kind": "column",
+      "name": "updated_at",
+      "not_null": true,
+      "table": "plugin_web_bundles",
+      "type": "bigint"
+    },
+    {
+      "collation": null,
       "default": "CURRENT_TIMESTAMP",
       "generated": "",
       "identity": "",
@@ -16220,6 +16383,17 @@
       "not_null": false,
       "table": "message_write_ledger",
       "type": "timestamp with time zone"
+    },
+    {
+      "collation": null,
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "kind": "column",
+      "name": "withdrawn_at",
+      "not_null": false,
+      "table": "plugin_web_bundles",
+      "type": "bigint"
     },
     {
       "collation": "default",
@@ -17960,6 +18134,66 @@
       "name": "plugin_versions_plugin_id_plugin_version_manifest_digest_key",
       "table": "plugin_versions",
       "type": "u",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "deferred": false,
+      "definition": "CHECK (((bundle_id)::text ~ '^[a-z0-9][a-z0-9-]{0,63}$'::text))",
+      "kind": "constraint",
+      "name": "plugin_web_bundles_bundle_id_check",
+      "table": "plugin_web_bundles",
+      "type": "c",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "deferred": false,
+      "definition": "CHECK (((withdrawn_at IS NULL) OR (withdrawn_at >= approved_at)))",
+      "kind": "constraint",
+      "name": "plugin_web_bundles_check",
+      "table": "plugin_web_bundles",
+      "type": "c",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "deferred": false,
+      "definition": "PRIMARY KEY (plugin_id, plugin_version, bundle_id)",
+      "kind": "constraint",
+      "name": "plugin_web_bundles_pkey",
+      "table": "plugin_web_bundles",
+      "type": "p",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "deferred": false,
+      "definition": "FOREIGN KEY (plugin_id, plugin_version) REFERENCES plugin_versions(plugin_id, plugin_version)",
+      "kind": "constraint",
+      "name": "plugin_web_bundles_plugin_id_plugin_version_fkey",
+      "table": "plugin_web_bundles",
+      "type": "f",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "deferred": false,
+      "definition": "CHECK ((sha256 ~ '^[0-9a-f]{64}$'::text))",
+      "kind": "constraint",
+      "name": "plugin_web_bundles_sha256_check",
+      "table": "plugin_web_bundles",
+      "type": "c",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "deferred": false,
+      "definition": "CHECK (((size >= 1) AND (size <= 10485760)))",
+      "kind": "constraint",
+      "name": "plugin_web_bundles_size_check",
+      "table": "plugin_web_bundles",
+      "type": "c",
       "validated": true
     },
     {
@@ -20170,6 +20404,16 @@
     },
     {
       "clustered": false,
+      "definition": "CREATE UNIQUE INDEX plugin_web_bundles_pkey ON public.plugin_web_bundles USING btree (plugin_id, plugin_version, bundle_id)",
+      "kind": "index",
+      "name": "plugin_web_bundles_pkey",
+      "ready": true,
+      "replica_identity": false,
+      "table": "plugin_web_bundles",
+      "valid": true
+    },
+    {
+      "clustered": false,
       "definition": "CREATE UNIQUE INDEX tenant_client_policy_pkey ON public.tenant_client_policy USING btree (tenant_id)",
       "kind": "index",
       "name": "tenant_client_policy_pkey",
@@ -21127,6 +21371,17 @@
     {
       "force_row_security": false,
       "kind": "relation",
+      "name": "plugin_web_bundles",
+      "options": null,
+      "partition": null,
+      "persistence": "p",
+      "replica_identity": "d",
+      "row_security": false,
+      "type": "r"
+    },
+    {
+      "force_row_security": false,
+      "kind": "relation",
       "name": "tenant_client_policy",
       "options": null,
       "partition": null,
@@ -21390,9 +21645,9 @@
   "sourceSha256": {
     "initial/database.sql": "8f16ea0bd02305b05a7d18035d555900f5ac3eb097d32b161fbf2f4db9df803d",
     "initial/roles.sql": "00eb565dfb2df61632c2322abbb46566cb946b67fd2fb462aad55f1b8e0675e1",
-    "initial/schema.sql": "2a8aed950572af85ae82555a254085ace7be75ad2a2f4bb62ac6024297c60237",
+    "initial/schema.sql": "7487108c665cba6e57044668cf068a6b750977ea8b41c992257fb4826727c809",
     "initial/seeds.sql": "138a2fff772c1c6fe964a07c3c34f28ae780f42cf068c0f21ef5a34d12dce470",
-    "initial/upgrades/0002_application_media.sql": "68ddc40bdb0ebf4b43105fda77ef8e334a033b3c543784b5cfb12411482f3309",
+    "initial/upgrades/0002_application_media.sql": "a129c52f26221955fd17c7d8066d7a7c2ddf6e7f9e3df014eadd6c9990a231f3",
     "initial/upgrades/catalog.sql": "cd270e141fe5d1cbf51cde3ac3fcb580de1e60d408372ee2c7e51ccc820cb0fd",
     "initial/versions/v1/schema.sql": "e0f45478ea92d03dd54375155e3966322d3708a021d11acfce6bd54ba570c236",
     "initial/versions/v1/seeds.sql": "138a2fff772c1c6fe964a07c3c34f28ae780f42cf068c0f21ef5a34d12dce470"
