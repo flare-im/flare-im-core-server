@@ -462,6 +462,7 @@ async fn ui_catalog_selects_contribution_variants_per_client_descriptor() {
     let manifest = |min_client: Option<Value>| {
         let mut raw: Value = serde_json::from_str(&echo_manifest()).unwrap();
         raw["clientExtensions"] = serde_json::json!({"platforms":["web"],"nativeCapabilities":[],
+            "webBundles":[{"id":"board","sha256":"ab".repeat(32),"size":4096,"bridge":1}],
             // A page: message cards stay declarative and never take a bundle variant.
             "contributions":[{"kind":"page","id":"example.echo.board","schemaVersion":1,
                 "requiredPermissions":["example.echo.run"],

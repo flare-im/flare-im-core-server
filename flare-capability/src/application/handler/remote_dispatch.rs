@@ -944,6 +944,9 @@ async fn client_ui_catalog(
             let declared_client_surfaces = !selected.is_empty();
             let mut outcomes = Vec::new();
             let mut extensions = manifest.client_extensions.clone();
+            // Web bundles reach the catalog only with their mirror addresses and approved
+            // bridge permissions; until Core holds those, none is listed.
+            extensions.web_bundles.clear();
             extensions.contributions = selected
                 .iter()
                 .filter(|s| {
