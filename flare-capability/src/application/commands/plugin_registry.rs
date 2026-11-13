@@ -79,7 +79,7 @@ impl PluginRegistryCommands {
     pub async fn withdraw_web_bundle(
         &self,
         bundle: &WebBundleRef,
-    ) -> RegistryResult<WebBundleAttachment> {
+    ) -> RegistryResult<Option<WebBundleAttachment>> {
         self.repository.withdraw_web_bundle(bundle).await
     }
 

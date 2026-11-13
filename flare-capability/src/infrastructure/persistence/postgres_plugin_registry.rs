@@ -1179,7 +1179,7 @@ impl PluginRegistryRepository for PostgresPluginRegistry {
     async fn withdraw_web_bundle(
         &self,
         bundle: &WebBundleRef,
-    ) -> RegistryResult<WebBundleAttachment> {
+    ) -> RegistryResult<Option<WebBundleAttachment>> {
         let mut tx = self.pool.begin().await.map_err(unavailable)?;
         let row = sqlx::query(&format!(
             "SELECT {WEB_BUNDLE_COLUMNS} FROM plugin_web_bundles \
@@ -1190,11 +1190,13 @@ impl PluginRegistryRepository for PostgresPluginRegistry {
         .bind(&bundle.bundle_id)
         .fetch_optional(&mut *tx)
         .await
-        .map_err(unavailable)?
-        .ok_or(PluginRegistryError::NotFound)?;
+        .map_err(unavailable)?;
+        let Some(row) = row else {
+            return Ok(None);
+        };
         let current = web_bundle_row(&row).map_err(unavailable)?;
         if current.withdrawn() {
-            return Ok(current);
+            return Ok(Some(current));
         }
         let row = sqlx::query(&format!(
             "UPDATE plugin_web_bundles SET withdrawn_at=GREATEST(approved_at,{NOW_MS}),\
@@ -1211,7 +1213,7 @@ impl PluginRegistryRepository for PostgresPluginRegistry {
         // Every application stops serving it on its next read, before any re-projection.
         raise_revision(&mut tx, GLOBAL_SCOPE).await?;
         tx.commit().await.map_err(unavailable)?;
-        web_bundle_row(&row).map_err(unavailable)
+        web_bundle_row(&row).map(Some).map_err(unavailable)
     }
 
     async fn web_bundles(

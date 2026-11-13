@@ -109,11 +109,12 @@ pub trait PluginRegistryRepository: Send + Sync {
 
     /// Withdraws an attached web bundle for good. Raises the global revision: from the next
     /// catalog read no application serves it, whatever its projection still lists. Withdrawing
-    /// again answers the stored row.
+    /// again answers the stored row; a bundle never attached (withdrawn before approval) answers
+    /// `None`: there is nothing to stop serving.
     async fn withdraw_web_bundle(
         &self,
         bundle: &WebBundleRef,
-    ) -> RegistryResult<WebBundleAttachment>;
+    ) -> RegistryResult<Option<WebBundleAttachment>>;
 
     async fn web_bundles(
         &self,
