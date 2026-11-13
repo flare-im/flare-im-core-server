@@ -855,6 +855,7 @@ async fn client_ui_catalog(
         valid_until_ms: now + 30000,
         plugins: vec![],
         unavailable: vec![],
+        payment_provider: None,
     };
     let mut unavailable: std::collections::BTreeMap<String, UiUnavailableReason> =
         Default::default();
@@ -1037,6 +1038,11 @@ async fn client_ui_catalog(
         .filter(|(plugin_id, _)| !available.contains(plugin_id.as_str()))
         .map(|(plugin_id, reason)| UiUnavailablePlugin { plugin_id, reason })
         .collect();
+    result.payment_provider =
+        crate::infrastructure::config::plugin_payment_provider::catalog_payment_provider(
+            routes.payment_provider.as_deref(),
+            &result.plugins,
+        );
     let value = serde_json::to_value(result)
         .map_err(|_| CapabilityError::System("plugin UI encoding failed".into()))?;
     Ok(CapabilityDispatchResult::ok(

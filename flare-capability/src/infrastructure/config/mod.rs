@@ -4,6 +4,7 @@ pub mod capability_runtime;
 pub mod hook_retention;
 pub mod plugin_config_key;
 pub mod plugin_development;
+pub mod plugin_payment_provider;
 pub mod plugin_publishers;
 pub mod plugin_web_bundles;
 

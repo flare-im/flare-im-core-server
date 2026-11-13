@@ -29,6 +29,9 @@ pub struct PluginRouteBook {
     /// The deployment's web bundle switch and the client catalog's variant selection cache.
     pub(crate) catalog_selection:
         Arc<crate::application::handler::catalog_selection::CatalogSelection>,
+    /// `plugin.paymentProvider`: the transient operation that checks payment credentials
+    /// ([`crate::infrastructure::config::plugin_payment_provider`]); `None` names no provider.
+    pub(crate) payment_provider: Option<String>,
 }
 
 impl PluginRouteBook {
@@ -79,6 +82,12 @@ impl PluginRouteBook {
                 crate::application::handler::catalog_selection::SELECTION_CACHE_CAPACITY,
             ),
         );
+        self
+    }
+    /// `plugin.paymentProvider` of the deployment: the catalog names this operation's plugin as
+    /// the payment provider to viewers who can reach it.
+    pub fn with_payment_provider(mut self, operation: Option<String>) -> Self {
+        self.payment_provider = operation;
         self
     }
     pub fn new() -> Self {
