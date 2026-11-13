@@ -472,7 +472,12 @@ async fn ui_catalog_selects_contribution_variants_per_client_descriptor() {
                 "variants":[
                     {"id":"board","requires":{"bundle":{"id":"board","bridge":1}},
                      "bundle":{"id":"board","route":"/"}},
-                    {"id":"basic"}]}]});
+                    {"id":"basic","schema":{"title":"Echo",
+                        "fields":[{"label":"Last","path":"/last"}],
+                        "actions":[{"id":"run","label":"Run",
+                            "target":{"kind":"operation","operation":"example.echo.run"}}],
+                        "translations":{"en-US":{"title":"Echo board","fields":["Last"],
+                            "actions":{"run":"Run"}}}}}]}]});
         if let Some(min_client) = min_client {
             raw["clientExtensions"]["contributions"][0]["minClient"] = min_client;
         }
@@ -517,6 +522,9 @@ async fn ui_catalog_selects_contribution_variants_per_client_descriptor() {
     assert!(basic.bundle.is_none(), "a bundle is never inherited");
     assert_eq!(basic.id, board.id, "identity is the same in every variant");
     assert_eq!(basic.schema.actions.len(), 1);
+    // The bundle variant carries the declarative page a host draws when the bundle cannot run.
+    assert_eq!(board.schema, basic.schema);
+    assert_eq!(board.schema.fields.len(), 1);
     // One selection per descriptor of this projection version.
     assert_eq!(routes.catalog_selection.cached(), 2);
     let _ = catalog(routes.clone(), true).await;
