@@ -75,10 +75,7 @@ impl EntityRules {
         let mut contributions = HashMap::new();
         for projected in &projection.plugins {
             let grant = &projected.grant;
-            if !grant.enabled
-                || grant.revoked
-                || !grant.in_effect(now_ms)
-            {
+            if !grant.enabled || grant.revoked || !grant.in_effect(now_ms) {
                 continue;
             }
             let Some(manifest) = manifests.get(projected.manifest_digest()) else {
@@ -369,6 +366,7 @@ mod tests {
                 lifecycle: ProjectedLifecycle::Installed,
                 export_until_ms: None,
                 features: Default::default(),
+                web_bundles: Vec::new(),
             }],
             bindings: Vec::new(),
         };

@@ -176,6 +176,7 @@ async fn event_activation_secret_record_delivery_keeps_the_accepted_backlog() {
             lifecycle: ProjectedLifecycle::Installed,
             export_until_ms: None,
             features: [("run".into(), true)].into(),
+            web_bundles: Vec::new(),
         }],
     };
     let value = serde_json::to_value(&projection).unwrap();

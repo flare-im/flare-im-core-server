@@ -5,7 +5,8 @@
 //! the projection version and the registry revision, so a new projection, a revocation or a runtime
 //! fact takes effect on the next read while an unchanged application parses nothing.
 use crate::domain::plugin::{
-    AppPluginState, DevBinding, PluginDeploymentRecord, VersionFlags, resolve, with_development,
+    AppPluginState, ApprovedWebBundles, DevBinding, PluginDeploymentRecord, VersionFlags, resolve,
+    with_development,
 };
 use crate::domain::{model::TenantProjectionOutcome, repository::PluginAuthorizationReader};
 use dashmap::DashMap;
@@ -175,6 +176,25 @@ impl PostgresPluginAuthorization {
         Ok((manifests, flags))
     }
 
+    /// The approved, not withdrawn web bundles of the versions `digests` name. Attaching and
+    /// withdrawing raise the global registry revision, so a cached resolution never outlives one.
+    async fn approved_web_bundles(&self, digests: &[String]) -> Result<ApprovedWebBundles> {
+        let rows: Vec<(String, String, String)> = sqlx::query_as(
+            "SELECT v.manifest_digest,b.bundle_id,b.sha256 FROM plugin_web_bundles b \
+             JOIN plugin_versions v ON v.plugin_id=b.plugin_id AND v.plugin_version=b.plugin_version \
+             WHERE v.manifest_digest=ANY($1) AND b.withdrawn_at IS NULL",
+        )
+        .bind(digests)
+        .fetch_all(self.pool.as_ref())
+        .await
+        .map_err(unavailable)?;
+        let mut bundles = ApprovedWebBundles::new();
+        for (digest, bundle, sha256) in rows {
+            bundles.entry(digest).or_default().insert(bundle, sha256);
+        }
+        Ok(bundles)
+    }
+
     async fn resolve(
         &self,
         tenant: &str,
@@ -221,12 +241,14 @@ impl PostgresPluginAuthorization {
             .map(|row| deployment_row(row).map(|d| (d.deployment_id.clone(), d)))
             .collect::<std::result::Result<_, _>>()
             .map_err(unavailable)?;
+        let web_bundles = self.approved_web_bundles(&digests).await?;
         let resolution = resolve(
             projection,
             &manifests,
             &versions,
             &states,
             &deployments,
+            &web_bundles,
             now,
         );
         for digest in &resolution.unknown_digests {

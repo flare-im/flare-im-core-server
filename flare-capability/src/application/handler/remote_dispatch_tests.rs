@@ -479,7 +479,9 @@ async fn ui_catalog_selects_contribution_variants_per_client_descriptor() {
         serde_json::to_string(&raw).unwrap()
     };
     let mut projected = snapshot("http://127.0.0.1:1".into());
-    projected.plugins[0] = with_manifest(&projected.plugins[0], &manifest(None));
+    projected.plugins[0] = with_manifest(&projected.plugins[0], &manifest(None))
+        .with_web_bundles(vec![board_entry()])
+        .unwrap();
     let reader = Arc::new(Projection(Mutex::new(Some(projected.clone()))));
     let routes = Arc::new(PluginRouteBook::new().with_runtime_authorization(reader.clone(), None));
     let backend: Arc<dyn CapabilityPolicyBackend> = policy();
@@ -548,7 +550,9 @@ async fn ui_catalog_selects_contribution_variants_per_client_descriptor() {
     floored.plugins[0] = with_manifest(
         &floored.plugins[0],
         &manifest(Some(serde_json::json!({"web": 5}))),
-    );
+    )
+    .with_web_bundles(vec![board_entry()])
+    .unwrap();
     *reader.0.lock().unwrap() = Some(floored);
     let placeholder = catalog(routes.clone(), true).await;
     assert_eq!(
@@ -563,6 +567,211 @@ async fn ui_catalog_selects_contribution_variants_per_client_descriptor() {
     assert_eq!(placeholder.schema.translations["en-US"].title, "Echo board");
     assert!(placeholder.schema.actions.is_empty() && placeholder.bundle.is_none());
     assert_eq!(routes.catalog_selection.cached(), 3);
+}
+
+/// The served `board` bundle of the board manifests below: the manifest's declaration with the
+/// application's mirror addresses, unpacked files and approved bridge permissions.
+fn board_entry() -> flare_im_capability_core::plugin::bundle::WebBundleDecl {
+    use flare_im_capability_core::plugin::bridge::BridgePermission;
+    flare_im_capability_core::plugin::bundle::WebBundleDecl {
+        id: "board".into(),
+        sha256: "ab".repeat(32),
+        size: 4096,
+        bridge: 1,
+        digital_goods: false,
+        urls: vec![
+            "https://m1.example.com/b/board.fwb".into(),
+            "https://m2.example.net/b/board.fwb".into(),
+        ],
+        files: Some(format!("https://m1.example.com/b/{}/", "ab".repeat(32))),
+        permissions: [BridgePermission::PluginQuery].into(),
+    }
+}
+
+/// A board page with a web bundle variant and a declarative one.
+fn board_manifest(digital_goods: bool) -> String {
+    let mut raw: Value = serde_json::from_str(&echo_manifest()).unwrap();
+    raw["clientExtensions"] = serde_json::json!({"platforms":["web","android","ios"],"nativeCapabilities":[],
+        "webBundles":[{"id":"board","sha256":"ab".repeat(32),"size":4096,"bridge":1,"digitalGoods":digital_goods}],
+        "contributions":[{"kind":"page","id":"example.echo.board","schemaVersion":1,
+            "requiredPermissions":["example.echo.run"],
+            "schema":{"title":"Echo","fields":[],"actions":[{"id":"run","label":"Run",
+                "target":{"kind":"operation","operation":"example.echo.run"}}]},
+            "variants":[
+                {"id":"board","requires":{"bundle":{"id":"board","bridge":1}},
+                 "bundle":{"id":"board","route":"/"}},
+                {"id":"basic"}]}]});
+    serde_json::to_string(&raw).unwrap()
+}
+
+/// The catalog plugin a client of `platform` with a bundle runtime gets from `reader`.
+async fn bundle_catalog(
+    reader: Arc<Projection>,
+    platform: flare_im_capability_core::plugin::manifest::ClientPlatform,
+) -> flare_im_capability_core::plugin::ui::ClientPlugin {
+    use flare_im_capability_core::plugin::ui::{
+        BundleRuntime, ClientUiDescriptor, UiCatalog, engine_vocabulary,
+    };
+    let (ctx, _, _) = identity(SignedActorType::User);
+    let routes = Arc::new(PluginRouteBook::new().with_runtime_authorization(reader, None));
+    let backend: Arc<dyn CapabilityPolicyBackend> = policy();
+    let descriptor = ClientUiDescriptor::new(
+        &engine_vocabulary(),
+        platform,
+        1,
+        "web",
+        Some(BundleRuntime {
+            bridge: 1,
+            engine: "webview".into(),
+            engine_major: 120,
+        }),
+    );
+    let mut request = command();
+    request.capability_id = flare_im_capability_core::plugin::ui::UI_CATALOG_OPERATION.into();
+    request.payload = Some(serde_json::json!({ "descriptor": descriptor }));
+    let result = dispatch_remote(&ctx, &request, &routes, &backend, Duration::from_secs(1))
+        .await
+        .unwrap();
+    let catalog: UiCatalog = serde_json::from_value(result.data).unwrap();
+    catalog.plugins[0].clone()
+}
+
+/// `webBundles` in the catalog: the served bundle a selected contribution opens, with the
+/// application's addresses and approved permissions; `files` only for Web and Tauri; nothing
+/// when the bundle is not served (not approved, withdrawn or not projected), and the declarative
+/// variant is chosen instead.
+#[tokio::test]
+async fn ui_catalog_lists_the_served_web_bundles_a_selected_contribution_opens() {
+    use flare_im_capability_core::plugin::manifest::ClientPlatform;
+    let mut projected = snapshot("http://127.0.0.1:1".into());
+    projected.plugins[0] = with_manifest(&projected.plugins[0], &board_manifest(false))
+        .with_web_bundles(vec![board_entry()])
+        .unwrap();
+    let reader = Arc::new(Projection(Mutex::new(Some(projected.clone()))));
+
+    let web = bundle_catalog(reader.clone(), ClientPlatform::Web).await;
+    assert_eq!(
+        web.extensions.contributions[0].variant.as_deref(),
+        Some("board")
+    );
+    assert_eq!(web.extensions.web_bundles, vec![board_entry()]);
+
+    let android = bundle_catalog(reader.clone(), ClientPlatform::Android).await;
+    assert_eq!(
+        android.extensions.contributions[0].variant.as_deref(),
+        Some("board")
+    );
+    let mut entry = board_entry();
+    entry.files = None;
+    assert_eq!(
+        android.extensions.web_bundles,
+        vec![entry],
+        "native clients read the .fwb file, not the unpacked copy"
+    );
+
+    // Withdrawn in the registry (or never approved): the resolution serves no bundle.
+    let mut withdrawn = projected.clone();
+    withdrawn.plugins[0] = with_manifest(&projected.plugins[0], &board_manifest(false));
+    *reader.0.lock().unwrap() = Some(withdrawn);
+    let fallback = bundle_catalog(reader.clone(), ClientPlatform::Web).await;
+    assert_eq!(
+        fallback.extensions.contributions[0].variant.as_deref(),
+        Some("basic")
+    );
+    assert!(fallback.extensions.web_bundles.is_empty());
+    assert!(fallback.extensions.contributions[0].bundle.is_none());
+}
+
+/// A bundle selling digital goods is never selected for iOS, and then not listed either.
+#[tokio::test]
+async fn ui_catalog_keeps_digital_goods_bundles_away_from_ios() {
+    use flare_im_capability_core::plugin::manifest::ClientPlatform;
+    let mut projected = snapshot("http://127.0.0.1:1".into());
+    let mut entry = board_entry();
+    entry.digital_goods = true;
+    projected.plugins[0] = with_manifest(&projected.plugins[0], &board_manifest(true))
+        .with_web_bundles(vec![entry.clone()])
+        .unwrap();
+    let reader = Arc::new(Projection(Mutex::new(Some(projected))));
+    let ios = bundle_catalog(reader.clone(), ClientPlatform::Ios).await;
+    assert_eq!(
+        ios.extensions.contributions[0].variant.as_deref(),
+        Some("basic")
+    );
+    assert!(ios.extensions.web_bundles.is_empty());
+    let web = bundle_catalog(reader, ClientPlatform::Web).await;
+    assert_eq!(web.extensions.web_bundles, vec![entry]);
+}
+
+/// A served bundle must be the manifest's declaration: another digest is refused.
+#[test]
+fn a_resolved_plugin_serves_only_declared_web_bundles() {
+    let projected = snapshot("http://127.0.0.1:1".into());
+    let plugin = with_manifest(&projected.plugins[0], &board_manifest(false));
+    let mut other = board_entry();
+    other.sha256 = "cd".repeat(32);
+    assert!(plugin.clone().with_web_bundles(vec![other]).is_err());
+    let mut unknown = board_entry();
+    unknown.id = "other".into();
+    assert!(plugin.clone().with_web_bundles(vec![unknown]).is_err());
+    let mut no_urls = board_entry();
+    no_urls.urls.clear();
+    assert!(plugin.clone().with_web_bundles(vec![no_urls]).is_err());
+    assert!(
+        plugin
+            .clone()
+            .with_web_bundles(vec![board_entry(), board_entry()])
+            .is_err()
+    );
+    assert!(plugin.with_web_bundles(vec![board_entry()]).is_ok());
+}
+
+/// Resolution serves a projected bundle only when the manifest declares it with that digest and
+/// the registry holds it approved with that digest; an approval must match the manifest.
+#[test]
+fn served_web_bundles_need_the_manifest_the_registry_and_the_projection_to_agree() {
+    use crate::domain::plugin::{WebBundleApproval, served_web_bundles};
+    use flare_im_capability_core::plugin::bridge::BridgePermission;
+    let manifest = PluginManifest::from_json(board_manifest(false).as_bytes()).unwrap();
+    let projected = ProjectedWebBundle {
+        id: "board".into(),
+        sha256: "ab".repeat(32),
+        urls: board_entry().urls,
+        files: board_entry().files,
+        permissions: [BridgePermission::PluginQuery].into(),
+    };
+    let approved: std::collections::BTreeMap<String, String> =
+        [("board".to_owned(), "ab".repeat(32))].into();
+    assert_eq!(
+        served_web_bundles(&manifest, std::slice::from_ref(&projected), Some(&approved)),
+        vec![board_entry()]
+    );
+    assert!(served_web_bundles(&manifest, std::slice::from_ref(&projected), None).is_empty());
+    let stale: std::collections::BTreeMap<String, String> =
+        [("board".to_owned(), "cd".repeat(32))].into();
+    assert!(
+        served_web_bundles(&manifest, std::slice::from_ref(&projected), Some(&stale)).is_empty(),
+        "the registry approved other bytes"
+    );
+    let mut forged = projected.clone();
+    forged.sha256 = "cd".repeat(32);
+    assert!(
+        served_web_bundles(&manifest, &[forged], Some(&stale)).is_empty(),
+        "the manifest signs another digest"
+    );
+    let approval = |sha256: String, size: u64| WebBundleApproval {
+        plugin_id: "example.echo".into(),
+        plugin_version: "1.0.0".into(),
+        bundle_id: "board".into(),
+        sha256,
+        size,
+    };
+    assert!(approval("ab".repeat(32), 4096).check(&manifest).is_ok());
+    assert!(approval("cd".repeat(32), 4096).check(&manifest).is_err());
+    assert!(approval("ab".repeat(32), 4097).check(&manifest).is_err());
+    let mut other = approval("ab".repeat(32), 4096);
+    other.bundle_id = "other".into();
+    assert!(other.check(&manifest).is_err());
 }
 
 #[tokio::test]

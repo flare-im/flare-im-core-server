@@ -938,15 +938,16 @@ async fn client_ui_catalog(
                 .get(&(grant.plugin_id.clone(), grant.manifest_digest.clone()))
                 .cloned()
                 .unwrap_or_else(|| {
-                    select_contributions(&manifest.client_extensions.contributions, descriptor)
-                        .into()
+                    select_contributions(
+                        &manifest.client_extensions.contributions,
+                        descriptor,
+                        &projected.web_bundles,
+                    )
+                    .into()
                 });
             let declared_client_surfaces = !selected.is_empty();
             let mut outcomes = Vec::new();
             let mut extensions = manifest.client_extensions.clone();
-            // Web bundles reach the catalog only with their mirror addresses and approved
-            // bridge permissions; until Core holds those, none is listed.
-            extensions.web_bundles.clear();
             extensions.contributions = selected
                 .iter()
                 .filter(|s| {
@@ -961,6 +962,11 @@ async fn client_ui_catalog(
                     s.contribution.clone()
                 })
                 .collect();
+            extensions.web_bundles = catalog_web_bundles(
+                &extensions.contributions,
+                &projected.web_bundles,
+                descriptor.platform,
+            );
             if extensions.contributions.is_empty() {
                 if declared_client_surfaces {
                     note(
@@ -1039,6 +1045,35 @@ async fn client_ui_catalog(
         UI_CATALOG_OPERATION,
         value,
     ))
+}
+
+/// The web bundles of a plugin's catalog entry: the served bundles (approved in the registry, not
+/// withdrawn, projected with this application's addresses and approved bridge permissions) that a
+/// selected contribution opens, in the order the version serves them, each once. The unpacked
+/// files' base (`files`) goes to Web and Tauri only; the other clients read the `.fwb` file.
+/// No bundle goes out that no contribution opens, so a client never fetches code it cannot reach.
+pub(crate) fn catalog_web_bundles(
+    contributions: &[flare_im_capability_core::plugin::manifest::UiContribution],
+    served: &[flare_im_capability_core::plugin::bundle::WebBundleDecl],
+    platform: flare_im_capability_core::plugin::manifest::ClientPlatform,
+) -> Vec<flare_im_capability_core::plugin::bundle::WebBundleDecl> {
+    use flare_im_capability_core::plugin::manifest::ClientPlatform;
+    let opened: std::collections::BTreeSet<&str> = contributions
+        .iter()
+        .filter_map(|c| c.bundle.as_ref().map(|bundle| bundle.id.as_str()))
+        .collect();
+    let file_reader = matches!(platform, ClientPlatform::Web | ClientPlatform::Tauri);
+    served
+        .iter()
+        .filter(|bundle| opened.contains(bundle.id.as_str()))
+        .map(|bundle| {
+            let mut entry = bundle.clone();
+            if !file_reader {
+                entry.files = None;
+            }
+            entry
+        })
+        .collect()
 }
 
 /// The client-visible configuration of a projected plugin: the projection's subset, kept to the

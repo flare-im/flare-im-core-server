@@ -10,7 +10,7 @@ use serde::Serialize;
 use crate::domain::plugin::{
     AppPluginState, DeploymentFilter, PluginAssetContent, PluginDeploymentRecord,
     PluginRegistryError, PluginVersion, PluginVersionDetail, RegistryResult, VersionFilter,
-    VersionKey,
+    VersionKey, WebBundleAttachment, WebBundleFilter,
 };
 use crate::domain::repository::plugin_registry::PluginRegistryRepository;
 
@@ -54,6 +54,13 @@ impl PluginRegistryQueries {
         self.repository.asset(plugin_id, plugin_version, path).await
     }
 
+    pub async fn web_bundles(
+        &self,
+        filter: &WebBundleFilter,
+    ) -> RegistryResult<Vec<WebBundleAttachment>> {
+        self.repository.web_bundles(filter).await
+    }
+
     pub async fn deployments(
         &self,
         filter: &DeploymentFilter,
@@ -70,11 +77,7 @@ impl PluginRegistryQueries {
         self.presented(states).await
     }
 
-    pub async fn state(
-        &self,
-        app_id: &str,
-        binding_id: &str,
-    ) -> RegistryResult<PresentedAppState> {
+    pub async fn state(&self, app_id: &str, binding_id: &str) -> RegistryResult<PresentedAppState> {
         let binding = [binding_id.to_owned()];
         let states = self
             .repository

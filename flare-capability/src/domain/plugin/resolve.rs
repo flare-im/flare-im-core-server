@@ -20,6 +20,10 @@ pub struct VersionFlags {
     pub suspended: bool,
 }
 
+/// The web bundles the registry holds approved and not withdrawn, by manifest digest, then by
+/// bundle id: their digest.
+pub type ApprovedWebBundles = HashMap<String, BTreeMap<String, String>>;
+
 #[derive(Debug, Clone)]
 pub struct Resolution {
     pub snapshot: PluginRuntimeSnapshot,
@@ -46,6 +50,7 @@ pub fn resolve(
     versions: &HashMap<String, VersionFlags>,
     states: &HashMap<String, AppPluginState>,
     deployments: &HashMap<String, PluginDeploymentRecord>,
+    web_bundles: &ApprovedWebBundles,
     now_ms: i64,
 ) -> Resolution {
     let mut plugins = Vec::with_capacity(projection.plugins.len());
@@ -63,6 +68,7 @@ pub fn resolve(
             *flags,
             states.get(&projected.grant.grant_id),
             deployments,
+            web_bundles.get(digest),
             now_ms,
         ) else {
             continue;
@@ -91,6 +97,7 @@ fn resolve_one(
     flags: VersionFlags,
     state: Option<&AppPluginState>,
     deployments: &HashMap<String, PluginDeploymentRecord>,
+    web_bundles: Option<&BTreeMap<String, String>>,
     now_ms: i64,
 ) -> Option<(ResolvedPlugin, i64)> {
     let grant = &projected.grant;
@@ -163,7 +170,20 @@ fn resolve_one(
         digest,
         client_configuration,
         projected.features.clone(),
-    );
+    )
+    .and_then(|plugin| {
+        let served = super::served_web_bundles(manifest, &projected.web_bundles, web_bundles);
+        if served.len() < projected.web_bundles.len() {
+            tracing::warn!(
+                app = %grant.tenant_id,
+                plugin = %grant.plugin_id,
+                projected = projected.web_bundles.len(),
+                served = served.len(),
+                "projected web bundles not approved in the registry or not declared; left out"
+            );
+        }
+        plugin.with_web_bundles(served)
+    });
     match resolved {
         Ok(plugin) => Some((
             plugin,

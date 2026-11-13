@@ -26,10 +26,11 @@ pub use development::{
     DevAppFlag, DevBinding, DevRegistered, DevRegistration, DevRelease, with_development,
 };
 pub use reconcile::{Outcome, ReconcileRow, Target, TenantDelivery};
-pub use resolve::{Resolution, VersionFlags, resolve};
+pub use resolve::{ApprovedWebBundles, Resolution, VersionFlags, resolve};
 pub use version::{
     NewPluginAsset, NewPluginVersion, PluginAssetContent, PluginAssetRef, PluginVersion,
-    PluginVersionDetail, VersionFilter, VersionKey, VersionStateChange, namespace_conflict,
+    PluginVersionDetail, VersionFilter, VersionKey, VersionStateChange, WebBundleApproval,
+    WebBundleAttachment, WebBundleFilter, WebBundleRef, namespace_conflict, served_web_bundles,
 };
 
 /// Why a registry operation failed. Hand-written `Display`: IM production code keeps one error

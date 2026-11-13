@@ -15,8 +15,8 @@ use crate::domain::plugin::{
     AppPluginState, DeploymentFilter, DeploymentRegistration, DesiredAppState, DevRegistered,
     DevRelease, NewPluginVersion, PluginAssetContent, PluginAssetRef, PluginDeploymentRecord,
     PluginRegistryError, PluginVersion, PluginVersionDetail, ReconcileRow, RegistryResult,
-    RuntimePatch, StateLifecycle, VersionFilter, VersionKey, VersionStateChange,
-    namespace_conflict,
+    RuntimePatch, StateLifecycle, VersionFilter, VersionKey, VersionStateChange, WebBundleApproval,
+    WebBundleAttachment, WebBundleFilter, WebBundleRef, namespace_conflict,
 };
 use crate::domain::repository::plugin_registry::{PluginRegistryRepository, ReconcileCursor};
 use crate::infrastructure::config::plugin_config_key::PluginConfigCipher;
@@ -25,6 +25,8 @@ const VERSION_COLUMNS: &str = "plugin_id,plugin_version,display_name,publisher_i
 const DEPLOYMENT_COLUMNS: &str = "deployment_id,plugin_id,plugin_version,manifest_digest,artifact_digest,grpc_authority,healthy_until_ms,last_error,created_at";
 const STATE_COLUMNS: &str = "app_id,binding_id,plugin_id,plugin_version,manifest_digest,revision,enabled,configured,configuration,deployment_id,runtime_revision,runtime_configuration_digest,runtime_enabled,runtime_healthy_until_ms,runtime_error,runtime_error_detail,runtime_configuration,runtime_attempts,runtime_next_attempt_ms,runtime_enabled_digest,organization_id,lifecycle,suspended,owned,offline_hold,export_until_ms,approved,features,projected_revision,updated_at";
 const NOW_MS: &str = "(extract(epoch FROM clock_timestamp())*1000)::bigint";
+const WEB_BUNDLE_COLUMNS: &str =
+    "plugin_id,plugin_version,bundle_id,sha256,size,approved_at,withdrawn_at,updated_at";
 /// The scope of a registry revision no single application owns.
 pub const GLOBAL_SCOPE: &str = "";
 
@@ -65,6 +67,19 @@ fn version_row(row: &PgRow) -> Result<PluginVersion, sqlx::Error> {
         revoked: row.try_get("revoked")?,
         suspended: row.try_get("suspended")?,
         created_at: row.try_get("created_at")?,
+        updated_at: row.try_get("updated_at")?,
+    })
+}
+
+fn web_bundle_row(row: &PgRow) -> Result<WebBundleAttachment, sqlx::Error> {
+    Ok(WebBundleAttachment {
+        plugin_id: row.try_get("plugin_id")?,
+        plugin_version: row.try_get("plugin_version")?,
+        bundle_id: row.try_get("bundle_id")?,
+        sha256: row.try_get("sha256")?,
+        size: row.try_get("size")?,
+        approved_at: row.try_get("approved_at")?,
+        withdrawn_at: row.try_get("withdrawn_at")?,
         updated_at: row.try_get("updated_at")?,
     })
 }
@@ -1099,6 +1114,124 @@ impl PluginRegistryRepository for PostgresPluginRegistry {
 
     async fn manifest(&self, digest: &str) -> RegistryResult<Arc<PluginManifest>> {
         self.cached_manifest(digest).await
+    }
+
+    async fn attach_web_bundle(
+        &self,
+        approval: &WebBundleApproval,
+    ) -> RegistryResult<WebBundleAttachment> {
+        let mut tx = self.pool.begin().await.map_err(unavailable)?;
+        let digest: String = sqlx::query_scalar(
+            "SELECT manifest_digest FROM plugin_versions \
+             WHERE plugin_id=$1 AND plugin_version=$2 AND NOT development FOR SHARE",
+        )
+        .bind(&approval.plugin_id)
+        .bind(&approval.plugin_version)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(unavailable)?
+        .ok_or(PluginRegistryError::NotFound)?;
+        let manifest = self.cached_manifest(&digest).await?;
+        approval.check(&manifest)?;
+        let size = i64::try_from(approval.size)
+            .map_err(|_| PluginRegistryError::Invalid("web bundle size".into()))?;
+        let existing = sqlx::query(&format!(
+            "SELECT {WEB_BUNDLE_COLUMNS} FROM plugin_web_bundles \
+             WHERE plugin_id=$1 AND plugin_version=$2 AND bundle_id=$3 FOR UPDATE"
+        ))
+        .bind(&approval.plugin_id)
+        .bind(&approval.plugin_version)
+        .bind(&approval.bundle_id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(unavailable)?;
+        if let Some(row) = existing {
+            let current = web_bundle_row(&row).map_err(unavailable)?;
+            if current.withdrawn() {
+                return Err(PluginRegistryError::Conflict(
+                    "a withdrawn web bundle stays withdrawn".into(),
+                ));
+            }
+            if current.sha256 != approval.sha256 || current.size != size {
+                return Err(PluginRegistryError::Conflict(
+                    "the web bundle of this version is attached with another digest".into(),
+                ));
+            }
+            return Ok(current);
+        }
+        let row = sqlx::query(&format!(
+            "INSERT INTO plugin_web_bundles(plugin_id,plugin_version,bundle_id,sha256,size) \
+             VALUES($1,$2,$3,$4,$5) RETURNING {WEB_BUNDLE_COLUMNS}"
+        ))
+        .bind(&approval.plugin_id)
+        .bind(&approval.plugin_version)
+        .bind(&approval.bundle_id)
+        .bind(&approval.sha256)
+        .bind(size)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(unavailable)?;
+        raise_revision(&mut tx, GLOBAL_SCOPE).await?;
+        tx.commit().await.map_err(unavailable)?;
+        web_bundle_row(&row).map_err(unavailable)
+    }
+
+    async fn withdraw_web_bundle(
+        &self,
+        bundle: &WebBundleRef,
+    ) -> RegistryResult<WebBundleAttachment> {
+        let mut tx = self.pool.begin().await.map_err(unavailable)?;
+        let row = sqlx::query(&format!(
+            "SELECT {WEB_BUNDLE_COLUMNS} FROM plugin_web_bundles \
+             WHERE plugin_id=$1 AND plugin_version=$2 AND bundle_id=$3 FOR UPDATE"
+        ))
+        .bind(&bundle.plugin_id)
+        .bind(&bundle.plugin_version)
+        .bind(&bundle.bundle_id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(unavailable)?
+        .ok_or(PluginRegistryError::NotFound)?;
+        let current = web_bundle_row(&row).map_err(unavailable)?;
+        if current.withdrawn() {
+            return Ok(current);
+        }
+        let row = sqlx::query(&format!(
+            "UPDATE plugin_web_bundles SET withdrawn_at=GREATEST(approved_at,{NOW_MS}),\
+             updated_at=GREATEST(updated_at+1,{NOW_MS}) \
+             WHERE plugin_id=$1 AND plugin_version=$2 AND bundle_id=$3 \
+             RETURNING {WEB_BUNDLE_COLUMNS}"
+        ))
+        .bind(&bundle.plugin_id)
+        .bind(&bundle.plugin_version)
+        .bind(&bundle.bundle_id)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(unavailable)?;
+        // Every application stops serving it on its next read, before any re-projection.
+        raise_revision(&mut tx, GLOBAL_SCOPE).await?;
+        tx.commit().await.map_err(unavailable)?;
+        web_bundle_row(&row).map_err(unavailable)
+    }
+
+    async fn web_bundles(
+        &self,
+        filter: &WebBundleFilter,
+    ) -> RegistryResult<Vec<WebBundleAttachment>> {
+        let rows = sqlx::query(&format!(
+            "SELECT {WEB_BUNDLE_COLUMNS} FROM plugin_web_bundles \
+             WHERE plugin_id=$1 AND ($2::text IS NULL OR plugin_version=$2) \
+             ORDER BY plugin_version,bundle_id LIMIT 512"
+        ))
+        .bind(&filter.plugin_id)
+        .bind(&filter.plugin_version)
+        .fetch_all(self.pool.as_ref())
+        .await
+        .map_err(unavailable)?;
+        rows.iter()
+            .map(web_bundle_row)
+            .collect::<Result<_, _>>()
+            .map_err(unavailable)
     }
 
     async fn register_development(&self, release: &DevRelease) -> RegistryResult<DevRegistered> {

@@ -4,7 +4,7 @@ use crate::domain::plugin::{
     AppPluginState, DeploymentFilter, DeploymentRegistration, DesiredAppState, DevRegistered,
     DevRelease, NewPluginVersion, PluginAssetContent, PluginDeploymentRecord, PluginVersion,
     PluginVersionDetail, ReconcileRow, RegistryResult, RuntimePatch, VersionFilter, VersionKey,
-    VersionStateChange,
+    VersionStateChange, WebBundleApproval, WebBundleAttachment, WebBundleFilter, WebBundleRef,
 };
 use flare_im_capability_core::plugin::PluginManifest;
 use std::sync::Arc;
@@ -97,6 +97,28 @@ pub trait PluginRegistryRepository: Send + Sync {
         seen: &AppPluginState,
         patch: RuntimePatch,
     ) -> RegistryResult<bool>;
+
+    /// Records the platform's approval of a web bundle of a (non-development) version. The
+    /// manifest must declare it with the same digest and size. The same approval again answers
+    /// the stored row; another digest for the bundle, or a withdrawn bundle, is a conflict.
+    /// Raises the global revision, so the next catalog read of every application may serve it.
+    async fn attach_web_bundle(
+        &self,
+        approval: &WebBundleApproval,
+    ) -> RegistryResult<WebBundleAttachment>;
+
+    /// Withdraws an attached web bundle for good. Raises the global revision: from the next
+    /// catalog read no application serves it, whatever its projection still lists. Withdrawing
+    /// again answers the stored row.
+    async fn withdraw_web_bundle(
+        &self,
+        bundle: &WebBundleRef,
+    ) -> RegistryResult<WebBundleAttachment>;
+
+    async fn web_bundles(
+        &self,
+        filter: &WebBundleFilter,
+    ) -> RegistryResult<Vec<WebBundleAttachment>>;
 
     /// The parsed manifest of a digest; immutable, so it is cached.
     async fn manifest(&self, digest: &str) -> RegistryResult<Arc<PluginManifest>>;

@@ -2,14 +2,17 @@
 //!
 //! A client sends what it can render (`{"descriptor": ClientUiDescriptor}`); every contribution
 //! of every plugin goes out as the first variant that client satisfies, or as an upgrade
-//! placeholder ([`UiContribution::select`]). Clients of the same build send the same descriptor,
-//! so the selection of a projection is cached by `(tenant, projection version, descriptor hash)`.
+//! placeholder ([`UiContribution::select_with_bundles`]). Clients of the same build send the same
+//! descriptor, so the selection of a projection is cached by `(tenant, projection version,
+//! descriptor hash, web bundle fingerprint)`. The fingerprint covers the web bundles the snapshot
+//! serves: a withdrawal in the registry changes it without a new projection version.
 //! The cache holds the selection only: authorization, emergency switches, closed features and
 //! target pruning run on every request, as before.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
+use flare_im_capability_core::plugin::bundle::WebBundleDecl;
 use flare_im_capability_core::plugin::manifest::UiContribution;
 use flare_im_capability_core::plugin::runtime::PluginRuntimeSnapshot;
 use flare_im_capability_core::plugin::ui::ClientUiDescriptor;
@@ -67,16 +70,18 @@ pub(crate) struct SelectedContribution {
     pub outcome: &'static str,
 }
 
-/// Every contribution selected for `descriptor`, in manifest order. Marketplace samples
-/// (`preview`) are not part of the running client surface and are dropped.
+/// Every contribution selected for `descriptor`, in manifest order, with `bundles` the web
+/// bundles this application may run (approved, not withdrawn, projected with its addresses).
+/// Marketplace samples (`preview`) are not part of the running client surface and are dropped.
 pub(crate) fn select_contributions(
     contributions: &[UiContribution],
     descriptor: &ClientUiDescriptor,
+    bundles: &[WebBundleDecl],
 ) -> Vec<SelectedContribution> {
     contributions
         .iter()
         .map(|contribution| {
-            let selected = contribution.select(descriptor);
+            let selected = contribution.select_with_bundles(descriptor, bundles);
             let outcome = selected.outcome();
             let mut contribution = selected.into_contribution();
             contribution.preview = None;
@@ -91,7 +96,30 @@ pub(crate) fn select_contributions(
 /// The selection of one projection for one descriptor, by `(plugin id, manifest digest)`.
 pub(crate) type SnapshotSelection = HashMap<(String, String), Arc<[SelectedContribution]>>;
 
-type CacheKey = (String, u64, String);
+type CacheKey = (String, u64, String, u64);
+
+/// What of the snapshot's web bundles selection depends on: per plugin, each served bundle's id,
+/// digest, bridge and digital goods flag. Addresses and permissions do not change a selection.
+pub(crate) fn web_bundle_fingerprint(snapshot: &PluginRuntimeSnapshot) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    for projected in &snapshot.plugins {
+        if projected.web_bundles.is_empty() {
+            continue;
+        }
+        projected.grant.manifest_digest.hash(&mut hasher);
+        for bundle in &projected.web_bundles {
+            (
+                &bundle.id,
+                &bundle.sha256,
+                bundle.bridge,
+                bundle.digital_goods,
+            )
+                .hash(&mut hasher);
+        }
+    }
+    hasher.finish()
+}
 
 struct CacheEntry {
     used: u64,
@@ -151,7 +179,12 @@ impl CatalogSelection {
         descriptor: &ClientUiDescriptor,
         hash: &str,
     ) -> Arc<SnapshotSelection> {
-        let key: CacheKey = (tenant.to_owned(), snapshot.version, hash.to_owned());
+        let key: CacheKey = (
+            tenant.to_owned(),
+            snapshot.version,
+            hash.to_owned(),
+            web_bundle_fingerprint(snapshot),
+        );
         {
             let mut cache = self.lock();
             cache.tick += 1;
@@ -174,6 +207,7 @@ impl CatalogSelection {
                         select_contributions(
                             &projected.manifest().client_extensions.contributions,
                             descriptor,
+                            &projected.web_bundles,
                         )
                         .into(),
                     )

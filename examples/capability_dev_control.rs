@@ -25,8 +25,8 @@
 
 use std::collections::{BTreeSet, HashMap};
 
-use flare_grpc_proto::capability::capability_service_client::CapabilityServiceClient;
 use flare_grpc_proto::capability::DispatchCapabilityRequest;
+use flare_grpc_proto::capability::capability_service_client::CapabilityServiceClient;
 use flare_grpc_proto::control::PluginsProjectionUpsert;
 use flare_grpc_proto::control::tenant_projection_client::TenantProjectionClient;
 use flare_im_capability_core::plugin::PluginManifest;
@@ -183,6 +183,7 @@ fn snapshot(
             lifecycle: ProjectedLifecycle::Installed,
             export_until_ms: None,
             features: Default::default(),
+            web_bundles: Vec::new(),
         }],
         bindings: Vec::new(),
     };

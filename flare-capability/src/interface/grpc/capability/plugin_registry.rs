@@ -1,5 +1,5 @@
 //! `CapabilityService.Administer` for the plugin registry (`flare.extension.v1.plugin_version.*`,
-//! `plugin_deployment.*`, `plugin_config.*`, `plugin_app_status.*`, `plugin_data.*`, `plugin_dev.*`).
+//! `plugin_web_bundle.*`, `plugin_deployment.*`, `plugin_config.*`, `plugin_app_status.*`, `plugin_data.*`, `plugin_dev.*`).
 //!
 //! Two callers. admin-gateway forwards a Staff context signed for `core:plugins:*`, in the same two
 //! scopes as hooks. The platform worker presents its assertion (`authorization: Bearer`), the
@@ -35,6 +35,7 @@ use crate::application::queries::PluginRegistryQueries;
 use crate::domain::plugin::{
     DeploymentFilter, DeploymentRegistration, DesiredAppState, DevAppFlag, DevRegistration,
     PluginRegistryError, RuntimePatch, VersionFilter, VersionKey, VersionStateChange,
+    WebBundleApproval, WebBundleFilter, WebBundleRef,
 };
 use crate::domain::repository::plugin_registry::PluginRegistryRepository;
 
@@ -44,6 +45,11 @@ const VERSION_SET_STATE: &str = "flare.extension.v1.plugin_version.set_state";
 const VERSION_LIST: &str = "flare.extension.v1.plugin_version.list";
 const VERSION_GET: &str = "flare.extension.v1.plugin_version.get";
 const VERSION_ASSET: &str = "flare.extension.v1.plugin_version.asset";
+/// The platform's review approved a web bundle of a version.
+const WEB_BUNDLE_ATTACH: &str = "flare.extension.v1.plugin_web_bundle.attach";
+/// The platform withdrew a web bundle; final.
+const WEB_BUNDLE_WITHDRAW: &str = "flare.extension.v1.plugin_web_bundle.withdraw";
+const WEB_BUNDLE_LIST: &str = "flare.extension.v1.plugin_web_bundle.list";
 const DEPLOYMENT_REGISTER: &str = "flare.extension.v1.plugin_deployment.register";
 const DEPLOYMENT_LIST: &str = "flare.extension.v1.plugin_deployment.list";
 const CONFIG_PUT: &str = "flare.extension.v1.plugin_config.put";
@@ -84,8 +90,10 @@ pub(super) struct OperationSpec {
 pub(super) fn spec_of(operation: &str) -> Option<OperationSpec> {
     let (access, scope, machine_only) = match operation {
         VERSION_VERIFY | VERSION_REGISTER | VERSION_SET_STATE | DEPLOYMENT_REGISTER
-        | DEV_FLAG_APP => (Access::Write, Scope::Platform, false),
-        VERSION_LIST | VERSION_GET | VERSION_ASSET | DEPLOYMENT_LIST => {
+        | DEV_FLAG_APP | WEB_BUNDLE_ATTACH | WEB_BUNDLE_WITHDRAW => {
+            (Access::Write, Scope::Platform, false)
+        }
+        VERSION_LIST | VERSION_GET | VERSION_ASSET | DEPLOYMENT_LIST | WEB_BUNDLE_LIST => {
             (Access::Read, Scope::Platform, false)
         }
         CONFIG_PUT | DEV_REGISTER => (Access::Write, Scope::Application, false),
@@ -434,6 +442,33 @@ async fn run(
                 }),
             ))
         }
+        WEB_BUNDLE_ATTACH => {
+            let input: WebBundleApproval = parse(&payload)?;
+            let row = registry
+                .commands
+                .attach_web_bundle(&input)
+                .await
+                .map_err(into_status)?;
+            Ok((platform, value(serde_json::to_value(row))?))
+        }
+        WEB_BUNDLE_WITHDRAW => {
+            let input: WebBundleRef = parse(&payload)?;
+            let row = registry
+                .commands
+                .withdraw_web_bundle(&input)
+                .await
+                .map_err(into_status)?;
+            Ok((platform, value(serde_json::to_value(row))?))
+        }
+        WEB_BUNDLE_LIST => {
+            let input: WebBundleFilter = parse(&payload)?;
+            let items = registry
+                .queries
+                .web_bundles(&input)
+                .await
+                .map_err(into_status)?;
+            Ok((platform, json!({"items": items})))
+        }
         DEPLOYMENT_REGISTER => {
             let input: DeploymentRegistration = parse(&payload)?;
             let row = registry
@@ -458,7 +493,10 @@ async fn run(
             let tenant = input.desired.app_id.clone();
             let row = registry
                 .commands
-                .put_config(&input.desired, input.deployment_id.map(RuntimePatch::rebound))
+                .put_config(
+                    &input.desired,
+                    input.deployment_id.map(RuntimePatch::rebound),
+                )
                 .await
                 .map_err(into_status)?;
             let row = registry.queries.present(row).await.map_err(into_status)?;
@@ -561,6 +599,9 @@ mod tests {
             VERSION_LIST,
             VERSION_GET,
             VERSION_ASSET,
+            WEB_BUNDLE_ATTACH,
+            WEB_BUNDLE_WITHDRAW,
+            WEB_BUNDLE_LIST,
             DEPLOYMENT_REGISTER,
             DEPLOYMENT_LIST,
             DEV_FLAG_APP,
