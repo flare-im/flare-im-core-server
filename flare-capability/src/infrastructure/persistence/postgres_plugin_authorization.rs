@@ -393,6 +393,16 @@ impl PluginAuthorizationReader for PostgresPluginAuthorization {
         );
         Ok(Some(snapshot))
     }
+    async fn plugin_projection_lapsed(&self, tenant: &str) -> Result<bool> {
+        sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM plugin_authorization_snapshots \
+             WHERE app_id=$1 AND valid_until_ms<=(extract(epoch FROM clock_timestamp())*1000)::bigint)",
+        )
+        .bind(tenant)
+        .fetch_one(self.pool.as_ref())
+        .await
+        .map_err(unavailable)
+    }
 }
 
 #[cfg(test)]
@@ -463,6 +473,9 @@ mod tests {
         assert!(restart.plugin_snapshot("202").await.unwrap().is_none());
         sqlx::query("UPDATE plugin_authorization_snapshots SET valid_until_ms=1,snapshot=jsonb_set(snapshot,'{validUntilMs}','1') WHERE app_id='201'").execute(pool.as_ref()).await.unwrap();
         assert!(restart.plugin_snapshot("201").await.unwrap().is_none());
+        // Expired, not uninstalled: the dispatch path reports an outage instead.
+        assert!(restart.plugin_projection_lapsed("201").await.unwrap());
+        assert!(!restart.plugin_projection_lapsed("202").await.unwrap());
         assert_eq!(
             restart.versions(&[]).await.unwrap(),
             vec![("201".into(), 20)]

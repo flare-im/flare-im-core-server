@@ -86,6 +86,16 @@ pub trait PluginAuthorizationReader: Send + Sync {
     ) -> flare_server_core::error::Result<
         Option<std::sync::Arc<flare_im_capability_core::plugin::runtime::PluginRuntimeSnapshot>>,
     >;
+    /// Whether the application has a plugin projection its control plane stopped renewing:
+    /// `plugin_snapshot` then answers `None`, yet nothing was uninstalled. Clients are told
+    /// the plugins cannot be read for now, never that none is installed. A reader without
+    /// durable projections has nothing to lapse.
+    async fn plugin_projection_lapsed(
+        &self,
+        _tenant: &str,
+    ) -> flare_server_core::error::Result<bool> {
+        Ok(false)
+    }
     /// Durable activation of the effective grant/configuration. A reader that cannot prove
     /// this boundary cannot disclose historical events. Lease renewal never advances it.
     async fn event_active_since_ms(

@@ -81,6 +81,25 @@ fn plugin_denied(code: &str, message: &str) -> CapabilityError {
     CapabilityError::plugin(code, message)
 }
 
+/// No projection serves `tenant`. Either nothing is installed, or the control plane stopped
+/// renewing the projection for a while (the platform stalled or restarted): the plugins are
+/// still installed, so that is a temporary outage the client may retry, never "not installed".
+async fn no_projection(
+    reader: &dyn crate::domain::repository::PluginAuthorizationReader,
+    tenant: &str,
+) -> CapabilityError {
+    match reader.plugin_projection_lapsed(tenant).await {
+        Ok(false) => plugin_denied(
+            flare_im_service_kit::plugin_platform::PLUGIN_NOT_INSTALLED,
+            "no plugin is installed for this application",
+        ),
+        Ok(true) => CapabilityError::System(LAPSED_PROJECTION.into()),
+        Err(_) => CapabilityError::System("plugin authorization is unavailable".into()),
+    }
+}
+
+const LAPSED_PROJECTION: &str = "the plugin projection of this application lapsed";
+
 /// Operations a user ticket never invokes: the console's admin operations and the platform's
 /// lifecycle callbacks (`entityLifecycle.unbound`).
 pub(crate) fn restricted_operations(
@@ -216,19 +235,14 @@ async fn invoke_authorized(
             .await
             .map(Invoked::Answered);
     }
-    let snapshot = routes
-        .authorization
-        .as_ref()
-        .ok_or_else(|| denied(()))?
+    let reader = routes.authorization.as_ref().ok_or_else(|| denied(()))?;
+    let Some(snapshot) = reader
         .plugin_snapshot(&tenant)
         .await
         .map_err(|_| denied(()))?
-        .ok_or_else(|| {
-            plugin_denied(
-                flare_im_service_kit::plugin_platform::PLUGIN_NOT_INSTALLED,
-                "no plugin is installed for this application",
-            )
-        })?;
+    else {
+        return Err(no_projection(reader.as_ref(), &tenant).await);
+    };
     let now = chrono::Utc::now().timestamp_millis();
     snapshot.validate(now).map_err(|_| {
         plugin_denied(
@@ -843,10 +857,22 @@ async fn client_ui_catalog(
     metrics.record_descriptor(&descriptor_hash);
     let now = chrono::Utc::now().timestamp_millis();
     let snapshot = match &routes.authorization {
-        Some(reader) => reader
-            .plugin_snapshot(tenant)
-            .await
-            .map_err(|_| CapabilityError::PolicyDenied("plugin catalog unavailable".into()))?,
+        Some(reader) => {
+            let snapshot = reader
+                .plugin_snapshot(tenant)
+                .await
+                .map_err(|_| CapabilityError::PolicyDenied("plugin catalog unavailable".into()))?;
+            // An empty catalog would read as "nothing installed" on every client.
+            if snapshot.is_none()
+                && reader
+                    .plugin_projection_lapsed(tenant)
+                    .await
+                    .unwrap_or(true)
+            {
+                return Err(CapabilityError::System(LAPSED_PROJECTION.into()));
+            }
+            snapshot
+        }
         None => None,
     };
     let mut result = UiCatalog {

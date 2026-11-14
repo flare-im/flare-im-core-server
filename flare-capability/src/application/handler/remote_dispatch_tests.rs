@@ -171,6 +171,59 @@ async fn dispatch_refuses_an_absent_expired_disabled_or_revoked_projection() {
     }
 }
 
+/// The control plane stopped renewing the projection (the platform stalled or restarted):
+/// the plugins are still installed. Neither an operation nor the catalog may then read as
+/// "not installed"; both answer a temporary failure the client retries.
+#[tokio::test]
+async fn a_lapsed_projection_is_an_outage_not_an_uninstall() {
+    struct Lapsed(bool);
+    #[async_trait::async_trait]
+    impl PluginAuthorizationReader for Lapsed {
+        async fn plugin_snapshot(
+            &self,
+            _tenant: &str,
+        ) -> flare_server_core::error::Result<Option<Arc<PluginRuntimeSnapshot>>> {
+            Ok(None)
+        }
+        async fn plugin_projection_lapsed(
+            &self,
+            _tenant: &str,
+        ) -> flare_server_core::error::Result<bool> {
+            Ok(self.0)
+        }
+    }
+    let (ctx, _, _) = identity(SignedActorType::User);
+    let backend: Arc<dyn CapabilityPolicyBackend> = policy();
+    let mut catalog = command();
+    catalog.capability_id = flare_im_capability_core::plugin::ui::UI_CATALOG_OPERATION.into();
+    catalog.payload = Some(catalog_payload(false));
+    for lapsed in [true, false] {
+        let routes = Arc::new(
+            PluginRouteBook::new().with_runtime_authorization(Arc::new(Lapsed(lapsed)), None),
+        );
+        let operation =
+            dispatch_remote(&ctx, &command(), &routes, &backend, Duration::from_secs(1)).await;
+        let read = dispatch_remote(&ctx, &catalog, &routes, &backend, Duration::from_secs(1)).await;
+        if lapsed {
+            assert!(
+                matches!(operation, Err(CapabilityError::System(_))),
+                "lapsed operation: {operation:?}"
+            );
+            assert!(
+                matches!(read, Err(CapabilityError::System(_))),
+                "lapsed catalog: {read:?}"
+            );
+        } else {
+            assert_eq!(
+                plugin_code(&operation),
+                Some(flare_im_service_kit::plugin_platform::PLUGIN_NOT_INSTALLED)
+            );
+            let read = read.unwrap();
+            assert!(read.data["plugins"].as_array().unwrap().is_empty());
+        }
+    }
+}
+
 #[tokio::test]
 async fn an_installed_plugin_needs_no_user_grant_and_the_emergency_switch_still_stops_it() {
     use flare_grpc_proto::capability::{
