@@ -1140,6 +1140,8 @@ environment_bindings = { SDK_SIGNING_KEY = "CELL_KEY" }
             "FLARE_PLUGIN_PUBLISHER_KEYS",
             "FLARE_PLUGIN_CONFIG_KEY",
             "FLARE_PLUGIN_RUNTIME_PUBLIC_KEYS",
+            "FLARE_PLUGIN_PAYMENT_PROVIDER",
+            "FLARE_PLUGIN_WEB_BUNDLES_ENABLED",
         ] {
             assert_eq!(holders(variable), ["capability"], "{variable}");
         }

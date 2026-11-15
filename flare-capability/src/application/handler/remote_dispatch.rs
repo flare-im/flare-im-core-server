@@ -81,6 +81,25 @@ fn plugin_denied(code: &str, message: &str) -> CapabilityError {
     CapabilityError::plugin(code, message)
 }
 
+/// No projection serves `tenant`. Either nothing is installed, or the control plane stopped
+/// renewing the projection for a while (the platform stalled or restarted): the plugins are
+/// still installed, so that is a temporary outage the client may retry, never "not installed".
+async fn no_projection(
+    reader: &dyn crate::domain::repository::PluginAuthorizationReader,
+    tenant: &str,
+) -> CapabilityError {
+    match reader.plugin_projection_lapsed(tenant).await {
+        Ok(false) => plugin_denied(
+            flare_im_service_kit::plugin_platform::PLUGIN_NOT_INSTALLED,
+            "no plugin is installed for this application",
+        ),
+        Ok(true) => CapabilityError::System(LAPSED_PROJECTION.into()),
+        Err(_) => CapabilityError::System("plugin authorization is unavailable".into()),
+    }
+}
+
+const LAPSED_PROJECTION: &str = "the plugin projection of this application lapsed";
+
 /// Operations a user ticket never invokes: the console's admin operations and the platform's
 /// lifecycle callbacks (`entityLifecycle.unbound`).
 pub(crate) fn restricted_operations(
@@ -208,23 +227,22 @@ async fn invoke_authorized(
         .require_user_binding(&tenant, user, request_id)
         .map_err(|_| denied(()))?;
     if req.capability_id == flare_im_capability_core::plugin::ui::UI_CATALOG_OPERATION {
-        return client_ui_catalog(&tenant, request_id, routes, policy)
+        let descriptor = super::catalog_selection::read_descriptor(
+            req.payload.as_ref(),
+            routes.catalog_selection.web_bundles(),
+        )?;
+        return client_ui_catalog(&tenant, request_id, routes, policy, &descriptor)
             .await
             .map(Invoked::Answered);
     }
-    let snapshot = routes
-        .authorization
-        .as_ref()
-        .ok_or_else(|| denied(()))?
+    let reader = routes.authorization.as_ref().ok_or_else(|| denied(()))?;
+    let Some(snapshot) = reader
         .plugin_snapshot(&tenant)
         .await
         .map_err(|_| denied(()))?
-        .ok_or_else(|| {
-            plugin_denied(
-                flare_im_service_kit::plugin_platform::PLUGIN_NOT_INSTALLED,
-                "no plugin is installed for this application",
-            )
-        })?;
+    else {
+        return Err(no_projection(reader.as_ref(), &tenant).await);
+    };
     let now = chrono::Utc::now().timestamp_millis();
     snapshot.validate(now).map_err(|_| {
         plugin_denied(
@@ -850,22 +868,43 @@ fn schema_has_command_identity(value: &Value) -> bool {
 /// tenant has but the viewer cannot use are listed in `unavailable` with the reason (disabled,
 /// not installed after a revocation, nothing offered), so a card of one
 /// says why it is inert. One plugin's problem never fails the catalog.
+///
+/// Each contribution goes out as the first variant the client's `descriptor` satisfies, or as
+/// an upgrade placeholder ([`super::catalog_selection`]); the selection is cached per projection
+/// version and descriptor, the checks above run on every request.
 async fn client_ui_catalog(
     tenant: &str,
     request_id: &str,
     routes: &PluginRouteBook,
     policy: &Arc<dyn CapabilityPolicyBackend>,
+    descriptor: &flare_im_capability_core::plugin::ui::ClientUiDescriptor,
 ) -> Result<CapabilityDispatchResult> {
+    use super::catalog_selection::{CatalogSelectionMetrics, select_contributions};
     use flare_im_capability_core::plugin::ui::{
         ClientPlugin, UI_CATALOG_OPERATION, UiActionTarget, UiCatalog, UiUnavailablePlugin,
         UiUnavailableReason,
     };
+    let metrics = CatalogSelectionMetrics::registered();
+    let descriptor_hash = descriptor.hash();
+    metrics.record_descriptor(&descriptor_hash);
     let now = chrono::Utc::now().timestamp_millis();
     let snapshot = match &routes.authorization {
-        Some(reader) => reader
-            .plugin_snapshot(tenant)
-            .await
-            .map_err(|_| CapabilityError::PolicyDenied("plugin catalog unavailable".into()))?,
+        Some(reader) => {
+            let snapshot = reader
+                .plugin_snapshot(tenant)
+                .await
+                .map_err(|_| CapabilityError::PolicyDenied("plugin catalog unavailable".into()))?;
+            // An empty catalog would read as "nothing installed" on every client.
+            if snapshot.is_none()
+                && reader
+                    .plugin_projection_lapsed(tenant)
+                    .await
+                    .unwrap_or(true)
+            {
+                return Err(CapabilityError::System(LAPSED_PROJECTION.into()));
+            }
+            snapshot
+        }
         None => None,
     };
     let mut result = UiCatalog {
@@ -874,11 +913,10 @@ async fn client_ui_catalog(
         valid_until_ms: now + 30000,
         plugins: vec![],
         unavailable: vec![],
+        payment_provider: None,
     };
-    let mut authorized_queries: std::collections::BTreeMap<
-        String,
-        std::collections::BTreeSet<String>,
-    > = Default::default();
+    // Commands a reauthenticate host flow may call, listed only for a plugin that declares
+    // that capability (decided once the plugin's surfaces are known).
     let mut authorized_transients: std::collections::BTreeMap<
         String,
         std::collections::BTreeSet<String>,
@@ -898,6 +936,10 @@ async fn client_ui_catalog(
             .map_err(|_| CapabilityError::PolicyDenied("plugin catalog expired".into()))?;
         result.version = snapshot.version;
         result.valid_until_ms = snapshot.valid_until_ms.min(now.saturating_add(30000));
+        let selection =
+            routes
+                .catalog_selection
+                .selection(tenant, &snapshot, descriptor, &descriptor_hash);
         for projected in &snapshot.plugins {
             let grant = &projected.grant;
             if grant.revoked {
@@ -939,7 +981,7 @@ async fn client_ui_catalog(
                 }
                 operations.insert(operation);
             }
-            let query_operations = operations
+            let query_operations: std::collections::BTreeSet<String> = operations
                 .iter()
                 .filter(|operation| {
                     manifest.operation(operation).is_some_and(|op| {
@@ -948,7 +990,6 @@ async fn client_ui_catalog(
                 })
                 .cloned()
                 .collect();
-            authorized_queries.insert(manifest.plugin_id.clone(), query_operations);
             authorized_transients.insert(
                 manifest.plugin_id.clone(),
                 operations
@@ -961,21 +1002,48 @@ async fn client_ui_catalog(
                     .cloned()
                     .collect(),
             );
+            // Reached only through a host confirmation (a payment order's operation).
+            let transient_operations: std::collections::BTreeSet<String> = operations
+                .iter()
+                .filter(|operation| manifest.operation(operation).is_some_and(|op| op.transient))
+                .cloned()
+                .collect();
             let configuration = client_configuration(manifest, projected);
+            // The variant this client renders, or its upgrade placeholder; identity, permissions
+            // and the feature a contribution belongs to are the same in every variant.
+            let selected = selection
+                .get(&(grant.plugin_id.clone(), grant.manifest_digest.clone()))
+                .cloned()
+                .unwrap_or_else(|| {
+                    select_contributions(
+                        &manifest.client_extensions.contributions,
+                        descriptor,
+                        &projected.web_bundles,
+                    )
+                    .into()
+                });
+            let declared_client_surfaces = !selected.is_empty();
+            let mut outcomes = Vec::new();
             let mut extensions = manifest.client_extensions.clone();
-            // Marketplace samples are not part of the running client surface.
-            for contribution in &mut extensions.contributions {
-                contribution.preview = None;
-            }
-            let declared_client_surfaces = !extensions.contributions.is_empty();
-            // Every reference to an action the viewer may not invoke goes with it (choices,
-            // rows, translations, a detail whose operation is not offered).
-            extensions.contributions.retain(|c| {
-                !closed.contributions.contains(&c.id)
-                    && c.required_permissions
-                        .iter()
-                        .all(|p| permissions.contains(p))
-            });
+            extensions.contributions = selected
+                .iter()
+                .filter(|s| {
+                    !closed.contributions.contains(&s.contribution.id)
+                        && s.contribution
+                            .required_permissions
+                            .iter()
+                            .all(|p| permissions.contains(p))
+                })
+                .map(|s| {
+                    outcomes.push(s.outcome);
+                    s.contribution.clone()
+                })
+                .collect();
+            extensions.web_bundles = catalog_web_bundles(
+                &extensions.contributions,
+                &projected.web_bundles,
+                descriptor.platform,
+            );
             if extensions.contributions.is_empty() {
                 if declared_client_surfaces {
                     note(
@@ -989,6 +1057,9 @@ async fn client_ui_catalog(
                 }
                 continue;
             }
+            for outcome in outcomes {
+                metrics.record_outcome(outcome);
+            }
             result.valid_until_ms = result.valid_until_ms.min(grant.valid_until_ms);
             result.plugins.push(ClientPlugin {
                 plugin_id: manifest.plugin_id.clone(),
@@ -997,8 +1068,8 @@ async fn client_ui_catalog(
                 grant_revision: grant.revision,
                 extensions,
                 operations,
-                query_operations: Default::default(),
-                transient_operations: Default::default(),
+                query_operations,
+                transient_operations,
                 configuration,
             });
         }
@@ -1028,34 +1099,22 @@ async fn client_ui_catalog(
                     plugin_id.as_ref().unwrap_or(&plugin.plugin_id).clone(),
                     page.clone(),
                 )),
+                // Selection already required every native capability of the variant.
                 UiActionTarget::Native { .. } => true,
             });
         }
-        // Older catalog readers reject unknown fields. Only a plugin actually
-        // offering read-only recovery or scan resolution needs this authority; all
-        // existing plugins retain the previous serialized catalog shape.
-        if plugin.extensions.contributions.iter().any(|contribution| {
-            contribution.kind
-                == flare_im_capability_core::plugin::manifest::UiContributionKind::ScanHandler
-                || contribution.schema.actions.iter().any(|action| {
-                    action.command.as_ref().is_some_and(|command| {
-                        command.mode
-                            == flare_im_capability_core::plugin::ui::UiPageCommandMode::Observe
-                    })
-                })
-        }) {
-            plugin.query_operations = authorized_queries
-                .remove(&plugin.plugin_id)
-                .unwrap_or_default();
-        }
+        // Next to the operations the manifest marks transient: the commands a declared
+        // reauthenticate flow may call.
         if plugin
             .extensions
             .native_capabilities
             .contains(&flare_im_capability_core::plugin::ui::NativeCapability::Reauthenticate)
         {
-            plugin.transient_operations = authorized_transients
-                .remove(&plugin.plugin_id)
-                .unwrap_or_default();
+            plugin.transient_operations.extend(
+                authorized_transients
+                    .remove(&plugin.plugin_id)
+                    .unwrap_or_default(),
+            );
         }
     }
     let available: std::collections::BTreeSet<&str> = result
@@ -1068,6 +1127,11 @@ async fn client_ui_catalog(
         .filter(|(plugin_id, _)| !available.contains(plugin_id.as_str()))
         .map(|(plugin_id, reason)| UiUnavailablePlugin { plugin_id, reason })
         .collect();
+    result.payment_provider =
+        crate::infrastructure::config::plugin_payment_provider::catalog_payment_provider(
+            routes.payment_provider.as_deref(),
+            &result.plugins,
+        );
     let value = serde_json::to_value(result)
         .map_err(|_| CapabilityError::System("plugin UI encoding failed".into()))?;
     Ok(CapabilityDispatchResult::ok(
@@ -1076,6 +1140,35 @@ async fn client_ui_catalog(
         UI_CATALOG_OPERATION,
         value,
     ))
+}
+
+/// The web bundles of a plugin's catalog entry: the served bundles (approved in the registry, not
+/// withdrawn, projected with this application's addresses and approved bridge permissions) that a
+/// selected contribution opens, in the order the version serves them, each once. The unpacked
+/// files' base (`files`) goes to Web and Tauri only; the other clients read the `.fwb` file.
+/// No bundle goes out that no contribution opens, so a client never fetches code it cannot reach.
+pub(crate) fn catalog_web_bundles(
+    contributions: &[flare_im_capability_core::plugin::manifest::UiContribution],
+    served: &[flare_im_capability_core::plugin::bundle::WebBundleDecl],
+    platform: flare_im_capability_core::plugin::manifest::ClientPlatform,
+) -> Vec<flare_im_capability_core::plugin::bundle::WebBundleDecl> {
+    use flare_im_capability_core::plugin::manifest::ClientPlatform;
+    let opened: std::collections::BTreeSet<&str> = contributions
+        .iter()
+        .filter_map(|c| c.bundle.as_ref().map(|bundle| bundle.id.as_str()))
+        .collect();
+    let file_reader = matches!(platform, ClientPlatform::Web | ClientPlatform::Tauri);
+    served
+        .iter()
+        .filter(|bundle| opened.contains(bundle.id.as_str()))
+        .map(|bundle| {
+            let mut entry = bundle.clone();
+            if !file_reader {
+                entry.files = None;
+            }
+            entry
+        })
+        .collect()
 }
 
 /// The client-visible configuration of a projected plugin: the projection's subset, kept to the

@@ -10,7 +10,7 @@ use serde::Serialize;
 use crate::domain::plugin::{
     AppPluginState, DeploymentFilter, PluginAssetContent, PluginDeploymentRecord,
     PluginRegistryError, PluginVersion, PluginVersionDetail, RegistryResult, VersionFilter,
-    VersionKey,
+    VersionKey, WebBundleAttachment, WebBundleFilter,
 };
 use crate::domain::repository::plugin_registry::PluginRegistryRepository;
 
@@ -52,6 +52,13 @@ impl PluginRegistryQueries {
         path: &str,
     ) -> RegistryResult<PluginAssetContent> {
         self.repository.asset(plugin_id, plugin_version, path).await
+    }
+
+    pub async fn web_bundles(
+        &self,
+        filter: &WebBundleFilter,
+    ) -> RegistryResult<Vec<WebBundleAttachment>> {
+        self.repository.web_bundles(filter).await
     }
 
     pub async fn deployments(

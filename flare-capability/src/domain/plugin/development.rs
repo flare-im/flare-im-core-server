@@ -235,6 +235,7 @@ pub fn with_development(
             lifecycle: ProjectedLifecycle::Installed,
             export_until_ms: None,
             features: default_features(manifest),
+            web_bundles: Vec::new(),
         });
     }
     projection

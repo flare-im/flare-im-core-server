@@ -1,5 +1,6 @@
 //! `PluginVersion`: one signed package. The bytes never change; only `published`, `revoked` and
 //! `suspended` do.
+use flare_im_capability_core::plugin::PluginManifest;
 use flare_im_capability_core::plugin::manifest::PluginKind;
 use flare_im_capability_core::plugin::package::PluginPackage;
 use flare_im_capability_core::plugin::runtime::digest_bytes;
@@ -230,6 +231,109 @@ pub struct PluginAssetContent {
     pub digest: String,
     pub media_type: String,
     pub bytes: Vec<u8>,
+}
+
+/// A web bundle of a version the platform approved (`plugin_web_bundle.attach`). The platform
+/// reviewed the bytes; Core keeps the outcome so it serves a bundle only while it stands, and
+/// stops serving it everywhere at once when it is withdrawn. Where each application fetches it and
+/// which bridge permissions the application approved come with the application's projection
+/// ([`flare_im_capability_core::plugin::runtime::ProjectedWebBundle`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WebBundleAttachment {
+    pub plugin_id: String,
+    pub plugin_version: String,
+    pub bundle_id: String,
+    /// 64 lowercase hex digits, as the manifest declares it.
+    pub sha256: String,
+    pub size: i64,
+    pub approved_at: i64,
+    /// Set once: a withdrawn bundle of a version stays withdrawn.
+    pub withdrawn_at: Option<i64>,
+    pub updated_at: i64,
+}
+
+impl WebBundleAttachment {
+    pub fn withdrawn(&self) -> bool {
+        self.withdrawn_at.is_some()
+    }
+}
+
+/// `plugin_web_bundle.attach`: the platform approved this bundle of this version.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct WebBundleApproval {
+    pub plugin_id: String,
+    pub plugin_version: String,
+    pub bundle_id: String,
+    pub sha256: String,
+    pub size: u64,
+}
+
+impl WebBundleApproval {
+    /// The approval names a bundle the version's signed manifest declares, with the same digest
+    /// and size: Core never serves bytes the publisher did not sign.
+    pub fn check(&self, manifest: &PluginManifest) -> RegistryResult<()> {
+        if manifest.plugin_id != self.plugin_id || manifest.version != self.plugin_version {
+            return Err(PluginRegistryError::Invalid(
+                "web bundle names another version".into(),
+            ));
+        }
+        let decl = manifest
+            .client_extensions
+            .web_bundle(&self.bundle_id)
+            .ok_or_else(|| {
+                PluginRegistryError::Invalid("the manifest does not declare this web bundle".into())
+            })?;
+        if decl.sha256 != self.sha256 || decl.size != self.size {
+            return Err(PluginRegistryError::Invalid(
+                "web bundle digest or size differs from the manifest".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// `plugin_web_bundle.withdraw`.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct WebBundleRef {
+    pub plugin_id: String,
+    pub plugin_version: String,
+    pub bundle_id: String,
+}
+
+/// `plugin_web_bundle.list`: the bundles of one version, or of every version of a plugin.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct WebBundleFilter {
+    pub plugin_id: String,
+    #[serde(default)]
+    pub plugin_version: Option<String>,
+}
+
+/// What a resolution serves of one projected plugin: each projected bundle the manifest
+/// declares with the same digest and the registry holds approved, not withdrawn, with the same
+/// digest; in catalog form. Anything else is left out (logged by the caller), never served.
+pub fn served_web_bundles(
+    manifest: &PluginManifest,
+    projected: &[flare_im_capability_core::plugin::runtime::ProjectedWebBundle],
+    approved: Option<&std::collections::BTreeMap<String, String>>,
+) -> Vec<flare_im_capability_core::plugin::bundle::WebBundleDecl> {
+    let Some(approved) = approved else {
+        return Vec::new();
+    };
+    projected
+        .iter()
+        .filter_map(|bundle| {
+            let decl = manifest.client_extensions.web_bundle(&bundle.id)?;
+            (decl.sha256 == bundle.sha256
+                && approved
+                    .get(&bundle.id)
+                    .is_some_and(|sha| *sha == bundle.sha256))
+            .then(|| bundle.catalog_entry(decl))
+        })
+        .collect()
 }
 
 #[cfg(test)]

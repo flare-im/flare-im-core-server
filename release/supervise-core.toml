@@ -88,7 +88,10 @@ inherit_env_prefixes = ["CAPABILITY_", "FLARE_CAPABILITY_", "PLUGIN_"]
 # for the invoking user (with FLARE_PLUGIN_RESOURCE_CONVERSATION_URL set, Capability does not
 # start without it), and the im.realtime.deliver pushes to FLARE_PLUGIN_REALTIME_PUSH_URL (Push
 # Proxy). FLARE_CAPABILITY_NOTICE_REDIS_URL (prefix) names the Redis of the tenant notice channel
-# when the token_store profile is not configured.
+# when the token_store profile is not configured. FLARE_PLUGIN_PAYMENT_PROVIDER names the transient
+# operation that checks payment credentials (unset: no client can confirm a payment);
+# FLARE_PLUGIN_WEB_BUNDLES_ENABLED=false turns plugin web bundles off (D-16; the platform has a
+# switch of the same name).
 inherit_env = [
   "FLARE_INTERNAL_CTX_PUBLIC_KEY", "FLARE_INTERNAL_CTX_PUBLIC_KEYS", "FLARE_PLATFORM_PUBLIC_KEY",
   "CONFIG_CENTER_ENDPOINT", "TENANT_ID",
@@ -99,6 +102,7 @@ inherit_env = [
   "FLARE_PLUGIN_CALL_KEY_ID", "FLARE_PLUGIN_CALL_SIGNING_KEY", "FLARE_PLUGIN_CALL_PUBLIC_KEYS",
   "FLARE_PLUGIN_PUBLISHER_KEYS", "FLARE_PLUGIN_CONFIG_KEY",
   "FLARE_PLUGIN_RUNTIME_PUBLIC_KEYS",
+  "FLARE_PLUGIN_PAYMENT_PROVIDER", "FLARE_PLUGIN_WEB_BUNDLES_ENABLED",
   "FLARE_INTERNAL_CTX_PRIVATE_KEY",
 ]
 required_env = ["FLARE_INTERNAL_CTX_PUBLIC_KEY"]

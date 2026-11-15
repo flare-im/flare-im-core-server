@@ -366,6 +366,7 @@ mod tests {
                 lifecycle: ProjectedLifecycle::Installed,
                 export_until_ms: None,
                 features: Default::default(),
+                web_bundles: Vec::new(),
             }],
             bindings: Vec::new(),
         };

@@ -253,6 +253,7 @@ async fn store_projection(pool: &sqlx::PgPool, snapshot: &PluginRuntimeSnapshot)
             lifecycle: ProjectedLifecycle::Installed,
             export_until_ms: None,
             features: plugin.features.clone(),
+            web_bundles: Vec::new(),
         }],
         bindings: Vec::new(),
     };

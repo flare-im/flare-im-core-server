@@ -34,6 +34,12 @@ pub fn capability_error_to_status(e: CapabilityError) -> Status {
         CapabilityError::NotRegistered(_) => Status::not_found(msg),
         CapabilityError::NotSupported(_) => Status::unimplemented(msg),
         CapabilityError::Timeout(_) => Status::deadline_exceeded(msg),
+        // A request Core cannot read (the catalog without a valid client UI descriptor).
+        CapabilityError::Flare(error)
+            if error.code() == Some(flare_server_core::error::ErrorCode::InvalidParameter) =>
+        {
+            Status::invalid_argument(msg)
+        }
         _ => Status::internal(msg),
     }
 }

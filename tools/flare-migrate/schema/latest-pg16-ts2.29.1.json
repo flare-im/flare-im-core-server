@@ -226,6 +226,17 @@
     },
     {
       "collation": null,
+      "default": "((EXTRACT(epoch FROM clock_timestamp()) * (1000)::numeric))::bigint",
+      "generated": "",
+      "identity": "",
+      "kind": "column",
+      "name": "approved_at",
+      "not_null": true,
+      "table": "plugin_web_bundles",
+      "type": "bigint"
+    },
+    {
+      "collation": null,
       "default": null,
       "generated": "",
       "identity": "",
@@ -355,6 +366,17 @@
       "not_null": true,
       "table": "tenant_client_policy",
       "type": "jsonb"
+    },
+    {
+      "collation": "default",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "kind": "column",
+      "name": "bundle_id",
+      "not_null": true,
+      "table": "plugin_web_bundles",
+      "type": "character varying(64)"
     },
     {
       "collation": null,
@@ -4973,6 +4995,17 @@
       "kind": "column",
       "name": "plugin_id",
       "not_null": true,
+      "table": "plugin_web_bundles",
+      "type": "character varying(128)"
+    },
+    {
+      "collation": "default",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "kind": "column",
+      "name": "plugin_id",
+      "not_null": true,
       "table": "capability_plugin_resource_calls",
       "type": "text"
     },
@@ -5051,6 +5084,17 @@
       "name": "plugin_version",
       "not_null": true,
       "table": "plugin_versions",
+      "type": "character varying(64)"
+    },
+    {
+      "collation": "default",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "kind": "column",
+      "name": "plugin_version",
+      "not_null": true,
+      "table": "plugin_web_bundles",
       "type": "character varying(64)"
     },
     {
@@ -6605,6 +6649,17 @@
       "type": "text"
     },
     {
+      "collation": "default",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "kind": "column",
+      "name": "sha256",
+      "not_null": true,
+      "table": "plugin_web_bundles",
+      "type": "text"
+    },
+    {
       "collation": null,
       "default": "true",
       "generated": "",
@@ -6625,6 +6680,17 @@
       "not_null": true,
       "table": "plugin_versions",
       "type": "character varying(128)"
+    },
+    {
+      "collation": null,
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "kind": "column",
+      "name": "size",
+      "not_null": true,
+      "table": "plugin_web_bundles",
+      "type": "bigint"
     },
     {
       "collation": null,
@@ -7750,6 +7816,17 @@
     },
     {
       "collation": null,
+      "default": "((EXTRACT(epoch FROM clock_timestamp()) * (1000)::numeric))::bigint",
+      "generated": "",
+      "identity": "",
+      "kind": "column",
+      "name": "updated_at",
+      "not_null": true,
+      "table": "plugin_web_bundles",
+      "type": "bigint"
+    },
+    {
+      "collation": null,
       "default": "CURRENT_TIMESTAMP",
       "generated": "",
       "identity": "",
@@ -8209,6 +8286,17 @@
       "not_null": false,
       "table": "message_write_ledger",
       "type": "timestamp with time zone"
+    },
+    {
+      "collation": null,
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "kind": "column",
+      "name": "withdrawn_at",
+      "not_null": false,
+      "table": "plugin_web_bundles",
+      "type": "bigint"
     },
     {
       "collation": "default",
@@ -9839,6 +9927,66 @@
       "name": "plugin_versions_plugin_id_plugin_version_manifest_digest_key",
       "table": "plugin_versions",
       "type": "u",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "deferred": false,
+      "definition": "CHECK (((bundle_id)::text ~ '^[a-z0-9][a-z0-9-]{0,63}$'::text))",
+      "kind": "constraint",
+      "name": "plugin_web_bundles_bundle_id_check",
+      "table": "plugin_web_bundles",
+      "type": "c",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "deferred": false,
+      "definition": "CHECK (((withdrawn_at IS NULL) OR (withdrawn_at >= approved_at)))",
+      "kind": "constraint",
+      "name": "plugin_web_bundles_check",
+      "table": "plugin_web_bundles",
+      "type": "c",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "deferred": false,
+      "definition": "PRIMARY KEY (plugin_id, plugin_version, bundle_id)",
+      "kind": "constraint",
+      "name": "plugin_web_bundles_pkey",
+      "table": "plugin_web_bundles",
+      "type": "p",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "deferred": false,
+      "definition": "FOREIGN KEY (plugin_id, plugin_version) REFERENCES plugin_versions(plugin_id, plugin_version)",
+      "kind": "constraint",
+      "name": "plugin_web_bundles_plugin_id_plugin_version_fkey",
+      "table": "plugin_web_bundles",
+      "type": "f",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "deferred": false,
+      "definition": "CHECK ((sha256 ~ '^[0-9a-f]{64}$'::text))",
+      "kind": "constraint",
+      "name": "plugin_web_bundles_sha256_check",
+      "table": "plugin_web_bundles",
+      "type": "c",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "deferred": false,
+      "definition": "CHECK (((size >= 1) AND (size <= 10485760)))",
+      "kind": "constraint",
+      "name": "plugin_web_bundles_size_check",
+      "table": "plugin_web_bundles",
+      "type": "c",
       "validated": true
     },
     {
@@ -12105,6 +12253,16 @@
     },
     {
       "clustered": false,
+      "definition": "CREATE UNIQUE INDEX plugin_web_bundles_pkey ON public.plugin_web_bundles USING btree (plugin_id, plugin_version, bundle_id)",
+      "kind": "index",
+      "name": "plugin_web_bundles_pkey",
+      "ready": true,
+      "replica_identity": false,
+      "table": "plugin_web_bundles",
+      "valid": true
+    },
+    {
+      "clustered": false,
       "definition": "CREATE UNIQUE INDEX tenant_client_policy_pkey ON public.tenant_client_policy USING btree (tenant_id)",
       "kind": "index",
       "name": "tenant_client_policy_pkey",
@@ -13012,6 +13170,17 @@
       "force_row_security": false,
       "kind": "relation",
       "name": "plugin_versions",
+      "options": null,
+      "partition": null,
+      "persistence": "p",
+      "replica_identity": "d",
+      "row_security": false,
+      "type": "r"
+    },
+    {
+      "force_row_security": false,
+      "kind": "relation",
+      "name": "plugin_web_bundles",
       "options": null,
       "partition": null,
       "persistence": "p",

@@ -90,6 +90,28 @@ fn command() -> CapabilityDispatchCommand {
         message_id: None,
     }
 }
+/// What a web client of build 1 renders: the engine vocabulary, a bundle runtime when `bundle`.
+fn catalog_descriptor(bundle: bool) -> flare_im_capability_core::plugin::ui::ClientUiDescriptor {
+    use flare_im_capability_core::plugin::manifest::ClientPlatform;
+    use flare_im_capability_core::plugin::ui::{
+        BundleRuntime, ClientUiDescriptor, engine_vocabulary,
+    };
+    ClientUiDescriptor::new(
+        &engine_vocabulary(),
+        ClientPlatform::Web,
+        1,
+        "web",
+        bundle.then(|| BundleRuntime {
+            bridge: 1,
+            engine: "browser".into(),
+            engine_major: 120,
+        }),
+    )
+}
+/// The catalog request payload of [`catalog_descriptor`].
+fn catalog_payload(bundle: bool) -> Value {
+    serde_json::json!({"descriptor": catalog_descriptor(bundle)})
+}
 /// A policy backend with no user grant at all: plugin operations never need one.
 fn policy() -> Arc<InMemoryCapabilityGrants> {
     Arc::new(InMemoryCapabilityGrants::new())
@@ -146,6 +168,59 @@ async fn dispatch_refuses_an_absent_expired_disabled_or_revoked_projection() {
         let result =
             dispatch_remote(&ctx, &command(), &routes, &backend, Duration::from_secs(1)).await;
         assert_eq!(plugin_code(&result), Some(code), "mode {mode}");
+    }
+}
+
+/// The control plane stopped renewing the projection (the platform stalled or restarted):
+/// the plugins are still installed. Neither an operation nor the catalog may then read as
+/// "not installed"; both answer a temporary failure the client retries.
+#[tokio::test]
+async fn a_lapsed_projection_is_an_outage_not_an_uninstall() {
+    struct Lapsed(bool);
+    #[async_trait::async_trait]
+    impl PluginAuthorizationReader for Lapsed {
+        async fn plugin_snapshot(
+            &self,
+            _tenant: &str,
+        ) -> flare_server_core::error::Result<Option<Arc<PluginRuntimeSnapshot>>> {
+            Ok(None)
+        }
+        async fn plugin_projection_lapsed(
+            &self,
+            _tenant: &str,
+        ) -> flare_server_core::error::Result<bool> {
+            Ok(self.0)
+        }
+    }
+    let (ctx, _, _) = identity(SignedActorType::User);
+    let backend: Arc<dyn CapabilityPolicyBackend> = policy();
+    let mut catalog = command();
+    catalog.capability_id = flare_im_capability_core::plugin::ui::UI_CATALOG_OPERATION.into();
+    catalog.payload = Some(catalog_payload(false));
+    for lapsed in [true, false] {
+        let routes = Arc::new(
+            PluginRouteBook::new().with_runtime_authorization(Arc::new(Lapsed(lapsed)), None),
+        );
+        let operation =
+            dispatch_remote(&ctx, &command(), &routes, &backend, Duration::from_secs(1)).await;
+        let read = dispatch_remote(&ctx, &catalog, &routes, &backend, Duration::from_secs(1)).await;
+        if lapsed {
+            assert!(
+                matches!(operation, Err(CapabilityError::System(_))),
+                "lapsed operation: {operation:?}"
+            );
+            assert!(
+                matches!(read, Err(CapabilityError::System(_))),
+                "lapsed catalog: {read:?}"
+            );
+        } else {
+            assert_eq!(
+                plugin_code(&operation),
+                Some(flare_im_service_kit::plugin_platform::PLUGIN_NOT_INSTALLED)
+            );
+            let read = read.unwrap();
+            assert!(read.data["plugins"].as_array().unwrap().is_empty());
+        }
     }
 }
 
@@ -339,6 +414,7 @@ async fn ui_catalog_uses_local_projection_and_strips_runtime_details() {
     let routes = Arc::new(PluginRouteBook::new().with_runtime_authorization(reader.clone(), None));
     let mut command = command();
     command.capability_id = flare_im_capability_core::plugin::ui::UI_CATALOG_OPERATION.into();
+    command.payload = Some(catalog_payload(false));
     let backend: Arc<dyn CapabilityPolicyBackend> = policy();
     let result = dispatch_remote(&ctx, &command, &routes, &backend, Duration::from_secs(1))
         .await
@@ -350,7 +426,7 @@ async fn ui_catalog_uses_local_projection_and_strips_runtime_details() {
     assert!(!result.data.to_string().contains("example.echo.other"));
     assert!(
         result.data["plugins"][0].get("queryOperations").is_none(),
-        "legacy plugins retain their previous wire shape"
+        "no query operation is offered"
     );
     let catalog: flare_im_capability_core::plugin::ui::UiCatalog =
         serde_json::from_value(result.data).unwrap();
@@ -390,6 +466,373 @@ async fn ui_catalog_uses_local_projection_and_strips_runtime_details() {
             serde_json::json!([{"pluginId": "example.echo", "reason": reason}])
         );
     }
+}
+
+/// There is no catalog without a client UI descriptor: a missing, unreadable or out-of-bounds
+/// one is `INVALID_ARGUMENT`, before the projection is read.
+#[tokio::test]
+async fn ui_catalog_requires_a_valid_client_ui_descriptor() {
+    let (ctx, _, _) = identity(SignedActorType::User);
+    let reader = Arc::new(Projection(Mutex::new(Some(snapshot(
+        "http://127.0.0.1:1".into(),
+    )))));
+    let routes = Arc::new(PluginRouteBook::new().with_runtime_authorization(reader, None));
+    let backend: Arc<dyn CapabilityPolicyBackend> = policy();
+    let mut bad = serde_json::to_value(catalog_descriptor(false)).unwrap();
+    bad["appBuild"] = serde_json::json!(-1);
+    // Unknown fields are ignored but still count toward the size bound.
+    let mut padded = serde_json::to_value(catalog_descriptor(false)).unwrap();
+    padded["padding"] = serde_json::json!("x".repeat(5000));
+    for payload in [
+        Some(serde_json::json!({"descriptor": padded})),
+        None,
+        Some(Value::Null),
+        Some(serde_json::json!({})),
+        Some(serde_json::json!({"descriptor": {"platform": "web"}})),
+        Some(serde_json::json!({"descriptor": bad})),
+    ] {
+        let mut request = command();
+        request.capability_id = flare_im_capability_core::plugin::ui::UI_CATALOG_OPERATION.into();
+        request.payload = payload.clone();
+        let error = dispatch_remote(&ctx, &request, &routes, &backend, Duration::from_secs(1))
+            .await
+            .unwrap_err();
+        let status = crate::interface::grpc::shared::helpers::capability_error_to_status(error);
+        assert_eq!(status.code(), tonic::Code::InvalidArgument, "{payload:?}");
+    }
+    assert_eq!(routes.catalog_selection.cached(), 0);
+}
+
+/// The task board card of the plan in miniature: a web bundle variant, then the declarative
+/// card. One projection, two descriptors, two variants; a `minClient` floor above the client's
+/// build gives the upgrade placeholder; with web bundles switched off for the deployment a
+/// client with a bundle runtime gets the declarative variant. Selections are cached per
+/// projection version and descriptor.
+#[tokio::test]
+async fn ui_catalog_selects_contribution_variants_per_client_descriptor() {
+    use flare_im_capability_core::plugin::ui::{UiBundleRef, UiCatalog, UiUpgrade};
+    let (ctx, _, _) = identity(SignedActorType::User);
+    let manifest = |min_client: Option<Value>| {
+        let mut raw: Value = serde_json::from_str(&echo_manifest()).unwrap();
+        raw["clientExtensions"] = serde_json::json!({"platforms":["web"],"nativeCapabilities":[],
+            "webBundles":[{"id":"board","sha256":"ab".repeat(32),"size":4096,"bridge":1}],
+            // A page: message cards stay declarative and never take a bundle variant.
+            "contributions":[{"kind":"page","id":"example.echo.board","schemaVersion":1,
+                "requiredPermissions":["example.echo.run"],
+                "schema":{"title":"Echo","fields":[],"actions":[{"id":"run","label":"Run",
+                    "target":{"kind":"operation","operation":"example.echo.run"}}],
+                    "translations":{"en-US":{"title":"Echo board","fields":[],"actions":{"run":"Run"}}}},
+                "variants":[
+                    {"id":"board","requires":{"bundle":{"id":"board","bridge":1}},
+                     "bundle":{"id":"board","route":"/"}},
+                    {"id":"basic","schema":{"title":"Echo",
+                        "fields":[{"label":"Last","path":"/last"}],
+                        "actions":[{"id":"run","label":"Run",
+                            "target":{"kind":"operation","operation":"example.echo.run"}}],
+                        "translations":{"en-US":{"title":"Echo board","fields":["Last"],
+                            "actions":{"run":"Run"}}}}}]}]});
+        if let Some(min_client) = min_client {
+            raw["clientExtensions"]["contributions"][0]["minClient"] = min_client;
+        }
+        serde_json::to_string(&raw).unwrap()
+    };
+    let mut projected = snapshot("http://127.0.0.1:1".into());
+    projected.plugins[0] = with_manifest(&projected.plugins[0], &manifest(None))
+        .with_web_bundles(vec![board_entry()])
+        .unwrap();
+    let reader = Arc::new(Projection(Mutex::new(Some(projected.clone()))));
+    let routes = Arc::new(PluginRouteBook::new().with_runtime_authorization(reader.clone(), None));
+    let backend: Arc<dyn CapabilityPolicyBackend> = policy();
+    let catalog = |routes: Arc<PluginRouteBook>, bundle: bool| {
+        let ctx = ctx.clone();
+        let backend = backend.clone();
+        async move {
+            let mut request = command();
+            request.capability_id =
+                flare_im_capability_core::plugin::ui::UI_CATALOG_OPERATION.into();
+            request.payload = Some(catalog_payload(bundle));
+            let result = dispatch_remote(&ctx, &request, &routes, &backend, Duration::from_secs(1))
+                .await
+                .unwrap();
+            let catalog: UiCatalog = serde_json::from_value(result.data).unwrap();
+            assert!(catalog.unavailable.is_empty());
+            catalog.plugins[0].extensions.contributions[0].clone()
+        }
+    };
+
+    let board = catalog(routes.clone(), true).await;
+    assert_eq!(board.variant.as_deref(), Some("board"));
+    assert_eq!(
+        board.bundle,
+        Some(UiBundleRef {
+            id: "board".into(),
+            route: "/".into()
+        })
+    );
+    assert!(board.variants.is_empty() && board.min_client.is_empty() && board.upgrade.is_none());
+    let basic = catalog(routes.clone(), false).await;
+    assert_eq!(basic.variant.as_deref(), Some("basic"));
+    assert!(basic.bundle.is_none(), "a bundle is never inherited");
+    assert_eq!(basic.id, board.id, "identity is the same in every variant");
+    assert_eq!(basic.schema.actions.len(), 1);
+    // The bundle variant carries the declarative page a host draws when the bundle cannot run.
+    assert_eq!(board.schema, basic.schema);
+    assert_eq!(board.schema.fields.len(), 1);
+    // One selection per descriptor of this projection version.
+    assert_eq!(routes.catalog_selection.cached(), 2);
+    let _ = catalog(routes.clone(), true).await;
+    assert_eq!(
+        routes.catalog_selection.cached(),
+        2,
+        "the same descriptor hits the cache"
+    );
+
+    // Web bundles switched off: only declarative variants, whatever the client offers.
+    let declarative = Arc::new(
+        PluginRouteBook::new()
+            .with_runtime_authorization(reader.clone(), None)
+            .with_web_bundles(false),
+    );
+    let chosen = catalog(declarative.clone(), true).await;
+    assert_eq!(chosen.variant.as_deref(), Some("basic"));
+    assert!(chosen.bundle.is_none());
+    assert_eq!(declarative.catalog_selection.cached(), 1);
+    let _ = catalog(declarative.clone(), false).await;
+    assert_eq!(
+        declarative.catalog_selection.cached(),
+        1,
+        "without bundles both clients share one selection"
+    );
+
+    // A floor above the client's build: the upgrade placeholder, title and translations only.
+    // A new projection version is a new selection.
+    let mut floored = projected.clone();
+    floored.version += 1;
+    floored.plugins[0] = with_manifest(
+        &floored.plugins[0],
+        &manifest(Some(serde_json::json!({"web": 5}))),
+    )
+    .with_web_bundles(vec![board_entry()])
+    .unwrap();
+    *reader.0.lock().unwrap() = Some(floored);
+    let placeholder = catalog(routes.clone(), true).await;
+    assert_eq!(
+        placeholder.upgrade,
+        Some(UiUpgrade {
+            min_build: Some(5),
+            unsupported: false
+        })
+    );
+    assert_eq!(placeholder.id, "example.echo.board");
+    assert_eq!(placeholder.schema.title, "Echo");
+    assert_eq!(placeholder.schema.translations["en-US"].title, "Echo board");
+    assert!(placeholder.schema.actions.is_empty() && placeholder.bundle.is_none());
+    assert_eq!(routes.catalog_selection.cached(), 3);
+}
+
+/// The served `board` bundle of the board manifests below: the manifest's declaration with the
+/// application's mirror addresses, unpacked files and approved bridge permissions.
+fn board_entry() -> flare_im_capability_core::plugin::bundle::WebBundleDecl {
+    use flare_im_capability_core::plugin::bridge::BridgePermission;
+    flare_im_capability_core::plugin::bundle::WebBundleDecl {
+        id: "board".into(),
+        sha256: "ab".repeat(32),
+        size: 4096,
+        bridge: 1,
+        digital_goods: false,
+        urls: vec![
+            "https://m1.example.com/b/board.fwb".into(),
+            "https://m2.example.net/b/board.fwb".into(),
+        ],
+        files: Some(format!("https://m1.example.com/b/{}/", "ab".repeat(32))),
+        permissions: [BridgePermission::PluginQuery].into(),
+    }
+}
+
+/// A board page with a web bundle variant and a declarative one.
+fn board_manifest(digital_goods: bool) -> String {
+    let mut raw: Value = serde_json::from_str(&echo_manifest()).unwrap();
+    raw["clientExtensions"] = serde_json::json!({"platforms":["web","android","ios"],"nativeCapabilities":[],
+        "webBundles":[{"id":"board","sha256":"ab".repeat(32),"size":4096,"bridge":1,"digitalGoods":digital_goods}],
+        "contributions":[{"kind":"page","id":"example.echo.board","schemaVersion":1,
+            "requiredPermissions":["example.echo.run"],
+            "schema":{"title":"Echo","fields":[],"actions":[{"id":"run","label":"Run",
+                "target":{"kind":"operation","operation":"example.echo.run"}}]},
+            "variants":[
+                {"id":"board","requires":{"bundle":{"id":"board","bridge":1}},
+                 "bundle":{"id":"board","route":"/"}},
+                {"id":"basic"}]}]});
+    serde_json::to_string(&raw).unwrap()
+}
+
+/// The catalog plugin a client of `platform` with a bundle runtime gets from `reader`.
+async fn bundle_catalog(
+    reader: Arc<Projection>,
+    platform: flare_im_capability_core::plugin::manifest::ClientPlatform,
+) -> flare_im_capability_core::plugin::ui::ClientPlugin {
+    use flare_im_capability_core::plugin::ui::{
+        BundleRuntime, ClientUiDescriptor, UiCatalog, engine_vocabulary,
+    };
+    let (ctx, _, _) = identity(SignedActorType::User);
+    let routes = Arc::new(PluginRouteBook::new().with_runtime_authorization(reader, None));
+    let backend: Arc<dyn CapabilityPolicyBackend> = policy();
+    let descriptor = ClientUiDescriptor::new(
+        &engine_vocabulary(),
+        platform,
+        1,
+        "web",
+        Some(BundleRuntime {
+            bridge: 1,
+            engine: "webview".into(),
+            engine_major: 120,
+        }),
+    );
+    let mut request = command();
+    request.capability_id = flare_im_capability_core::plugin::ui::UI_CATALOG_OPERATION.into();
+    request.payload = Some(serde_json::json!({ "descriptor": descriptor }));
+    let result = dispatch_remote(&ctx, &request, &routes, &backend, Duration::from_secs(1))
+        .await
+        .unwrap();
+    let catalog: UiCatalog = serde_json::from_value(result.data).unwrap();
+    catalog.plugins[0].clone()
+}
+
+/// `webBundles` in the catalog: the served bundle a selected contribution opens, with the
+/// application's addresses and approved permissions; `files` only for Web and Tauri; nothing
+/// when the bundle is not served (not approved, withdrawn or not projected), and the declarative
+/// variant is chosen instead.
+#[tokio::test]
+async fn ui_catalog_lists_the_served_web_bundles_a_selected_contribution_opens() {
+    use flare_im_capability_core::plugin::manifest::ClientPlatform;
+    let mut projected = snapshot("http://127.0.0.1:1".into());
+    projected.plugins[0] = with_manifest(&projected.plugins[0], &board_manifest(false))
+        .with_web_bundles(vec![board_entry()])
+        .unwrap();
+    let reader = Arc::new(Projection(Mutex::new(Some(projected.clone()))));
+
+    let web = bundle_catalog(reader.clone(), ClientPlatform::Web).await;
+    assert_eq!(
+        web.extensions.contributions[0].variant.as_deref(),
+        Some("board")
+    );
+    assert_eq!(web.extensions.web_bundles, vec![board_entry()]);
+
+    let android = bundle_catalog(reader.clone(), ClientPlatform::Android).await;
+    assert_eq!(
+        android.extensions.contributions[0].variant.as_deref(),
+        Some("board")
+    );
+    let mut entry = board_entry();
+    entry.files = None;
+    assert_eq!(
+        android.extensions.web_bundles,
+        vec![entry],
+        "native clients read the .fwb file, not the unpacked copy"
+    );
+
+    // Withdrawn in the registry (or never approved): the resolution serves no bundle.
+    let mut withdrawn = projected.clone();
+    withdrawn.plugins[0] = with_manifest(&projected.plugins[0], &board_manifest(false));
+    *reader.0.lock().unwrap() = Some(withdrawn);
+    let fallback = bundle_catalog(reader.clone(), ClientPlatform::Web).await;
+    assert_eq!(
+        fallback.extensions.contributions[0].variant.as_deref(),
+        Some("basic")
+    );
+    assert!(fallback.extensions.web_bundles.is_empty());
+    assert!(fallback.extensions.contributions[0].bundle.is_none());
+}
+
+/// A bundle selling digital goods is never selected for iOS, and then not listed either.
+#[tokio::test]
+async fn ui_catalog_keeps_digital_goods_bundles_away_from_ios() {
+    use flare_im_capability_core::plugin::manifest::ClientPlatform;
+    let mut projected = snapshot("http://127.0.0.1:1".into());
+    let mut entry = board_entry();
+    entry.digital_goods = true;
+    projected.plugins[0] = with_manifest(&projected.plugins[0], &board_manifest(true))
+        .with_web_bundles(vec![entry.clone()])
+        .unwrap();
+    let reader = Arc::new(Projection(Mutex::new(Some(projected))));
+    let ios = bundle_catalog(reader.clone(), ClientPlatform::Ios).await;
+    assert_eq!(
+        ios.extensions.contributions[0].variant.as_deref(),
+        Some("basic")
+    );
+    assert!(ios.extensions.web_bundles.is_empty());
+    let web = bundle_catalog(reader, ClientPlatform::Web).await;
+    assert_eq!(web.extensions.web_bundles, vec![entry]);
+}
+
+/// A served bundle must be the manifest's declaration: another digest is refused.
+#[test]
+fn a_resolved_plugin_serves_only_declared_web_bundles() {
+    let projected = snapshot("http://127.0.0.1:1".into());
+    let plugin = with_manifest(&projected.plugins[0], &board_manifest(false));
+    let mut other = board_entry();
+    other.sha256 = "cd".repeat(32);
+    assert!(plugin.clone().with_web_bundles(vec![other]).is_err());
+    let mut unknown = board_entry();
+    unknown.id = "other".into();
+    assert!(plugin.clone().with_web_bundles(vec![unknown]).is_err());
+    let mut no_urls = board_entry();
+    no_urls.urls.clear();
+    assert!(plugin.clone().with_web_bundles(vec![no_urls]).is_err());
+    assert!(
+        plugin
+            .clone()
+            .with_web_bundles(vec![board_entry(), board_entry()])
+            .is_err()
+    );
+    assert!(plugin.with_web_bundles(vec![board_entry()]).is_ok());
+}
+
+/// Resolution serves a projected bundle only when the manifest declares it with that digest and
+/// the registry holds it approved with that digest; an approval must match the manifest.
+#[test]
+fn served_web_bundles_need_the_manifest_the_registry_and_the_projection_to_agree() {
+    use crate::domain::plugin::{WebBundleApproval, served_web_bundles};
+    use flare_im_capability_core::plugin::bridge::BridgePermission;
+    let manifest = PluginManifest::from_json(board_manifest(false).as_bytes()).unwrap();
+    let projected = ProjectedWebBundle {
+        id: "board".into(),
+        sha256: "ab".repeat(32),
+        urls: board_entry().urls,
+        files: board_entry().files,
+        permissions: [BridgePermission::PluginQuery].into(),
+    };
+    let approved: std::collections::BTreeMap<String, String> =
+        [("board".to_owned(), "ab".repeat(32))].into();
+    assert_eq!(
+        served_web_bundles(&manifest, std::slice::from_ref(&projected), Some(&approved)),
+        vec![board_entry()]
+    );
+    assert!(served_web_bundles(&manifest, std::slice::from_ref(&projected), None).is_empty());
+    let stale: std::collections::BTreeMap<String, String> =
+        [("board".to_owned(), "cd".repeat(32))].into();
+    assert!(
+        served_web_bundles(&manifest, std::slice::from_ref(&projected), Some(&stale)).is_empty(),
+        "the registry approved other bytes"
+    );
+    let mut forged = projected.clone();
+    forged.sha256 = "cd".repeat(32);
+    assert!(
+        served_web_bundles(&manifest, &[forged], Some(&stale)).is_empty(),
+        "the manifest signs another digest"
+    );
+    let approval = |sha256: String, size: u64| WebBundleApproval {
+        plugin_id: "example.echo".into(),
+        plugin_version: "1.0.0".into(),
+        bundle_id: "board".into(),
+        sha256,
+        size,
+    };
+    assert!(approval("ab".repeat(32), 4096).check(&manifest).is_ok());
+    assert!(approval("cd".repeat(32), 4096).check(&manifest).is_err());
+    assert!(approval("ab".repeat(32), 4097).check(&manifest).is_err());
+    let mut other = approval("ab".repeat(32), 4096);
+    other.bundle_id = "other".into();
+    assert!(other.check(&manifest).is_err());
 }
 
 #[tokio::test]
@@ -438,6 +881,7 @@ async fn ui_catalog_query_operations_are_only_authorized_signed_queries() {
     let backend: Arc<dyn CapabilityPolicyBackend> = backend_config.clone();
     let mut request = command();
     request.capability_id = flare_im_capability_core::plugin::ui::UI_CATALOG_OPERATION.into();
+    request.payload = Some(catalog_payload(false));
     let result = dispatch_remote(&ctx, &request, &routes, &backend, Duration::from_secs(1))
         .await
         .unwrap();
@@ -456,7 +900,7 @@ async fn ui_catalog_query_operations_are_only_authorized_signed_queries() {
         .unwrap();
     assert!(
         closed.data["plugins"][0].get("queryOperations").is_none(),
-        "an unavailable Observe target must not emit observation authority"
+        "a stopped query is not offered"
     );
 }
 
@@ -492,6 +936,7 @@ async fn scan_catalog_authorizes_its_resolver_without_an_observe_action() {
     let backend: Arc<dyn CapabilityPolicyBackend> = backend_config.clone();
     let mut request = command();
     request.capability_id = flare_im_capability_core::plugin::ui::UI_CATALOG_OPERATION.into();
+    request.payload = Some(catalog_payload(false));
     let result = dispatch_remote(&ctx, &request, &routes, &backend, Duration::from_secs(1))
         .await
         .unwrap();
@@ -590,6 +1035,7 @@ async fn native_catalog_exposes_only_approved_transient_commands() {
     let backend: Arc<dyn CapabilityPolicyBackend> = backend_config;
     let mut request = command();
     request.capability_id = flare_im_capability_core::plugin::ui::UI_CATALOG_OPERATION.into();
+    request.payload = Some(catalog_payload(false));
     let result = dispatch_remote(&ctx, &request, &routes, &backend, Duration::from_secs(1))
         .await
         .unwrap();
@@ -617,6 +1063,54 @@ async fn native_catalog_exposes_only_approved_transient_commands() {
             .get("transientOperations")
             .is_none()
     );
+}
+
+#[tokio::test]
+async fn ui_catalog_lists_the_authorized_transient_operations() {
+    let (ctx, _, _) = identity(SignedActorType::User);
+    let mut raw: Value = serde_json::from_str(&echo_manifest()).unwrap();
+    raw["clientExtensions"] = serde_json::json!({"platforms":["web"],"contributions":[{"kind":"message-content","id":"example.echo.card","schemaVersion":1,"requiredPermissions":[],"schema":{"title":"Echo","actions":[{"id":"run","label":"Run","target":{"kind":"operation","operation":"example.echo.run"}}]}}]});
+    let original = raw["capabilities"][0]["operations"][0].clone();
+    for id in ["pay", "unapproved-pay"] {
+        let mut transient = original.clone();
+        transient["id"] = serde_json::json!(id);
+        transient["mode"] = serde_json::json!("command");
+        transient["transient"] = serde_json::json!(true);
+        raw["capabilities"][0]["operations"]
+            .as_array_mut()
+            .unwrap()
+            .push(transient);
+    }
+    let mut projected = snapshot("http://127.0.0.1:1".into());
+    projected.plugins[0] =
+        with_manifest(&projected.plugins[0], &serde_json::to_string(&raw).unwrap());
+    projected.plugins[0]
+        .grant
+        .approved_operations
+        .insert("example.echo.pay".into());
+    let reader = Arc::new(Projection(Mutex::new(Some(projected))));
+    let routes = Arc::new(PluginRouteBook::new().with_runtime_authorization(reader, None));
+    let backend: Arc<dyn CapabilityPolicyBackend> = policy();
+    let mut request = command();
+    request.capability_id = flare_im_capability_core::plugin::ui::UI_CATALOG_OPERATION.into();
+    request.payload = Some(catalog_payload(false));
+    let result = dispatch_remote(&ctx, &request, &routes, &backend, Duration::from_secs(1))
+        .await
+        .unwrap();
+    assert_eq!(
+        result.data["plugins"][0]["transientOperations"],
+        serde_json::json!(["example.echo.pay"])
+    );
+    let catalog: flare_im_capability_core::plugin::ui::UiCatalog =
+        serde_json::from_value(result.data).unwrap();
+    let plugin = &catalog.plugins[0];
+    assert_eq!(
+        plugin.transient_operations,
+        ["example.echo.pay".into()].into()
+    );
+    assert!(plugin.transient_operations.is_subset(&plugin.operations));
+    assert!(!plugin.transient_operations.contains("example.echo.run"));
+    assert!(plugin.query_operations.is_empty());
 }
 
 /// Design 6.3: an action whose operation a closed feature gates leaves every surface, including a
@@ -648,6 +1142,7 @@ async fn a_closed_feature_drops_the_page_actions_targeting_its_operations() {
     let routes = Arc::new(PluginRouteBook::new().with_runtime_authorization(reader.clone(), None));
     let mut request = command();
     request.capability_id = flare_im_capability_core::plugin::ui::UI_CATALOG_OPERATION.into();
+    request.payload = Some(catalog_payload(false));
     let backend: Arc<dyn CapabilityPolicyBackend> = policy();
     for (open, expected) in [(false, vec!["other"]), (true, vec!["open", "other"])] {
         let mut value = projected.clone();
@@ -656,9 +1151,10 @@ async fn a_closed_feature_drops_the_page_actions_targeting_its_operations() {
         let result = dispatch_remote(&ctx, &request, &routes, &backend, Duration::from_secs(1))
             .await
             .unwrap();
-        assert!(
-            result.data["plugins"][0].get("queryOperations").is_none(),
-            "an authorized query without Observe keeps its original wire shape"
+        assert_eq!(
+            result.data["plugins"][0]["queryOperations"],
+            serde_json::json!(["example.echo.home"]),
+            "every authorized query is listed, Observe actions or not"
         );
         let catalog: flare_im_capability_core::plugin::ui::UiCatalog =
             serde_json::from_value(result.data).unwrap();
@@ -708,6 +1204,7 @@ async fn projection_issued_ahead_of_core_clock_keeps_plugins_in_effect() {
     let (ctx, _, _) = identity(SignedActorType::User);
     let mut request = command();
     request.capability_id = flare_im_capability_core::plugin::ui::UI_CATALOG_OPERATION.into();
+    request.payload = Some(catalog_payload(false));
     let reader = Arc::new(Projection(Mutex::new(Some(value.clone()))));
     let routes = Arc::new(PluginRouteBook::new().with_runtime_authorization(reader, None));
     let catalog = dispatch_remote(&ctx, &request, &routes, &backend, Duration::from_secs(1))
@@ -783,6 +1280,7 @@ async fn catalog_cross_plugin_pages_require_an_enabled_approved_destination() {
     let (ctx, _, _) = identity(SignedActorType::User);
     let mut request = command();
     request.capability_id = flare_im_capability_core::plugin::ui::UI_CATALOG_OPERATION.into();
+    request.payload = Some(catalog_payload(false));
     for reversed in [false, true] {
         for blocked in [
             "none",
@@ -1141,7 +1639,7 @@ mod plugin_state_and_catalog {
         *h.reader.0.lock().unwrap() = Some(snapshot);
         let mut command = poll_command(
             flare_im_capability_core::plugin::ui::UI_CATALOG_OPERATION,
-            Value::Null,
+            catalog_payload(false),
         );
         command.conversation_id = None;
         let result = dispatch(&h, &command).await.unwrap();

@@ -443,6 +443,20 @@ pub const REGISTERED_ENV_VARS: &[EnvVarSpec] = &[
         EnvOwner::Capability,
         EnvPurpose::Auth,
     ),
+    // The transient operation that checks payment credentials (`plugin.paymentProvider`), for
+    // example `flare.wallet.payments.ticket`. Unset: no client can confirm a payment.
+    env(
+        "FLARE_PLUGIN_PAYMENT_PROVIDER",
+        EnvOwner::Capability,
+        EnvPurpose::TenantDefaults,
+    ),
+    // Plugin web bundles (D-16): `false` or `0` serves every plugin page as its declarative
+    // variant. Unset: on. The platform has a switch of the same name; set both alike.
+    env(
+        "FLARE_PLUGIN_WEB_BUNDLES_ENABLED",
+        EnvOwner::Capability,
+        EnvPurpose::TenantDefaults,
+    ),
     // Local plugin development only. Release builds and deployment templates never set it.
     env(
         "FLARE_PLUGIN_DEV_MODE",

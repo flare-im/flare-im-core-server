@@ -1213,6 +1213,22 @@ CREATE TABLE IF NOT EXISTS plugin_dev_apps (
  app_id text PRIMARY KEY CHECK(app_id ~ '^[0-9A-Za-z_-]{1,32}$'),
  created_at bigint NOT NULL DEFAULT (extract(epoch FROM clock_timestamp())*1000)::bigint
 );
+-- 插件版本的 Web 包附件：平台审核通过后登记到 Core，撤回后不再下发。
+-- 每个应用的镜像地址和批准的桥权限随授权投影下发；这里只记版本级的审核结论。
+-- 撤回是终态：同一版本的同一个包不能再登记回来。
+CREATE TABLE IF NOT EXISTS plugin_web_bundles (
+ plugin_id varchar(128) NOT NULL,
+ plugin_version varchar(64) NOT NULL,
+ bundle_id varchar(64) NOT NULL CHECK(bundle_id ~ '^[a-z0-9][a-z0-9-]{0,63}$'),
+ sha256 text NOT NULL CHECK(sha256 ~ '^[0-9a-f]{64}$'),
+ size bigint NOT NULL CHECK(size BETWEEN 1 AND 10485760),
+ approved_at bigint NOT NULL DEFAULT (extract(epoch FROM clock_timestamp())*1000)::bigint,
+ withdrawn_at bigint,
+ updated_at bigint NOT NULL DEFAULT (extract(epoch FROM clock_timestamp())*1000)::bigint,
+ PRIMARY KEY(plugin_id,plugin_version,bundle_id),
+ FOREIGN KEY(plugin_id,plugin_version) REFERENCES plugin_versions(plugin_id,plugin_version),
+ CHECK(withdrawn_at IS NULL OR withdrawn_at>=approved_at)
+);
 -- 注册表变化的水位。scope 空串是全局（版本状态、部署恢复），否则是应用（配置、事实）。
 -- 解析缓存按它和投影版本探测，撤权和状态变化下一次读取就生效。
 CREATE TABLE IF NOT EXISTS plugin_registry_revisions (
@@ -1341,18 +1357,19 @@ CREATE TABLE tenant_notice_outbox (
 CREATE INDEX idx_tenant_notice_outbox_due ON tenant_notice_outbox(next_attempt_at);
 
 CREATE TABLE core_initial_history (
-    to_version smallint PRIMARY KEY CHECK (to_version = 2),
-    from_version smallint NOT NULL CHECK (from_version IN (0, 1)),
+    to_version smallint PRIMARY KEY CHECK (to_version IN (2, 3)),
+    from_version smallint NOT NULL CHECK (from_version IN (0, 1, 2)),
     from_sha256 text CHECK (from_sha256 ~ '^[0-9a-f]{64}$'),
     to_sha256 text NOT NULL CHECK (to_sha256 ~ '^[0-9a-f]{64}$'),
-    transition text NOT NULL CHECK (transition IN ('fresh', 'application-media-v2')),
+    transition text NOT NULL CHECK (transition IN ('fresh', 'application-media-v2', 'plugin-web-bundles-v3')),
     ddl_sha256 text NOT NULL CHECK (ddl_sha256 ~ '^[0-9a-f]{64}$'),
     applied_at timestamptz NOT NULL DEFAULT clock_timestamp(),
     CHECK ((from_version = 0 AND from_sha256 IS NULL AND transition = 'fresh')
-        OR (from_version = 1 AND from_sha256 IS NOT NULL AND transition = 'application-media-v2'))
+        OR (from_version = 1 AND to_version = 2 AND from_sha256 IS NOT NULL AND transition = 'application-media-v2')
+        OR (from_version = 2 AND to_version = 3 AND from_sha256 IS NOT NULL AND transition = 'plugin-web-bundles-v3'))
 );
 CREATE TABLE core_initial_schema (
- version smallint PRIMARY KEY CHECK(version=2),
+ version smallint PRIMARY KEY CHECK(version=3),
  schema_sha256 text NOT NULL CHECK(schema_sha256 ~ '^[0-9a-f]{64}$'),
  initialized_at timestamptz NOT NULL DEFAULT clock_timestamp()
 );
