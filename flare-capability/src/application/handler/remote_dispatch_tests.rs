@@ -3,14 +3,14 @@ use crate::application::handler::plugin_state::tests::{with_features, with_manif
 use crate::domain::repository::PluginAuthorizationReader;
 use crate::infrastructure::capability::InMemoryCapabilityGrants;
 use ed25519_dalek::{
-    pkcs8::{EncodePrivateKey, EncodePublicKey},
     SigningKey,
+    pkcs8::{EncodePrivateKey, EncodePublicKey},
 };
 use flare_im_capability_core::plugin::{
-    authorization::TenantPluginGrant,
-    invocation::{PluginCallSigner, PluginCallVerifier, PLUGIN_CALL_HEADER},
-    runtime::*,
     PluginManifest,
+    authorization::TenantPluginGrant,
+    invocation::{PLUGIN_CALL_HEADER, PluginCallSigner, PluginCallVerifier},
+    runtime::*,
 };
 use flare_server_core::{SignedContextIdentity, SignedContextSigner};
 use std::sync::Mutex;
@@ -44,37 +44,39 @@ fn snapshot(authority: String) -> PluginRuntimeSnapshot {
         version: 10,
         issued_at_ms: now,
         valid_until_ms: now + 300000,
-        plugins: vec![ResolvedPlugin::new(
-            TenantPluginGrant {
-                grant_id: "g1".into(),
-                revision: 2,
-                tenant_id: "app-a".into(),
-                plugin_id: "example.echo".into(),
-                plugin_version: "1.0.0".into(),
-                manifest_digest: digest.clone(),
-                approved_operations: ["example.echo.run".into()].into(),
-                approved_permissions: ["example.echo.run".into()].into(),
-                approved_data_scopes: Default::default(),
-                enabled: true,
-                revoked: false,
-                suspended: false,
-                valid_from_ms: now,
-                valid_until_ms: now + 300000,
-            },
-            Arc::new(PluginManifest::from_json(raw.as_bytes()).unwrap()),
-            PluginDeployment {
-                deployment_id: "echo-1".into(),
-                plugin_id: "example.echo".into(),
-                plugin_version: "1.0.0".into(),
-                manifest_digest: digest,
-                artifact_digest: format!("sha256:{}", "a".repeat(64)),
-                grpc_authority: authority,
-            },
-            configuration_digest(&serde_json::json!({})).unwrap(),
-            Default::default(),
-            [("run".to_owned(), true)].into(),
-        )
-        .unwrap()],
+        plugins: vec![
+            ResolvedPlugin::new(
+                TenantPluginGrant {
+                    grant_id: "g1".into(),
+                    revision: 2,
+                    tenant_id: "app-a".into(),
+                    plugin_id: "example.echo".into(),
+                    plugin_version: "1.0.0".into(),
+                    manifest_digest: digest.clone(),
+                    approved_operations: ["example.echo.run".into()].into(),
+                    approved_permissions: ["example.echo.run".into()].into(),
+                    approved_data_scopes: Default::default(),
+                    enabled: true,
+                    revoked: false,
+                    suspended: false,
+                    valid_from_ms: now,
+                    valid_until_ms: now + 300000,
+                },
+                Arc::new(PluginManifest::from_json(raw.as_bytes()).unwrap()),
+                PluginDeployment {
+                    deployment_id: "echo-1".into(),
+                    plugin_id: "example.echo".into(),
+                    plugin_version: "1.0.0".into(),
+                    manifest_digest: digest,
+                    artifact_digest: format!("sha256:{}", "a".repeat(64)),
+                    grpc_authority: authority,
+                },
+                configuration_digest(&serde_json::json!({})).unwrap(),
+                Default::default(),
+                [("run".to_owned(), true)].into(),
+            )
+            .unwrap(),
+        ],
     }
 }
 fn command() -> CapabilityDispatchCommand {
@@ -150,8 +152,8 @@ async fn dispatch_refuses_an_absent_expired_disabled_or_revoked_projection() {
 #[tokio::test]
 async fn an_installed_plugin_needs_no_user_grant_and_the_emergency_switch_still_stops_it() {
     use flare_grpc_proto::capability::{
-        extension_plugin_server::{ExtensionPlugin, ExtensionPluginServer},
         GenericResponse,
+        extension_plugin_server::{ExtensionPlugin, ExtensionPluginServer},
     };
     struct Endpoint {
         verifier: PluginCallVerifier,
@@ -267,11 +269,12 @@ fn dispatch_identity_requires_exact_user_tenant_and_request() {
         assert!(origin.require_user_binding(tenant, user, request).is_err());
     }
     let (ctx, _, _) = identity(SignedActorType::Service);
-    assert!(ctx
-        .get_data::<VerifiedDispatchOrigin>()
-        .unwrap()
-        .require_user_binding("app-a", "u1", "r1")
-        .is_err());
+    assert!(
+        ctx.get_data::<VerifiedDispatchOrigin>()
+            .unwrap()
+            .require_user_binding("app-a", "u1", "r1")
+            .is_err()
+    );
 }
 #[test]
 fn absent_forged_and_duplicate_user_credentials_are_rejected() {
@@ -851,10 +854,10 @@ async fn catalog_cross_plugin_pages_require_an_enabled_approved_destination() {
 
 mod plugin_state_and_catalog {
     use super::*;
-    use crate::application::handler::plugin_card::tests::{MemoryOutbox, ScriptedDelivery};
     use crate::application::handler::plugin_card::PluginCardPoster;
+    use crate::application::handler::plugin_card::tests::{MemoryOutbox, ScriptedDelivery};
     use crate::application::handler::plugin_state::tests::{
-        poll_snapshot, publisher, MemoryBindings, RecordingSink,
+        MemoryBindings, RecordingSink, poll_snapshot, publisher,
     };
     use crate::application::handler::plugin_test_server::PluginServer;
     use flare_im_service_kit::plugin_platform::{

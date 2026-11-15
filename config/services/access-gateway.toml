@@ -43,6 +43,12 @@ tenant_policy = "lenient"
 # sync_pull_tenant_requests_per_second = 2000
 # sync_pull_tenant_burst = 5000
 
+# 送达确认（只走环境变量，毫秒；0 或非整数按未配置处理）:
+#   ACCESS_GATEWAY_DELIVERY_ACK_ACTIVE_DEADLINE_MS   默认 3000。前台连接等送达确认的期限，到期未确认的可提示帧交接给推送通道
+#   ACCESS_GATEWAY_DELIVERY_ACK_STANDBY_DEADLINE_MS  默认 1500。后台连接等送达确认的期限
+#   ACCESS_GATEWAY_DELIVERY_PROBE_TIMEOUT_MS         默认 5000。确认超时后探活的时限，到时没有 PONG 也没有确认就关闭连接
+# 交接经 Push Proxy 上报（服务发现名 flare-push-proxy，static 模式回退同容器 50091），以 Cell 私钥签名。
+
 [services.access_gateway.auth]
 # 可选值: core_jwt, http_hook
 mode = "core_jwt"

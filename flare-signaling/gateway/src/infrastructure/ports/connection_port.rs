@@ -12,7 +12,8 @@ use flare_core::server::connection::{ConnectionManagerTrait, TraitConnectionInfo
 use flare_grpc_proto::signaling::online::online_service_client::OnlineServiceClient;
 use flare_grpc_proto::signaling::online::{
     GetOnlineStatusRequest, GetOnlineStatusResponse, HeartbeatRequest, HeartbeatResponse,
-    LoginRequest, LoginResponse, LogoutRequest, LogoutResponse,
+    LoginRequest, LoginResponse, LogoutRequest, LogoutResponse, ReportDeviceStateRequest,
+    ReportDeviceStateResponse,
 };
 use flare_im_contracts::service_names::{SIGNALING_ONLINE, get_service_name};
 use flare_im_contracts::utils::normalize_tenant_id;
@@ -26,7 +27,9 @@ use tonic::transport::Channel;
 
 use flare_im_contracts::Ctx;
 
-use crate::constants::{AUTH_FAILURE_MSG_TENANT_UNAVAILABLE, METADATA_KEY_TENANT_ID};
+use crate::constants::{
+    AUTH_FAILURE_MSG_TENANT_UNAVAILABLE, METADATA_KEY_DEVICE_STATE, METADATA_KEY_TENANT_ID,
+};
 use crate::domain::model::ConnectionInfo as DomainConnectionInfo;
 use crate::domain::ports::IConnectionPort;
 use crate::infrastructure::connection_context::AuthenticatedConnectionOrigin;
@@ -321,6 +324,27 @@ impl IConnectionPort for ConnectionRepository {
             })
     }
 
+    async fn report_device_state(
+        &self,
+        ctx: &Ctx,
+        request: ReportDeviceStateRequest,
+    ) -> Result<ReportDeviceStateResponse> {
+        let request = self.signed_request(ctx, request.clone(), &request.user_id)?;
+        let mut client = self.ensure_client().await?;
+        client
+            .report_device_state(request)
+            .await
+            .map(|resp| resp.into_inner())
+            .map_err(|status| {
+                ErrorBuilder::new(
+                    ErrorCode::ServiceUnavailable,
+                    "signaling report_device_state failed",
+                )
+                .details(status.to_string())
+                .build_error()
+            })
+    }
+
     async fn get_online_status(
         &self,
         ctx: &Ctx,
@@ -516,7 +540,8 @@ pub(crate) fn core_info_to_domain(
 
 /// 客户端在 CONNECT 的 `DeviceInfo.metadata` 里带构建号（`app_build`）与分发渠道（`distribution`），
 /// 用于按版本排查连接问题；链路监督者还带上连接代数（`connection_epoch`）与接入清单 serial
-/// （`access_serial`），用于排查切换与清单下发。只取这几个键并校验格式：其余客户端自报的键不进连接
+/// （`access_serial`），用于排查切换与清单下发；以及建连时的应用状态（`device_state`，前台或两种后台），
+/// 登记 Online 会话与送达确认跟踪据此起步。只取这几个键并校验格式：其余客户端自报的键不进连接
 /// 元数据（里面还有租户等服务端写入的键，不能被客户端覆盖），连接元数据里已有同名键时也不覆盖。
 fn merge_client_build_metadata(
     metadata: &mut HashMap<String, String>,
@@ -527,6 +552,7 @@ fn merge_client_build_metadata(
         ("distribution", is_distribution),
         ("connection_epoch", is_app_build),
         ("access_serial", is_app_build),
+        (METADATA_KEY_DEVICE_STATE, is_connect_device_state),
     ] {
         if !metadata.contains_key(key)
             && let Some(value) = device_metadata.get(key).map(|value| value.trim())
@@ -540,6 +566,12 @@ fn merge_client_build_metadata(
 /// 构建号：十进制整数字符串（最多 20 位，装得下 u64）。
 fn is_app_build(value: &str) -> bool {
     (1..=20).contains(&value.len()) && value.bytes().all(|byte| byte.is_ascii_digit())
+}
+
+/// 建连时的应用状态：只认小写的 `active`、`standby` 与 `deferred`，其余不进连接元数据
+/// （按前台处理）。
+fn is_connect_device_state(value: &str) -> bool {
+    matches!(value, "active" | "standby" | "deferred")
 }
 
 /// 分发渠道：短标识（如 `appstore`、`testflight`、`enterprise`），只允许字母数字与 `._-`，
@@ -649,6 +681,30 @@ mod static_route_tests {
         let mut existing = HashMap::from([("app_build".to_string(), "7".to_string())]);
         merge_client_build_metadata(&mut existing, &device);
         assert_eq!(existing.get("app_build").map(String::as_str), Some("7"));
+    }
+
+    /// 建连时的应用状态（`active` / `standby` / `deferred`）从 DeviceInfo.metadata 带进连接
+    /// 元数据；别的取值不带，连接按前台处理。
+    #[test]
+    fn the_connect_device_state_enters_connection_metadata() {
+        for (reported, carried) in [
+            ("standby", Some("standby")),
+            (" active ", Some("active")),
+            ("deferred", Some("deferred")),
+            ("Standby", None),
+            ("parking", None),
+            ("", None),
+        ] {
+            let device =
+                HashMap::from([(METADATA_KEY_DEVICE_STATE.to_string(), reported.to_string())]);
+            let mut metadata = HashMap::new();
+            merge_client_build_metadata(&mut metadata, &device);
+            assert_eq!(
+                metadata.get(METADATA_KEY_DEVICE_STATE).map(String::as_str),
+                carried,
+                "{reported:?}"
+            );
+        }
     }
 
     #[test]

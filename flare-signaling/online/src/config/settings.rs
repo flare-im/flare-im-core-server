@@ -17,6 +17,10 @@ pub struct OnlineConfig {
     /// Local fallback when a tenant has no projected device quota; zero means
     /// unlimited. A projected nonzero quota always takes precedence.
     pub max_online_devices_per_user: u32,
+    /// Push Proxy `PushService` 的 gRPC 地址（`http(s)://` 或 `discovery://<服务名>`）。配了才把
+    /// 网关失联时被清扫的设备交接给推送通道，并在踢线、身份会话吊销、设备被顶下线时吊销那台设备的
+    /// 推送绑定；不配则清扫只移除会话，踢线也不动绑定。
+    pub push_proxy_url: Option<String>,
 }
 
 impl OnlineConfig {
@@ -94,6 +98,12 @@ impl OnlineConfig {
             })?
             .unwrap_or(0);
 
+        // 没有缺省地址：Push Proxy 在哪、要不要接由部署决定，不配就不调用它。
+        let push_proxy_url = env::var("SIGNALING_ONLINE_PUSH_PROXY_URL")
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty());
+
         Ok(Self {
             redis_url,
             redis_ttl_seconds,
@@ -103,6 +113,7 @@ impl OnlineConfig {
             tenant_runtime_postgres_url,
             tenant_policy,
             max_online_devices_per_user,
+            push_proxy_url,
         })
     }
 }

@@ -8,9 +8,9 @@ mod hook_runtime;
 
 pub(crate) use hook_runtime::HookRetentionBackground;
 mod internal_ctx;
+pub(crate) mod message_events;
 mod plugin_reconcile;
 mod plugin_routes;
-pub(crate) mod message_events;
 mod resource_bridge;
 
 use std::sync::Arc;
@@ -120,7 +120,8 @@ pub(crate) async fn initialize(
         extensions.service_dispatch.as_ref(),
     )
     .await?;
-    let plugin_message_events = message_events::tasks(&plugin_routes, Arc::clone(&capability_policy)).await?;
+    let plugin_message_events =
+        message_events::tasks(&plugin_routes, Arc::clone(&capability_policy)).await?;
     let audit_delivery = if let Some(pool) = db_pool {
         let publisher =
             flare_im_service_kit::audit_effects::AuditEffects::from_env("flare-capability").await?;

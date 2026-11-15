@@ -31,8 +31,8 @@ use flare_server_core::auth::credential_snapshot::{
 use flare_server_core::error::grpc::IntoGrpc;
 use tonic::{Request, Response, Status};
 
-use crate::application::handler::plugin_reconcile::ReconcileSignal;
 use crate::application::commands::{apply_client_policy, apply_tenant_projection};
+use crate::application::handler::plugin_reconcile::ReconcileSignal;
 use crate::application::queries::tenant_projection_versions;
 use crate::domain::model::{ClientPolicyRecord, TenantProjectionRecord};
 use crate::domain::repository::TenantProjectionRepository;
@@ -355,9 +355,8 @@ mod tests {
     struct MemoryRepo {
         rows: Mutex<HashMap<String, (TenantProjectionRecord, u64)>>,
         credentials: Mutex<HashMap<String, CredentialSnapshot>>,
-        plugins: Mutex<
-            HashMap<String, flare_im_capability_core::plugin::runtime::PluginProjection>,
-        >,
+        plugins:
+            Mutex<HashMap<String, flare_im_capability_core::plugin::runtime::PluginProjection>>,
         client_policies: Mutex<HashMap<String, ClientPolicyRecord>>,
     }
 

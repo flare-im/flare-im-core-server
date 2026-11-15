@@ -19,6 +19,9 @@ use crate::domain::model::{
 use crate::domain::repository::ConversationRepository;
 use crate::infrastructure::persistence::message_cache::MessageCacheInvalidator;
 
+/// 用户级通知设置与会话通知订阅者（`NotificationSettingsRepository`）。
+mod notification_settings;
+
 /// 不计入未读的消息状态：已撤回、已删除。取 proto `MessageStatus` 的枚举值绑定进 SQL，不在 SQL
 /// 里写数字：`messages.status` 存的就是 proto 编码（撤回 5、删除 6）。
 const UNREAD_EXCLUDED_STATUSES: [i32; 2] = [
@@ -616,6 +619,7 @@ impl ConversationRepository for PostgresConversationRepository {
                 END AS unread_count,
                 COALESCE(sp.muted, false) as muted,
                 COALESCE(sp.mention_only, false) AS mention_only,
+                COALESCE(sp.notify_all, false) AS notify_all,
                 COALESCE(sp.pinned, false) as pinned,
                 (s.lifecycle_state = 'archived' OR COALESCE(sp.is_archived, false)) as is_archived,
                 COALESCE(sp.settings_version, 0) as settings_version,
@@ -754,6 +758,7 @@ impl ConversationRepository for PostgresConversationRepository {
             let unread_count: i32 = row.get("unread_count");
             let is_muted: bool = row.get("muted");
             let is_mention_only: bool = row.get("mention_only");
+            let notify_all: bool = row.get("notify_all");
             let is_pinned: bool = row.get("pinned");
             let is_archived: bool = row.get("is_archived");
             let settings_version: i64 = row.get("settings_version");
@@ -818,6 +823,7 @@ impl ConversationRepository for PostgresConversationRepository {
                 member_preview: Vec::new(),
                 is_muted,
                 is_mention_only,
+                notify_all,
                 is_pinned,
                 is_archived,
                 settings_version: settings_version.max(0) as u64,
@@ -1984,6 +1990,143 @@ impl ConversationRepository for PostgresConversationRepository {
             .await
     }
 
+    async fn list_recent_unread_conversations(
+        &self,
+        ctx: &flare_server_core::context::Context,
+        user_id: &str,
+        since: DateTime<Utc>,
+        limit: usize,
+    ) -> Result<Vec<crate::domain::model::RecentUnreadConversation>> {
+        let tenant_id = required_tenant(ctx)?;
+        let user_id = user_id.trim();
+        if user_id.is_empty() || limit == 0 {
+            return Ok(Vec::new());
+        }
+        // 一条语句，每一步都落在已有索引上：
+        // - 参与者行走 idx_conversation_participants_tenant_user（tenant_id, user_id 前缀）。
+        // - 窗口探针（EXISTS）走 idx_messages_conversation_ts。它只引用参与者行，规划器可以把它
+        //   下推到两个 LATERAL 之前：窗口内没有新消息的会话在这一步就被裁掉，成本是 O(有变化的会话)，
+        //   不是 O(这个用户的全部会话)。
+        // - 最后一条消息与未读重算走 idx_messages_tenant_conv_seq：前者倒序取一行，后者封顶。
+        //
+        // 未读的两段——unread_tail 与外层的 CASE——与 load_bootstrap 逐字相同，参数位置也相同
+        // （$2 用户、$4 重算上限、$5 不计未读的状态）：这是同一个「未读」，不能各写各的，
+        // 测试 recent_unread_uses_the_conversation_list_unread_definition 钉住这一点。超大群
+        // 没有物化未读（见 above_precise_unread_threshold）时 sp.unread_count 是 0，
+        // 未读就是重算值，与会话列表一致。
+        let rows = sqlx::query(
+            r#"
+            SELECT recent.conversation_id,
+                   recent.last_message_seq,
+                   recent.last_message_id,
+                   recent.last_sender_id,
+                   recent.last_message_at,
+                   recent.unread_count
+            FROM (
+                SELECT
+                    sp.conversation_id,
+                    message_tail.max_seq AS last_message_seq,
+                    message_tail.last_message_id AS last_message_id,
+                    message_tail.last_sender_id AS last_sender_id,
+                    message_tail.last_message_at AS last_message_at,
+                    CASE WHEN GREATEST(sp.history_cleared_through_seq, s.history_cleared_through_seq) > 0
+                         THEN COALESCE(unread_tail.unread_count, 0)
+                         ELSE GREATEST(COALESCE(sp.unread_count, 0), COALESCE(unread_tail.unread_count, 0))
+                    END AS unread_count
+                FROM conversation_participants sp
+                INNER JOIN conversations s
+                    ON s.tenant_id = sp.tenant_id AND s.conversation_id = sp.conversation_id
+                INNER JOIN LATERAL (
+                    -- 这个用户看得到的、未撤回也未删除的最新一条。历史下限与全会话删除的过滤同
+                    -- 会话摘要的预览；另外跳过已撤回、已删除的消息：摘要要把「撤回了一条消息」
+                    -- 显示出来，而这里回答的是有没有值得提示的新消息。
+                    SELECT m.seq AS max_seq, m.timestamp AS last_message_at,
+                           m.server_id AS last_message_id, m.sender_id AS last_sender_id
+                    FROM messages m
+                    WHERE m.tenant_id = s.tenant_id
+                      AND m.conversation_id = s.conversation_id
+                      AND m.seq > GREATEST(sp.visible_from_seq, sp.history_cleared_through_seq, s.history_cleared_through_seq)
+                      AND NOT (COALESCE(m.status, 1) = ANY($5))
+                      AND NOT EXISTS (
+                          SELECT 1 FROM message_visibility mv
+                          WHERE mv.tenant_id = m.tenant_id AND mv.message_id = m.server_id
+                            AND mv.scope = 2 AND mv.visibility_status IN (1, 2)
+                      )
+                    ORDER BY m.seq DESC
+                    LIMIT 1
+                ) message_tail ON TRUE
+                LEFT JOIN LATERAL (
+                    SELECT COUNT(1)::INT AS unread_count
+                    FROM (
+                        SELECT 1
+                        FROM messages m
+                        WHERE m.tenant_id = s.tenant_id
+                          AND m.conversation_id = s.conversation_id
+                          AND m.seq > GREATEST(
+                              COALESCE(sp.last_read_seq, 0),
+                              COALESCE(sp.visible_from_seq, 0),
+                              sp.history_cleared_through_seq,
+                              s.history_cleared_through_seq,
+                              COALESCE(sp.last_sync_seq, 0)
+                          )
+                          AND m.sender_id <> $2
+                          AND NOT (COALESCE(m.status, 1) = ANY($5))
+                          AND NOT EXISTS (
+                              SELECT 1 FROM message_visibility mv
+                              WHERE mv.tenant_id = m.tenant_id AND mv.message_id = m.server_id
+                                AND mv.scope = 2 AND mv.visibility_status IN (1, 2)
+                          )
+                        LIMIT $4
+                    ) capped
+                ) unread_tail ON TRUE
+                WHERE sp.tenant_id = $1
+                  AND sp.user_id = $2
+                  AND s.lifecycle_state != 'deleted'
+                  -- 在席：未隐藏、未退出。隐藏了会话的人不再收到这个会话的推送。
+                  AND NOT COALESCE(sp.is_deleted, false)
+                  AND sp.quit_at IS NULL
+                  AND EXISTS (
+                      SELECT 1 FROM messages mx
+                      WHERE mx.tenant_id = sp.tenant_id
+                        AND mx.conversation_id = sp.conversation_id
+                        AND mx.timestamp > $3
+                  )
+                  AND message_tail.last_message_at > $3
+                  AND message_tail.last_sender_id <> $2
+            ) recent
+            WHERE recent.unread_count > 0
+            ORDER BY recent.last_message_at DESC, recent.conversation_id ASC
+            LIMIT $6
+            "#,
+        )
+        .bind(tenant_id)
+        .bind(user_id)
+        .bind(since)
+        .bind(MAX_RECOMPUTED_UNREAD)
+        .bind(UNREAD_EXCLUDED_STATUSES.as_slice())
+        .bind(i64::try_from(limit).unwrap_or(i64::MAX))
+        .fetch_all(&*self.pool)
+        .await
+        .map_err(|e| {
+            map_infra_error(
+                e,
+                ErrorCode::DatabaseError,
+                "list recent unread conversations",
+            )
+        })?;
+        Ok(rows
+            .iter()
+            .map(|row| crate::domain::model::RecentUnreadConversation {
+                conversation_id: row.get("conversation_id"),
+                last_message_seq: row.get("last_message_seq"),
+                last_message_id: row.get("last_message_id"),
+                last_sender_id: row.get("last_sender_id"),
+                last_message_time: row.get("last_message_at"),
+                unread_count: row.get("unread_count"),
+            })
+            .collect())
+    }
+
     async fn retract_message_unread(
         &self,
         ctx: &flare_server_core::context::Context,
@@ -2371,6 +2514,7 @@ impl ConversationRepository for PostgresConversationRepository {
                     member_preview: Vec::new(),
                     is_muted: false,
                     is_mention_only: false,
+                    notify_all: false,
                     is_pinned: false,
                     is_archived: false,
                     settings_version: 0,
@@ -2573,7 +2717,8 @@ impl ConversationRepository for PostgresConversationRepository {
             || patch.is_muted.is_some()
             || patch.is_archived.is_some()
             || patch.draft.is_some()
-            || patch.clear_history_through_seq.is_some();
+            || patch.clear_history_through_seq.is_some()
+            || patch.notify_all.is_some();
         if !has_patch {
             return Err(ErrorBuilder::new(
                 ErrorCode::InvalidParameter,
@@ -2595,6 +2740,7 @@ impl ConversationRepository for PostgresConversationRepository {
                 pinned = CASE WHEN $5::bool IS NOT NULL THEN $5 ELSE sp.pinned END,
                 muted = CASE WHEN $6::bool IS NOT NULL THEN $6 ELSE sp.muted END,
                 mention_only = CASE WHEN $9::bool IS NOT NULL THEN $9 ELSE sp.mention_only END,
+                notify_all = CASE WHEN $11::bool IS NOT NULL THEN $11 ELSE sp.notify_all END,
                 is_archived = CASE
                     WHEN c.lifecycle_state <> 'archived' AND $7::bool IS NOT NULL THEN $7
                     ELSE sp.is_archived
@@ -2627,7 +2773,7 @@ impl ConversationRepository for PostgresConversationRepository {
               AND ($4 = 0 OR sp.settings_version = $4)
             RETURNING sp.pinned, sp.muted, sp.mention_only,
                       (c.lifecycle_state = 'archived' OR sp.is_archived) AS is_archived, sp.draft,
-                      sp.settings_version, sp.history_cleared_through_seq
+                      sp.settings_version, sp.history_cleared_through_seq, sp.notify_all
             "#,
         )
         .bind(tenant_id)
@@ -2640,6 +2786,7 @@ impl ConversationRepository for PostgresConversationRepository {
         .bind(patch.draft.as_deref())
         .bind(patch.is_mention_only)
         .bind(patch.clear_history_through_seq.map(|seq| i64::try_from(seq).unwrap_or(i64::MAX)))
+        .bind(patch.notify_all)
         .fetch_optional(&*self.pool)
         .await
         .map_err(|e| map_infra_error(e, ErrorCode::DatabaseError, "update user settings"))?;
@@ -2667,6 +2814,7 @@ impl ConversationRepository for PostgresConversationRepository {
             draft: row.get::<Option<String>, _>("draft"),
             settings_version: row.get::<i64, _>("settings_version").max(0) as u64,
             history_cleared_through_seq: row.get::<i64, _>("history_cleared_through_seq") as u64,
+            notify_all: row.get("notify_all"),
         })
     }
 
@@ -3203,6 +3351,7 @@ mod single_chat_peer_tests {
             member_preview: Vec::new(),
             is_muted: false,
             is_mention_only: false,
+            notify_all: false,
             is_pinned: false,
             is_archived: false,
             settings_version: 0,
@@ -3241,5 +3390,102 @@ mod single_chat_peer_tests {
                 ("", None),
             ]
         );
+    }
+}
+
+#[cfg(test)]
+mod recent_unread_sql_tests {
+    /// 去掉 SQL 注释与多余空白，便于逐字比较两段 SQL。
+    fn normalized(sql: &str) -> String {
+        sql.lines()
+            .map(|line| line.split("--").next().unwrap_or_default())
+            .flat_map(str::split_whitespace)
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
+    fn production_source() -> &'static str {
+        let source = include_str!("postgres_repository.rs");
+        source.split("\n#[cfg(test)]").next().unwrap_or(source)
+    }
+
+    /// 生产代码里每个 `unread_tail` LATERAL 的正文，按出现顺序。
+    fn unread_laterals(source: &str) -> Vec<String> {
+        let pieces: Vec<&str> = source.split(") unread_tail ON TRUE").collect();
+        pieces[..pieces.len() - 1]
+            .iter()
+            .map(|piece| {
+                let start = piece
+                    .rfind("LEFT JOIN LATERAL (")
+                    .expect("unread_tail 是一个 LEFT JOIN LATERAL");
+                normalized(&piece[start..])
+            })
+            .collect()
+    }
+
+    /// 生产代码里每个未读 CASE 表达式，按出现顺序。
+    fn unread_cases(source: &str) -> Vec<String> {
+        // 运行时拼接起止标记，避免本函数的字面量被 include_str! 读进来命中自己。
+        let start = format!(
+            "CASE WHEN GREATEST(sp.history_cleared_through_seq, {}) > 0",
+            "s.history_cleared_through_seq"
+        );
+        let end = format!("END AS {}", "unread_count");
+        source
+            .split(start.as_str())
+            .skip(1)
+            .map(|rest| normalized(rest.split(end.as_str()).next().unwrap_or_default()))
+            .collect()
+    }
+
+    /// 「有新未读消息的会话」与会话列表摘要用的必须是同一个未读定义：已物化的未读与按已读水位
+    /// 重算（封顶）的未读取大者，重算时排除本人发的、已撤回已删除的、看不到的消息。
+    ///
+    /// 两处各写一份 SQL，靠这条用例保证它们逐字相同：只改一处的话，会话列表说「没有未读」的
+    /// 会话照样会被补一条推送提示（或者反过来），而这种不一致只在特定数据上才露头。
+    #[test]
+    fn recent_unread_uses_the_conversation_list_unread_definition() {
+        let source = production_source();
+
+        let laterals = unread_laterals(source);
+        assert_eq!(
+            laterals.len(),
+            2,
+            "未读重算应当只有会话摘要与新未读会话这两处；多了一处就把它也纳入比较"
+        );
+        assert_eq!(laterals[0], laterals[1], "未读重算的 SQL 在两处不一致");
+        assert!(
+            laterals[1].contains("LIMIT $4") && laterals[1].contains(") capped"),
+            "未读重算必须封顶，否则对整条时间线做 COUNT"
+        );
+
+        let cases = unread_cases(source);
+        assert_eq!(cases.len(), 2, "未读 CASE 表达式应当只有两处");
+        assert_eq!(cases[0], cases[1], "未读 CASE 表达式在两处不一致");
+    }
+
+    /// 这条读按用户扫参与者行，必须先用窗口探针裁掉没有新消息的会话，并且只回答在席的会话。
+    #[test]
+    fn recent_unread_prunes_by_the_time_window_and_reads_seated_conversations_only() {
+        let source = production_source();
+        let body = source
+            .split("async fn list_recent_unread_conversations")
+            .nth(1)
+            .expect("函数应存在");
+        let body = normalized(&body[..body.find("\n    async fn ").unwrap_or(body.len())]);
+
+        assert!(
+            body.contains("mx.timestamp > $3"),
+            "缺了窗口探针就要为这个用户的每个会话各算一遍最后一条消息与未读"
+        );
+        assert!(
+            body.contains("AND NOT COALESCE(sp.is_deleted, false) AND sp.quit_at IS NULL"),
+            "只回答在席（未隐藏、未退出）的会话：隐藏了会话的人不再收到它的推送"
+        );
+        assert!(
+            body.contains("AND message_tail.last_sender_id <> $2"),
+            "自己发的最后一条消息不该给自己补提示"
+        );
+        assert!(body.contains("LIMIT $6"), "结果必须有上限");
     }
 }

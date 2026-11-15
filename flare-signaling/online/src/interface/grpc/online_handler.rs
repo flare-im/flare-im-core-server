@@ -23,7 +23,9 @@ use flare_server_core::grpc::middleware::signed_context::{
     VerifiedContext, verify_signed_context_metadata,
 };
 
-use crate::application::commands::{HeartbeatCommand, LoginCommand, LogoutCommand};
+use crate::application::commands::{
+    HeartbeatCommand, LoginCommand, LogoutCommand, ReportDeviceStateCommand,
+};
 use crate::application::queries::GetOnlineStatusQuery;
 use flare_im_service_kit::audit_effects::durable::StaffAudit;
 
@@ -183,8 +185,16 @@ where
                 "authenticated signaling connection required for Online login",
             ));
         }
-        if request.get_ref().metadata.get("identity_session_id").map(String::as_str) != claims.session_id.as_deref() {
-            return Err(Status::permission_denied("authenticated identity session mismatch"));
+        if request
+            .get_ref()
+            .metadata
+            .get("identity_session_id")
+            .map(String::as_str)
+            != claims.session_id.as_deref()
+        {
+            return Err(Status::permission_denied(
+                "authenticated identity session mismatch",
+            ));
         }
         if request
             .get_ref()
@@ -242,6 +252,26 @@ where
         let response = self
             .command_handler
             .handle_heartbeat(&ctx, command)
+            .await
+            .into_grpc()?;
+        Ok(Response::new(response))
+    }
+
+    /// 设备状态上报：与心跳同一个调用方（网关替这位用户签的上下文）、同一个租户边界，
+    /// 租户取自签名。
+    pub async fn handle_report_device_state(
+        &self,
+        request: Request<ReportDeviceStateRequest>,
+    ) -> Result<Response<ReportDeviceStateResponse>, Status> {
+        let (ctx, claims) = self.verified_identity(&request)?;
+        Self::require_user(&claims, &request.get_ref().user_id)?;
+        let command = ReportDeviceStateCommand {
+            request: request.into_inner(),
+            ctx: ctx.as_ref().clone(),
+        };
+        let response = self
+            .command_handler
+            .handle_report_device_state(&ctx, command)
             .await
             .into_grpc()?;
         Ok(Response::new(response))
@@ -670,6 +700,7 @@ mod admin_branch_tests {
     use flare_im_service_kit::control_auth::{
         CORE_PROJECTION_AUDIENCE, PLATFORM_ISSUER, PROJECTION_WORKER_SUBJECT, SCHEDULER_SUBJECT,
     };
+    use flare_proto::common::{DeviceAppState as ProtoAppState, DeviceAttention as ProtoAttention};
     use flare_server_core::auth::{KeySet, kid};
     use flare_server_core::context::Context;
     use flare_server_core::error::Result as FlareResult;
@@ -678,14 +709,19 @@ mod admin_branch_tests {
 
     use super::*;
     use crate::domain::aggregate::{Connection, ConnectionCreateParams};
+    use crate::domain::connection_event_publisher::NoopConnectionEventPublisher;
     use crate::domain::model::OnlineStatusRecord;
+    use crate::domain::push_binding::{
+        BindingRevocation, BindingRevocationReason, BindingRevocationSink,
+    };
     use crate::domain::repository::{EvictedConnection, PresenceChangeEvent};
     use crate::domain::service::{OnlineStatusService, SubscriptionService, UserService};
     use crate::domain::value_object::{
-        ConnectionId, DeviceId, DevicePriority, TokenVersion, UserId,
+        ConnectionId, DeviceAppState, DeviceAttention, DeviceId, DevicePriority, DeviceStateUpdate,
+        TokenVersion, UserId,
     };
 
-    /// 按 (tenant, user) 分桶的会话存储；只实现管理员分支会走到的读写。
+    /// 按 (tenant, user) 分桶的会话存储；实现管理员分支与设备状态上报会走到的读写。
     #[derive(Default)]
     struct TenantSessions {
         sessions: Mutex<HashMap<(String, String), Vec<Connection>>>,
@@ -704,6 +740,8 @@ mod admin_branch_tests {
                 device_priority: DevicePriority::Normal,
                 token_version: TokenVersion::from(0),
                 initial_quality: None,
+                app_state: DeviceAppState::Active,
+                attention: DeviceAttention::Unspecified,
             });
             self.sessions
                 .lock()
@@ -733,12 +771,38 @@ mod admin_branch_tests {
         }
         async fn admit_connection(
             &self,
-            _: &Connection,
+            connection: &Connection,
             _: &str,
             _: DeviceConflictStrategy,
             _: u32,
         ) -> FlareResult<Vec<EvictedConnection>> {
-            unreachable!("admin branch never admits connections")
+            self.sessions
+                .lock()
+                .unwrap()
+                .entry((
+                    connection.tenant_id().to_string(),
+                    connection.user_id().as_str().to_string(),
+                ))
+                .or_default()
+                .push(connection.clone());
+            Ok(Vec::new())
+        }
+        async fn report_device_state(
+            &self,
+            tenant_id: &str,
+            connection_id: &ConnectionId,
+            user_id: &UserId,
+            update: DeviceStateUpdate,
+        ) -> FlareResult<bool> {
+            let mut sessions = self.sessions.lock().unwrap();
+            let Some(connection) = sessions
+                .get_mut(&(tenant_id.to_string(), user_id.as_str().to_string()))
+                .and_then(|list| list.iter_mut().find(|c| c.id() == connection_id))
+            else {
+                return Ok(false);
+            };
+            connection.report_device_state(update, chrono::Utc::now());
+            Ok(true)
         }
         async fn remove_connection(
             &self,
@@ -953,6 +1017,15 @@ mod admin_branch_tests {
     }
 
     fn handler(repo: Arc<TenantSessions>, with_key: bool) -> Handler {
+        handler_revoking(repo, with_key, None)
+    }
+
+    /// 同 [`handler`]，领域服务接上推送绑定吊销的出口。
+    fn handler_revoking(
+        repo: Arc<TenantSessions>,
+        with_key: bool,
+        revocations: Option<Arc<dyn BindingRevocationSink>>,
+    ) -> Handler {
         let control = with_key
             .then(|| PlatformAssertionVerifier::from_public_key(&pem(PLATFORM_KEY).1).unwrap());
         let staff = with_key.then(|| {
@@ -963,14 +1036,22 @@ mod admin_branch_tests {
         });
         OnlineHandler::new(
             Arc::new(OnlineCommandHandler::new(
-                Arc::new(OnlineStatusService::new(repo.clone(), "gw".to_string())),
+                Arc::new(
+                    OnlineStatusService::<_, NoopConnectionEventPublisher>::new(
+                        repo.clone(),
+                        "gw".to_string(),
+                    )
+                    .with_binding_revocations(revocations.clone()),
+                ),
                 Arc::new(SubscriptionService::new(
                     Arc::new(NoSubscriptions),
                     Arc::new(NoPresence),
                 )),
             )),
             Arc::new(OnlineQueryHandler::new(repo.clone())),
-            Arc::new(OnlineUserHandler::new(Arc::new(UserService::new(repo)))),
+            Arc::new(OnlineUserHandler::new(Arc::new(
+                UserService::new(repo).with_binding_revocations(revocations),
+            ))),
             Arc::new(OnlinePresenceWatcherHandler::new(Arc::new(NoWatcher))),
         )
         .with_control_verifier(control)
@@ -1530,18 +1611,633 @@ mod admin_branch_tests {
     }
     #[tokio::test]
     async fn login_rejects_unbound_or_tampered_identity_sid_metadata() {
-        let verifier=SignedContextVerifier::from_public_key(&pem(GATEWAY_KEY).1).unwrap();
-        let online=handler(seeded(),true).with_identity_verifier(Some(verifier));
-        let sid=uuid::Uuid::new_v4().to_string();let different=uuid::Uuid::new_v4().to_string();
-        for (claim,body) in [(None,Some(sid.as_str())),(Some(sid.as_str()),Some(different.as_str())),(Some(sid.as_str()),None)] {
-            let identity=SignedContextIdentity::new(SignedActorType::User,"u1","tenant-a","physical-owned").with_credential_id("signaling-gateway");
-            let identity=if let Some(sid)=claim {identity.with_session_id(sid)} else {identity};
-            let token=SignedContextSigner::from_private_key(&pem(GATEWAY_KEY).0).unwrap().sign(&identity).unwrap();
-            let mut metadata=HashMap::from([("connection_id".into(),"physical-owned".into())]);
-            if let Some(sid)=body {metadata.insert("identity_session_id".into(),sid.into());}
-            let request=LoginRequest {user_id:"u1".into(),device_id:"owned-device".into(),metadata,..Default::default()};
-            assert_eq!(online.handle_login(with_ctx(request,&token)).await.unwrap_err().code(),Code::PermissionDenied);
+        let verifier = SignedContextVerifier::from_public_key(&pem(GATEWAY_KEY).1).unwrap();
+        let online = handler(seeded(), true).with_identity_verifier(Some(verifier));
+        let sid = uuid::Uuid::new_v4().to_string();
+        let different = uuid::Uuid::new_v4().to_string();
+        for (claim, body) in [
+            (None, Some(sid.as_str())),
+            (Some(sid.as_str()), Some(different.as_str())),
+            (Some(sid.as_str()), None),
+        ] {
+            let identity = SignedContextIdentity::new(
+                SignedActorType::User,
+                "u1",
+                "tenant-a",
+                "physical-owned",
+            )
+            .with_credential_id("signaling-gateway");
+            let identity = if let Some(sid) = claim {
+                identity.with_session_id(sid)
+            } else {
+                identity
+            };
+            let token = SignedContextSigner::from_private_key(&pem(GATEWAY_KEY).0)
+                .unwrap()
+                .sign(&identity)
+                .unwrap();
+            let mut metadata = HashMap::from([("connection_id".into(), "physical-owned".into())]);
+            if let Some(sid) = body {
+                metadata.insert("identity_session_id".into(), sid.into());
+            }
+            let request = LoginRequest {
+                user_id: "u1".into(),
+                device_id: "owned-device".into(),
+                metadata,
+                ..Default::default()
+            };
+            assert_eq!(
+                online
+                    .handle_login(with_ctx(request, &token))
+                    .await
+                    .unwrap_err()
+                    .code(),
+                Code::PermissionDenied
+            );
         }
     }
 
+    /// 网关替 `user` 签的用户上下文（`request_id` 是物理连接 ID）。
+    fn user_ctx<T>(payload: T, tenant: &str, user: &str, connection: &str) -> Request<T> {
+        let identity = SignedContextIdentity::new(SignedActorType::User, user, tenant, connection)
+            .with_credential_id("signaling-gateway");
+        let token = SignedContextSigner::from_private_key(&pem(GATEWAY_KEY).0)
+            .unwrap()
+            .sign(&identity)
+            .unwrap();
+        with_ctx(payload, &token)
+    }
+
+    fn device_state_handler(repo: Arc<TenantSessions>) -> Handler {
+        let verifier = SignedContextVerifier::from_public_key(&pem(GATEWAY_KEY).1).unwrap();
+        handler(repo, true).with_identity_verifier(Some(verifier))
+    }
+
+    fn state_report(
+        user: &str,
+        session: &str,
+        app_state: ProtoAppState,
+        attention: ProtoAttention,
+        badge: u32,
+    ) -> ReportDeviceStateRequest {
+        ReportDeviceStateRequest {
+            user_id: user.to_string(),
+            conversation_id: session.to_string(),
+            app_state: app_state as i32,
+            attention: attention as i32,
+            badge,
+        }
+    }
+
+    /// 以 `state` 建连，返回会话 ID。
+    async fn login_with_state(
+        online: &Handler,
+        tenant: &str,
+        user: &str,
+        app_state: ProtoAppState,
+        attention: ProtoAttention,
+    ) -> String {
+        let login = online
+            .handle_login(user_ctx(
+                LoginRequest {
+                    user_id: user.to_string(),
+                    device_id: "phone".to_string(),
+                    device_platform: "ios".to_string(),
+                    desired_conflict_strategy: DeviceConflictStrategy::Coexist as i32,
+                    metadata: HashMap::from([(
+                        "connection_id".to_string(),
+                        "physical-1".to_string(),
+                    )]),
+                    app_state: app_state as i32,
+                    attention: attention as i32,
+                    ..Default::default()
+                },
+                tenant,
+                user,
+                "physical-1",
+            ))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(login.success);
+        login.conversation_id
+    }
+
+    async fn only_device(online: &Handler, tenant: &str, user: &str) -> DeviceInfo {
+        let mut devices = online
+            .handle_list_user_devices(user_ctx(
+                ListUserDevicesRequest {
+                    user_id: user.to_string(),
+                },
+                tenant,
+                user,
+                "physical-1",
+            ))
+            .await
+            .unwrap()
+            .into_inner()
+            .devices;
+        assert_eq!(devices.len(), 1);
+        devices.remove(0)
+    }
+
+    fn since(device: &DeviceInfo) -> (i64, i32) {
+        let at = device.state_since.as_ref().unwrap();
+        (at.seconds, at.nanos)
+    }
+
+    /// 建连带来的状态是初始状态；之后的上报整体覆盖应用状态、注意力与角标，设备列表读到的就是
+    /// 最近一次上报。进入当前应用状态的时刻只在应用状态变化时前移。
+    #[tokio::test]
+    async fn a_device_state_report_is_what_the_device_list_shows() {
+        let online = device_state_handler(Arc::new(TenantSessions::default()));
+        let session = login_with_state(
+            &online,
+            "tenant-a",
+            "u1",
+            ProtoAppState::Standby,
+            ProtoAttention::Idle,
+        )
+        .await;
+
+        let connected = only_device(&online, "tenant-a", "u1").await;
+        assert_eq!(connected.conversation_id, session);
+        assert_eq!(connected.app_state, ProtoAppState::Standby as i32);
+        assert_eq!(connected.attention, ProtoAttention::Idle as i32);
+        assert_eq!(connected.badge, 0);
+
+        let report = |app_state, attention, badge| {
+            user_ctx(
+                state_report("u1", &session, app_state, attention, badge),
+                "tenant-a",
+                "u1",
+                "physical-1",
+            )
+        };
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        // 同一应用状态下只改注意力与角标：不重新计时。
+        assert!(
+            online
+                .handle_report_device_state(report(
+                    ProtoAppState::Standby,
+                    ProtoAttention::Attentive,
+                    3
+                ))
+                .await
+                .unwrap()
+                .into_inner()
+                .success
+        );
+        let refreshed = only_device(&online, "tenant-a", "u1").await;
+        assert_eq!(refreshed.app_state, ProtoAppState::Standby as i32);
+        assert_eq!(refreshed.attention, ProtoAttention::Attentive as i32);
+        assert_eq!(refreshed.badge, 3);
+        assert_eq!(since(&refreshed), since(&connected));
+
+        // 托管：应用状态变了，重新计时。
+        assert!(
+            online
+                .handle_report_device_state(report(
+                    ProtoAppState::Parking,
+                    ProtoAttention::Unspecified,
+                    5
+                ))
+                .await
+                .unwrap()
+                .into_inner()
+                .success
+        );
+        let parked = only_device(&online, "tenant-a", "u1").await;
+        assert_eq!(parked.app_state, ProtoAppState::Parking as i32);
+        assert_eq!(parked.attention, ProtoAttention::Unspecified as i32);
+        assert_eq!(parked.badge, 5);
+        assert!(since(&parked) > since(&connected));
+    }
+
+    /// 没带应用状态的建连与上报都按前台处理。
+    #[tokio::test]
+    async fn an_unspecified_app_state_counts_as_active() {
+        let online = device_state_handler(Arc::new(TenantSessions::default()));
+        let session = login_with_state(
+            &online,
+            "tenant-a",
+            "u1",
+            ProtoAppState::Unspecified,
+            ProtoAttention::Unspecified,
+        )
+        .await;
+        let connected = only_device(&online, "tenant-a", "u1").await;
+        assert_eq!(connected.app_state, ProtoAppState::Active as i32);
+        assert_eq!(connected.attention, ProtoAttention::Unspecified as i32);
+
+        let parked = state_report(
+            "u1",
+            &session,
+            ProtoAppState::Parking,
+            ProtoAttention::Idle,
+            1,
+        );
+        online
+            .handle_report_device_state(user_ctx(parked, "tenant-a", "u1", "physical-1"))
+            .await
+            .unwrap();
+        let back = state_report(
+            "u1",
+            &session,
+            ProtoAppState::Unspecified,
+            ProtoAttention::Idle,
+            1,
+        );
+        online
+            .handle_report_device_state(user_ctx(back, "tenant-a", "u1", "physical-1"))
+            .await
+            .unwrap();
+        assert_eq!(
+            only_device(&online, "tenant-a", "u1").await.app_state,
+            ProtoAppState::Active as i32
+        );
+    }
+
+    /// 「后台、保着链路、不能自己提示」在建连与上报时都被接受，设备列表原样带出。
+    #[tokio::test]
+    async fn a_deferred_device_is_accepted_on_login_and_report_and_exposed() {
+        let online = device_state_handler(Arc::new(TenantSessions::default()));
+        let session = login_with_state(
+            &online,
+            "tenant-a",
+            "u1",
+            ProtoAppState::Deferred,
+            ProtoAttention::Unspecified,
+        )
+        .await;
+        let connected = only_device(&online, "tenant-a", "u1").await;
+        assert_eq!(connected.app_state, ProtoAppState::Deferred as i32);
+
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        for (app_state, badge) in [(ProtoAppState::Active, 0), (ProtoAppState::Deferred, 2)] {
+            let report = state_report("u1", &session, app_state, ProtoAttention::Idle, badge);
+            assert!(
+                online
+                    .handle_report_device_state(user_ctx(report, "tenant-a", "u1", "physical-1"))
+                    .await
+                    .unwrap()
+                    .into_inner()
+                    .success
+            );
+        }
+        let deferred = only_device(&online, "tenant-a", "u1").await;
+        assert_eq!(deferred.app_state, ProtoAppState::Deferred as i32);
+        assert_eq!(deferred.badge, 2);
+        // 回到前台再进后台：进入当前状态的时刻重新计。
+        assert!(since(&deferred) > since(&connected));
+    }
+
+    /// 上报与心跳同一个边界：必须是网关替这位用户签的上下文，租户取自签名。会话不在签名租户下
+    /// （已断开，或属于别的租户）时 `success = false`，别的租户的记录不受影响。
+    #[tokio::test]
+    async fn a_device_state_report_is_bound_to_the_signed_user_and_tenant() {
+        let online = device_state_handler(Arc::new(TenantSessions::default()));
+        let session = login_with_state(
+            &online,
+            "tenant-a",
+            "u1",
+            ProtoAppState::Active,
+            ProtoAttention::Attentive,
+        )
+        .await;
+        let parking = || {
+            state_report(
+                "u1",
+                &session,
+                ProtoAppState::Parking,
+                ProtoAttention::Idle,
+                9,
+            )
+        };
+
+        // 没有签名上下文。
+        assert_eq!(
+            online
+                .handle_report_device_state(Request::new(parking()))
+                .await
+                .unwrap_err()
+                .code(),
+            Code::Unauthenticated
+        );
+        // 别的用户的上下文替 u1 上报。
+        assert_eq!(
+            online
+                .handle_report_device_state(user_ctx(parking(), "tenant-a", "u2", "physical-2"))
+                .await
+                .unwrap_err()
+                .code(),
+            Code::PermissionDenied
+        );
+        // 同一个用户 ID 在另一个租户：找不到这条会话。
+        assert!(
+            !online
+                .handle_report_device_state(user_ctx(parking(), "tenant-b", "u1", "physical-1"))
+                .await
+                .unwrap()
+                .into_inner()
+                .success
+        );
+        // 会话已经不在。
+        let gone = state_report(
+            "u1",
+            &uuid::Uuid::new_v4().to_string(),
+            ProtoAppState::Parking,
+            ProtoAttention::Idle,
+            9,
+        );
+        assert!(
+            !online
+                .handle_report_device_state(user_ctx(gone, "tenant-a", "u1", "physical-1"))
+                .await
+                .unwrap()
+                .into_inner()
+                .success
+        );
+
+        let untouched = only_device(&online, "tenant-a", "u1").await;
+        assert_eq!(untouched.app_state, ProtoAppState::Active as i32);
+        assert_eq!(untouched.attention, ProtoAttention::Attentive as i32);
+        assert_eq!(untouched.badge, 0);
+    }
+
+    /// 一条吊销请求针对谁：`(租户, 用户, 设备, 原因)`；设备为 `None` 是全部设备。
+    type RevocationTarget = (String, String, Option<String>, BindingRevocationReason);
+
+    fn revocation_target(
+        tenant: &str,
+        user: &str,
+        device: Option<&str>,
+        reason: BindingRevocationReason,
+    ) -> RevocationTarget {
+        (
+            tenant.to_string(),
+            user.to_string(),
+            device.map(str::to_string),
+            reason,
+        )
+    }
+
+    /// 记下提交的推送绑定吊销请求。
+    #[derive(Default)]
+    struct RecordedRevocations(Mutex<Vec<BindingRevocation>>);
+
+    impl RecordedRevocations {
+        /// 各条请求针对谁，按 (租户, 用户, 设备) 排序。
+        fn targets(&self) -> Vec<RevocationTarget> {
+            let mut targets: Vec<RevocationTarget> = self
+                .0
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|r| {
+                    (
+                        r.tenant_id.clone(),
+                        r.user_id.clone(),
+                        r.device_id.clone(),
+                        r.reason,
+                    )
+                })
+                .collect();
+            targets.sort_by(|a, b| (&a.0, &a.1, &a.2).cmp(&(&b.0, &b.1, &b.2)));
+            targets
+        }
+
+        /// 各条请求的登记时刻上限。
+        fn cutoffs(&self) -> Vec<i64> {
+            self.0
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|r| r.registered_before_ms)
+                .collect()
+        }
+    }
+
+    impl BindingRevocationSink for RecordedRevocations {
+        fn submit(&self, revocation: BindingRevocation) {
+            self.0.lock().unwrap().push(revocation);
+        }
+    }
+
+    /// 带吊销出口与用户上下文验证的 handler。
+    fn revoking_handler(
+        repo: Arc<TenantSessions>,
+        revocations: &Arc<RecordedRevocations>,
+    ) -> Handler {
+        let verifier = SignedContextVerifier::from_public_key(&pem(GATEWAY_KEY).1).unwrap();
+        handler_revoking(
+            repo,
+            true,
+            Some(revocations.clone() as Arc<dyn BindingRevocationSink>),
+        )
+        .with_identity_verifier(Some(verifier))
+    }
+
+    /// 运维踢设备与用户踢自己的设备：被踢设备的推送绑定吊销，只吊销踢线那一刻之前登记的。正常
+    /// 登出不吊销。
+    #[tokio::test]
+    async fn kick_rpcs_revoke_the_push_bindings_of_the_kicked_device() {
+        let repo = seeded();
+        let revocations = Arc::new(RecordedRevocations::default());
+        let online = revoking_handler(repo.clone(), &revocations);
+
+        let before_ms = chrono::Utc::now().timestamp_millis();
+        assert!(
+            online
+                .handle_kick_device(staff(kick_device_req("u1", "a1"), "tenant-a", USERS_KICK))
+                .await
+                .unwrap()
+                .into_inner()
+                .success
+        );
+        assert!(
+            online
+                .handle_self_kick_device(user_ctx(
+                    kick_device_req("u1", "b1"),
+                    "tenant-b",
+                    "u1",
+                    "physical-b2"
+                ))
+                .await
+                .unwrap()
+                .into_inner()
+                .success
+        );
+        let after_ms = chrono::Utc::now().timestamp_millis();
+        // u1 在 tenant-b 的另一台设备自己登出。
+        let session = repo
+            .sessions
+            .lock()
+            .unwrap()
+            .get(&("tenant-b".to_string(), "u1".to_string()))
+            .and_then(|list| list.iter().find(|c| c.device_id().as_str() == "b2"))
+            .map(|c| c.id().as_str().to_string())
+            .unwrap();
+        assert!(
+            online
+                .handle_logout(user_ctx(
+                    LogoutRequest {
+                        user_id: "u1".to_string(),
+                        conversation_id: session,
+                    },
+                    "tenant-b",
+                    "u1",
+                    "physical-b2"
+                ))
+                .await
+                .unwrap()
+                .into_inner()
+                .success
+        );
+        assert!(repo.devices("tenant-b", "u1").is_empty());
+
+        assert_eq!(
+            revocations.targets(),
+            vec![
+                revocation_target(
+                    "tenant-a",
+                    "u1",
+                    Some("a1"),
+                    BindingRevocationReason::Kicked
+                ),
+                revocation_target(
+                    "tenant-b",
+                    "u1",
+                    Some("b1"),
+                    BindingRevocationReason::Kicked
+                ),
+            ]
+        );
+        assert!(
+            revocations
+                .cutoffs()
+                .iter()
+                .all(|cutoff| (before_ms..=after_ms).contains(cutoff))
+        );
+    }
+
+    /// 点名踢一台没有在线会话的设备（已托管的手机）：两个入口照旧回「设备不存在」，那台设备的
+    /// 推送绑定仍然吊销。
+    #[tokio::test]
+    async fn kick_rpcs_revoke_the_bindings_of_a_named_device_that_is_not_online() {
+        let revocations = Arc::new(RecordedRevocations::default());
+        let online = revoking_handler(seeded(), &revocations);
+
+        assert!(
+            online
+                .handle_kick_device(staff(
+                    kick_device_req("u1", "parked-a"),
+                    "tenant-a",
+                    USERS_KICK
+                ))
+                .await
+                .is_err()
+        );
+        assert!(
+            online
+                .handle_self_kick_device(user_ctx(
+                    kick_device_req("u1", "parked-b"),
+                    "tenant-b",
+                    "u1",
+                    "physical-b2"
+                ))
+                .await
+                .is_err()
+        );
+
+        assert_eq!(
+            revocations.targets(),
+            vec![
+                revocation_target(
+                    "tenant-a",
+                    "u1",
+                    Some("parked-a"),
+                    BindingRevocationReason::Kicked
+                ),
+                revocation_target(
+                    "tenant-b",
+                    "u1",
+                    Some("parked-b"),
+                    BindingRevocationReason::Kicked
+                ),
+            ]
+        );
+    }
+
+    /// 身份会话吊销：点名会话时吊销被结束的在线会话所属设备的绑定，没点名时一次吊销该用户在
+    /// 签名租户下的全部设备。租户取自已验证的上下文，登记时刻的上限是请求的截止时刻。
+    #[tokio::test]
+    async fn identity_revocation_rpc_revokes_push_bindings_within_the_signed_tenant() {
+        use flare_grpc_proto::auth_revoke::RevokeIdentitySessionsRequest;
+
+        let revocations = Arc::new(RecordedRevocations::default());
+        let online = revoking_handler(seeded(), &revocations);
+        let cutoff_ms = chrono::Utc::now().timestamp_millis();
+        let revoke = |tenant: &str, session_ids: Vec<String>| {
+            let identity = SignedContextIdentity::new(
+                SignedActorType::Service,
+                "flare-social-bridge",
+                tenant,
+                "owned-revocation",
+            )
+            .with_roles(vec!["identity.revoke".into()]);
+            let token = SignedContextSigner::from_private_key(&pem(GATEWAY_KEY).0)
+                .unwrap()
+                .sign(&identity)
+                .unwrap();
+            with_ctx(
+                RevokeIdentitySessionsRequest {
+                    user_id: "u1".into(),
+                    revocation_id: uuid::Uuid::new_v4().to_string(),
+                    cutoff_ms,
+                    session_ids,
+                },
+                &token,
+            )
+        };
+
+        // 点名了会话：tenant-b 下 u1 的两条连接都早于截止时刻、没有身份会话 ID，被这次吊销结束。
+        online
+            .handle_revoke_identity_sessions(revoke(
+                "tenant-b",
+                vec![uuid::Uuid::new_v4().to_string()],
+            ))
+            .await
+            .unwrap();
+        let identity_revoked = |device: &str| {
+            revocation_target(
+                "tenant-b",
+                "u1",
+                Some(device),
+                BindingRevocationReason::IdentityRevoked,
+            )
+        };
+        assert_eq!(
+            revocations.targets(),
+            vec![identity_revoked("b1"), identity_revoked("b2")]
+        );
+        assert_eq!(revocations.cutoffs(), vec![cutoff_ms; 2]);
+
+        // 没点名会话：一次吊销全部设备，只在签名租户内。
+        revocations.0.lock().unwrap().clear();
+        online
+            .handle_revoke_identity_sessions(revoke("tenant-a", Vec::new()))
+            .await
+            .unwrap();
+        assert_eq!(
+            revocations.targets(),
+            vec![revocation_target(
+                "tenant-a",
+                "u1",
+                None,
+                BindingRevocationReason::IdentityRevoked
+            )]
+        );
+        assert_eq!(revocations.cutoffs(), vec![cutoff_ms]);
+    }
 }

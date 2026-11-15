@@ -44,6 +44,7 @@
 | `/api/v1/conversations/participants` | GET | 分页读取会话成员；`muted`、`pinned`、`mention_only` 只在调用者本人那一行有值，其余成员恒为 false | 必须 |
 | `/api/v1/conversations/participants/manage` | POST | 管理会话参与者，供后台/业务 bridge 使用；已有成员只更新角色、属性与历史下限，`muted`、`pinned` 只在新加入的成员上生效 | 管理权限：令牌须带网关管理 scope，终端用户令牌回 403 `PARTICIPANT_MANAGEMENT_DENIED` |
 | `/api/v1/medias/*` | GET/POST/DELETE | 媒体能力 | 除公开下载外必须 |
+| `/api/v1/push/receipts` | POST | 上报本用户一台设备的推送到达回执（≤100 条），转 Push Proxy `ReportPushReceipts`；只进指标与推送决策链 | 必须（租户绑定的终端用户令牌；令牌绑定了设备时只能是这台） |
 | `/api/v1/devices/{device_id}/push-token` | PUT/DELETE | 登记/注销本用户设备的推送令牌，转 Push Proxy | 必须（租户绑定的终端用户令牌） |
 | `/api/v1/capabilities/*` | GET/POST | 能力管理面，后续补齐 | 管理权限 |
 | `/api/v1/admin/*` | GET/POST/PATCH/DELETE | 管理后台、运维、审计接口 | 管理主体 |

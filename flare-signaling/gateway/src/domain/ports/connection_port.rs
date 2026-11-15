@@ -7,7 +7,8 @@ use crate::domain::model::ConnectionInfo;
 use async_trait::async_trait;
 use flare_grpc_proto::signaling::{
     GetOnlineStatusRequest, GetOnlineStatusResponse, HeartbeatRequest, HeartbeatResponse,
-    LoginRequest, LoginResponse, LogoutRequest, LogoutResponse,
+    LoginRequest, LoginResponse, LogoutRequest, LogoutResponse, ReportDeviceStateRequest,
+    ReportDeviceStateResponse,
 };
 use flare_im_contracts::Ctx;
 use flare_server_core::error::Result;
@@ -18,6 +19,12 @@ pub trait IConnectionPort: Send + Sync {
     async fn login(&self, ctx: &Ctx, request: LoginRequest) -> Result<LoginResponse>;
     async fn logout(&self, ctx: &Ctx, request: LogoutRequest) -> Result<LogoutResponse>;
     async fn heartbeat(&self, ctx: &Ctx, request: HeartbeatRequest) -> Result<HeartbeatResponse>;
+    /// 把客户端上报的设备状态（前台 / 后台 / 托管中）转给 Online，按 Login 返回的会话 ID 定位。
+    async fn report_device_state(
+        &self,
+        ctx: &Ctx,
+        request: ReportDeviceStateRequest,
+    ) -> Result<ReportDeviceStateResponse>;
     async fn get_online_status(
         &self,
         ctx: &Ctx,

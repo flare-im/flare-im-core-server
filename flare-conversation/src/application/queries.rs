@@ -61,6 +61,39 @@ pub struct FindConversationMembersQuery {
 /// [`FindConversationMembersQuery::user_ids`] 的上限。
 pub const MAX_PARTICIPANT_LOOKUP_IDS: usize = 500;
 
+/// 某用户在 `since` 之后有新未读消息的会话（服务身份按用户读，见
+/// [`crate::domain::model::RecentUnreadConversation`]）。
+#[derive(Debug, Clone)]
+pub struct ListRecentUnreadConversationsQuery {
+    /// 读谁的会话。
+    pub user_id: String,
+    /// 只要最后一条消息晚于该时刻的会话，Unix epoch 毫秒。
+    pub since_ms: i64,
+    /// 0 取上限；上限 `MAX_RECENT_UNREAD_CONVERSATIONS`。
+    pub limit: i32,
+}
+
+/// 一批用户的用户级通知设置（服务身份按用户读）。用户数上限是
+/// [`MAX_NOTIFICATION_SETTINGS_BATCH`](crate::domain::model::notification_settings::MAX_NOTIFICATION_SETTINGS_BATCH)。
+#[derive(Debug, Clone)]
+pub struct BatchGetUserNotificationSettingsQuery {
+    pub user_ids: Vec<String>,
+}
+
+/// 会话里开启了「全部消息通知」的成员（服务身份读），按 user_id 升序分页。
+#[derive(Debug, Clone)]
+pub struct ListNotificationSubscribersQuery {
+    pub conversation_id: String,
+    /// 空为第一页；否则是上一页回的令牌。
+    pub page_token: String,
+    /// 0 或超过上限时取上限。
+    pub page_size: i32,
+}
+
+/// [`ListRecentUnreadConversationsQuery::limit`] 的上限。这个读是给「设备刚转入推送通道」补
+/// 提示用的，一次补几个会话就到头了；上限同时封住单次查询要算未读的会话数。
+pub const MAX_RECENT_UNREAD_CONVERSATIONS: usize = 20;
+
 /// 同步消息查询
 #[derive(Debug, Clone)]
 pub struct SyncMessagesQuery {

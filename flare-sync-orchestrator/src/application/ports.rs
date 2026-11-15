@@ -4,9 +4,11 @@
 use flare_grpc_proto::conversation::{
     ConversationBootstrapRequest, ConversationBootstrapResponse, CreateConversationRequest,
     CreateConversationResponse, GetConversationDetailRequest, GetConversationDetailResponse,
+    GetUserNotificationSettingsRequest, GetUserNotificationSettingsResponse,
     ListConversationParticipantsRequest, ListConversationParticipantsResponse,
     UpdateConversationUserSettingsRequest, UpdateConversationUserSettingsResponse,
-    UpdateCursorRequest,
+    UpdateCursorRequest, UpdateUserNotificationSettingsRequest,
+    UpdateUserNotificationSettingsResponse,
 };
 use flare_im_contracts::Ctx;
 use flare_proto::Message;
@@ -53,6 +55,20 @@ pub trait ConversationSyncPort: Send + Sync {
         ctx: &Ctx,
         req: CreateConversationRequest,
     ) -> Result<CreateConversationResponse, FlareError>;
+
+    /// 调用者本人的用户级通知设置（会话服务的 `UserNotificationSettingsService`）。
+    async fn get_user_notification_settings(
+        &self,
+        ctx: &Ctx,
+        req: GetUserNotificationSettingsRequest,
+    ) -> Result<GetUserNotificationSettingsResponse, FlareError>;
+
+    /// 部分更新调用者本人的用户级通知设置。
+    async fn update_user_notification_settings(
+        &self,
+        ctx: &Ctx,
+        req: UpdateUserNotificationSettingsRequest,
+    ) -> Result<UpdateUserNotificationSettingsResponse, FlareError>;
 }
 
 /// 存储读侧返回的会话最新消息水位（`messages` 表，按 `seq` 最大的一行）

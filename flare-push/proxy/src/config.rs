@@ -126,10 +126,10 @@ impl PushProxyConfig {
         let redis_key_prefix = env::var("PUSH_PROXY_REDIS_KEY_PREFIX")
             .ok()
             .unwrap_or_else(|| "flare:push:proxy".to_string());
-        let device_token_redis_url = env::var("PUSH_PROXY_DEVICE_TOKEN_REDIS_URL")
-            .ok()
-            .filter(|value| !value.trim().is_empty())
-            .unwrap_or_else(|| redis_url.clone());
+        let device_token_redis_url = resolve_device_token_redis_url(
+            env::var("PUSH_PROXY_DEVICE_TOKEN_REDIS_URL").ok(),
+            app.redis_profile("push").map(|profile| profile.url.clone()),
+        );
         let device_token_key_prefix = env::var("PUSH_PROXY_DEVICE_TOKEN_KEY_PREFIX")
             .ok()
             .filter(|value| !value.trim().is_empty())
@@ -155,6 +155,18 @@ impl PushProxyConfig {
             device_token_key_prefix,
         }
     }
+}
+
+/// 设备推送绑定登记表的地址。Proxy 在这里登记、Push Server 与 Push Worker 从这里读，三者缺省逐项
+/// 相同：显式配置优先，其次 `[redis.push]` profile，最后本机 Redis。
+fn resolve_device_token_redis_url(
+    env_value: Option<String>,
+    push_profile_url: Option<String>,
+) -> String {
+    env_value
+        .filter(|value| !value.trim().is_empty())
+        .or(push_profile_url)
+        .unwrap_or_else(|| "redis://127.0.0.1:6379".to_string())
 }
 
 impl NatsProducerConfig for PushProxyConfig {
@@ -190,5 +202,47 @@ impl KafkaProducerConfig for PushProxyConfig {
 
     fn kafka_options(&self) -> HashMap<String, String> {
         self.kafka_options.clone()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::resolve_device_token_redis_url;
+
+    /// 登记表缺省与 Push Server、Push Worker 相同。缺省若落到本机，单容器部署里那里没有 Redis，
+    /// 登记全部失败，路由与投递也就看不到任何绑定。
+    #[test]
+    fn device_token_registry_defaults_to_the_push_redis_profile() {
+        let profile = Some("redis://push-redis.internal:6379/5".to_string());
+        assert_eq!(
+            resolve_device_token_redis_url(None, profile.clone()),
+            "redis://push-redis.internal:6379/5"
+        );
+        // 空串与只有空白按未配置处理。
+        for blank in ["", "  "] {
+            assert_eq!(
+                resolve_device_token_redis_url(Some(blank.to_string()), profile.clone()),
+                "redis://push-redis.internal:6379/5"
+            );
+        }
+    }
+
+    #[test]
+    fn an_explicit_device_token_registry_wins_over_the_profile() {
+        assert_eq!(
+            resolve_device_token_redis_url(
+                Some("redis://registry.internal:6379/7".to_string()),
+                Some("redis://push-redis.internal:6379/5".to_string()),
+            ),
+            "redis://registry.internal:6379/7"
+        );
+    }
+
+    #[test]
+    fn without_a_profile_the_registry_is_the_local_redis() {
+        assert_eq!(
+            resolve_device_token_redis_url(None, None),
+            "redis://127.0.0.1:6379"
+        );
     }
 }

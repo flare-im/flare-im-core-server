@@ -74,6 +74,17 @@ impl ApplicationBootstrap {
                     handler.clone(),
                     &read_layer,
                 );
+                // 服务身份按用户读：一律要求签名，只放行 Cell 内服务。
+                let internal_read_svc = crate::interface::grpc::signed_internal_read_service(
+                    handler.clone(),
+                    &read_layer,
+                );
+                // 调用者本人的用户级通知设置：只放行用户身份。
+                let notification_settings_svc =
+                    crate::interface::grpc::signed_notification_settings_service(
+                        handler.clone(),
+                        &read_layer,
+                    );
                 // 会话管理仍按调用方元数据（PurgeConversationHistory 除外，逐 RPC 验签）：Social
                 // Bridge 以服务签名代成员调用，「服务代用户」的表达定下之前不能套用读接口的冲突规则。
                 let manage_svc = ContextLayer::new()
@@ -88,6 +99,8 @@ impl ApplicationBootstrap {
                     .layer(grpc_metrics)
                     .add_service(read_svc)
                     .add_service(read_receipt_svc)
+                    .add_service(internal_read_svc)
+                    .add_service(notification_settings_svc)
                     .add_service(manage_svc)
                     .add_service(admin_svc)
                     .serve_with_shutdown(address_clone, async {

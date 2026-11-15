@@ -143,8 +143,15 @@ fn push_server_can_read_online_status_from_redis_without_grpc_roundtrip() {
         online_status.contains("OnlineStatusBackend")
             && online_status.contains("Redis(ConnectionManager)")
             && online_status.contains("session:{tenant_id}:{user_id}")
-            && online_status.contains("grpc_online_statuses"),
+            && online_status.contains("grpc_device_reachability"),
         "push server online filtering must retain redis direct-read backend and grpc fallback"
+    );
+    // Online is decided per device: the Redis backend reads the session records themselves.
+    // Counting them (HLEN) answers "does the user have a session", which lets a desktop
+    // suppress the offline push to every phone of the same user.
+    assert!(
+        online_status.contains("pipe.hvals(") && !online_status.contains("pipe.hlen("),
+        "push server must read session records per device, not count sessions per user"
     );
     // SEC-07: the same user id in two tenants must never share a session key.
     assert!(

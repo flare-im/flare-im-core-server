@@ -58,6 +58,7 @@ use flare_im_service_kit::clients::AdminGrpcClients;
         ops_handler::list_participants,
         ops_handler::list_user_devices,
         ops_handler::get_user_presence,
+        ops_handler::list_user_push_traces,
         ops_handler::kick_user,
         ops_handler::kick_device,
         ops_handler::kick_tenant,
@@ -178,6 +179,10 @@ use flare_im_service_kit::clients::AdminGrpcClients;
             crate::application::admin_ops::AdminDeviceHttp,
             crate::application::admin_ops::AdminUserDevicesHttp,
             crate::application::admin_ops::AdminUserPresenceHttp,
+            crate::application::admin_ops::AdminPushTraceQuery,
+            crate::application::admin_ops::AdminPushTraceEntryHttp,
+            crate::application::admin_ops::AdminPushTraceHttp,
+            crate::application::admin_ops::AdminPushTracesHttp,
             crate::application::admin_ops::AdminUserKickHttp,
             crate::application::admin_ops::AdminDeviceKickHttp,
             crate::application::admin_ops::AdminTenantKickHttp,
@@ -460,6 +465,10 @@ pub fn create_admin_router(
         .route(
             "/users/{user_id}/presence",
             get(ops_handler::get_user_presence),
+        )
+        .route(
+            "/users/{user_id}/push-traces",
+            get(ops_handler::list_user_push_traces),
         )
         .route("/users/{user_id}/kick", post(ops_handler::kick_user))
         .route(

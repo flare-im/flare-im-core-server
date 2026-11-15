@@ -1,4 +1,5 @@
 use super::*;
+use crate::domain::offline_delivery::OfflinePushExecutor;
 use flare_im_contracts::Ctx;
 use flare_proto::PushTaskEnvelope;
 use sha2::{Digest, Sha256};
@@ -18,7 +19,8 @@ pub struct LeasedApplications {
     path: PathBuf,
     allowed: Vec<OfflineDeliveryBackend>,
     tokens: Arc<dyn DeviceTokenRepository>,
-    usage: flare_im_usage::UsageRecorder,
+    /// Survives every rebuild: governance and the digest hold are not per lease.
+    runtime: Arc<DeliveryRuntime>,
     ttl_ms: u64,
     request_ms: u64,
     cache: tokio::sync::Mutex<Option<Cached>>,
@@ -43,7 +45,7 @@ impl LeasedApplications {
         path: PathBuf,
         allowed: Vec<OfflineDeliveryBackend>,
         tokens: Arc<dyn DeviceTokenRepository>,
-        usage: flare_im_usage::UsageRecorder,
+        runtime: Arc<DeliveryRuntime>,
         ttl_ms: u64,
         request_ms: u64,
     ) -> Self {
@@ -51,7 +53,7 @@ impl LeasedApplications {
             path,
             allowed,
             tokens,
-            usage,
+            runtime,
             ttl_ms,
             request_ms,
             cache: tokio::sync::Mutex::new(None),
@@ -92,7 +94,7 @@ impl LeasedApplications {
             doc,
             &self.allowed,
             self.tokens.clone(),
-            self.usage.clone(),
+            self.runtime.clone(),
             self.ttl_ms,
             self.request_ms,
         )?);
@@ -114,22 +116,31 @@ impl OfflinePushExecutor for LeasedApplications {
                 "push application context mismatch",
             ));
         }
-        if self
+        // The device's bindings are listed once per task. A target device without a binding
+        // needs no credentials: skip the lease read.
+        let registered = self
             .tokens
-            .list_user_tokens(ctx, &envelope.tenant_id, &envelope.user_id)
-            .await?
-            .is_empty()
-        {
+            .list_device_tokens(
+                ctx,
+                &envelope.tenant_id,
+                &envelope.user_id,
+                &envelope.device_id,
+            )
+            .await?;
+        if registered.is_empty() {
             return Ok(());
         }
-        self.current().await?.deliver(ctx, envelope).await
+        self.current()
+            .await?
+            .deliver_listed(ctx, envelope, registered)
+            .await
     }
 }
 #[cfg(test)]
 mod tests {
     use super::*;
     fn write(path: &std::path::Path, secret: &str, expires: i64) {
-        let value = serde_json::json!({"schema":"flare.mobile-push-applications/v1","valid_until_ms":expires,"applications":[{"app_id":"t1","getui":{"app_id":"vendor-a","app_key":"key","master_secret":secret}}]});
+        let value = serde_json::json!({"schema":"flare.mobile-push-applications/v2","valid_until_ms":expires,"applications":[{"app_id":"t1","getui":{"app_id":"vendor-a","app_key":"key","master_secret":secret}}]});
         std::fs::write(path, serde_json::to_vec(&value).unwrap()).unwrap();
         #[cfg(unix)]
         {
@@ -148,7 +159,7 @@ mod tests {
             path,
             vec![OfflineDeliveryBackend::Getui],
             Arc::new(crate::infrastructure::push_test_support::Tokens::default()),
-            flare_im_usage::UsageRecorder::disabled(),
+            DeliveryRuntime::for_tests(),
             60_000,
             5_000,
         )
@@ -185,7 +196,7 @@ mod tests {
         assert!(e.current().await.is_err());
         std::fs::write(
             &path,
-            br#"{"schema":"flare.mobile-push-applications/v1","applications":[]}"#,
+            br#"{"schema":"flare.mobile-push-applications/v2","applications":[]}"#,
         )
         .unwrap();
         assert!(e.current().await.is_err());
@@ -208,7 +219,7 @@ mod tests {
     #[tokio::test]
     async fn explicit_disabled_channel_is_an_intentional_no_send_not_missing_configuration() {
         let path = path();
-        let value = serde_json::json!({"schema":"flare.mobile-push-applications/v1","valid_until_ms":now_ms().unwrap()+20_000,"applications":[{"app_id":"t1","disabled_providers":["fcm"]}]});
+        let value = serde_json::json!({"schema":"flare.mobile-push-applications/v2","valid_until_ms":now_ms().unwrap()+20_000,"applications":[{"app_id":"t1","disabled_providers":["fcm"]}]});
         std::fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
         #[cfg(unix)]
         {
@@ -227,7 +238,7 @@ mod tests {
             path.clone(),
             vec![OfflineDeliveryBackend::Fcm],
             tokens,
-            flare_im_usage::UsageRecorder::disabled(),
+            DeliveryRuntime::for_tests(),
             60_000,
             5_000,
         );
@@ -235,6 +246,7 @@ mod tests {
         let envelope = PushTaskEnvelope {
             tenant_id: "t1".into(),
             user_id: "u1".into(),
+            device_id: "device-one".into(),
             ..Default::default()
         };
         e.deliver(&ctx, &envelope).await.unwrap();

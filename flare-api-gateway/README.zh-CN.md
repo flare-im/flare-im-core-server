@@ -353,6 +353,24 @@ DELETE /api/v1/devices/device-123/push-token?provider=getui
 Authorization: Bearer <token>
 ```
 
+#### 上报推送到达回执
+```http
+POST /api/v1/push/receipts
+Content-Type: application/json
+Authorization: Bearer <token>
+
+{
+  "deviceId": "device-123",
+  "appVersion": "1.4.0",
+  "receipts": [
+    {"conversationId": "c-1", "messageId": "m-9", "seq": 123, "collapseId": "c:0123456789abcdef0123456789abcdef",
+     "disposition": "loud", "provider": "apns", "path": "extension", "receivedAtMs": 1731400000000}
+  ]
+}
+```
+
+身份规则与推送令牌接口相同，只是没绑定设备的令牌也可以上报；绑定了设备的令牌只能替这台设备上报。一次至多 100 条；形状不对、或 `provider`（`apns`、`fcm`、`getui`）与 `path`（`extension`、`app`）Push Proxy 认不出的条目跳过。响应是 `{"accepted": n}`。回执只进指标与推送决策链，不改变投递。
+
 Push Proxy 的 gRPC 地址由 `FLARE_API_GATEWAY_GRPC_PUSH_PROXY_URL` 静态配置。未配置时使用 `http://127.0.0.1:50091`，即 single 拓扑里同容器 Push Proxy 的监听地址；其他拓扑必须显式配置。通道惰性连接：Push Proxy 不在时网关照常启动，这两个接口在其可达之前返回 503。
 
 ### 未知路由

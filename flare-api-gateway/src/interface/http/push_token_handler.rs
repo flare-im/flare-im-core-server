@@ -106,7 +106,7 @@ impl PushTokenClient {
         }
     }
 
-    async fn client(&self) -> Result<PushServiceClient<Channel>> {
+    pub(super) async fn client(&self) -> Result<PushServiceClient<Channel>> {
         match &self.target {
             PushTokenTarget::Static(url) => resolve_grpc_channel(url)
                 .await
@@ -121,7 +121,7 @@ impl PushTokenClient {
 
     /// 一次 Push Proxy 调用：带请求超时；传输层失败（连不上、连接被断、ping 超时）时丢弃
     /// 静态地址的通道，对端回的状态不动缓存。
-    async fn call<T, F, Fut>(&self, rpc: F) -> std::result::Result<T, tonic::Status>
+    pub(super) async fn call<T, F, Fut>(&self, rpc: F) -> std::result::Result<T, tonic::Status>
     where
         F: FnOnce() -> Fut,
         Fut: std::future::Future<Output = std::result::Result<T, tonic::Status>>,
@@ -158,6 +158,23 @@ pub struct RegisterPushTokenHttpRequest {
     pub binding_id: String,
     pub expected_version: String,
     pub expires_at_ms: i64,
+    /// iOS 的 bundle id 或 Android 的 applicationId；三个通道都必填（由 Push Proxy 校验）。
+    #[serde(default)]
+    pub app_bundle: Option<String>,
+    /// 只用于 `apns`：`sandbox` 或 `production`，不填按生产环境。
+    #[serde(default)]
+    pub environment: Option<String>,
+    /// BCP 47 语言标签，例如 `zh-CN`。
+    #[serde(default)]
+    pub locale: Option<String>,
+    /// IANA 时区，例如 `Asia/Shanghai`。
+    #[serde(default)]
+    pub time_zone: Option<String>,
+    #[serde(default)]
+    pub app_version: Option<String>,
+    /// 设备的推送能力：`dataMessages`（Android 能收 FCM 数据消息）、`serviceExtension`（iOS 通知扩展）。
+    #[serde(default)]
+    pub capabilities: Option<Vec<String>>,
 }
 
 /// 注销推送令牌的查询参数。
@@ -192,14 +209,15 @@ pub struct PushBindingView {
 }
 
 /// 已验证的调用方：用户、规范化租户与现签的内部上下文令牌。
-struct PushTokenCaller {
-    ctx: Ctx,
-    user_id: String,
+pub(super) struct PushTokenCaller {
+    pub(super) ctx: Ctx,
+    pub(super) user_id: String,
+    pub(super) tenant_id: String,
     signed_context: String,
 }
 
 impl PushTokenCaller {
-    fn request<T>(&self, payload: T) -> Result<tonic::Request<T>> {
+    pub(super) fn request<T>(&self, payload: T) -> Result<tonic::Request<T>> {
         let mut request = flare_server_core::request_with_context(payload, &self.ctx);
         flare_server_core::set_signed_context_token(&mut request, &self.signed_context).map_err(
             |_| GatewayError::internal("PUSH_SIGNING_FAILED", "internal identity signing failed"),
@@ -214,6 +232,29 @@ fn push_token_caller(
     principal: &AuthenticatedPrincipal,
     signer: &MessageContextSigner,
     device_id: &str,
+) -> Result<PushTokenCaller> {
+    device_caller(headers, principal, signer, device_id, true)
+}
+
+/// 到达回执的调用方：与推送令牌接口同一套校验，只是令牌没绑定设备时也可以上报；
+/// 令牌绑定了设备时，上报的设备必须是它。
+pub(super) fn receipt_caller(
+    headers: &HeaderMap,
+    principal: &AuthenticatedPrincipal,
+    signer: &MessageContextSigner,
+    device_id: &str,
+) -> Result<PushTokenCaller> {
+    device_caller(headers, principal, signer, device_id, false)
+}
+
+/// `bound_device_required` 为真时令牌必须绑定这台设备；为假时令牌没绑定设备也可以，
+/// 绑定了就必须是这台。
+fn device_caller(
+    headers: &HeaderMap,
+    principal: &AuthenticatedPrincipal,
+    signer: &MessageContextSigner,
+    device_id: &str,
+    bound_device_required: bool,
 ) -> Result<PushTokenCaller> {
     let signer = signer.0.as_ref().ok_or_else(|| {
         GatewayError::internal(
@@ -238,13 +279,16 @@ fn push_token_caller(
         ));
     }
     // 绑定了设备的令牌只能管理本设备的推送令牌。
-    if principal
+    let bound_device = principal
         .device_id
         .as_deref()
         .map(str::trim)
-        .filter(|bound| !bound.is_empty())
-        != Some(device_id)
-    {
+        .filter(|bound| !bound.is_empty());
+    let device_allowed = match bound_device {
+        Some(bound) => bound == device_id,
+        None => !bound_device_required,
+    };
+    if !device_allowed {
         return Err(forbidden(
             "DEVICE_MISMATCH",
             "the token is bound to a different device",
@@ -263,8 +307,13 @@ fn push_token_caller(
         .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
     let signed_context = signer
         .sign(
-            &SignedContextIdentity::new(SignedActorType::User, user_id, tenant_id, request_id)
-                .with_credential_id("api-gateway"),
+            &SignedContextIdentity::new(
+                SignedActorType::User,
+                user_id,
+                tenant_id.clone(),
+                request_id,
+            )
+            .with_credential_id("api-gateway"),
         )
         .map_err(|_| {
             GatewayError::internal("PUSH_SIGNING_FAILED", "internal identity signing failed")
@@ -272,11 +321,12 @@ fn push_token_caller(
     Ok(PushTokenCaller {
         ctx,
         user_id: user_id.to_string(),
+        tenant_id,
         signed_context,
     })
 }
 
-fn forbidden(reason: &str, message: &str) -> GatewayError {
+pub(super) fn forbidden(reason: &str, message: &str) -> GatewayError {
     GatewayError(
         ErrorBuilder::new(ErrorCode::HttpForbidden, reason)
             .details(message)
@@ -289,7 +339,14 @@ fn bounded_text(value: &str, max_len: usize, allow: impl Fn(char) -> bool) -> Op
     (!value.is_empty() && value.len() <= max_len && value.chars().all(allow)).then_some(value)
 }
 
-fn device_id(raw: &str) -> Result<String> {
+/// 可选文本字段：没给与空白都是空串。
+fn trimmed(value: Option<String>) -> String {
+    value
+        .map(|value| value.trim().to_string())
+        .unwrap_or_default()
+}
+
+pub(super) fn device_id(raw: &str) -> Result<String> {
     bounded_text(raw, MAX_DEVICE_ID_LEN, |ch| !ch.is_control())
         .map(str::to_owned)
         .ok_or_else(|| GatewayError::bad_request("DEVICE_ID_INVALID", "device_id is invalid"))
@@ -398,6 +455,18 @@ pub async fn register_push_token(
         binding_id: body.binding_id,
         expected_version: body.expected_version,
         expires_at_ms: body.expires_at_ms,
+        // 只做去空白；取值与长度由 Push Proxy 校验，网关和 Proxy 不维护两份规则。
+        app_bundle: trimmed(body.app_bundle),
+        environment: trimmed(body.environment),
+        locale: trimmed(body.locale),
+        time_zone: trimmed(body.time_zone),
+        app_version: trimmed(body.app_version),
+        capabilities: body
+            .capabilities
+            .unwrap_or_default()
+            .into_iter()
+            .map(|capability| capability.trim().to_string())
+            .collect(),
     };
     debug!(
         trace_id = %caller.ctx.trace_id(),
@@ -419,6 +488,8 @@ pub async fn register_push_token(
 }
 
 /// Read back the exact binding after an unknown write; never returns an OS token.
+/// 客户端每次回到前台都会核对一次：本人核对到自己当前的绑定时，Push Proxy 顺带刷新它的
+/// 最近活跃时间，长期没核对过的绑定会过期。
 #[utoipa::path(
     get,
     path = "/api/v1/devices/{device_id}/push-token",
@@ -513,6 +584,7 @@ pub async fn revoke_push_token(
     let caller = PushTokenCaller {
         ctx: Ctx::default(),
         user_id: String::new(),
+        tenant_id: String::new(),
         signed_context: signed,
     };
     let req = caller.request(RevokeDevicePushBindingRequest {

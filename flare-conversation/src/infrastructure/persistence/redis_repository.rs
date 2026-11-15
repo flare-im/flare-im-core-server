@@ -182,6 +182,7 @@ impl ConversationRepository for RedisConversationRepository {
                 member_preview: Vec::new(),
                 is_muted: false,
                 is_mention_only: false,
+                notify_all: false,
                 is_pinned: false,
                 is_archived: false,
                 settings_version: 0,
@@ -300,6 +301,16 @@ impl ConversationRepository for RedisConversationRepository {
         _user_ids: &[String],
     ) -> Result<Vec<ConversationParticipant>> {
         Err(redis_not_supported("find_conversation_members"))
+    }
+
+    async fn list_recent_unread_conversations(
+        &self,
+        _ctx: &flare_server_core::context::Context,
+        _user_id: &str,
+        _since: chrono::DateTime<chrono::Utc>,
+        _limit: usize,
+    ) -> Result<Vec<crate::domain::model::RecentUnreadConversation>> {
+        Err(redis_not_supported("list_recent_unread_conversations"))
     }
 
     async fn retract_message_unread(

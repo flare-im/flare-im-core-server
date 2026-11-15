@@ -33,6 +33,7 @@ GET  /api/v1/admin/conversations/{conversation_id}
 GET  /api/v1/admin/conversations/{conversation_id}/participants
 GET  /api/v1/admin/users/{user_id}/devices
 GET  /api/v1/admin/users/{user_id}/presence
+GET  /api/v1/admin/users/{user_id}/push-traces
 POST /api/v1/admin/users/{user_id}/kick
 POST /api/v1/admin/users/{user_id}/devices/{device_id}/kick
 POST /api/v1/admin/tenant/kick-all

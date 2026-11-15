@@ -458,7 +458,10 @@ async fn run(
             let tenant = input.desired.app_id.clone();
             let row = registry
                 .commands
-                .put_config(&input.desired, input.deployment_id.map(RuntimePatch::rebound))
+                .put_config(
+                    &input.desired,
+                    input.deployment_id.map(RuntimePatch::rebound),
+                )
                 .await
                 .map_err(into_status)?;
             let row = registry.queries.present(row).await.map_err(into_status)?;

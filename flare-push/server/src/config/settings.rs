@@ -2,13 +2,17 @@
 
 use std::{collections::HashMap, env};
 
+use super::notify::NotifyGateSettings;
+
 use flare_im_contracts::constants::groups::PUSH_SERVER_CONSUMER_GROUP_DEFAULT;
 use flare_im_contracts::constants::topics::{
     TOPIC_PUSH_DLQ, TOPIC_PUSH_ENVELOPE, TOPIC_PUSH_EVENTS, TOPIC_PUSH_MESSAGES,
-    TOPIC_PUSH_OFFLINE, TOPIC_PUSH_ONLINE,
+    TOPIC_PUSH_OFFLINE, TOPIC_PUSH_OFFLINE_BULK, TOPIC_PUSH_OFFLINE_GROUP, TOPIC_PUSH_ONLINE,
 };
+use flare_im_contracts::domain::push_binding::PUSH_BINDING_INACTIVE_DAYS_DEFAULT;
 use flare_im_contracts::utils::normalize_tenant_id;
 use flare_im_service_kit::config::{FlareAppConfig, ServiceEndpointConfig};
+use flare_im_service_kit::push_trace::PushTraceConfig;
 use flare_server_core::mq::kafka::{KafkaConsumerConfig, KafkaProducerConfig};
 use flare_server_core::mq::nats::{
     NatsConsumerConfig, NatsProducerConfig, NatsStreamSpec, default_stream_specs,
@@ -31,10 +35,23 @@ pub struct PushServerConfig {
     pub push_event_topic: String,
     pub push_envelope_topic: String,
     pub push_online_topic: String,
+    /// 离线任务的单聊通道（单聊、紧急、点名、修正）。
     pub push_offline_topic: String,
+    /// 离线任务的群通道（群里的普通提示、尾部刷新）。
+    pub push_offline_group_topic: String,
+    /// 离线任务的批量通道（大群波次、@所有人 波次、摘要、补提示）。
+    pub push_offline_bulk_topic: String,
     pub push_dlq_topic: String,
     pub redis_url: String,
     pub online_status_backend: String,
+    /// 设备推送绑定所在的 Redis。必须与 Push Proxy 登记、Push Worker 读取的是同一个实例，
+    /// 否则路由看不到任何绑定，一条离线任务都建不出来。
+    pub device_token_redis_url: String,
+    /// 设备推送绑定的 key 前缀，同样要与 Proxy、Worker 一致。
+    pub device_token_key_prefix: String,
+    /// 多少天没活跃的绑定视为不存在，应与 Worker 的同名设置一致：路由先不给它建任务，
+    /// Worker 遇到时删除。
+    pub binding_inactive_days: u32,
 
     /// flare-signaling/online 的 gRPC endpoint（与 `config/services/signaling-online.toml` 中 server.port 一致）
     pub online_service_endpoint: String,
@@ -43,6 +60,12 @@ pub struct PushServerConfig {
 
     /// 默认 tenant（用于填充 Envelope）
     pub default_tenant_id: String,
+
+    /// 防打扰闸门：状态所在的推送 Redis、到期队列与租户覆盖。
+    pub notify: NotifyGateSettings,
+
+    /// 推送决策链（`[services.push_server.trace]`），写在闸门所在的同一个推送 Redis。
+    pub trace: PushTraceConfig,
 }
 
 /// 与 `signaling-online` 监听地址对齐：优先读 app 中 `[services.signaling_online.server]`，否则本地默认 50061。
@@ -152,6 +175,15 @@ impl PushServerConfig {
             .ok()
             .or_else(|| service.push_offline_topic.clone())
             .unwrap_or_else(|| TOPIC_PUSH_OFFLINE.to_string());
+        // 另外两条通道只走环境变量，缺省与 Push Worker 的同名设置一致。
+        let push_offline_group_topic = env::var("PUSH_SERVER_PUSH_OFFLINE_GROUP_TOPIC")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| TOPIC_PUSH_OFFLINE_GROUP.to_string());
+        let push_offline_bulk_topic = env::var("PUSH_SERVER_PUSH_OFFLINE_BULK_TOPIC")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| TOPIC_PUSH_OFFLINE_BULK.to_string());
         let push_dlq_topic = env::var("PUSH_SERVER_PUSH_DLQ_TOPIC")
             .ok()
             .or_else(|| service.push_dlq_topic.clone())
@@ -171,6 +203,21 @@ impl PushServerConfig {
             .or_else(|| service.online_status_backend.clone())
             .unwrap_or_else(|| "redis".to_string())
             .to_ascii_lowercase();
+        // 缺省值与 Push Worker 的 PUSH_WORKER_DEVICE_TOKEN_* 逐项相同：两边读的是同一份绑定。
+        let device_token_redis_url = env::var("PUSH_SERVER_DEVICE_TOKEN_REDIS_URL")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .or_else(|| app.redis_profile("push").map(|profile| profile.url.clone()))
+            .unwrap_or_else(|| "redis://127.0.0.1:6379".to_string());
+        let device_token_key_prefix = env::var("PUSH_SERVER_DEVICE_TOKEN_KEY_PREFIX")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| "flare:im:push:device_tokens".to_string());
+        let binding_inactive_days = env::var("PUSH_SERVER_BINDING_INACTIVE_DAYS")
+            .ok()
+            .and_then(|value| value.trim().parse::<u32>().ok())
+            .filter(|days| *days > 0)
+            .unwrap_or(PUSH_BINDING_INACTIVE_DAYS_DEFAULT);
 
         let online_service_endpoint = env::var("PUSH_SERVER_ONLINE_SERVICE_ENDPOINT")
             .ok()
@@ -186,6 +233,17 @@ impl PushServerConfig {
             .or_else(|| service.default_tenant_id.clone())
             .map(normalize_tenant_id)
             .unwrap_or_else(|| "0".to_string());
+
+        // 闸门状态与设备绑定表默认在同一个推送 Redis（`[redis.push]`），可以单独指到别处。
+        let gate_redis_url = env::var("PUSH_SERVER_GATE_REDIS_URL")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .or_else(|| app.redis_profile("push").map(|profile| profile.url.clone()))
+            .unwrap_or_else(|| "redis://127.0.0.1:6379".to_string());
+        let notify =
+            NotifyGateSettings::load(&flare_im_service_kit::resolve_config_path(), gate_redis_url);
+        let trace =
+            PushTraceConfig::load(&flare_im_service_kit::resolve_config_path(), "push_server");
 
         Self {
             mq_backend,
@@ -203,12 +261,19 @@ impl PushServerConfig {
             push_envelope_topic,
             push_online_topic,
             push_offline_topic,
+            push_offline_group_topic,
+            push_offline_bulk_topic,
             push_dlq_topic,
             redis_url,
             online_status_backend,
+            device_token_redis_url,
+            device_token_key_prefix,
+            binding_inactive_days,
             online_service_endpoint,
             event_ping_coalesce_window_ms,
             default_tenant_id,
+            notify,
+            trace,
         }
     }
 }
@@ -274,5 +339,49 @@ impl KafkaProducerConfig for PushServerConfig {
 impl KafkaConsumerConfig for PushServerConfig {
     fn kafka_consumer_group(&self) -> &str {
         &self.consumer_group
+    }
+}
+
+#[cfg(test)]
+mod test_support {
+    use super::{
+        NotifyGateSettings, PUSH_BINDING_INACTIVE_DAYS_DEFAULT, PushServerConfig, PushTraceConfig,
+    };
+
+    impl PushServerConfig {
+        /// 测试用配置：不指向任何真实依赖，各用例用结构体更新语法只覆盖自己关心的字段。
+        /// 新增配置项时只改这一处，不必逐个用例补字段。
+        pub(crate) fn for_tests() -> Self {
+            Self {
+                mq_backend: "nats".into(),
+                jetstream_url: "nats://127.0.0.1:1".into(),
+                jetstream_timeout_ms: 1_000,
+                jetstream_retries: 0,
+                jetstream_retry_backoff_ms: 0,
+                jetstream_stream_specs: Vec::new(),
+                kafka_brokers: Vec::new(),
+                kafka_client_id: String::new(),
+                kafka_options: Default::default(),
+                consumer_group: "push-server".into(),
+                push_message_topic: String::new(),
+                push_event_topic: String::new(),
+                push_envelope_topic: String::new(),
+                push_online_topic: String::new(),
+                push_offline_topic: String::new(),
+                push_offline_group_topic: String::new(),
+                push_offline_bulk_topic: String::new(),
+                push_dlq_topic: String::new(),
+                redis_url: String::new(),
+                online_status_backend: "redis".into(),
+                device_token_redis_url: String::new(),
+                device_token_key_prefix: String::new(),
+                binding_inactive_days: PUSH_BINDING_INACTIVE_DAYS_DEFAULT,
+                online_service_endpoint: String::new(),
+                event_ping_coalesce_window_ms: 0,
+                default_tenant_id: "0".into(),
+                notify: NotifyGateSettings::default(),
+                trace: PushTraceConfig::default(),
+            }
+        }
     }
 }

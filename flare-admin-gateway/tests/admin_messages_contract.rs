@@ -313,6 +313,7 @@ async fn messages_harness() -> MessagesHarness {
         .connect_lazy();
     // 其余下游指向一个不会被调用的环回端口。
     let unused = Channel::from_static("http://127.0.0.1:9").connect_lazy();
+    let unused_push = unused.clone();
     let clients = AdminGrpcClients {
         media: Arc::new(tokio::sync::Mutex::new(
             MediaServiceClientWrapper::from_channel(unused.clone(), None),
@@ -325,6 +326,9 @@ async fn messages_harness() -> MessagesHarness {
         )),
         storage_reader: Arc::new(tokio::sync::Mutex::new(
             StorageReaderServiceClientWrapper::from_channel(storage),
+        )),
+        push: Arc::new(tokio::sync::Mutex::new(
+            flare_im_service_kit::clients::PushAdminClientWrapper::from_channel(unused_push),
         )),
         request_timeout: None,
     };

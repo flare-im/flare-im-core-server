@@ -309,6 +309,7 @@ pub fn build_admin_capabilities() -> AdminCapabilitiesResponse {
             admin_endpoint("/api/v1/admin/conversations/{conversation_id}/participants"),
             admin_endpoint("/api/v1/admin/users/{user_id}/devices"),
             admin_endpoint("/api/v1/admin/users/{user_id}/presence"),
+            admin_endpoint("/api/v1/admin/users/{user_id}/push-traces"),
             admin_write_endpoint("POST", "/api/v1/admin/users/{user_id}/kick"),
             admin_write_endpoint(
                 "POST",

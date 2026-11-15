@@ -29,12 +29,18 @@ toml = { workspace = true }
 thiserror = { workspace = true }
 redis = { workspace = true }
 deadpool-redis = { workspace = true }
+moka = { workspace = true }
+sha2 = { workspace = true }
 anyhow = { workspace = true }
 async-trait = { workspace = true }
 prost = { workspace = true }
 prost-types = { workspace = true }
 uuid = { workspace = true }
 chrono = { workspace = true }
+# 设备当地时间：绑定登记的 IANA 时区换算成勿扰时段要的「一周中的分钟」。
+chrono-tz = { workspace = true }
+# 提示规则的唯一实现：决策、会话槽位与设备预算。服务端只负责读写状态。
+flare-notify-rules = { path = "../../../flare-protocol/flare-notify-rules" }
 futures = { workspace = true }
 ulid = { workspace = true }  # 添加ulid依赖
 

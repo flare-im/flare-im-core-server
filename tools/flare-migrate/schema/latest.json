@@ -4483,6 +4483,17 @@
     },
     {
       "collation": null,
+      "default": "0",
+      "generated": "",
+      "identity": "",
+      "kind": "column",
+      "name": "multi_device",
+      "not_null": true,
+      "table": "user_notification_settings",
+      "type": "smallint"
+    },
+    {
+      "collation": null,
       "default": null,
       "generated": "",
       "identity": "",
@@ -4623,6 +4634,17 @@
       "not_null": false,
       "table": "alert_rules",
       "type": "text[]"
+    },
+    {
+      "collation": null,
+      "default": "false",
+      "generated": "",
+      "identity": "",
+      "kind": "column",
+      "name": "notify_all",
+      "not_null": true,
+      "table": "conversation_participants",
+      "type": "boolean"
     },
     {
       "collation": "default",
@@ -5044,6 +5066,17 @@
     },
     {
       "collation": null,
+      "default": "0",
+      "generated": "",
+      "identity": "",
+      "kind": "column",
+      "name": "preview",
+      "not_null": true,
+      "table": "user_notification_settings",
+      "type": "smallint"
+    },
+    {
+      "collation": null,
       "default": "now()",
       "generated": "",
       "identity": "",
@@ -5118,6 +5151,50 @@
       "not_null": true,
       "table": "media_assets",
       "type": "text"
+    },
+    {
+      "collation": null,
+      "default": "false",
+      "generated": "",
+      "identity": "",
+      "kind": "column",
+      "name": "quiet_allow_mentions",
+      "not_null": true,
+      "table": "user_notification_settings",
+      "type": "boolean"
+    },
+    {
+      "collation": null,
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "kind": "column",
+      "name": "quiet_end_minute",
+      "not_null": false,
+      "table": "user_notification_settings",
+      "type": "smallint"
+    },
+    {
+      "collation": null,
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "kind": "column",
+      "name": "quiet_start_minute",
+      "not_null": false,
+      "table": "user_notification_settings",
+      "type": "smallint"
+    },
+    {
+      "collation": null,
+      "default": "0",
+      "generated": "",
+      "identity": "",
+      "kind": "column",
+      "name": "quiet_weekdays",
+      "not_null": true,
+      "table": "user_notification_settings",
+      "type": "smallint"
     },
     {
       "collation": null,
@@ -6495,6 +6572,17 @@
       "type": "bigint"
     },
     {
+      "collation": null,
+      "default": "0",
+      "generated": "",
+      "identity": "",
+      "kind": "column",
+      "name": "settings_version",
+      "not_null": true,
+      "table": "user_notification_settings",
+      "type": "bigint"
+    },
+    {
       "collation": "default",
       "default": null,
       "generated": "",
@@ -7426,6 +7514,17 @@
       "kind": "column",
       "name": "tenant_id",
       "not_null": true,
+      "table": "user_notification_settings",
+      "type": "text"
+    },
+    {
+      "collation": "default",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "kind": "column",
+      "name": "tenant_id",
+      "not_null": true,
       "table": "user_sync_cursor",
       "type": "text"
     },
@@ -7810,6 +7909,17 @@
       "identity": "",
       "kind": "column",
       "name": "updated_at",
+      "not_null": true,
+      "table": "user_notification_settings",
+      "type": "timestamp with time zone"
+    },
+    {
+      "collation": null,
+      "default": "CURRENT_TIMESTAMP",
+      "generated": "",
+      "identity": "",
+      "kind": "column",
+      "name": "updated_at",
       "not_null": false,
       "table": "user_sync_cursor",
       "type": "timestamp with time zone"
@@ -7911,6 +8021,17 @@
       "name": "user_id",
       "not_null": true,
       "table": "thread_participants",
+      "type": "text"
+    },
+    {
+      "collation": "default",
+      "default": null,
+      "generated": "",
+      "identity": "",
+      "kind": "column",
+      "name": "user_id",
+      "not_null": true,
+      "table": "user_notification_settings",
       "type": "text"
     },
     {
@@ -9883,6 +10004,76 @@
     {
       "deferrable": false,
       "deferred": false,
+      "definition": "CHECK (((multi_device >= 0) AND (multi_device <= 3)))",
+      "kind": "constraint",
+      "name": "user_notification_settings_multi_device",
+      "table": "user_notification_settings",
+      "type": "c",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "deferred": false,
+      "definition": "PRIMARY KEY (tenant_id, user_id)",
+      "kind": "constraint",
+      "name": "user_notification_settings_pkey",
+      "table": "user_notification_settings",
+      "type": "p",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "deferred": false,
+      "definition": "CHECK (((preview >= 0) AND (preview <= 3)))",
+      "kind": "constraint",
+      "name": "user_notification_settings_preview",
+      "table": "user_notification_settings",
+      "type": "c",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "deferred": false,
+      "definition": "CHECK (((quiet_start_minute IS NULL) = (quiet_end_minute IS NULL)))",
+      "kind": "constraint",
+      "name": "user_notification_settings_quiet_pair",
+      "table": "user_notification_settings",
+      "type": "c",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "deferred": false,
+      "definition": "CHECK ((((quiet_start_minute >= 0) AND (quiet_start_minute <= 1439)) AND ((quiet_end_minute >= 0) AND (quiet_end_minute <= 1439))))",
+      "kind": "constraint",
+      "name": "user_notification_settings_quiet_range",
+      "table": "user_notification_settings",
+      "type": "c",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "deferred": false,
+      "definition": "CHECK ((settings_version >= 0))",
+      "kind": "constraint",
+      "name": "user_notification_settings_version",
+      "table": "user_notification_settings",
+      "type": "c",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "deferred": false,
+      "definition": "CHECK (((quiet_weekdays >= 0) AND (quiet_weekdays <= 127)))",
+      "kind": "constraint",
+      "name": "user_notification_settings_weekdays",
+      "table": "user_notification_settings",
+      "type": "c",
+      "validated": true
+    },
+    {
+      "deferrable": false,
+      "deferred": false,
       "definition": "PRIMARY KEY (tenant_id, user_id, conversation_id)",
       "kind": "constraint",
       "name": "user_sync_cursor_pkey",
@@ -10247,6 +10438,16 @@
       "definition": "CREATE INDEX idx_conversation_participants_conv_joined ON public.conversation_participants USING btree (tenant_id, conversation_id, joined_at, user_id)",
       "kind": "index",
       "name": "idx_conversation_participants_conv_joined",
+      "ready": true,
+      "replica_identity": false,
+      "table": "conversation_participants",
+      "valid": true
+    },
+    {
+      "clustered": false,
+      "definition": "CREATE INDEX idx_conversation_participants_notify_all ON public.conversation_participants USING btree (tenant_id, conversation_id, user_id) WHERE notify_all",
+      "kind": "index",
+      "name": "idx_conversation_participants_notify_all",
       "ready": true,
       "replica_identity": false,
       "table": "conversation_participants",
@@ -11964,6 +12165,16 @@
     },
     {
       "clustered": false,
+      "definition": "CREATE UNIQUE INDEX user_notification_settings_pkey ON public.user_notification_settings USING btree (tenant_id, user_id)",
+      "kind": "index",
+      "name": "user_notification_settings_pkey",
+      "ready": true,
+      "replica_identity": false,
+      "table": "user_notification_settings",
+      "valid": true
+    },
+    {
+      "clustered": false,
       "definition": "CREATE UNIQUE INDEX user_sync_cursor_pkey ON public.user_sync_cursor USING btree (tenant_id, user_id, conversation_id)",
       "kind": "index",
       "name": "user_sync_cursor_pkey",
@@ -12856,6 +13067,17 @@
       "force_row_security": false,
       "kind": "relation",
       "name": "threads",
+      "options": null,
+      "partition": null,
+      "persistence": "p",
+      "replica_identity": "d",
+      "row_security": false,
+      "type": "r"
+    },
+    {
+      "force_row_security": false,
+      "kind": "relation",
+      "name": "user_notification_settings",
       "options": null,
       "partition": null,
       "persistence": "p",

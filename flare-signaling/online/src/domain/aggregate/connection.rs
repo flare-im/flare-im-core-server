@@ -14,7 +14,8 @@ use serde::{Deserialize, Serialize};
 
 use super::super::event::DomainEvent;
 use super::super::value_object::{
-    ConnectionId, ConnectionQuality, DeviceId, DevicePriority, TokenVersion, UserId,
+    ConnectionId, ConnectionQuality, DeviceAppState, DeviceAttention, DeviceId, DevicePriority,
+    DeviceStateUpdate, TokenVersion, UserId,
 };
 
 /// Connection 聚合根
@@ -40,6 +41,18 @@ pub struct Connection {
     token_version: TokenVersion,
     connection_quality: Option<ConnectionQuality>,
 
+    // === 设备可达状态（客户端经网关上报）===
+    #[serde(default)]
+    app_state: DeviceAppState,
+    #[serde(default)]
+    attention: DeviceAttention,
+    /// 进入当前应用状态的时刻：只在应用状态变化时前移，注意力与角标的更新不动它
+    #[serde(default)]
+    state_since: DateTime<Utc>,
+    /// 最近一次上报的未读总数
+    #[serde(default)]
+    badge: u32,
+
     // === 生命周期 ===
     created_at: DateTime<Utc>,
     last_heartbeat_at: DateTime<Utc>,
@@ -60,6 +73,10 @@ pub struct ConnectionCreateParams {
     pub device_priority: DevicePriority,
     pub token_version: TokenVersion,
     pub initial_quality: Option<ConnectionQuality>,
+    /// 建连时的应用状态（CONNECT 元数据带来）
+    pub app_state: DeviceAppState,
+    /// 建连时的用户注意力
+    pub attention: DeviceAttention,
 }
 
 impl Connection {
@@ -70,7 +87,8 @@ impl Connection {
     /// 业务规则：
     /// 1. 自动生成会话ID（UUID v4）
     /// 2. 初始化心跳时间为当前时间
-    /// 3. 发布 ConnectionCreated 事件
+    /// 3. 设备可达状态取建连时带来的应用状态与注意力，角标从 0 起，等第一次上报
+    /// 4. 发布 ConnectionCreated 事件
     pub fn create(params: ConnectionCreateParams) -> Self {
         let now = Utc::now();
         let conversation_id = ConnectionId::new();
@@ -87,6 +105,10 @@ impl Connection {
             device_priority: params.device_priority,
             token_version: params.token_version,
             connection_quality: params.initial_quality,
+            app_state: params.app_state,
+            attention: params.attention,
+            state_since: now,
+            badge: 0,
             created_at: now,
             last_heartbeat_at: now,
             domain_events: Vec::new(),
@@ -107,7 +129,8 @@ impl Connection {
 
     /// 从持久化数据重建聚合根（仓储专用）
     ///
-    /// 注意：此方法不发布事件，因为是从已存在的数据重建
+    /// 注意：此方法不发布事件，因为是从已存在的数据重建。设备可达状态由
+    /// [`Self::with_device_state`] 补上；不补时是前台、自建连起。
     #[allow(clippy::too_many_arguments)]
     pub fn reconstitute(
         conversation_id: ConnectionId,
@@ -135,13 +158,47 @@ impl Connection {
             device_priority,
             token_version,
             connection_quality,
+            app_state: DeviceAppState::default(),
+            attention: DeviceAttention::default(),
+            state_since: created_at,
+            badge: 0,
             created_at,
             last_heartbeat_at,
             domain_events: Vec::new(),
         }
     }
 
+    /// 重建时补上持久化的设备可达状态（仓储专用）
+    pub fn with_device_state(
+        mut self,
+        app_state: DeviceAppState,
+        attention: DeviceAttention,
+        state_since: DateTime<Utc>,
+        badge: u32,
+    ) -> Self {
+        self.app_state = app_state;
+        self.attention = attention;
+        self.state_since = state_since;
+        self.badge = badge;
+        self
+    }
+
     // ==================== 命令方法（修改状态）====================
+
+    /// 记录一次设备状态上报
+    ///
+    /// 业务规则：
+    /// 1. 应用状态、注意力、角标整体覆盖为上报值
+    /// 2. 只有应用状态真的变了才把 `state_since` 前移到 `at`：同一状态下只改注意力或角标，
+    ///    「进入当前状态多久」不重新计时
+    pub fn report_device_state(&mut self, update: DeviceStateUpdate, at: DateTime<Utc>) {
+        if self.app_state != update.app_state {
+            self.state_since = at;
+        }
+        self.app_state = update.app_state;
+        self.attention = update.attention;
+        self.badge = update.badge;
+    }
 
     /// 刷新心跳
     ///
@@ -304,6 +361,26 @@ impl Connection {
         self.connection_quality.as_ref()
     }
 
+    /// 获取设备应用状态
+    pub fn app_state(&self) -> DeviceAppState {
+        self.app_state
+    }
+
+    /// 获取用户注意力
+    pub fn attention(&self) -> DeviceAttention {
+        self.attention
+    }
+
+    /// 进入当前应用状态的时刻
+    pub fn state_since(&self) -> DateTime<Utc> {
+        self.state_since
+    }
+
+    /// 最近一次上报的未读总数
+    pub fn badge(&self) -> u32 {
+        self.badge
+    }
+
     /// 获取最后心跳时间
     pub fn last_heartbeat_at(&self) -> DateTime<Utc> {
         self.last_heartbeat_at
@@ -367,6 +444,42 @@ impl Connection {
         new_version.should_kick(&self.token_version)
     }
 
+    /// 一次身份会话吊销是否覆盖一条连接
+    ///
+    /// 业务规则：
+    /// 1. 带身份会话 ID 的连接按 ID 精确匹配，与截止时刻无关
+    /// 2. 没有身份会话 ID 的连接（早于身份会话下发）按登记时刻不晚于截止时刻算；截止时刻是吊销
+    ///    发生的那一刻，重试时不能换成当前时间
+    ///
+    /// 仓储对存储里的记录、领域服务对重建的聚合用的是这同一条规则。
+    pub fn identity_revocation_covers(
+        identity_session_id: Option<&str>,
+        created_at_ms: i64,
+        revoked_session_ids: &[String],
+        cutoff_ms: i64,
+    ) -> bool {
+        match identity_session_id {
+            Some(session_id) => revoked_session_ids
+                .iter()
+                .any(|revoked| revoked == session_id),
+            None => created_at_ms <= cutoff_ms,
+        }
+    }
+
+    /// 这条连接是否被一次身份会话吊销结束（见 [`Self::identity_revocation_covers`]）
+    pub fn ended_by_identity_revocation(
+        &self,
+        revoked_session_ids: &[String],
+        cutoff_ms: i64,
+    ) -> bool {
+        Self::identity_revocation_covers(
+            self.identity_session_id(),
+            self.created_at.timestamp_millis(),
+            revoked_session_ids,
+            cutoff_ms,
+        )
+    }
+
     // ==================== 领域事件管理 ====================
 
     /// 添加领域事件
@@ -399,6 +512,10 @@ impl std::fmt::Debug for Connection {
             .field("device_priority", &self.device_priority)
             .field("token_version", &self.token_version)
             .field("connection_quality", &self.connection_quality)
+            .field("app_state", &self.app_state)
+            .field("attention", &self.attention)
+            .field("state_since", &self.state_since)
+            .field("badge", &self.badge)
             .field("created_at", &self.created_at)
             .field("last_heartbeat_at", &self.last_heartbeat_at)
             .finish()
@@ -419,6 +536,10 @@ impl Clone for Connection {
             device_priority: self.device_priority,
             token_version: self.token_version,
             connection_quality: self.connection_quality.clone(),
+            app_state: self.app_state,
+            attention: self.attention,
+            state_since: self.state_since,
+            badge: self.badge,
             created_at: self.created_at,
             last_heartbeat_at: self.last_heartbeat_at,
             domain_events: Vec::new(),
@@ -467,6 +588,8 @@ mod tests {
             device_priority: DevicePriority::Normal,
             token_version: TokenVersion::new(1).unwrap(),
             initial_quality: None,
+            app_state: DeviceAppState::Standby,
+            attention: DeviceAttention::Idle,
         })
     }
 
@@ -477,6 +600,112 @@ mod tests {
         assert_eq!(session.device_platform(), "ios");
         assert_eq!(session.device_priority(), DevicePriority::Normal);
         assert_eq!(session.domain_events().len(), 1); // ConnectionCreatedEvent
+    }
+
+    /// 建连带来的应用状态与注意力就是初始状态：自建连起计时，角标等第一次上报。
+    #[test]
+    fn a_new_session_starts_in_the_state_it_connected_with() {
+        let session = create_test_session();
+
+        assert_eq!(session.app_state(), DeviceAppState::Standby);
+        assert_eq!(session.attention(), DeviceAttention::Idle);
+        assert_eq!(session.state_since(), session.created_at());
+        assert_eq!(session.badge(), 0);
+    }
+
+    /// 上报整体覆盖应用状态、注意力与角标；`state_since` 只在应用状态变化时前移。
+    #[test]
+    fn state_since_moves_only_when_the_app_state_changes() {
+        let mut session = create_test_session();
+        let connected_at = session.state_since();
+        let later = connected_at + Duration::seconds(30);
+
+        // 同一应用状态下只改注意力与角标：不重新计时。
+        session.report_device_state(
+            DeviceStateUpdate {
+                app_state: DeviceAppState::Standby,
+                attention: DeviceAttention::Attentive,
+                badge: 7,
+            },
+            later,
+        );
+        assert_eq!(session.attention(), DeviceAttention::Attentive);
+        assert_eq!(session.badge(), 7);
+        assert_eq!(session.state_since(), connected_at);
+
+        session.report_device_state(
+            DeviceStateUpdate {
+                app_state: DeviceAppState::Parking,
+                attention: DeviceAttention::Unspecified,
+                badge: 9,
+            },
+            later,
+        );
+        assert_eq!(session.app_state(), DeviceAppState::Parking);
+        assert_eq!(session.attention(), DeviceAttention::Unspecified);
+        assert_eq!(session.badge(), 9);
+        assert_eq!(session.state_since(), later);
+    }
+
+    /// 身份会话吊销：带身份会话 ID 的连接只按 ID 匹配；没有 ID 的按登记时刻不晚于截止时刻算。
+    #[test]
+    fn an_identity_revocation_covers_named_sessions_and_older_unbound_connections() {
+        let revoked = vec!["sid-old".to_string()];
+        let bound = |sid: &str| create_test_session().with_identity_session_id(Some(sid.into()));
+        let created_ms = |session: &Connection| session.created_at().timestamp_millis();
+
+        let named = bound("sid-old");
+        assert!(named.ended_by_identity_revocation(&revoked, 0));
+        let other = bound("sid-new");
+        assert!(!other.ended_by_identity_revocation(&revoked, i64::MAX));
+        // 没点名任何会话：带 ID 的连接一条都不覆盖。
+        assert!(!named.ended_by_identity_revocation(&[], i64::MAX));
+
+        let unbound = create_test_session();
+        assert!(unbound.ended_by_identity_revocation(&[], created_ms(&unbound)));
+        assert!(!unbound.ended_by_identity_revocation(&revoked, created_ms(&unbound) - 1));
+    }
+
+    /// 重建时不补设备状态就是前台、自建连起；补了以持久化的值为准。
+    #[test]
+    fn reconstitution_restores_the_persisted_device_state() {
+        let created_at = Utc::now() - Duration::minutes(5);
+        let rebuild = || {
+            Connection::reconstitute(
+                ConnectionId::new(),
+                UserId::new("test_user".to_string()).unwrap(),
+                DeviceId::new("test_device".to_string()).unwrap(),
+                "0".to_string(),
+                "ios".to_string(),
+                "server1".to_string(),
+                "gateway1".to_string(),
+                DevicePriority::Normal,
+                TokenVersion::new(1).unwrap(),
+                None,
+                created_at,
+                created_at,
+            )
+        };
+
+        let untouched = rebuild();
+        assert_eq!(untouched.app_state(), DeviceAppState::Active);
+        assert_eq!(untouched.attention(), DeviceAttention::Unspecified);
+        assert_eq!(untouched.state_since(), created_at);
+        assert_eq!(untouched.badge(), 0);
+
+        let parked_at = created_at + Duration::minutes(2);
+        let parked = rebuild().with_device_state(
+            DeviceAppState::Parking,
+            DeviceAttention::Idle,
+            parked_at,
+            12,
+        );
+        assert_eq!(parked.app_state(), DeviceAppState::Parking);
+        assert_eq!(parked.attention(), DeviceAttention::Idle);
+        assert_eq!(parked.state_since(), parked_at);
+        assert_eq!(parked.badge(), 12);
+        // 克隆带着设备状态走。
+        assert_eq!(parked.clone().badge(), 12);
     }
 
     #[test]

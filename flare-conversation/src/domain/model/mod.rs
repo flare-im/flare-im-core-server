@@ -3,6 +3,11 @@ use std::collections::HashMap;
 
 mod admin;
 pub use admin::{AdminConversation, AdminConversationPage};
+pub mod notification_settings;
+pub use notification_settings::{
+    MultiDeviceAlertPolicy, NotificationPreview, NotificationSubscriberPage, QuietHours,
+    QuietHoursChange, SubscriberCursor, UserNotificationSettings, UserNotificationSettingsPatch,
+};
 pub mod read_receipt;
 pub use read_receipt::{
     MemberReadPosition, MessageReadSummaries, MessageReadSummary, MessageReaderPage, ReadCounts,
@@ -159,6 +164,8 @@ pub struct ConversationSummary {
     pub is_muted: bool,
     /// 当前用户：是否只接收提及提醒
     pub is_mention_only: bool,
+    /// 当前用户：大群里是否显式开启了「全部消息通知」
+    pub notify_all: bool,
     /// 当前用户：是否置顶
     pub is_pinned: bool,
     /// 当前用户：是否归档
@@ -169,6 +176,19 @@ pub struct ConversationSummary {
     pub draft: Option<String>,
     /// 当前用户的历史可见边界；seq <= visible_after_seq 的消息不可见。
     pub visible_after_seq: i64,
+}
+
+/// 某用户有新未读消息的一个会话：只带补提示要看的字段，不是会话摘要。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RecentUnreadConversation {
+    pub conversation_id: String,
+    /// 该用户看得到的、未撤回也未删除的最新一条消息的会话 seq。
+    pub last_message_seq: i64,
+    pub last_message_id: String,
+    pub last_sender_id: String,
+    pub last_message_time: DateTime<Utc>,
+    /// 口径同会话摘要的未读数，恒大于 0。
+    pub unread_count: i32,
 }
 
 // The existing bridge sets this business type when it projects its group into Core.
@@ -186,6 +206,8 @@ pub struct ConversationUserSettings {
     pub draft: Option<String>,
     pub settings_version: u64,
     pub history_cleared_through_seq: u64,
+    /// 大群里显式开启「全部消息通知」：进入该会话的通知订阅者。
+    pub notify_all: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -198,6 +220,7 @@ pub struct UpdateConversationUserSettingsPatch {
     pub draft: Option<String>,
     pub base_settings_version: u64,
     pub clear_history_through_seq: Option<u64>,
+    pub notify_all: Option<bool>,
 }
 
 #[derive(Clone, Debug)]

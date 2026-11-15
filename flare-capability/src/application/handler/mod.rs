@@ -10,9 +10,9 @@ pub(crate) use remote_dispatch::VerifiedDispatchOrigin;
 pub(crate) use remote_dispatch::dispatch_remote;
 pub mod admin_dispatch;
 pub mod entity_lifecycle;
-pub mod message_events;
 #[cfg(test)]
 mod message_event_activation_pg_tests;
+pub mod message_events;
 pub mod plugin_card;
 pub mod plugin_reconcile;
 pub mod plugin_state;

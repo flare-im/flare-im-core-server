@@ -61,8 +61,10 @@ Environment variables are reserved for secrets and per-process operational tunin
 - `FLARE_API_GATEWAY_TOKEN_SECRET`, `ACCESS_GATEWAY_TOKEN_SECRET` for end-user access tokens; `FLARE_INTERNAL_CTX_PUBLIC_KEY(S)` for the Cell-signed context (including the staff context the Social gateway admin partition signs for Admin Gateway); `FLARE_PLATFORM_PUBLIC_KEY` for the platform's worker and scheduler assertions (Capability and Online only)
 - `FLARE_API_GATEWAY_TENANT_POLICY`, `MESSAGE_INGEST_TENANT_POLICY` and the corresponding `*_TENANT_RUNTIME_POSTGRES_URL` overrides for data-plane tenant admission
 - `FLARE_API_GATEWAY_GRPC_*`, `FLARE_ADMIN_GATEWAY_GRPC_*` for downstream HTTP gateway routes and static fallbacks
-- `ACCESS_GATEWAY_*` for long-connection stability limits and auth-hook overrides
-- `PUSH_WORKER_OFFLINE_*` for offline outbox stream wiring
+- `ACCESS_GATEWAY_*` for long-connection stability limits, delivery acknowledgement deadlines and auth-hook overrides
+- `PUSH_WORKER_OFFLINE_*` for the offline delivery backend and outbox stream wiring; `PUSH_PROXY_DEVICE_TOKEN_*`, `PUSH_SERVER_DEVICE_TOKEN_*` and `PUSH_WORKER_DEVICE_TOKEN_*` must name one device binding registry
+- `PUSH_SERVER_PUSH_OFFLINE_GROUP_TOPIC` / `PUSH_SERVER_PUSH_OFFLINE_BULK_TOPIC` and their `PUSH_WORKER_*` twins for the group and bulk offline lanes (defaults `flare.im.push.offline_group`, `flare.im.push.offline_bulk`); `PUSH_WORKER_{ONLINE,OFFLINE,OFFLINE_GROUP,OFFLINE_BULK}_CONCURRENCY` for the worker's per-subject consumers
+- `SIGNALING_ONLINE_PUSH_PROXY_URL` for Online's device handoffs and push binding revocations
 - `FLARE_MQ_DEFAULT_BACKEND`
 
 Do not add active TOML keys that are not consumed by `FlareAppConfig` or a service-owned typed settings loader. A non-working knob is worse than no knob.

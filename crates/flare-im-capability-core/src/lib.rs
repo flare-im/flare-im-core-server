@@ -21,7 +21,5 @@ pub use error::{CapabilityError, Result};
 pub use extension_operation::{DynExtensionOperationHandler, ExtensionOperationHandler};
 pub use flare_plugin_protocol as plugin;
 pub use grant::TenantCapabilitySwitch;
-pub use ports::{
-    CapabilityDispatchRoute, CapabilityPolicyBackend, RecipientResolver,
-};
+pub use ports::{CapabilityDispatchRoute, CapabilityPolicyBackend, RecipientResolver};
 pub use recipient::{RecipientResolveRequest, RecipientResolveResult};

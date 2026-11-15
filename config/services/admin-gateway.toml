@@ -20,13 +20,15 @@ address = "0.0.0.0"
 port = 50051
 
 # 下游 gRPC 默认走 discovery:// 服务发现；覆盖时使用 Admin Gateway 独立环境变量。Admin Gateway
-# 只连 Media、Conversation、Online、Storage Reader 与可选的 Capability，不连 Message Ingest 与
+# 只连 Media、Conversation、Online、Storage Reader、Push Proxy 与可选的 Capability，不连 Message Ingest 与
 # Orchestrator（它们的 *_SERVICE_URL 在 Admin 作用域下只做格式校验）。每次下游调用受
 # FLARE_ADMIN_GATEWAY_GRPC_REQUEST_TIMEOUT_SECS 限时（缺省 5 秒，超时回 504）。
 # FLARE_ADMIN_GATEWAY_GRPC_CONVERSATION_SERVICE_URL
 # FLARE_ADMIN_GATEWAY_GRPC_MEDIA_SERVICE_URL
 # FLARE_ADMIN_GATEWAY_GRPC_ONLINE_SERVICE_URL
 # FLARE_ADMIN_GATEWAY_GRPC_STORAGE_READER_SERVICE_URL
+# FLARE_ADMIN_GATEWAY_GRPC_PUSH_PROXY_SERVICE_URL（推送决策链 /users/{user_id}/push-traces；api-gateway 不读，
+#   它拨 Push Proxy 用自己的 FLARE_API_GATEWAY_GRPC_PUSH_PROXY_URL）
 # FLARE_ADMIN_GATEWAY_GRPC_CAPABILITY_SERVICE_URL（仅 Admin Gateway 的可选下游；设为空串即不连接，
 #   此时 /tenant/runtime、/capabilities/{catalog,tenant}、/plugins/**、/hooks/** 回 503
 #   ADMIN_CAPABILITY_DISABLED）
@@ -34,12 +36,12 @@ port = 50051
 # 管理接口（会话与成员、在线设备、踢线、租户运行时、能力目录与开关、插件、Hook 治理）只依赖
 # 其中的 CONVERSATION、ONLINE、CAPABILITY 三个下游，路由表见 docs/admin-api.md。
 # 显式 static 注册模式（FLARE_REGISTRY_MODE=static，单容器 Core）不做服务发现：
-# release/supervise-core.toml 把这 5 个 *_SERVICE_URL 直接设成同一 Core 容器内的固定地址；
+# release/supervise-core.toml 把这 6 个 *_SERVICE_URL 直接设成同一 Core 容器内的固定地址；
 # 没设时启动时每个下游打印一条回退 WARN，然后使用 *_STATIC_FALLBACK 的缺省值，即同样的地址：
 #   MEDIA http://127.0.0.1:60081            CONVERSATION http://127.0.0.1:50090
 #   ONLINE http://127.0.0.1:50061           STORAGE_READER http://127.0.0.1:60083
-#   CAPABILITY http://127.0.0.1:50110
-# flare-deploy 单机模板在 Compose 里把这 5 个 *_SERVICE_URL 直接设成上述地址，不走回退。
+#   CAPABILITY http://127.0.0.1:50110       PUSH_PROXY http://127.0.0.1:50091
+# flare-deploy 单机模板在 Compose 里把这 6 个 *_SERVICE_URL 直接设成上述地址，不走回退。
 # 把对应的 *_SERVICE_URL 设成 http:// 地址即直接连接，不再先尝试发现；下游不在同一容器时
 # 填它的私网地址。见 release/README.md「DEP-08 单容器静态发现候选」。
 

@@ -6,7 +6,9 @@ use serde::Deserialize;
 
 use crate::domain::aggregate::Connection;
 use crate::domain::model::OnlineStatusRecord;
-use crate::domain::value_object::{ConnectionId, DeviceId, UserId};
+use crate::domain::value_object::{
+    ConnectionId, DeviceAppState, DeviceId, DeviceStateUpdate, UserId,
+};
 
 /// A physical gateway connection removed by an atomic login admission.
 /// The gateway must close only this connection, never a newer reconnect on
@@ -66,6 +68,8 @@ pub trait ConversationRepository: Send + Sync {
     /// Publish a physical-session-only kick, then atomically remove that session.
     /// Failed publication leaves it retryable; replacement/index must survive.
     /// Return the old physical gateway ID. Unsupported adapters fail closed.
+    /// A kick that is durably recorded but not yet confirmed by its gateway fails with
+    /// [`KICK_PENDING_CONFIRMATION`] (see [`is_kick_pending_confirmation`]).
     async fn remove_connection_for_kick(
         &self,
         _tenant: &str,
@@ -101,6 +105,24 @@ pub trait ConversationRepository: Send + Sync {
         conversation_id: &ConnectionId,
         user_id: &UserId,
     ) -> Result<()>;
+
+    /// 记录一条会话的设备状态上报：应用状态、注意力、角标在一次读改写里原子更新，并发的心跳
+    /// 或踢线不会被它覆盖，也不会把已移除的会话写回来。「进入当前应用状态的时刻」只在应用状态
+    /// 变化时前移，取存储侧的时钟；心跳时间与 TTL 不动。会话已不存在返回 `false`。
+    /// 不支持的适配器按不可用处理。
+    async fn report_device_state(
+        &self,
+        _tenant_id: &str,
+        _conversation_id: &ConnectionId,
+        _user_id: &UserId,
+        _update: DeviceStateUpdate,
+    ) -> Result<bool> {
+        Err(flare_server_core::flare_err!(
+            flare_server_core::error::ErrorCode::ServiceUnavailable,
+            "device state store unavailable"
+        ))
+    }
+
     async fn fetch_statuses(
         &self,
         tenant_id: &str,
@@ -153,12 +175,18 @@ pub trait ConversationRepository: Send + Sync {
     ) -> Result<()>;
 }
 
-/// 网关连接索引里一条会话当前的归属（读自 `session:{tenant}:{user}` 的那个字段）。
+/// 网关连接索引里一条会话当前的归属（读自 `session:{tenant}:{user}` 的那个字段），连同清扫器把
+/// 它交接给推送通道时要用的设备与应用状态。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionOwner {
     pub gateway_id: String,
     /// 会话登记时刻（毫秒）。
     pub created_at_ms: i64,
+    /// 会话所属设备。
+    pub device_id: String,
+    /// 设备最近一次上报的应用状态。提示本来就归推送通道的设备（已托管，或在后台不能自己提示）
+    /// 不用补提示，清扫时不交接。
+    pub app_state: DeviceAppState,
 }
 
 /// 网关宕机清扫所需的存储操作：单例锁、已知网关与租约、网关连接索引
@@ -276,6 +304,17 @@ pub struct PresenceChangeEvent {
     pub occurred_at: chrono::DateTime<chrono::Utc>,
     pub conflict_action: Option<i32>, // ConflictAction enum value
     pub reason: Option<String>,
+}
+
+/// 踢线已经持久登记、目标网关还没确认关闭连接时，[`ConversationRepository::remove_connection_for_kick`]
+/// 返回的错误原因（错误码 `ServiceUnavailable`）。
+pub const KICK_PENDING_CONFIRMATION: &str = "kick command pending receiver confirmation";
+
+/// 这次踢线是不是「已登记、待网关确认」。登记是持久的，后台会一直推进到网关确认、会话移除为止：
+/// 调用方这一次拿到的是错误，但这条会话必然会结束，而它结束时不再经过调用方。
+pub fn is_kick_pending_confirmation(error: &flare_server_core::error::FlareError) -> bool {
+    error.code() == Some(flare_server_core::error::ErrorCode::ServiceUnavailable)
+        && error.reason() == KICK_PENDING_CONFIRMATION
 }
 
 /// 踢线时下发给客户端的类型化原因（KICKED 帧的 message）。

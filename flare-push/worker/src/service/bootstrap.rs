@@ -2,6 +2,7 @@ use flare_im_contracts::service_names::PUSH_WORKER;
 use flare_server_core::error::Result;
 use tracing::info;
 
+use crate::service::consumer_lanes::LaneBrokerSettings;
 use crate::service::wire::{self, ApplicationContext};
 
 pub struct ApplicationBootstrap;
@@ -36,12 +37,21 @@ impl ApplicationBootstrap {
         context: ApplicationContext,
         mut runtime: flare_core_runtime::ServiceRuntime,
     ) -> Result<()> {
-        info!("Starting Push Worker (push-online/push-offline) via ServiceRuntime...");
+        info!(
+            "Starting Push Worker (push-online, push-offline, push-offline-group, push-offline-bulk) via ServiceRuntime..."
+        );
 
         let usage = context.usage;
         runtime = runtime.add_spawn_with_shutdown("push-worker-usage", move |shutdown_rx| {
             usage.run(shutdown_rx)
         });
+
+        // 厂商限流时攒下的提示：厂商恢复后每台设备交还一条。停机时还攒着的丢掉（消息打开即同步）。
+        if let Some(coalescer) = context.digest_coalescer {
+            runtime = runtime.add_spawn_with_shutdown("push-worker-digest", move |shutdown_rx| {
+                coalescer.run(shutdown_rx)
+            });
+        }
 
         if context.config.metrics.enabled {
             let metrics_config = context.config.metrics.clone();
@@ -57,43 +67,46 @@ impl ApplicationBootstrap {
             );
         }
 
-        let tasks = match context.config.mq_backend.as_str() {
-            "kafka" => flare_server_core::mq::kafka::build_kafka_consumer_tasks(
-                context.config.as_ref(),
-                context.consumer_config,
-                context.dispatcher.clone(),
-                "push-delivery-consumer",
-            )
-            .map_err(|e| {
-                flare_server_core::error::FlareError::system(format!(
-                    "create push-worker kafka consumers: {}",
-                    e
-                ))
-            })?,
-            // 接通死信:处理失败/毒消息投到独立死信流 flare.im.dlq.push-delivery,不再无限重投。
-            "nats" => flare_server_core::mq::nats::build_nats_consumer_tasks_with_dlq(
-                context.config.as_ref(),
-                context.consumer_config,
-                context.dispatcher.clone(),
-                "push-delivery-consumer",
-                "flare.im.dlq.push-delivery",
-            )
-            .await
-            .map_err(|e| {
-                flare_server_core::error::FlareError::system(format!(
-                    "create push-worker nats consumers: {}",
-                    e
-                ))
-            })?,
-            other => {
-                return Err(flare_server_core::error::FlareError::system(format!(
-                    "unsupported mq backend: {other}"
-                )));
+        // 每个主题一个消费者，各用自己的消费组与并发（见 `consumer_lanes`）。
+        for lane in context.consumers {
+            let settings = LaneBrokerSettings::new(context.config.clone(), &lane.spec);
+            let tasks = match context.config.mq_backend.as_str() {
+                "kafka" => flare_server_core::mq::kafka::build_kafka_consumer_tasks(
+                    &settings,
+                    lane.consumer_config,
+                    lane.dispatcher.clone(),
+                    lane.spec.name,
+                )
+                .map_err(|e| {
+                    flare_server_core::error::FlareError::system(format!(
+                        "create push-worker kafka consumer {}: {}",
+                        lane.spec.name, e
+                    ))
+                })?,
+                // 接通死信:处理失败/毒消息投到独立死信流 flare.im.dlq.push-delivery,不再无限重投。
+                "nats" => flare_server_core::mq::nats::build_nats_consumer_tasks_with_dlq(
+                    &settings,
+                    lane.consumer_config,
+                    lane.dispatcher.clone(),
+                    lane.spec.name,
+                    "flare.im.dlq.push-delivery",
+                )
+                .await
+                .map_err(|e| {
+                    flare_server_core::error::FlareError::system(format!(
+                        "create push-worker nats consumer {}: {}",
+                        lane.spec.name, e
+                    ))
+                })?,
+                other => {
+                    return Err(flare_server_core::error::FlareError::system(format!(
+                        "unsupported mq backend: {other}"
+                    )));
+                }
+            };
+            for task in tasks {
+                runtime = runtime.add_task(Box::new(task));
             }
-        };
-
-        for task in tasks {
-            runtime = runtime.add_task(Box::new(task));
         }
 
         runtime

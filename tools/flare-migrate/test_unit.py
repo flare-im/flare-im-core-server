@@ -67,7 +67,7 @@ class MigrationUnitTests(unittest.TestCase):
 
     def test_all_patches_are_accounted_for_and_baseline_has_no_drop(self):
         migrations = migrate.load_migrations()
-        self.assertEqual([m.version for m in migrations], list(range(1, 30)))
+        self.assertEqual([m.version for m in migrations], list(range(1, 31)))
         self.assertNotIn("\nDROP ", migrations[0].sql)
         for patch in (migrate.ROOT / "deploy/patches").glob("*.sql"):
             self.assertTrue(any(patch.name in migration.name for migration in migrations[1:]), patch.name)
@@ -129,8 +129,8 @@ class MigrationUnitTests(unittest.TestCase):
         self.assertEqual(len(environments), 2)
         for environment in map(json.loads, environments):
             shapes = {name: migrate.read_profile(name, environment) for name in migrate.REVIEWED_SHAPES}
-            self.assertEqual(set(shapes), {"baseline", "v0008", "v0009", "v0010", "v0011", "v0019", "v0020", "v0022", "v0023", "v0027", "v0028", "latest"})
-            self.assertEqual(len({migrate.canonical(shape) for shape in shapes.values()}), 12)
+            self.assertEqual(set(shapes), {"baseline", "v0008", "v0009", "v0010", "v0011", "v0019", "v0020", "v0022", "v0023", "v0027", "v0028", "v0029", "latest"})
+            self.assertEqual(len({migrate.canonical(shape) for shape in shapes.values()}), 13)
             for name, shape in shapes.items():
                 with self.subTest(environment=environment, shape=name):
                     migrate.assert_reviewed_baseline(shape)
@@ -275,7 +275,7 @@ class MigrationUnitTests(unittest.TestCase):
         for timescale in ("2.30.0", "2.29.1"):
             env = {"postgres_major": 16, "timescaledb": timescale}
             before = migrate.read_profile("v0028", env)
-            after = migrate.read_profile("latest", env)
+            after = migrate.read_profile("v0029", env)
             self.assertEqual(before["timescale"], after["timescale"])
             old = {migrate.canonical(o) for o in before["objects"]}
             new = {migrate.canonical(o) for o in after["objects"]}
@@ -288,6 +288,31 @@ class MigrationUnitTests(unittest.TestCase):
                 ("constraint", "media_assets_application_owner"),
             })
             self.assertTrue(all(o["table"] == "media_assets" for o in added))
+
+    def test_0030_adds_only_user_notification_settings_and_notify_all(self):
+        for timescale in ("2.30.0", "2.29.1"):
+            env = {"postgres_major": 16, "timescaledb": timescale}
+            before = migrate.read_profile("v0029", env)
+            after = migrate.read_profile("latest", env)
+            self.assertEqual(before["timescale"], after["timescale"])
+            old = {migrate.canonical(o) for o in before["objects"]}
+            new = {migrate.canonical(o) for o in after["objects"]}
+            self.assertFalse(old - new)
+            added = [o for o in after["objects"] if migrate.canonical(o) not in old]
+            kinds = sorted(o["kind"] for o in added)
+            self.assertEqual((kinds.count("relation"), kinds.count("column"), kinds.count("constraint"),
+                              kinds.count("index"), len(added)), (1, 11, 7, 2, 21), timescale)
+            self.assertEqual([(o["table"], o["name"]) for o in added
+                              if o["kind"] == "column" and o["table"] != "user_notification_settings"],
+                             [("conversation_participants", "notify_all")])
+            self.assertEqual({o["name"] for o in added if o["kind"] == "index"},
+                             {"user_notification_settings_pkey", "idx_conversation_participants_notify_all"})
+            self.assertEqual({o["name"] for o in added if o["kind"] == "constraint"}, {
+                "user_notification_settings_pkey",
+                "user_notification_settings_quiet_pair", "user_notification_settings_quiet_range",
+                "user_notification_settings_weekdays", "user_notification_settings_preview",
+                "user_notification_settings_multi_device", "user_notification_settings_version",
+            })
 
     def test_version_and_definition_drift_are_not_ignored(self):
         old = {"objects": [{"kind": "column", "not_null": True}], "environment": {"timescaledb": "2.29.1"}}

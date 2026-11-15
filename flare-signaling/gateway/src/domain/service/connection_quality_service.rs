@@ -129,6 +129,15 @@ impl ConnectionQualityService {
         metrics_map.get(connection_id).cloned()
     }
 
+    /// 连接平滑后的往返时延；还没有样本（或样本不是有效数值）时为 `None`。
+    /// 只取这一个数，不克隆整份指标：送达确认的期限按它收紧，查询在后台任务里逐连接发生。
+    pub async fn rtt(&self, connection_id: &str) -> Option<Duration> {
+        let metrics_map = self.metrics.read().await;
+        let rtt_avg_ms = metrics_map.get(connection_id)?.rtt_avg_ms;
+        (rtt_avg_ms.is_finite() && rtt_avg_ms >= 0.0)
+            .then(|| Duration::from_millis(rtt_avg_ms as u64))
+    }
+
     /// 获取用户所有设备的质量信息
     pub async fn get_user_devices_quality(&self, user_id: &str) -> Vec<ConnectionQualityMetrics> {
         let metrics_map = self.metrics.read().await;

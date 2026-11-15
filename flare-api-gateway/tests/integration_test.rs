@@ -67,7 +67,12 @@ fn usage_recorder_is_wired_into_the_public_app() {
 /// 签发/刷新接口在拿到 token 之前调用，不能套 bearer 中间件；生命周期实现必须在 server-core。
 #[test]
 fn auth_token_routes_are_public_and_delegate_lifecycle_to_server_core() {
-    let auth_router = function_body(ROUTER_RS, "let auth_router = Router::new()");
+    // 只看 `let auth_router = ...;` 这一条语句：它没有花括号，按函数体截取会一直读到后面别的路由。
+    let start = ROUTER_RS
+        .find("let auth_router = Router::new()")
+        .expect("auth router");
+    let statement = &ROUTER_RS[start..];
+    let auth_router = &statement[..statement.find(';').expect("statement end")];
     assert!(auth_router.contains("/tokens"));
     assert!(auth_router.contains("/tokens/refresh"));
     assert!(!auth_router.contains("gateway_auth_middleware"));

@@ -13,7 +13,7 @@ use flare_im_service_kit::tenant_runtime::TenantAccessPolicy;
 use flare_server_core::auth::AuthProviderMode;
 use flare_server_core::error::{ErrorBuilder, ErrorCode, FlareError, Result};
 
-use crate::domain::service::SyncPullRateLimitConfig;
+use crate::domain::service::{DeliveryWatchConfig, SyncPullRateLimitConfig};
 
 #[derive(Debug, Clone)]
 pub struct AccessGatewayConfig {
@@ -87,6 +87,15 @@ pub struct AccessGatewayConfig {
     pub tenant_policy: TenantAccessPolicy,
     /// 租户运行时投影库（`tenants` 表）；`None` = 不校验租户状态、配额回落全局。
     pub tenant_runtime_postgres_url: Option<String>,
+    /// 前台连接等送达确认的期限（毫秒），默认 3000，可通过
+    /// ACCESS_GATEWAY_DELIVERY_ACK_ACTIVE_DEADLINE_MS 覆盖。到期没确认的可提示帧转给推送通道
+    pub delivery_ack_active_deadline_ms: u64,
+    /// 后台连接等送达确认的期限（毫秒），默认 1500，可通过
+    /// ACCESS_GATEWAY_DELIVERY_ACK_STANDBY_DEADLINE_MS 覆盖
+    pub delivery_ack_standby_deadline_ms: u64,
+    /// 确认超时后探活（PING）等回应的时限（毫秒），默认 5000，可通过
+    /// ACCESS_GATEWAY_DELIVERY_PROBE_TIMEOUT_MS 覆盖。到时没有 PONG 也没有送达确认就关闭连接
+    pub delivery_probe_timeout_ms: u64,
 }
 
 impl AccessGatewayConfig {
@@ -279,6 +288,18 @@ impl AccessGatewayConfig {
             ));
         }
 
+        // 送达确认期限与探活时限：0 没有意义（等于不等确认），按未配置处理。
+        let delivery_watch_defaults = DeliveryWatchConfig::default();
+        let delivery_ack_active_deadline_ms =
+            env_positive_millis("ACCESS_GATEWAY_DELIVERY_ACK_ACTIVE_DEADLINE_MS")
+                .unwrap_or(delivery_watch_defaults.active_deadline.as_millis() as u64);
+        let delivery_ack_standby_deadline_ms =
+            env_positive_millis("ACCESS_GATEWAY_DELIVERY_ACK_STANDBY_DEADLINE_MS")
+                .unwrap_or(delivery_watch_defaults.standby_deadline.as_millis() as u64);
+        let delivery_probe_timeout_ms =
+            env_positive_millis("ACCESS_GATEWAY_DELIVERY_PROBE_TIMEOUT_MS")
+                .unwrap_or(delivery_watch_defaults.probe_timeout.as_millis() as u64);
+
         // 指标端点：与 ingest/orchestrator/storage-writer 同一套约定
         // （*_METRICS_ENABLED / _ADDRESS / _PORT / _PATH），默认开启。
         let metrics = {
@@ -335,6 +356,9 @@ impl AccessGatewayConfig {
             sync_pull_tenant_burst,
             tenant_policy,
             tenant_runtime_postgres_url,
+            delivery_ack_active_deadline_ms,
+            delivery_ack_standby_deadline_ms,
+            delivery_probe_timeout_ms,
         })
     }
 }
@@ -347,6 +371,16 @@ impl AccessGatewayConfig {
             user_burst: self.sync_pull_user_burst,
             tenant_requests_per_second: self.sync_pull_tenant_requests_per_second,
             tenant_burst: self.sync_pull_tenant_burst,
+        }
+    }
+
+    pub fn delivery_watch_config(&self) -> DeliveryWatchConfig {
+        use std::time::Duration;
+
+        DeliveryWatchConfig {
+            active_deadline: Duration::from_millis(self.delivery_ack_active_deadline_ms),
+            standby_deadline: Duration::from_millis(self.delivery_ack_standby_deadline_ms),
+            probe_timeout: Duration::from_millis(self.delivery_probe_timeout_ms),
         }
     }
 
@@ -484,8 +518,40 @@ fn env_u32(key: &str) -> Option<u32> {
     std::env::var(key).ok().and_then(|v| v.parse::<u32>().ok())
 }
 
+/// 毫秒数配置：必须是正整数，其余（含 0、解析不了的）按未配置处理。
+fn env_positive_millis(key: &str) -> Option<u64> {
+    positive_millis(std::env::var(key).ok().as_deref())
+}
+
+fn positive_millis(raw: Option<&str>) -> Option<u64> {
+    raw.and_then(|value| value.trim().parse::<u64>().ok())
+        .filter(|millis| *millis > 0)
+}
+
 fn config_error(reason: impl Into<String>) -> FlareError {
     ErrorBuilder::new(ErrorCode::ConfigurationError, reason).build_error()
+}
+
+#[cfg(test)]
+mod delivery_watch_config_tests {
+    use super::*;
+
+    #[test]
+    fn deadline_overrides_must_be_positive_integers() {
+        assert_eq!(positive_millis(Some(" 2500 ")), Some(2500));
+        for raw in [None, Some(""), Some("0"), Some("-1"), Some("1.5s")] {
+            assert_eq!(positive_millis(raw), None, "{raw:?}");
+        }
+    }
+
+    /// 没配置时的三个时限：前台 3s、后台 1.5s、探活 5s。
+    #[test]
+    fn defaults_follow_the_delivery_watch_defaults() {
+        let defaults = DeliveryWatchConfig::default();
+        assert_eq!(defaults.active_deadline.as_millis(), 3000);
+        assert_eq!(defaults.standby_deadline.as_millis(), 1500);
+        assert_eq!(defaults.probe_timeout.as_millis(), 5000);
+    }
 }
 
 #[cfg(test)]

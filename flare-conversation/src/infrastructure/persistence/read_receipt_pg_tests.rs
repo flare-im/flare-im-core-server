@@ -2,7 +2,9 @@
 //! - 群聊已读摘要与已读名单：读接口 `MessageReadReceiptService` 经仓储读成员的已读水位（由
 //!   `mark_as_read` 推进，即已读回执消费者写的那一列）与消息表；
 //! - Orchestrator 核对上行事件操作者的成员查找（`ext["member_ids"]`）：隐藏了会话的仍是成员；
-//! - 撤回、删除与未读：状态按 proto `MessageStatus` 判断，撤回后未读不再含这条消息。
+//! - 撤回、删除与未读：状态按 proto `MessageStatus` 判断，撤回后未读不再含这条消息；
+//! - 服务身份按用户读「有新未读消息的会话」（`ConversationInternalReadService`）：与会话列表
+//!   摘要同一个未读。
 //!
 //! 需要 `FLARE_CONVERSATION_TEST_DATABASE_URL`（任意可建 schema 的 PostgreSQL）。用例标了
 //! `#[ignore]`：默认的 `cargo test` 只记为 ignored，`-- --ignored` 显式运行时变量必须已设置。
@@ -134,6 +136,7 @@ async fn isolated_schema(url: &str) -> (PgPool, PgPool, String) {
         migration("0004_20260812_add_participant_mention_only.sql"),
         migration("0006_20260901_participants_joined_at_index.sql"),
         migration("0021_20261103_conversation_history_clear.sql"),
+        migration("0030_20261111_user_notification_settings.sql"),
     ]
     .join("\n");
     sqlx::raw_sql(&ddl).execute(&pool).await.unwrap();
@@ -1299,6 +1302,7 @@ async fn lifecycle_archive_converges_through_incremental_bootstrap_and_keeps_his
         draft: None,
         base_settings_version: 0,
         clear_history_through_seq: None,
+        notify_all: None,
     };
     assert!(
         repo.update_user_settings(&bob, &settings(true))
@@ -1438,6 +1442,7 @@ async fn member_rows_carry_personal_settings_only_for_their_owner() {
             draft: None,
             base_settings_version: 0,
             clear_history_through_seq: None,
+            notify_all: None,
         }
     };
     repo.update_user_settings(&user("bob"), &set(true, true, true))
@@ -1562,6 +1567,35 @@ async fn member_rows_carry_personal_settings_only_for_their_owner() {
             None,
             ConversationDomainConfig::default(),
         );
+    // Alice also turns on "all messages" for this group; each summary carries the caller's own
+    // mention-only and notify-all flags.
+    repo.update_user_settings(
+        &user("alice"),
+        &crate::domain::model::UpdateConversationUserSettingsPatch {
+            notify_all: Some(true),
+            ..set(true, false, false)
+        },
+    )
+    .await
+    .unwrap();
+    let own_flags = |who: &'static str| {
+        let bootstrap = &bootstrap;
+        let group = group.clone();
+        async move {
+            let summary = bootstrap
+                .bootstrap_conversation(&user(who), Default::default(), false, None, 0, 0)
+                .await
+                .unwrap()
+                .summaries
+                .into_iter()
+                .find(|summary| summary.conversation_id == group)
+                .expect("listed");
+            (summary.is_mention_only, summary.notify_all)
+        }
+    };
+    assert_eq!(own_flags("alice").await, (false, true));
+    assert_eq!(own_flags("bob").await, (true, false));
+    assert_eq!(own_flags("carol").await, (false, false));
     let mut preview: Vec<Row> = bootstrap
         .bootstrap_conversation(&user("alice"), Default::default(), false, None, 0, 0)
         .await
@@ -1673,6 +1707,7 @@ async fn adding_an_existing_member_keeps_their_own_settings() {
             draft: None,
             base_settings_version: 0,
             clear_history_through_seq: None,
+            notify_all: None,
         },
     )
     .await
@@ -1799,6 +1834,7 @@ async fn personal_history_cutoff_is_monotonic_and_isolated_from_other_members() 
         is_archived: None,
         draft: None,
         base_settings_version: 0,
+        notify_all: None,
     };
     let result = repo
         .update_user_settings(&user("alice"), &clear(u64::MAX))
@@ -1839,4 +1875,247 @@ async fn personal_history_cutoff_is_monotonic_and_isolated_from_other_members() 
         vec![("alice".into(), 2), ("bob".into(), 0), ("former".into(), 0)]
     );
     drop_schema(admin, pool, &schema).await;
+}
+
+/// A live message at an explicit time (the shared `message` helper stamps "now").
+async fn message_at(pool: &PgPool, cid: &str, id: &str, seq: i64, sender: &str, at_ms: i64) {
+    sqlx::query(
+        "INSERT INTO messages (tenant_id, server_id, conversation_id, sender_id, seq, status, \
+         timestamp, created_at) VALUES ($1, $2, $3, $4, $5, 1, to_timestamp($6::double precision / 1000), \
+         to_timestamp($6::double precision / 1000))",
+    )
+    .bind(TENANT)
+    .bind(id)
+    .bind(cid)
+    .bind(sender)
+    .bind(seq)
+    .bind(at_ms)
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
+async fn recent_unread(
+    handler: &ConversationGrpcHandler,
+    caller: &Context,
+    user_id: &str,
+    since: i64,
+    limit: i32,
+) -> Result<Vec<flare_grpc_proto::conversation::RecentUnreadConversation>, tonic::Status> {
+    use flare_grpc_proto::conversation::ListRecentUnreadConversationsRequest;
+    use flare_grpc_proto::conversation::conversation_internal_read_service_server::ConversationInternalReadService;
+    let mut request = tonic::Request::new(ListRecentUnreadConversationsRequest {
+        user_id: user_id.into(),
+        since,
+        limit,
+    });
+    flare_server_core::client::set_context_metadata(&mut request, caller);
+    handler
+        .list_recent_unread_conversations(request)
+        .await
+        .map(|response| response.into_inner().conversations)
+}
+
+/// 服务身份按用户读「有新未读消息的会话」：只回答在席的会话，最后一条未撤回消息须晚于 since、
+/// 不是本人发的，且本人仍有未读；从新到旧，条数封顶；租户取自上下文。
+#[tokio::test]
+#[ignore = "requires FLARE_CONVERSATION_TEST_DATABASE_URL pointing at a disposable PostgreSQL"]
+async fn recent_unread_conversations_follow_the_conversation_list_unread() {
+    const SINCE: i64 = 1_760_000_000_000;
+    let url = std::env::var(ENV_DATABASE_URL)
+        .unwrap_or_else(|_| panic!("set {ENV_DATABASE_URL} to a disposable PostgreSQL instance"));
+    let (admin, pool, schema) = isolated_schema(&url).await;
+
+    // (会话, alice 的参与方式, 消息们) —— 每个会话里 bob 是对端。
+    let fresh = generate_group_conversation_id("recent-fresh");
+    let newer = generate_group_conversation_id("recent-newer");
+    let stale = generate_group_conversation_id("recent-stale");
+    let own = generate_group_conversation_id("recent-own");
+    let read = generate_group_conversation_id("recent-read");
+    let hidden = generate_group_conversation_id("recent-hidden");
+    let left = generate_group_conversation_id("recent-left");
+    let recalled = generate_group_conversation_id("recent-recalled");
+    let floor = generate_group_conversation_id("recent-floor");
+    for (cid, alice_hidden, alice_quit) in [
+        (&fresh, false, false),
+        (&newer, false, false),
+        (&stale, false, false),
+        (&own, false, false),
+        (&read, false, false),
+        (&hidden, true, false),
+        (&left, false, true),
+        (&recalled, false, false),
+        (&floor, false, false),
+    ] {
+        conversation(&pool, cid, 2).await;
+        member(&pool, cid, "alice", 0, alice_hidden, alice_quit).await;
+        member(&pool, cid, "bob", 0, false, false).await;
+    }
+
+    // 窗口内有别人发的新消息，alice 没读：命中。fresh 另有一条窗口前的未读，未读数是 2。
+    message_at(&pool, &fresh, "fresh-1", 1, "bob", SINCE - 60_000).await;
+    message_at(&pool, &fresh, "fresh-2", 2, "bob", SINCE + 1_000).await;
+    message_at(&pool, &newer, "newer-1", 1, "bob", SINCE + 5_000).await;
+    // 最后一条在窗口之前：不算新消息，哪怕还没读。
+    message_at(&pool, &stale, "stale-1", 1, "bob", SINCE - 1).await;
+    // 最后一条是 alice 自己（从别的设备）发的。
+    message_at(&pool, &own, "own-1", 1, "bob", SINCE + 1_000).await;
+    message_at(&pool, &own, "own-2", 2, "alice", SINCE + 2_000).await;
+    // alice 已经读到了最后一条（别的设备上读的）。
+    message_at(&pool, &read, "read-1", 1, "bob", SINCE + 1_000).await;
+    sqlx::query(
+        "UPDATE conversation_participants SET last_read_seq = 1 \
+         WHERE conversation_id = $1 AND user_id = 'alice'",
+    )
+    .bind(&read)
+    .execute(&pool)
+    .await
+    .unwrap();
+    // 隐藏了会话、已经退出：不在席。
+    message_at(&pool, &hidden, "hidden-1", 1, "bob", SINCE + 1_000).await;
+    message_at(&pool, &left, "left-1", 1, "bob", SINCE + 1_000).await;
+    // 窗口内唯一的新消息被撤回了：没有值得提示的新消息。
+    message_at(&pool, &recalled, "recalled-1", 1, "bob", SINCE - 60_000).await;
+    message(
+        &pool,
+        &recalled,
+        "recalled-2",
+        2,
+        "bob",
+        flare_proto::common::MessageStatus::Recalled as i32,
+    )
+    .await;
+    // 新消息在 alice 的历史下限之下（她看不到）。
+    message_at(&pool, &floor, "floor-1", 1, "bob", SINCE + 1_000).await;
+    sqlx::query(
+        "UPDATE conversation_participants SET visible_from_seq = 1 \
+         WHERE conversation_id = $1 AND user_id = 'alice'",
+    )
+    .bind(&floor)
+    .execute(&pool)
+    .await
+    .unwrap();
+    // 另一个租户里同一个用户标识、同一个会话标识，不能串进来。
+    sqlx::query(
+        "INSERT INTO conversations (tenant_id, conversation_id, conversation_type, display_name, \
+         lifecycle_state) VALUES ('tenant-b', $1, 2, $1, 'active')",
+    )
+    .bind(&fresh)
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO conversation_participants (tenant_id, conversation_id, user_id) \
+         VALUES ('tenant-b', $1, 'alice')",
+    )
+    .bind(&fresh)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let repo = Arc::new(PostgresConversationRepository::new(
+        Arc::new(pool.clone()),
+        test_config(),
+    ));
+    let handler = handler(repo);
+    let push_server = Context::with_request_id("req-recent-unread")
+        .with_tenant_id(TENANT)
+        .with_actor(ActorContext::new("flare-push-server").with_type(ActorType::Service));
+
+    let found = recent_unread(&handler, &push_server, "alice", SINCE, 0)
+        .await
+        .unwrap();
+    assert_eq!(
+        found
+            .iter()
+            .map(|c| c.conversation_id.as_str())
+            .collect::<Vec<_>>(),
+        [newer.as_str(), fresh.as_str()],
+        "newest first; stale, own, read, hidden, left, recalled and below-the-floor are left out"
+    );
+    assert_eq!(found[0].last_message_id, "newer-1");
+    assert_eq!(found[0].last_message_seq, 1);
+    assert_eq!(found[0].last_sender_id, "bob");
+    assert_eq!(found[0].last_message_time, SINCE + 5_000);
+    assert_eq!(found[0].unread_count, 1);
+    assert_eq!(found[1].last_message_id, "fresh-2");
+    assert_eq!(found[1].last_message_seq, 2);
+    assert_eq!(
+        found[1].unread_count, 2,
+        "the unread count is the list's, not only what arrived in the window"
+    );
+
+    // 条数封顶，窗口下界是严格的「晚于」。
+    let capped = recent_unread(&handler, &push_server, "alice", SINCE, 1)
+        .await
+        .unwrap();
+    assert_eq!(capped.len(), 1);
+    assert_eq!(capped[0].conversation_id, newer);
+    assert!(
+        recent_unread(&handler, &push_server, "alice", SINCE + 5_000, 0)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    // 从没参与任何会话的人、另一个租户里的同名用户：没有结果。
+    assert!(
+        recent_unread(&handler, &push_server, "nobody", SINCE, 0)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    let other_tenant = Context::with_request_id("req-recent-unread")
+        .with_tenant_id("tenant-b")
+        .with_actor(ActorContext::new("flare-push-server").with_type(ActorType::Service));
+    assert!(
+        recent_unread(&handler, &other_tenant, "alice", SINCE, 0)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+
+    // 与会话列表摘要同一个未读：alice 自己的列表里，命中的两个会话未读数相同。
+    let list = repo_bootstrap_unread(&pool, "alice").await;
+    for conversation in &found {
+        assert_eq!(
+            list.get(&conversation.conversation_id).copied(),
+            Some(conversation.unread_count as i32),
+            "{}",
+            conversation.conversation_id
+        );
+    }
+
+    // 只有服务身份能按用户读：用户（哪怕读自己）被拒，空用户是参数错误。
+    assert_eq!(
+        recent_unread(&handler, &user("alice"), "alice", SINCE, 0)
+            .await
+            .unwrap_err()
+            .code(),
+        tonic::Code::PermissionDenied
+    );
+    assert_eq!(
+        recent_unread(&handler, &push_server, " ", SINCE, 0)
+            .await
+            .unwrap_err()
+            .code(),
+        tonic::Code::InvalidArgument
+    );
+
+    drop(handler);
+    drop_schema(admin, pool, &schema).await;
+}
+
+/// Unread counts of `user`'s own conversation list, by conversation.
+async fn repo_bootstrap_unread(
+    pool: &PgPool,
+    user_id: &str,
+) -> std::collections::HashMap<String, i32> {
+    let repo = PostgresConversationRepository::new(Arc::new(pool.clone()), test_config());
+    repo.load_bootstrap(&user(user_id), &Default::default(), 0)
+        .await
+        .unwrap()
+        .summaries
+        .into_iter()
+        .map(|summary| (summary.conversation_id, summary.unread_count))
+        .collect()
 }

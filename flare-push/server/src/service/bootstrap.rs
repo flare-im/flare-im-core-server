@@ -78,6 +78,16 @@ impl ApplicationBootstrap {
         for task in tasks {
             runtime = runtime.add_task(Box::new(task));
         }
+        // 防打扰闸门的到期循环：补发尾部刷新与推迟到期的提示，随运行时一起停。
+        if let Some(due) = context.notify_due {
+            runtime = runtime.add_task(Box::new(flare_core_runtime::SpawnTask::with_shutdown(
+                "push-server-notify-due",
+                move |shutdown| async move {
+                    due.run(shutdown).await;
+                    flare_core_runtime::TaskResult::Ok(())
+                },
+            )));
+        }
 
         runtime
             .run()

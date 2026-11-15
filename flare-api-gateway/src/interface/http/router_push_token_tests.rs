@@ -1,4 +1,4 @@
-//! 设备推送令牌接口与未知路由兜底的契约测试。
+//! 设备推送令牌、推送到达回执接口与未知路由兜底的契约测试。
 //!
 //! 替身 Push Proxy 挂真实的 `SignedContextLayer`（与 Push Proxy 进程相同的准入层），
 //! 按真实 Push Proxy 的规则校验 User 身份、规范租户与 user_id 归属，并以签名租户为键存令牌；
@@ -74,6 +74,8 @@ struct Call {
     platform: String,
     provider: i32,
     token: String,
+    /// 登记请求原样留一份，核对绑定属性逐项到达下游。
+    registration: Option<RegisterDevicePushTokenRequest>,
 }
 
 type StoreKey = (String, String, i32, String);
@@ -86,6 +88,8 @@ struct FakePushProxy {
     calls: Arc<StdMutex<Vec<Call>>>,
     store: Arc<StdMutex<HashMap<StoreKey, String>>>,
     deny_tenant: Option<&'static str>,
+    /// 到达回执：签名身份与原样的请求。
+    receipt_reports: Arc<StdMutex<Vec<(SignedContextClaims, ReportPushReceiptsRequest)>>>,
 }
 
 impl FakePushProxy {
@@ -168,11 +172,12 @@ impl PushService for FakePushProxy {
         self.calls.lock().unwrap().push(Call {
             rpc: "register",
             claims,
-            user_id: req.user_id,
-            device_id: req.device_id,
-            platform: req.platform,
+            user_id: req.user_id.clone(),
+            device_id: req.device_id.clone(),
+            platform: req.platform.clone(),
             provider: req.provider,
-            token: req.token,
+            token: req.token.clone(),
+            registration: Some(req.clone()),
         });
         Ok(tonic::Response::new(RegisterDevicePushTokenResponse {
             success: true,
@@ -197,6 +202,7 @@ impl PushService for FakePushProxy {
             platform: String::new(),
             provider: req.provider,
             token: String::new(),
+            registration: None,
         });
         Ok(tonic::Response::new(InspectDevicePushBindingResponse {
             version: "a".repeat(64),
@@ -226,6 +232,7 @@ impl PushService for FakePushProxy {
             platform: String::new(),
             provider: 0,
             token: String::new(),
+            registration: None,
         });
         Ok(tonic::Response::new(RevokeDevicePushBindingResponse {
             success: true,
@@ -237,6 +244,39 @@ impl PushService for FakePushProxy {
         _: tonic::Request<QueryPushStatusRequest>,
     ) -> Result<tonic::Response<QueryPushStatusResponse>, tonic::Status> {
         Err(tonic::Status::unimplemented("not used"))
+    }
+
+    async fn report_device_handoff(
+        &self,
+        _: tonic::Request<ReportDeviceHandoffRequest>,
+    ) -> Result<tonic::Response<ReportDeviceHandoffResponse>, tonic::Status> {
+        Err(tonic::Status::unimplemented("not used"))
+    }
+
+    async fn revoke_device_bindings(
+        &self,
+        _: tonic::Request<RevokeDeviceBindingsRequest>,
+    ) -> Result<tonic::Response<RevokeDeviceBindingsResponse>, tonic::Status> {
+        Err(tonic::Status::unimplemented("not used"))
+    }
+
+    /// 与真实 Push Proxy 相同的身份规则：User 签名、规范租户、请求的用户与租户等于签名。
+    async fn report_push_receipts(
+        &self,
+        request: tonic::Request<ReportPushReceiptsRequest>,
+    ) -> Result<tonic::Response<ReportPushReceiptsResponse>, tonic::Status> {
+        let claims = self.admit(&request)?;
+        let req = request.into_inner();
+        if req.user_id != claims.actor_id || req.tenant_id != claims.tenant_id {
+            return Err(tonic::Status::permission_denied(
+                "receipt identity mismatch",
+            ));
+        }
+        let accepted = req.receipts.len() as u32;
+        self.receipt_reports.lock().unwrap().push((claims, req));
+        Ok(tonic::Response::new(ReportPushReceiptsResponse {
+            accepted,
+        }))
     }
 }
 
@@ -364,6 +404,31 @@ fn inspect_request(token: Option<&str>, device_id: &str, query: &str) -> Request
     .unwrap()
 }
 
+fn receipts_request(token: Option<&str>, body: Value) -> Request<Body> {
+    with_bearer(
+        Request::builder()
+            .method("POST")
+            .uri("/api/v1/push/receipts")
+            .header("content-type", "application/json"),
+        token,
+    )
+    .body(Body::from(body.to_string()))
+    .unwrap()
+}
+
+fn receipt(message_id: &str) -> Value {
+    json!({
+        "conversationId": "c-1",
+        "messageId": message_id,
+        "seq": 123,
+        "collapseId": "c:0123456789abcdef0123456789abcdef",
+        "disposition": "loud",
+        "provider": "apns",
+        "path": "extension",
+        "receivedAtMs": 1_731_400_000_000_i64,
+    })
+}
+
 fn registration() -> Value {
     json!({"platform": "ios", "provider": "getui", "token": "tok-1"})
 }
@@ -400,7 +465,7 @@ async fn fcm_and_apns_use_the_same_signed_user_registration_entry() {
             put_request(
                 Some("alice-a"),
                 "d1",
-                json!({"platform":"ios","provider":name,"token":"a1b2"}),
+                json!({"platform":"ios","provider":name,"token":"a1b2","appBundle":"com.example.app"}),
             ),
         )
         .await;
@@ -411,6 +476,65 @@ async fn fcm_and_apns_use_the_same_signed_user_registration_entry() {
         assert_eq!(calls[0].claims.tenant_id, "tenant-a");
         assert_eq!(calls[0].claims.actor_id, "alice");
     }
+}
+
+/// 绑定属性（应用标识、环境、语言、时区、版本、能力）去掉首尾空白后原样到达 Push Proxy。
+/// 网关不判必填与取值，全部交给 Proxy：不带这些字段、或显式写 null，网关照样转发，
+/// 由 Proxy 拒收缺应用标识的登记。
+#[tokio::test]
+async fn binding_attributes_reach_push_proxy_trimmed() {
+    let fake = FakePushProxy::default();
+    let router = signed_router(fake.clone()).await;
+    let result = send(
+        &router,
+        put_request(
+            Some("alice-a"),
+            "d1",
+            json!({
+                "platform": "ios",
+                "provider": "apns",
+                "token": "a1b2",
+                "appBundle": " com.example.app ",
+                "environment": "sandbox",
+                "locale": "zh-CN",
+                "timeZone": "Asia/Shanghai",
+                "appVersion": "3.2.1",
+                "capabilities": [" serviceExtension "],
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(result.0, StatusCode::OK, "{}", result.1);
+    let result = send(
+        &router,
+        put_request(
+            Some("alice-a"),
+            "d1",
+            json!({
+                "platform": "android",
+                "provider": "getui",
+                "token": "cid-1",
+                "appBundle": null,
+                "capabilities": null,
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(result.0, StatusCode::OK, "{}", result.1);
+
+    let calls = fake.calls();
+    assert_eq!(calls.len(), 2);
+    let full = calls[0].registration.as_ref().expect("registration");
+    assert_eq!(full.app_bundle, "com.example.app");
+    assert_eq!(full.environment, "sandbox");
+    assert_eq!(full.locale, "zh-CN");
+    assert_eq!(full.time_zone, "Asia/Shanghai");
+    assert_eq!(full.app_version, "3.2.1");
+    assert_eq!(full.capabilities, vec!["serviceExtension".to_string()]);
+    let bare = calls[1].registration.as_ref().expect("registration");
+    assert!(bare.app_bundle.is_empty());
+    assert!(bare.environment.is_empty());
+    assert!(bare.capabilities.is_empty());
 }
 
 #[tokio::test]
@@ -465,7 +589,7 @@ async fn register_and_inspect_reach_push_proxy_with_token_identity_only() {
     assert_eq!(
         fake.store.lock().unwrap().len(),
         1,
-        "inspection is read-only"
+        "inspection registers nothing"
     );
 }
 
@@ -579,7 +703,7 @@ async fn default_tenant_alias_is_signed_as_the_canonical_tenant() {
     assert_eq!(
         fake.store.lock().unwrap().len(),
         1,
-        "inspection is read-only"
+        "inspection registers nothing"
     );
 }
 
@@ -782,4 +906,169 @@ async fn revoke_only_capability_survives_logout_but_cannot_read_or_register() {
             .0,
         StatusCode::UNAUTHORIZED
     );
+}
+
+/// 到达回执：身份只来自 IM 令牌，设备取自请求体，回执原样（去空白）到达 Push Proxy。
+#[tokio::test]
+async fn push_receipts_reach_push_proxy_with_token_identity_only() {
+    let fake = FakePushProxy::default();
+    let router = signed_router(fake.clone()).await;
+    let mut request = receipts_request(
+        Some("alice-a"),
+        json!({
+            "deviceId": "d1",
+            "appVersion": " 1.4.0 ",
+            "receipts": [receipt("m-9"), receipt("m-10")],
+        }),
+    );
+    for (name, value) in [("x-tenant-id", "tenant-b"), ("x-user-id", "mallory")] {
+        request.headers_mut().insert(name, value.parse().unwrap());
+    }
+    let (status, body) = send(&router, request).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body, json!({"code": 0, "data": {"accepted": 2}}));
+
+    let reports = fake.receipt_reports.lock().unwrap().clone();
+    assert_eq!(reports.len(), 1);
+    let (claims, report) = &reports[0];
+    assert_eq!(claims.actor_type, SignedActorType::User);
+    assert_eq!(claims.tenant_id, "tenant-a");
+    assert_eq!(claims.actor_id, "alice");
+    assert_eq!(claims.credential_id.as_deref(), Some("api-gateway"));
+    assert_eq!(report.tenant_id, "tenant-a");
+    assert_eq!(report.user_id, "alice");
+    assert_eq!(report.device_id, "d1");
+    assert_eq!(report.app_version, "1.4.0");
+    assert_eq!(report.receipts.len(), 2);
+    let first = &report.receipts[0];
+    assert_eq!(first.conversation_id, "c-1");
+    assert_eq!(first.message_id, "m-9");
+    assert_eq!(first.seq, 123);
+    assert_eq!(first.provider, "apns");
+    assert_eq!(first.path, "extension");
+    assert_eq!(first.disposition, "loud");
+    assert_eq!(first.received_at_ms, 1_731_400_000_000);
+}
+
+/// 令牌没绑定设备时也能上报；绑定了别的设备不行。默认租户别名按规范租户签。
+#[tokio::test]
+async fn push_receipts_follow_the_device_binding_of_the_token() {
+    let fake = FakePushProxy::default();
+    let router = signed_router(fake.clone()).await;
+    let body = |device_id: &str| json!({"deviceId": device_id, "receipts": [receipt("m-9")]});
+
+    let foreign = send(&router, receipts_request(Some("bound-d1"), body("d2"))).await;
+    assert_denied(&foreign, StatusCode::FORBIDDEN, "DEVICE_MISMATCH");
+    assert!(fake.receipt_reports.lock().unwrap().is_empty());
+
+    let (status, response) = send(&router, receipts_request(Some("no-device"), body("d7"))).await;
+    assert_eq!(status, StatusCode::OK, "{response}");
+    let (status, response) =
+        send(&router, receipts_request(Some("alice-default"), body("d1"))).await;
+    assert_eq!(status, StatusCode::OK, "{response}");
+
+    let reports = fake.receipt_reports.lock().unwrap().clone();
+    assert_eq!(reports.len(), 2);
+    assert_eq!(reports[0].1.device_id, "d7");
+    assert_eq!(reports[1].0.tenant_id, "0");
+    assert_eq!(reports[1].1.tenant_id, "0");
+}
+
+/// 鉴权、请求体与条数在发出 RPC 之前就挡住；形状不对的条目跳过，一条都不剩时不调用下游。
+#[tokio::test]
+async fn invalid_push_receipt_reports_never_reach_push_proxy() {
+    let fake = FakePushProxy::default();
+    let router = signed_router(fake.clone()).await;
+    let one = json!({"deviceId": "d1", "receipts": [receipt("m-9")]});
+
+    let missing = send(&router, receipts_request(None, one.clone())).await;
+    assert_denied(&missing, StatusCode::UNAUTHORIZED, "UNAUTHORIZED");
+    let admin = send(&router, receipts_request(Some("admin-scope"), one.clone())).await;
+    assert_denied(&admin, StatusCode::FORBIDDEN, "USER_REQUIRED");
+    let unbound = send(&router, receipts_request(Some("unbound"), one.clone())).await;
+    assert_denied(&unbound, StatusCode::FORBIDDEN, "TENANT_REQUIRED");
+
+    for extra in [json!({"userId": "bob"}), json!({"tenantId": "tenant-b"})] {
+        let mut body = one.clone();
+        body.as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        let result = send(&router, receipts_request(Some("alice-a"), body)).await;
+        assert_denied(&result, StatusCode::BAD_REQUEST, "INVALID_REQUEST_BODY");
+    }
+    let blank_device = send(
+        &router,
+        receipts_request(
+            Some("alice-a"),
+            json!({"deviceId": " ", "receipts": [receipt("m-9")]}),
+        ),
+    )
+    .await;
+    assert_denied(&blank_device, StatusCode::BAD_REQUEST, "DEVICE_ID_INVALID");
+    let too_many: Vec<Value> = (0..101).map(|i| receipt(&format!("m-{i}"))).collect();
+    let flood = send(
+        &router,
+        receipts_request(
+            Some("alice-a"),
+            json!({"deviceId": "d1", "receipts": too_many}),
+        ),
+    )
+    .await;
+    assert_denied(&flood, StatusCode::BAD_REQUEST, "TOO_MANY_RECEIPTS");
+    assert!(fake.receipt_reports.lock().unwrap().is_empty());
+
+    let (status, body) = send(
+        &router,
+        receipts_request(
+            Some("alice-a"),
+            json!({"deviceId": "d1", "receipts": [{"seq": "not a number"}, "junk"]}),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["data"]["accepted"], json!(0));
+    assert!(fake.receipt_reports.lock().unwrap().is_empty());
+
+    let (status, body) = send(
+        &router,
+        receipts_request(
+            Some("alice-a"),
+            json!({"deviceId": "d1", "receipts": [{"seq": "not a number"}, receipt("m-9")]}),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["data"]["accepted"], json!(1));
+    let reports = fake.receipt_reports.lock().unwrap().clone();
+    assert_eq!(reports.len(), 1);
+    assert_eq!(reports[0].1.receipts.len(), 1);
+}
+
+#[tokio::test]
+async fn unreachable_push_proxy_fails_a_receipt_report_with_503() {
+    let (signer, _) = cell_keys();
+    let router = router_with(closed_port_channel().await, Some(signer));
+    let result = send(
+        &router,
+        receipts_request(
+            Some("alice-a"),
+            json!({"deviceId": "d1", "receipts": [receipt("m-9")]}),
+        ),
+    )
+    .await;
+    assert_denied(
+        &result,
+        StatusCode::SERVICE_UNAVAILABLE,
+        "UPSTREAM_UNAVAILABLE",
+    );
+}
+
+#[tokio::test]
+async fn openapi_documents_the_push_receipt_route() {
+    let spec = serde_json::to_value(ApiDoc::openapi()).unwrap();
+    assert!(spec["paths"]["/api/v1/push/receipts"]["post"].is_object());
+    let schemas = &spec["components"]["schemas"];
+    assert!(schemas["ReportPushReceiptsHttpRequest"].is_object());
+    assert!(schemas["PushReceiptHttp"].is_object());
+    assert!(schemas["ReportPushReceiptsHttpResponse"].is_object());
 }

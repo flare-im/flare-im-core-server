@@ -18,6 +18,12 @@ presence_prefix = "presence:user"
 # KickTenant 按它分页踢出，并向网关的撤销即断频道 `{redis.token_store.namespace}:kick` 发用户 ID
 # 让 signaling-gateway 关掉 socket。可用 SIGNALING_ONLINE_KICK_REDIS_URL / SIGNALING_ONLINE_KICK_CHANNEL 覆盖。
 
+# 推送通道（只走环境变量）:
+#   SIGNALING_ONLINE_PUSH_PROXY_URL  Push Proxy 的 gRPC 地址（http(s):// 或 discovery://<服务名>），无缺省。
+#                                    配了才把网关失联时被清扫的设备交接给推送通道，并在踢线、设备被顶替、
+#                                    身份会话吊销时吊销该设备的推送绑定；调用以 Online 自己的身份签名，
+#                                    配了地址而没有 FLARE_INTERNAL_CTX_PRIVATE_KEY 时拒绝启动
+
 [services.signaling_online.server]
 address = "0.0.0.0"
 port = 50061

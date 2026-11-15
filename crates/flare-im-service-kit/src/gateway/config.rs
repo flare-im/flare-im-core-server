@@ -7,7 +7,8 @@ use crate::clients::CapabilityDownstreamConfig;
 pub use crate::clients::DownstreamGrpcConfig as GatewayGrpcConfig;
 use crate::discovery::{discovery_route_authority, is_discovery_route_authority};
 use crate::service_names::{
-    CAPABILITY, CONVERSATION, MEDIA, MESSAGE_INGEST, ORCHESTRATOR, SIGNALING_ONLINE, STORAGE_READER,
+    CAPABILITY, CONVERSATION, MEDIA, MESSAGE_INGEST, ORCHESTRATOR, PUSH_PROXY, SIGNALING_ONLINE,
+    STORAGE_READER,
 };
 
 /// 网关环境配置作用域。
@@ -220,6 +221,14 @@ impl GatewaySettings {
                 "GRPC_STORAGE_READER_SERVICE_URL",
                 &discovery_route_authority(STORAGE_READER),
             ),
+            // 只有 Admin Gateway 连 Push Proxy 的管理员入口；API Gateway 拨 Push Proxy 用自己的
+            // `FLARE_API_GATEWAY_GRPC_PUSH_PROXY_URL`，这两项在 API 作用域不读、恒为缺省。
+            push_proxy_service_url: admin_env_or(
+                &mut source,
+                scope,
+                "GRPC_PUSH_PROXY_SERVICE_URL",
+                &discovery_route_authority(PUSH_PROXY),
+            ),
             media_static_fallback: env_or(
                 &mut source,
                 scope,
@@ -255,6 +264,12 @@ impl GatewaySettings {
                 scope,
                 "GRPC_STORAGE_READER_STATIC_FALLBACK",
                 "http://127.0.0.1:60083",
+            ),
+            push_proxy_static_fallback: admin_env_or(
+                &mut source,
+                scope,
+                "GRPC_PUSH_PROXY_STATIC_FALLBACK",
+                "http://127.0.0.1:50091",
             ),
             // 缺省 2 秒，与 StaticChannelPolicy::DEFAULT 一致（以前写 5，却从不生效）。
             connect_timeout_secs: parse_env(&mut source, scope, "GRPC_CONNECT_TIMEOUT_SECS", "2")?,
@@ -350,6 +365,7 @@ impl GatewaySettings {
                 "storage-reader",
                 self.grpc.storage_reader_service_url.as_str(),
             ),
+            ("push-proxy", self.grpc.push_proxy_service_url.as_str()),
         ] {
             if !is_valid_grpc_route(route) {
                 return Err(config_error(format!(
@@ -660,6 +676,17 @@ where
     F: FnMut(&str) -> Option<String>,
 {
     env_value(source, scope, name).unwrap_or_else(|| default.to_string())
+}
+
+/// 只有 Admin 作用域读的设置：API 作用域不查环境，恒为缺省值。
+fn admin_env_or<F>(source: &mut F, scope: GatewayEnvScope, name: &str, default: &str) -> String
+where
+    F: FnMut(&str) -> Option<String>,
+{
+    match scope {
+        GatewayEnvScope::Admin => env_or(source, scope, name, default),
+        GatewayEnvScope::Api => default.to_string(),
+    }
 }
 
 fn parse_env<F, T>(source: &mut F, scope: GatewayEnvScope, name: &str, default: &str) -> Result<T>
@@ -1064,6 +1091,57 @@ mod tests {
                 (k == admin_key).then(|| "0".to_string())
             })
             .is_err()
+        );
+    }
+
+    /// Push Proxy 的路由只有 Admin 作用域读；API 作用域恒为缺省，它拨 Push Proxy 用自己的
+    /// `FLARE_API_GATEWAY_GRPC_PUSH_PROXY_URL`。路由格式照样校验。
+    #[test]
+    fn the_push_proxy_route_is_read_by_the_admin_scope_only() {
+        let defaults = GatewaySettings::from_env_source(GatewayEnvScope::Admin, |_| None).unwrap();
+        assert_eq!(
+            defaults.grpc.push_proxy_service_url,
+            "discovery://flare-push-proxy"
+        );
+        assert_eq!(
+            defaults.grpc.push_proxy_static_fallback,
+            "http://127.0.0.1:50091"
+        );
+
+        let admin = GatewaySettings::from_env_source(GatewayEnvScope::Admin, |key| match key {
+            "FLARE_ADMIN_GATEWAY_GRPC_PUSH_PROXY_SERVICE_URL" => {
+                Some("http://push-proxy:50091".to_string())
+            }
+            "FLARE_ADMIN_GATEWAY_GRPC_PUSH_PROXY_STATIC_FALLBACK" => Some(String::new()),
+            _ => None,
+        })
+        .unwrap();
+        assert_eq!(admin.grpc.push_proxy_service_url, "http://push-proxy:50091");
+        assert_eq!(admin.grpc.push_proxy_static_fallback, "");
+
+        let mut queried = Vec::new();
+        let api = GatewaySettings::from_env_source(GatewayEnvScope::Api, |key| {
+            queried.push(key.to_string());
+            key.contains("PUSH_PROXY")
+                .then(|| "ftp://elsewhere".to_string())
+        })
+        .unwrap();
+        assert!(
+            queried.iter().all(|key| !key.contains("PUSH_PROXY")),
+            "{queried:?}"
+        );
+        assert_eq!(
+            api.grpc.push_proxy_service_url,
+            "discovery://flare-push-proxy"
+        );
+
+        assert!(
+            GatewaySettings::from_env_source(GatewayEnvScope::Admin, |key| {
+                (key == "FLARE_ADMIN_GATEWAY_GRPC_PUSH_PROXY_SERVICE_URL")
+                    .then(|| "push-proxy:50091".to_string())
+            })
+            .is_err(),
+            "the route must be discovery://, http:// or https://"
         );
     }
 

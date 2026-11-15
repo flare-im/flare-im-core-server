@@ -4,17 +4,18 @@
 //! Online、Capability）也只认令牌里的租户。时间字段统一为 Unix 毫秒，枚举统一为小写
 //! 蛇形字符串，未知取值落到 `unspecified`，不把 proto 的整数编号暴露给调用方。
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use flare_grpc_proto::capability::{
     CapabilityDescriptor, GetTenantRuntimeResponse, ListCapabilitiesResponse,
-    ListRegisteredPluginsResponse, ListTenantCapabilitySwitchesResponse,
-    RegisteredPluginInstance, TenantCapabilitySwitch,
+    ListRegisteredPluginsResponse, ListTenantCapabilitySwitchesResponse, RegisteredPluginInstance,
+    TenantCapabilitySwitch,
 };
 use flare_grpc_proto::control::{TenantQuota, TenantStatus};
 use flare_grpc_proto::conversation::{
     AdminListConversationsResponse, AdminListParticipantsResponse,
 };
+use flare_grpc_proto::push::AdminQueryPushTraceResponse;
 use flare_grpc_proto::signaling::online::{DeviceInfo, UserPresence};
 use flare_proto::common::{
     ConversationDetail, ConversationLifecycleState, ConversationParticipant,
@@ -29,6 +30,9 @@ pub const MAX_CONVERSATION_PAGE: i32 = 200;
 /// 成员分页：缺省 200，上限 500（与 `AdminListParticipantsRequest` 的服务端上限一致）。
 pub const DEFAULT_PARTICIPANT_PAGE: i32 = 200;
 pub const MAX_PARTICIPANT_PAGE: i32 = 500;
+/// 推送决策链：不给消息 ID 时列最近多少条消息，缺省 20，上限 50（与 Push Proxy 一致）。
+pub const DEFAULT_PUSH_TRACE_PAGE: i32 = 20;
+pub const MAX_PUSH_TRACE_PAGE: i32 = 50;
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize, ToSchema)]
 pub struct AdminConversationListQuery {
@@ -48,6 +52,16 @@ pub struct AdminParticipantListQuery {
     pub limit: Option<i32>,
     #[serde(default)]
     pub include_removed: Option<bool>,
+}
+
+/// 推送决策链的查询：给了 `message_id` 只查这一条消息（也接受「会话#seq」形式的键），
+/// 否则列最近 `limit` 条。
+#[derive(Debug, Clone, Default, Deserialize, Serialize, ToSchema)]
+pub struct AdminPushTraceQuery {
+    #[serde(default)]
+    pub message_id: Option<String>,
+    #[serde(default)]
+    pub limit: Option<i32>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize, ToSchema)]
@@ -144,6 +158,38 @@ pub struct AdminUserPresenceHttp {
     /// Unix 毫秒；从未上线过时为 `null`。
     pub last_seen_at: Option<i64>,
     pub devices: Vec<AdminDeviceHttp>,
+}
+
+/// 决策链里的一条记录：哪个环节（`route`、`handoff`、`decide`、`gate`、`task`、`vendor`、`receipt`、
+/// `correction`）、哪台设备、记下了什么。字段全是字符串，没有的表示不知道。
+#[derive(Debug, Clone, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct AdminPushTraceEntryHttp {
+    /// Unix 毫秒（写下这条记录的服务端时刻；回执的设备时刻在 `fields.received_at_ms`）。
+    pub at_ms: i64,
+    pub stage: String,
+    pub device_id: String,
+    pub fields: BTreeMap<String, String>,
+}
+
+/// 一条消息的推送决策链，记录按时刻排列。
+#[derive(Debug, Clone, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct AdminPushTraceHttp {
+    /// 消息 ID；没有消息 ID 时是「会话#seq」。
+    pub trace_key: String,
+    pub conversation_id: String,
+    /// Unix 毫秒。
+    pub first_at_ms: i64,
+    pub entries: Vec<AdminPushTraceEntryHttp>,
+}
+
+/// 一个用户的推送决策链（留 24 小时），按开始时间从新到旧；查一条已过期的消息时为空。
+#[derive(Debug, Clone, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct AdminPushTracesHttp {
+    pub user_id: String,
+    pub traces: Vec<AdminPushTraceHttp>,
 }
 
 #[derive(Debug, Clone, Serialize, ToSchema)]
@@ -462,6 +508,34 @@ pub fn user_devices_http(user_id: String, devices: Vec<DeviceInfo>) -> AdminUser
     }
 }
 
+pub fn push_traces_http(
+    user_id: String,
+    response: AdminQueryPushTraceResponse,
+) -> AdminPushTracesHttp {
+    AdminPushTracesHttp {
+        user_id,
+        traces: response
+            .traces
+            .into_iter()
+            .map(|trace| AdminPushTraceHttp {
+                trace_key: trace.trace_key,
+                conversation_id: trace.conversation_id,
+                first_at_ms: trace.first_at_ms,
+                entries: trace
+                    .entries
+                    .into_iter()
+                    .map(|entry| AdminPushTraceEntryHttp {
+                        at_ms: entry.at_ms,
+                        stage: entry.stage,
+                        device_id: entry.device_id,
+                        fields: entry.fields.into_iter().collect(),
+                    })
+                    .collect(),
+            })
+            .collect(),
+    }
+}
+
 /// Online 对从未上线的用户可能不回 `presence`：按离线处理，而不是 500。
 pub fn user_presence_http(
     user_id: String,
@@ -695,5 +769,48 @@ mod tests {
             .map(|p| p.plugin_id.as_str())
             .collect();
         assert_eq!(ids, ["p1", "p2", "p3"]);
+    }
+
+    #[test]
+    fn push_traces_keep_order_and_sort_fields() {
+        use flare_grpc_proto::push::{PushTraceEntryView, PushTraceView};
+        let http = push_traces_http(
+            "u-1".into(),
+            AdminQueryPushTraceResponse {
+                traces: vec![PushTraceView {
+                    trace_key: "m-9".into(),
+                    conversation_id: "c-1".into(),
+                    first_at_ms: 10,
+                    entries: vec![
+                        PushTraceEntryView {
+                            at_ms: 10,
+                            stage: "route".into(),
+                            device_id: "d-1".into(),
+                            fields: HashMap::from([
+                                ("state".to_string(), "parked".to_string()),
+                                ("conv".to_string(), "c-1".to_string()),
+                            ]),
+                        },
+                        PushTraceEntryView {
+                            at_ms: 20,
+                            stage: "receipt".into(),
+                            device_id: "d-1".into(),
+                            fields: HashMap::new(),
+                        },
+                    ],
+                }],
+            },
+        );
+        let json = serde_json::to_value(&http).unwrap();
+        assert_eq!(json["userId"], "u-1");
+        assert_eq!(json["traces"][0]["traceKey"], "m-9");
+        assert_eq!(json["traces"][0]["conversationId"], "c-1");
+        assert_eq!(json["traces"][0]["firstAtMs"], 10);
+        assert_eq!(json["traces"][0]["entries"][0]["atMs"], 10);
+        assert_eq!(json["traces"][0]["entries"][0]["deviceId"], "d-1");
+        assert_eq!(json["traces"][0]["entries"][0]["fields"]["state"], "parked");
+        assert_eq!(json["traces"][0]["entries"][1]["stage"], "receipt");
+        let keys: Vec<&String> = http.traces[0].entries[0].fields.keys().collect();
+        assert_eq!(keys, ["conv", "state"]);
     }
 }

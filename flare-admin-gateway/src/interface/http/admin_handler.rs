@@ -109,18 +109,21 @@ pub struct AdminServerConfigSnapshot {
     pub max_body_size: usize,
 }
 
-/// The downstreams Admin Gateway connects: Media, Conversation, Online, the Storage Reader
-/// and the optional Capability. It opens no channel to Message Ingest or the Orchestrator.
+/// The downstreams Admin Gateway connects: Media, Conversation, Online, the Storage Reader,
+/// the Push Proxy and the optional Capability. It opens no channel to Message Ingest or the
+/// Orchestrator.
 #[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct AdminGrpcConfigSnapshot {
     pub media_service_url: String,
     pub conversation_service_url: String,
     pub online_service_url: String,
     pub storage_reader_service_url: String,
+    pub push_proxy_service_url: String,
     pub media_static_fallback: Option<String>,
     pub conversation_static_fallback: Option<String>,
     pub online_static_fallback: Option<String>,
     pub storage_reader_static_fallback: Option<String>,
+    pub push_proxy_static_fallback: Option<String>,
     /// Admin Gateway 专用的可选下游；关闭时为 `null`。
     pub capability_service_url: Option<String>,
     pub capability_static_fallback: Option<String>,
@@ -601,7 +604,7 @@ fn header_value(headers: &HeaderMap, name: &str) -> Option<String> {
         .map(ToOwned::to_owned)
 }
 
-/// 4 个固定下游（Media、Conversation、Online、Storage Reader），外加启用时的 Capability。
+/// 5 个固定下游（Media、Conversation、Online、Storage Reader、Push Proxy），外加启用时的 Capability。
 fn build_gateway_health(
     capability: Option<&CapabilityDownstreamConfig>,
 ) -> AdminGatewayHealthResponse {
@@ -611,7 +614,7 @@ fn build_gateway_health(
         boundary: "internal_admin_api_only_no_admin_console".to_string(),
         admin_api_version: "v1".to_string(),
         route_count: build_gateway_routes().routes.len(),
-        upstream_count: 4 + usize::from(capability.is_some()),
+        upstream_count: 5 + usize::from(capability.is_some()),
     }
 }
 
@@ -646,6 +649,13 @@ fn build_gateway_upstreams(
             "storage-reader",
             &grpc.storage_reader_service_url,
             &grpc.storage_reader_static_fallback,
+            grpc.connect_timeout_secs,
+            grpc.request_timeout_secs,
+        ),
+        gateway_upstream(
+            "push-proxy",
+            &grpc.push_proxy_service_url,
+            &grpc.push_proxy_static_fallback,
             grpc.connect_timeout_secs,
             grpc.request_timeout_secs,
         ),
@@ -942,6 +952,12 @@ fn build_gateway_routes() -> AdminGatewayRoutesResponse {
                 "signaling-online",
             ),
             ops_route(
+                "GET",
+                "/api/v1/admin/users/{user_id}/push-traces",
+                "admin-session",
+                "push-proxy",
+            ),
+            ops_route(
                 "POST",
                 "/api/v1/admin/users/{user_id}/kick",
                 "admin-session",
@@ -1234,6 +1250,7 @@ fn build_gateway_config_snapshot(
             conversation_service_url: settings.grpc.conversation_service_url.clone(),
             online_service_url: settings.grpc.online_service_url.clone(),
             storage_reader_service_url: settings.grpc.storage_reader_service_url.clone(),
+            push_proxy_service_url: settings.grpc.push_proxy_service_url.clone(),
             media_static_fallback: optional_string(&settings.grpc.media_static_fallback),
             conversation_static_fallback: optional_string(
                 &settings.grpc.conversation_static_fallback,
@@ -1242,6 +1259,7 @@ fn build_gateway_config_snapshot(
             storage_reader_static_fallback: optional_string(
                 &settings.grpc.storage_reader_static_fallback,
             ),
+            push_proxy_static_fallback: optional_string(&settings.grpc.push_proxy_static_fallback),
             capability_service_url: capability.map(|c| c.service_url.clone()),
             capability_static_fallback: capability
                 .and_then(|c| optional_string(&c.static_fallback)),
@@ -1355,7 +1373,8 @@ mod tests {
                 "media",
                 "conversation",
                 "signaling-online",
-                "storage-reader"
+                "storage-reader",
+                "push-proxy"
             ]
         );
         assert!(
@@ -1411,15 +1430,15 @@ mod tests {
         };
 
         let response = build_gateway_upstreams(&settings, Some(&capability));
-        assert_eq!(response.upstreams.len(), 5);
+        assert_eq!(response.upstreams.len(), 6);
         let upstream = response.upstreams.last().unwrap();
         assert_eq!(upstream.name, "capability");
         assert_eq!(
             upstream.static_fallback.as_deref(),
             Some("http://127.0.0.1:50110")
         );
-        assert_eq!(build_gateway_health(Some(&capability)).upstream_count, 5);
-        assert_eq!(build_gateway_health(None).upstream_count, 4);
+        assert_eq!(build_gateway_health(Some(&capability)).upstream_count, 6);
+        assert_eq!(build_gateway_health(None).upstream_count, 5);
         let snapshot = build_gateway_config_snapshot(&settings, Some(&capability));
         assert_eq!(
             snapshot.grpc.capability_service_url.as_deref(),
@@ -1485,12 +1504,14 @@ mod tests {
                 conversation_service_url: "discovery://flare-conversation".to_string(),
                 online_service_url: "discovery://flare-signaling-online".to_string(),
                 storage_reader_service_url: "discovery://flare-storage-reader".to_string(),
+                push_proxy_service_url: "discovery://flare-push-proxy".to_string(),
                 media_static_fallback: "http://127.0.0.1:60081".to_string(),
                 message_ingest_static_fallback: "http://127.0.0.1:50182".to_string(),
                 message_orchestrator_static_fallback: "http://127.0.0.1:50181".to_string(),
                 conversation_static_fallback: "http://127.0.0.1:50090".to_string(),
                 online_static_fallback: "http://127.0.0.1:50061".to_string(),
                 storage_reader_static_fallback: "http://127.0.0.1:60083".to_string(),
+                push_proxy_static_fallback: "http://127.0.0.1:50091".to_string(),
                 connect_timeout_secs: 5,
                 request_timeout_secs: 10,
             },

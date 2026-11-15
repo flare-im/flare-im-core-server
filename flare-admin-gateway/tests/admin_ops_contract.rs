@@ -386,6 +386,82 @@ async fn get_user_presence_shape() {
 }
 
 #[tokio::test]
+async fn list_user_push_traces_shape() {
+    let h = harness(true).await;
+    let (status, body) = send(
+        &h.router,
+        admin_request("GET", "/api/v1/admin/users/u1/push-traces", &h.gateway),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let data = &body["data"];
+    assert_eq!(keys(data), sorted(&["userId", "traces"]));
+    assert_eq!(data["userId"], "u1");
+    let trace = &data["traces"][0];
+    assert_eq!(
+        keys(trace),
+        sorted(&["traceKey", "conversationId", "firstAtMs", "entries"])
+    );
+    assert_eq!(trace["traceKey"], "m-9");
+    assert_eq!(trace["conversationId"], "c1");
+    assert_eq!(trace["firstAtMs"], 1_700_000_000_000_i64);
+    let entry = &trace["entries"][0];
+    assert_eq!(
+        keys(entry),
+        sorted(&["atMs", "stage", "deviceId", "fields"])
+    );
+    assert_eq!(entry["stage"], "route");
+    assert_eq!(entry["fields"]["state"], "parked");
+    assert_eq!(trace["entries"][1]["stage"], "receipt");
+    let calls = h.recorder.calls();
+    assert_eq!(calls[0].method, "AdminQueryPushTrace");
+    assert_eq!(calls[0].request, "user_id=u1 message_id=- limit=20");
+
+    // 按消息查：消息 ID 原样（去空白）到达 Push Proxy；过期或不存在的消息是空列表。
+    h.recorder.clear();
+    let (status, body) = send(
+        &h.router,
+        admin_request(
+            "GET",
+            "/api/v1/admin/users/u1/push-traces?message_id=m-8&limit=500",
+            &h.gateway,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["data"]["traces"], serde_json::json!([]));
+    assert_eq!(
+        h.recorder.calls()[0].request,
+        "user_id=u1 message_id=m-8 limit=50"
+    );
+
+    // limit 小于 1 在网关就拒绝，不调下游。
+    h.recorder.clear();
+    let (status, body) = send(
+        &h.router,
+        admin_request(
+            "GET",
+            "/api/v1/admin/users/u1/push-traces?limit=0",
+            &h.gateway,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(reason(&body), "ADMIN_PAGE_LIMIT_INVALID");
+    assert!(h.recorder.calls().is_empty());
+
+    // 下游不可用：503，不回显下游文案。
+    let (status, body) = send(
+        &h.router,
+        admin_request("GET", "/api/v1/admin/users/down/push-traces", &h.gateway),
+    )
+    .await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+    assert_eq!(reason(&body), "ADMIN_UPSTREAM_UNAVAILABLE");
+    assert!(!body.to_string().contains("id-secret-1"));
+}
+
+#[tokio::test]
 async fn kick_user_kicks_every_listed_device() {
     let h = harness(true).await;
     let (status, body) = send(

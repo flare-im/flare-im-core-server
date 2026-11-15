@@ -1,4 +1,4 @@
-//! 应用启动：gRPC PushService 监听
+//! 应用启动：gRPC PushService 与 PushAdminService 监听
 
 use flare_server_core::error::{ErrorBuilder, ErrorCode, Result};
 use flare_server_core::{SignedContextLayer, SignedContextVerifier};
@@ -34,7 +34,9 @@ impl ApplicationBootstrap {
         runtime_plan: flare_im_service_kit::ImServiceRuntimePlan,
         verifier: SignedContextVerifier,
     ) -> Result<()> {
+        use flare_grpc_proto::push::push_admin_service_server::PushAdminServiceServer;
         use flare_grpc_proto::push::push_service_server::PushServiceServer;
+        use flare_server_core::middleware::ContextLayer;
         use tonic::transport::Server;
 
         let address = runtime_plan.address;
@@ -42,16 +44,23 @@ impl ApplicationBootstrap {
         let grpc_metrics =
             flare_im_service_kit::metrics::GrpcMetricsLayer::new(service_name.clone());
         let handler = context.handler.clone();
+        let admin_handler = context.admin_handler.clone();
         let address_clone = address;
 
         let runtime = runtime_plan.service_runtime().add_spawn_with_shutdown(
             "push-proxy-grpc",
             move |shutdown_rx| async move {
                 let svc = SignedContextLayer::new(verifier).layer(PushServiceServer::new(handler));
+                // 管理员入口不走内部工作负载的签名层：handler 自己按 Staff 上下文验签（与 Online 的
+                // OnlineAdminService 相同）。
+                let admin_svc = ContextLayer::new()
+                    .allow_missing()
+                    .layer(PushAdminServiceServer::new(admin_handler));
 
                 Server::builder()
                     .layer(grpc_metrics)
                     .add_service(svc)
+                    .add_service(admin_svc)
                     .serve_with_shutdown(address_clone, async {
                         let _ = shutdown_rx.await;
                     })

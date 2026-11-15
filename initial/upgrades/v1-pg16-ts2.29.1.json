@@ -21092,9 +21092,9 @@
   "sourceSha256": {
     "initial/database.sql": "8f16ea0bd02305b05a7d18035d555900f5ac3eb097d32b161fbf2f4db9df803d",
     "initial/roles.sql": "00eb565dfb2df61632c2322abbb46566cb946b67fd2fb462aad55f1b8e0675e1",
-    "initial/schema.sql": "2a8aed950572af85ae82555a254085ace7be75ad2a2f4bb62ac6024297c60237",
+    "initial/schema.sql": "69a4c3090350fe91a71a842c5d5ca0fb1e193e78df56efdb1dc94989ced56af6",
     "initial/seeds.sql": "138a2fff772c1c6fe964a07c3c34f28ae780f42cf068c0f21ef5a34d12dce470",
-    "initial/upgrades/0002_application_media.sql": "68ddc40bdb0ebf4b43105fda77ef8e334a033b3c543784b5cfb12411482f3309",
+    "initial/upgrades/0002_application_media.sql": "892a3edd2e49e9ae54d1c7d3e5e2d20304a21750c3d89e8084f8726f104d6dcc",
     "initial/upgrades/catalog.sql": "cd270e141fe5d1cbf51cde3ac3fcb580de1e60d408372ee2c7e51ccc820cb0fd",
     "initial/versions/v1/schema.sql": "e0f45478ea92d03dd54375155e3966322d3708a021d11acfce6bd54ba570c236",
     "initial/versions/v1/seeds.sql": "138a2fff772c1c6fe964a07c3c34f28ae780f42cf068c0f21ef5a34d12dce470"

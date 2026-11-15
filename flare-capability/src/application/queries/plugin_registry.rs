@@ -70,11 +70,7 @@ impl PluginRegistryQueries {
         self.presented(states).await
     }
 
-    pub async fn state(
-        &self,
-        app_id: &str,
-        binding_id: &str,
-    ) -> RegistryResult<PresentedAppState> {
+    pub async fn state(&self, app_id: &str, binding_id: &str) -> RegistryResult<PresentedAppState> {
         let binding = [binding_id.to_owned()];
         let states = self
             .repository

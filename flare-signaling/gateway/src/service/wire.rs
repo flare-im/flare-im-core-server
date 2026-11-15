@@ -205,11 +205,35 @@ pub async fn initialize(
     let quality_service = Arc::new(ConnectionQualityService::new());
     let session_domain_service = Arc::new(ConnectionDomainService::new(
         connection_port.clone(),
-        quality_service,
+        quality_service.clone(),
         ConnectionDomainServiceConfig {
             gateway_id: gateway_id.clone(),
         },
     ));
+
+    // 6a. 送达确认跟踪：按连接记未确认的可提示下行帧，确认超时或链路断开时把提示交接给推送通道
+    // （经 Push Proxy 上报）。探活与关连接走 `ServerHandle`，槽位在第 13 步长连接服务器启动时填入；
+    // 那之前没有连接，也就没有要探的。
+    let push_handle_slot: Arc<Mutex<Option<Arc<dyn flare_core::server::handle::ServerHandle>>>> =
+        Arc::new(Mutex::new(None));
+    let handoff_reporter: Arc<dyn crate::domain::ports::IDeviceHandoffPort> = Arc::new(
+        crate::infrastructure::ports::PushProxyHandoffReporter::spawn(
+            Arc::new(crate::infrastructure::ports::PushProxyGrpcPool::new()),
+            message_signer.clone(),
+            metrics.clone(),
+        ),
+    );
+    let delivery_watch = Arc::new(crate::domain::service::DeliveryWatch::new(
+        gateway_id.clone(),
+        access_config.delivery_watch_config(),
+        handoff_reporter,
+        Arc::new(crate::infrastructure::ports::ServerHandleLinkProbe::new(
+            push_handle_slot.clone(),
+        )),
+        quality_service,
+        metrics.clone(),
+    ));
+    delivery_watch.spawn();
 
     // 会话级在线订阅注册表（统一读扩散地基）：组合根创建、共享单例，注入连接/投递/订阅路径。
     let conversation_subscriptions =
@@ -234,13 +258,12 @@ pub async fn initialize(
             connection_port.clone(),
             conversation_subscriptions.clone(),
             conversation_read_pool.clone(),
+            delivery_watch.clone(),
         )
         .with_usage(usage.recorder()),
     );
 
     // 7. Push 端口
-    let push_handle_slot: Arc<Mutex<Option<Arc<dyn flare_core::server::handle::ServerHandle>>>> =
-        Arc::new(Mutex::new(None));
     let push_port: Arc<dyn crate::domain::ports::IPushPort> =
         Arc::new(PushRepository::new(push_handle_slot.clone()));
 
@@ -347,6 +370,7 @@ pub async fn initialize(
         realtime_relay.clone(),
         realtime_broadcast,
         message_signer,
+        delivery_watch.clone(),
     );
 
     // 10. 推送领域服务
@@ -356,6 +380,7 @@ pub async fn initialize(
         conversation_subscriptions.clone(),
         conversation_read_pool.clone(),
         metrics.clone(),
+        delivery_watch,
     ));
 
     // 12. 认证器

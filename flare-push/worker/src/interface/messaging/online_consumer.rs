@@ -534,10 +534,10 @@ mod tests {
             conversation_id: "conv-1".to_string(),
             tenant_id: "tenant-1".to_string(),
             priority: 5,
-            expire_at: None,
             push_payload: request.encode_to_vec(),
-            headers: Default::default(),
             payload_kind: PushTaskPayloadKind::Message as i32,
+            // 在线任务不填按设备的字段（目标设备、合并键、处置等）。
+            ..Default::default()
         };
         let ctx = Arc::new(Context::with_request_id(format!("req-{server_id}")));
         let message = Message::new(
@@ -564,10 +564,9 @@ mod tests {
             conversation_id: "conv-1".to_string(),
             tenant_id: "tenant-1".to_string(),
             priority: 5,
-            expire_at: None,
             push_payload: request.encode_to_vec(),
-            headers: Default::default(),
             payload_kind: PushTaskPayloadKind::Ack as i32,
+            ..Default::default()
         };
         let ctx = Arc::new(Context::with_request_id(format!("req-{ack_id}")));
         let message = Message::new(

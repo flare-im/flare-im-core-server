@@ -7,12 +7,15 @@ use std::sync::Arc;
 use redis::Client;
 
 use crate::application::handlers::{
-    GatewaySweeper, OnlineCommandHandler, OnlinePresenceWatcherHandler, OnlineQueryHandler,
-    OnlineUserHandler,
+    GatewaySweeper, HandoffDispatchConfig, HandoffDispatcher, OnlineCommandHandler,
+    OnlinePresenceWatcherHandler, OnlineQueryHandler, OnlineUserHandler, RevocationDispatchConfig,
+    RevocationDispatcher, handoff_channel, revocation_channel,
 };
 use crate::config::OnlineConfig;
 use crate::domain::connection_event_publisher::NoopConnectionEventPublisher;
+use crate::domain::push_binding::BindingRevocationSink;
 use crate::domain::service::{OnlineStatusService, SubscriptionService, UserService};
+use crate::infrastructure::adapters::GrpcPushProxyClient;
 use crate::infrastructure::persistence::redis::{
     RedisConversationRepository, RedisGatewaySweepRepository, RedisPresencePublisher,
     RedisPresenceWatcher, RedisSubscriptionRepository,
@@ -38,11 +41,21 @@ pub type WiredGatewaySweeper = GatewaySweeper<
     RedisPresencePublisher,
 >;
 
+/// 单态化后的交接上报派发器（Push Proxy gRPC）
+pub type WiredHandoffDispatcher = HandoffDispatcher<GrpcPushProxyClient>;
+
+/// 单态化后的推送绑定吊销派发器（Push Proxy gRPC，与交接上报共用同一个客户端）
+pub type WiredRevocationDispatcher = RevocationDispatcher<GrpcPushProxyClient>;
+
 /// 应用上下文 - 包含所有已初始化的服务
 pub struct ApplicationContext {
     pub online_handler: WiredOnlineHandler,
     /// 网关宕机清扫器（单例锁保证多实例只有一个在扫）；bootstrap 把它挂进运行时。
     pub gateway_sweeper: WiredGatewaySweeper,
+    /// 网关失联交接的上报派发；没配 Push Proxy 地址时为空，清扫器也不产生交接。
+    pub handoff_dispatcher: Option<WiredHandoffDispatcher>,
+    /// 推送绑定吊销的派发；没配 Push Proxy 地址时为空，踢线与身份吊销也不提交吊销。
+    pub revocation_dispatcher: Option<WiredRevocationDispatcher>,
     pub command_delivery: Option<(
         Arc<RedisConversationRepository>,
         Arc<sqlx::PgPool>,
@@ -121,6 +134,41 @@ pub async fn initialize(
         online_config.clone(),
     ));
 
+    // 推送通道：配了 Push Proxy 地址才接。交接上报与绑定吊销共用一个客户端（同一条通道、同一把
+    // 签名器），各有各的队列与派发任务。调用以 Online 自己的 Service 身份签名，所以地址配了而没有
+    // 本 Cell 的签名私钥时拒绝启动，不留一个每次调用都被拒的半配置状态。
+    let (handoff_queue, handoff_dispatcher, binding_revocations, revocation_dispatcher) =
+        match online_config.push_proxy_url.as_deref() {
+            Some(url) => {
+                let signer =
+                    flare_im_service_kit::signed_read::service_signer_from_env("signaling-online")?
+                        .ok_or_else(|| {
+                            flare_server_core::error::FlareError::system(
+                                "SIGNALING_ONLINE_PUSH_PROXY_URL requires the internal context private key: Online calls the push proxy as itself",
+                            )
+                        })?;
+                let push_proxy = Arc::new(GrpcPushProxyClient::new(url, signer)?);
+                let (handoff_queue, handoff_dispatcher) =
+                    handoff_channel(push_proxy.clone(), HandoffDispatchConfig::default());
+                let (revocation_queue, revocation_dispatcher) =
+                    revocation_channel(push_proxy, RevocationDispatchConfig::default());
+                let binding_revocations: Arc<dyn BindingRevocationSink> =
+                    Arc::new(revocation_queue);
+                (
+                    Some(handoff_queue),
+                    Some(handoff_dispatcher),
+                    Some(binding_revocations),
+                    Some(revocation_dispatcher),
+                )
+            }
+            None => {
+                tracing::info!(
+                    "push proxy address not configured: lost-gateway devices are not handed off to push and push bindings are not revoked on kicks"
+                );
+                (None, None, None, None)
+            }
+        };
+
     // 4. 构建领域服务
     let gateway_id = format!("gateway-{}", &uuid::Uuid::new_v4().to_string()[..8]);
     let tenant_runtime = match online_config.tenant_runtime_postgres_url.as_deref() {
@@ -140,7 +188,8 @@ pub async fn initialize(
             tenant_runtime.clone(),
             online_config.tenant_policy,
             online_config.max_online_devices_per_user,
-        ),
+        )
+        .with_binding_revocations(binding_revocations.clone()),
     );
 
     let subscription_domain_service = Arc::new(SubscriptionService::new(
@@ -148,7 +197,10 @@ pub async fn initialize(
         presence_publisher,
     ));
 
-    let user_domain_service = Arc::new(UserService::new(conversation_repository.clone()));
+    let user_domain_service = Arc::new(
+        UserService::new(conversation_repository.clone())
+            .with_binding_revocations(binding_revocations),
+    );
 
     let user_handler = Arc::new(OnlineUserHandler::new(user_domain_service.clone()));
     let presence_watcher_handler =
@@ -167,7 +219,8 @@ pub async fn initialize(
         )),
         command_handler.clone(),
         Arc::new(flare_im_service_kit::metrics::OnlineSweeperMetrics::new()),
-    );
+    )
+    .with_handoff_queue(handoff_queue);
 
     // Query handler: 直接使用基础设施层（查询侧不经过领域层）
     let query_handler = Arc::new(OnlineQueryHandler::new(conversation_repository.clone()));
@@ -215,6 +268,8 @@ pub async fn initialize(
     Ok(ApplicationContext {
         online_handler,
         gateway_sweeper,
+        handoff_dispatcher,
+        revocation_dispatcher,
         command_delivery,
     })
 }
@@ -246,6 +301,13 @@ impl OnlineService for WiredOnlineHandler {
         request: Request<HeartbeatRequest>,
     ) -> std::result::Result<Response<HeartbeatResponse>, Status> {
         self.handle_heartbeat(request).await
+    }
+
+    async fn report_device_state(
+        &self,
+        request: Request<ReportDeviceStateRequest>,
+    ) -> std::result::Result<Response<ReportDeviceStateResponse>, Status> {
+        self.handle_report_device_state(request).await
     }
 
     async fn get_online_status(

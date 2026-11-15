@@ -3,6 +3,8 @@
 pub mod model;
 pub mod offline_delivery;
 pub mod push_routing;
+pub mod vendor_delivery;
+pub mod vendor_policy;
 
 pub use model::GatewayPushTarget;
 pub use offline_delivery::DeviceTokenRepository;

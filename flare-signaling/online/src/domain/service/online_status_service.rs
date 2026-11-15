@@ -5,7 +5,8 @@ use std::sync::Arc;
 
 use flare_grpc_proto::signaling::online::{
     DeviceConflictStrategy, GetOnlineStatusResponse, HeartbeatResponse, LoginRequest,
-    LoginResponse, LogoutRequest, LogoutResponse, OnlineStatus,
+    LoginResponse, LogoutRequest, LogoutResponse, OnlineStatus, ReportDeviceStateRequest,
+    ReportDeviceStateResponse,
 };
 use flare_im_contracts::ConnectionEvent;
 use flare_im_contracts::domain::tenant::is_valid_tenant_id;
@@ -22,9 +23,15 @@ use crate::domain::connection_event_publisher::{
     ConnectionEventPublisher, NoopConnectionEventPublisher,
 };
 use crate::domain::model::OnlineStatusRecord;
-use crate::domain::repository::{ConversationRepository, EvictedConnection, kick_reason};
+use crate::domain::push_binding::{
+    BindingRevocation, BindingRevocationReason, BindingRevocationSink,
+};
+use crate::domain::repository::{
+    ConversationRepository, EvictedConnection, EvictionCause, kick_reason,
+};
 use crate::domain::value_object::{
-    ConnectionId, ConnectionQuality, DeviceId, DevicePriority, TokenVersion, UserId,
+    ConnectionId, ConnectionQuality, DeviceAppState, DeviceAttention, DeviceId, DevicePriority,
+    DeviceStateUpdate, TokenVersion, UserId,
 };
 
 #[derive(Debug, Clone)]
@@ -43,6 +50,8 @@ pub struct OnlineStatusService<CR, P = NoopConnectionEventPublisher> {
     tenant_runtime: TenantRuntimeCache,
     tenant_policy: TenantAccessPolicy,
     max_online_devices_per_user: u32,
+    /// 推送绑定吊销的出口；没接推送通道时为空，登录不吊销任何绑定。
+    binding_revocations: Option<Arc<dyn BindingRevocationSink>>,
 }
 
 impl<CR, P> OnlineStatusService<CR, P>
@@ -59,6 +68,55 @@ where
             tenant_runtime: TenantRuntimeCache::disabled(),
             tenant_policy: TenantAccessPolicy::Lenient,
             max_online_devices_per_user: 0,
+            binding_revocations: None,
+        }
+    }
+
+    /// 接上推送绑定吊销的出口：登录把别的设备顶下线时，吊销那台设备的绑定。
+    pub fn with_binding_revocations(
+        mut self,
+        sink: Option<Arc<dyn BindingRevocationSink>>,
+    ) -> Self {
+        self.binding_revocations = sink;
+        self
+    }
+
+    /// 冲突策略（互斥，或平台互斥下的同平台）把同一用户的另一台设备顶下线：那台设备的登录到此
+    /// 为止，它的推送绑定一并吊销。
+    ///
+    /// 同设备接替（重连、重新登录）不吊销：还是这台设备，绑定仍然是它的。超出设备数上限被挤掉
+    /// 的也不吊销：它收到的是 SESSION_REPLACED，可以再连回来，登录仍然有效。
+    fn revoke_bindings_of_displaced_devices(
+        &self,
+        tenant_id: &str,
+        user_id: &str,
+        new_device_id: &str,
+        evicted: &[EvictedConnection],
+    ) {
+        let Some(sink) = self.binding_revocations.as_ref() else {
+            return;
+        };
+        let mut devices: Vec<&str> = evicted
+            .iter()
+            .filter(|old| {
+                old.cause == EvictionCause::DeviceConflict && old.device_id != new_device_id
+            })
+            .map(|old| old.device_id.as_str())
+            .collect();
+        // 一台设备可以同时挂着几条连接，只报一次。
+        devices.sort_unstable();
+        devices.dedup();
+        // 顶下线发生的时刻，这次登录挤掉的设备共用一个：只吊销在这之前登记的绑定，被顶掉的设备
+        // 之后重新登录登记的不受影响。
+        let displaced_at_ms = chrono::Utc::now().timestamp_millis();
+        for device_id in devices {
+            sink.submit(BindingRevocation::device(
+                tenant_id,
+                user_id,
+                device_id,
+                BindingRevocationReason::DeviceReplaced,
+                displaced_at_ms,
+            ));
         }
     }
 
@@ -201,6 +259,9 @@ where
             device_priority: priority_vo,
             token_version: token_vo,
             initial_quality: connection_quality.clone(),
+            // CONNECT 元数据带来的初始状态；没带（未指定）就是前台。
+            app_state: DeviceAppState::from_proto(request.app_state()),
+            attention: DeviceAttention::from_proto(request.attention()),
         };
         let identity_session_id = request.metadata.get("identity_session_id").cloned();
         if identity_session_id
@@ -260,6 +321,8 @@ where
                 warn!(tenant_id, user_id, connection_id = %old.connection_id, %error, "old connection kick publish failed after admission");
             }
         }
+        // 准入已经提交：被顶下线的设备不论踢线通知有没有送到，绑定都要吊销。
+        self.revoke_bindings_of_displaced_devices(tenant_id, user_id, device_id, &evicted);
 
         {
             let mut map = self.sessions.write().await;
@@ -415,6 +478,66 @@ where
             })?;
 
         Ok(HeartbeatResponse { success: true })
+    }
+
+    /// 记录客户端上报的设备状态（网关转发 DEVICE_STATE）。
+    ///
+    /// 只改这条会话的应用状态、注意力与角标，不算心跳：不续 TTL、不动最后活跃时间。会话已不存在
+    /// 时 `success = false`，网关据此知道这条连接在 Online 已经没有记录。
+    pub async fn report_device_state(
+        &self,
+        ctx: &Context,
+        request: &ReportDeviceStateRequest,
+    ) -> Result<ReportDeviceStateResponse> {
+        let tenant_id = required_tenant(ctx)?;
+        let user_id = request.user_id.as_str();
+        let conversation_id = request.conversation_id.as_str();
+        tracing::trace!(
+            trace_id = %ctx.trace_id(),
+            user_id = %user_id,
+            conversation_id = %conversation_id,
+            "Handling device state report"
+        );
+
+        let user_vo = UserId::new(user_id.to_string()).map_err(|e| {
+            flare_err!(
+                ErrorCode::InvalidParameter,
+                format!("invalid user_id: {}", e)
+            )
+        })?;
+        let session_vo = ConnectionId::from_string(conversation_id.to_string()).map_err(|e| {
+            flare_err!(
+                ErrorCode::InvalidParameter,
+                format!("invalid conversation_id: {}", e)
+            )
+        })?;
+        let update = DeviceStateUpdate {
+            app_state: DeviceAppState::from_proto(request.app_state()),
+            attention: DeviceAttention::from_proto(request.attention()),
+            badge: request.badge,
+        };
+
+        let recorded = self
+            .repository
+            .report_device_state(tenant_id, &session_vo, &user_vo, update)
+            .await
+            .map_err(|e| {
+                map_infra_error(e, ErrorCode::DatabaseError, "Failed to record device state")
+            })?;
+
+        if recorded {
+            let mut map = self.sessions.write().await;
+            if let Some(entry) = map.get_mut(conversation_id).filter(|entry| {
+                entry.session.tenant_id() == tenant_id
+                    && entry.session.user_id().as_str() == user_id
+            }) {
+                entry
+                    .session
+                    .report_device_state(update, chrono::Utc::now());
+            }
+        }
+
+        Ok(ReportDeviceStateResponse { success: recorded })
     }
 
     pub async fn get_online_status(
@@ -898,6 +1021,131 @@ mod tests {
                 ),
             ]
         );
+    }
+
+    /// 记下提交的推送绑定吊销请求。
+    #[derive(Default)]
+    struct RecordedRevocations(std::sync::Mutex<Vec<BindingRevocation>>);
+
+    impl BindingRevocationSink for RecordedRevocations {
+        fn submit(&self, revocation: BindingRevocation) {
+            self.0.lock().unwrap().push(revocation);
+        }
+    }
+
+    /// 准入时挤掉 `evicted` 的服务，吊销请求记进 `revocations`。
+    fn evicting_service(
+        evicted: Vec<EvictedConnection>,
+        revocations: &Arc<RecordedRevocations>,
+    ) -> OnlineStatusService<EvictingRepository> {
+        OnlineStatusService::<_, NoopConnectionEventPublisher>::new(
+            Arc::new(EvictingRepository {
+                evicted,
+                kicks: std::sync::Mutex::new(Vec::new()),
+            }),
+            "gateway-test".to_string(),
+        )
+        .with_binding_revocations(Some(revocations.clone() as Arc<dyn BindingRevocationSink>))
+    }
+
+    /// alice 的 `device-a`（PC）以平台互斥策略登录。
+    async fn login_device_a(service: &OnlineStatusService<EvictingRepository>) -> LoginResponse {
+        let ctx = Context::root()
+            .with_tenant_id("tenant-a")
+            .with_user_id("alice");
+        service
+            .login(
+                &ctx,
+                LoginRequest {
+                    user_id: "alice".to_string(),
+                    device_id: "device-a".to_string(),
+                    device_platform: "pc".to_string(),
+                    desired_conflict_strategy: DeviceConflictStrategy::PlatformExclusive as i32,
+                    metadata: HashMap::from([("connection_id".to_string(), "conn-a".to_string())]),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("login admits the new device")
+    }
+
+    /// 冲突策略把另一台设备顶下线：吊销那台设备的推送绑定，一台设备只报一次。同设备接替与超出
+    /// 设备数上限被挤掉的不吊销。
+    #[tokio::test]
+    async fn a_login_that_displaces_another_device_revokes_its_push_bindings() {
+        let revocations = Arc::new(RecordedRevocations::default());
+        let service = evicting_service(
+            vec![
+                evicted("pc-old", "conn-pc-old", EvictionCause::DeviceConflict),
+                evicted("pc-old", "conn-pc-old-2", EvictionCause::DeviceConflict),
+                evicted("device-a", "conn-a-old", EvictionCause::Replaced),
+                evicted("web-oldest", "conn-web-oldest", EvictionCause::DeviceCap),
+            ],
+            &revocations,
+        );
+
+        let before_ms = chrono::Utc::now().timestamp_millis();
+        login_device_a(&service).await;
+        let after_ms = chrono::Utc::now().timestamp_millis();
+
+        let recorded = revocations.0.lock().unwrap().clone();
+        assert_eq!(recorded.len(), 1);
+        // 登记时刻的上限是顶下线发生的那一刻。
+        let displaced_at_ms = recorded[0].registered_before_ms;
+        assert!((before_ms..=after_ms).contains(&displaced_at_ms));
+        assert_eq!(
+            recorded,
+            vec![BindingRevocation::device(
+                "tenant-a",
+                "alice",
+                "pc-old",
+                BindingRevocationReason::DeviceReplaced,
+                displaced_at_ms,
+            )]
+        );
+    }
+
+    /// 同一台设备重新登录（重连接替旧连接）：绑定还是这台设备的，什么都不吊销。
+    #[tokio::test]
+    async fn a_relogin_of_the_same_device_revokes_nothing() {
+        let revocations = Arc::new(RecordedRevocations::default());
+        let service = evicting_service(
+            vec![
+                evicted("device-a", "conn-a-old", EvictionCause::Replaced),
+                // 即便被报成设备冲突，同一个设备 ID 也不吊销。
+                evicted("device-a", "conn-a-older", EvictionCause::DeviceConflict),
+            ],
+            &revocations,
+        );
+
+        login_device_a(&service).await;
+
+        assert!(revocations.0.lock().unwrap().is_empty());
+    }
+
+    /// 没挤掉任何设备的登录、之后的正常登出：都不吊销绑定。登出的设备登录仍可能有效（客户端
+    /// 主动登出时自己吊销），断开更不是登出。
+    #[tokio::test]
+    async fn a_plain_login_and_logout_revoke_nothing() {
+        let revocations = Arc::new(RecordedRevocations::default());
+        let service = evicting_service(Vec::new(), &revocations);
+        let ctx = Context::root()
+            .with_tenant_id("tenant-a")
+            .with_user_id("alice");
+
+        let login = login_device_a(&service).await;
+        service
+            .logout(
+                &ctx,
+                LogoutRequest {
+                    user_id: "alice".to_string(),
+                    conversation_id: login.conversation_id,
+                },
+            )
+            .await
+            .expect("logout removes the session");
+
+        assert!(revocations.0.lock().unwrap().is_empty());
     }
 
     /// 投影库读不到时仍然拒绝登记（两种策略都是），但报的是暂时故障，不是 `TENANT_UNAVAILABLE`：

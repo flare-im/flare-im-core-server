@@ -4,9 +4,8 @@
 //!
 //! ## 职责
 //! 1. 从 MQ 消费 PushEnvelope
-//! 2. 解析推送目标（全量/用户/设备）
-//! 3. 调用 PushDispatcher 执行推送
-//! 4. 处理推送结果（重试、DLQ）
+//! 2. 交给 `PushRouterHandler` 按信封的目标与载荷类型路由
+//! 3. 处理路由结果（重试、DLQ）
 
 use std::sync::Arc;
 

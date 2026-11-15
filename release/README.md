@@ -383,7 +383,11 @@ Flare Core 进程监听本机服务端口：
 时免除 Consul；它不会实现 DNS/SRV 发现。该清单固定 Access Gateway 的
 WebSocket `60051`、QUIC `60052` 和 gRPC `60060`，以匹配 Core 内部的
 GatewayRouter 静态目标。Signaling Gateway 的 Online 调用在这一模式下仅
-回退同一 Core 容器的 `50061`。
+回退同一 Core 容器的 `50061`。Online 在这一模式下由清单的 `environment_defaults`
+把 `SIGNALING_ONLINE_PUSH_PROXY_URL` 设成同一容器的 Push Proxy `http://127.0.0.1:50091`
+（部署方设置的值优先，设空串即关闭），以 Cell 私钥 `FLARE_INTERNAL_CTX_PRIVATE_KEY`
+签名上报网关失联设备的交接和踢线、设备被顶替、身份会话吊销时的推送绑定吊销；配了地址
+而没有私钥时 Online 拒绝启动。configured 模式没有缺省地址，由部署方指定。
 
 API Gateway 与 Admin Gateway 的下游 gRPC 路由缺省是 `discovery://`。static 模式
 不做服务发现：`release/supervise-core.toml` 在 `FLARE_REGISTRY_MODE=static` 时用
@@ -392,8 +396,8 @@ API Gateway 与 Admin Gateway 的下游 gRPC 路由缺省是 `discovery://`。st
 `*_SERVICE_URL` 时，网关对每个下游各打印一条 WARN
 `service discovery failed, falling back to static gRPC URI`，然后改用
 `*_STATIC_FALLBACK` 的缺省值，即同一张表里的地址。Admin Gateway 只连 media、
-conversation、online、storage reader 与可选的 capability 这 5 个下游（与
-`AdminGrpcClients` 及清单里的 5 个缺省值一致），不连 Message Ingest 和 Orchestrator：
+conversation、online、storage reader、push proxy 与可选的 capability 这 6 个下游（与
+`AdminGrpcClients` 及清单里的 6 个缺省值一致），不连 Message Ingest 和 Orchestrator：
 
 | 下游 | 固定 URI | 覆盖变量（`<P>` 为 `FLARE_API_GATEWAY` 或 `FLARE_ADMIN_GATEWAY`） |
 | --- | --- | --- |
@@ -404,15 +408,16 @@ conversation、online、storage reader 与可选的 capability 这 5 个下游�
 | signaling-online | `http://127.0.0.1:50061` | `<P>_GRPC_ONLINE_SERVICE_URL` |
 | storage-reader | `http://127.0.0.1:60083` | `<P>_GRPC_STORAGE_READER_SERVICE_URL` |
 | capability（仅 Admin Gateway，可选；URL 设为空串即关闭） | `http://127.0.0.1:50110` | `FLARE_ADMIN_GATEWAY_GRPC_CAPABILITY_SERVICE_URL` |
-| push-proxy（仅 API Gateway，始终直连） | `http://127.0.0.1:50091` | `FLARE_API_GATEWAY_GRPC_PUSH_PROXY_URL` |
+| push-proxy（API Gateway 始终直连） | `http://127.0.0.1:50091` | `FLARE_API_GATEWAY_GRPC_PUSH_PROXY_URL` |
+| push-proxy（Admin Gateway，推送决策链） | `http://127.0.0.1:50091` | `FLARE_ADMIN_GATEWAY_GRPC_PUSH_PROXY_SERVICE_URL` |
 
 `*_SERVICE_URL` 设为 `http://` 地址时网关直接连接（static URI override），不再
 先尝试服务发现，也就没有这些 WARN；下游不在同一容器时，改成对应的私网地址。
 `*_STATIC_FALLBACK` 只在 `discovery://` 解析失败时才用。supervisor 清单按前缀
 `FLARE_API_GATEWAY_` / `FLARE_ADMIN_GATEWAY_` 把这些变量传给对应子进程。
-flare-deploy 单机模板在 Core 的 Compose `environment` 里把 Admin Gateway 的 5 个
+flare-deploy 单机模板在 Core 的 Compose `environment` 里把 Admin Gateway 的 6 个
 `FLARE_ADMIN_GATEWAY_GRPC_*_SERVICE_URL`（media、conversation、online、storage reader、
-capability）直接设成上表地址，preflight 核对它们。
+capability、push proxy）直接设成上表地址，preflight 核对它们。
 
 启用 Social PreSend Hook 时，`config/hooks.social.toml` 的
 `discovery://flare-social-hook` **不能**用于该模式：Message Ingest 会在

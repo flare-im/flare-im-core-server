@@ -16,27 +16,43 @@ use flare_im_service_kit::push_delivery::{
     AttestedRecordHandler, BrokerRecordIdentity, PushDeliveryMode,
 };
 use flare_server_core::mq::consumer::ConsumerConfig;
+use flare_server_core::mq::consumer::MessageHandler;
 use flare_server_core::mq::consumer::RetryBackoff;
 use flare_server_core::mq::consumer::TopicDispatcher;
 use flare_server_core::mq::consumer::dispatcher::Dispatcher;
 
+use super::consumer_lanes::{LaneKind, LaneSpec, lane_specs};
 use crate::application::GatewayPushExecutor;
+use crate::application::binding_delivery::DeliveryRuntime;
+use crate::application::digest_coalescer::{CoalescerLimits, DigestCoalescer};
+use crate::application::vendor_governance::VendorGovernance;
 use crate::config::{OfflineDeliveryBackend, PushWorkerConfig};
 use crate::infrastructure::device_tokens::RedisDeviceTokenRepository;
 use crate::infrastructure::mq::dlq_publisher::DlqPublisher;
 use crate::infrastructure::offline_outbox::RedisOfflineOutbox;
 use crate::infrastructure::rpc::OnlineServiceClient;
+use crate::infrastructure::vendor_trace::VendorTrace;
 use crate::interface::messaging::offline_consumer::{
     OfflinePushConsumerFactory, UsageCountedExecutor,
 };
 use crate::interface::messaging::online_consumer::OnlinePushConsumerFactory;
+use flare_im_service_kit::push_trace::{PushTraceConfig, PushTraceRecorder};
+
+/// 一个消费者：它的形状、消费配置与只登记了它那个主题的分发器。
+pub struct ConsumerLane {
+    pub spec: LaneSpec,
+    pub consumer_config: ConsumerConfig,
+    pub dispatcher: Arc<dyn Dispatcher>,
+}
 
 pub struct ApplicationContext {
     pub config: Arc<PushWorkerConfig>,
-    pub consumer_config: ConsumerConfig,
-    pub dispatcher: Arc<dyn Dispatcher>,
+    /// 在线投递与离线任务三条优先级通道，各一个消费者。
+    pub consumers: Vec<ConsumerLane>,
     /// 用量预聚合（`push.attempts`）；启动层把它的 flush 循环挂进运行时。
     pub usage: flare_im_usage::UsageReporter,
+    /// 厂商限流时攒下的提示（只在厂商后端时有）；启动层把它的交还循环挂进运行时。
+    pub digest_coalescer: Option<Arc<DigestCoalescer>>,
 }
 
 pub async fn initialize(
@@ -88,6 +104,7 @@ pub async fn initialize(
 
     // 5.1 离线推送后端：开发期按生产目标显式选择，不做隐式降级。每个后端经用量计数包一层。
     let usage = flare_im_usage::UsageReporter::from_env("flare-push-worker").await?;
+    let mut digest_coalescer = None;
     let offline_handler = match config.offline_delivery_backend {
         OfflineDeliveryBackend::Outbox => {
             let redis_url = config.offline_outbox_redis_url.as_deref().ok_or_else(|| {
@@ -105,13 +122,15 @@ pub async fn initialize(
             tracing::info!(
                 stream = %config.offline_outbox_stream,
                 maxlen = config.offline_outbox_maxlen,
-                "offline push outbox enabled (Redis Stream)"
+                "{} (Redis Stream)",
+                OfflineDeliveryBackend::Outbox.enabled_line()
             );
             OfflinePushConsumerFactory::create_handler_with_delivery(
                 dlq,
                 UsageCountedExecutor::wrap(Arc::new(outbox), "outbox", usage.recorder()),
                 config.offline_parking_capacity,
                 metrics,
+                VendorTrace::disabled(),
             )
         }
         backend @ (OfflineDeliveryBackend::Apns
@@ -123,13 +142,42 @@ pub async fn initialize(
             } else {
                 vec![backend]
             };
+            let provider_names = providers
+                .iter()
+                .map(|provider| provider.name())
+                .collect::<Vec<_>>()
+                .join(",");
             let tokens = Arc::new(
                 RedisDeviceTokenRepository::connect(
                     &config.device_token_redis_url,
                     config.device_token_key_prefix.clone(),
+                    config.binding_inactive_days,
                 )
                 .await?,
             );
+            // 厂商治理、绑定选择与限流降级摘要活得和进程一样长：凭据租约轮换只重建厂商适配器。
+            // 决策链写进推送 Redis（与设备绑定同一个实例），读 `[services.push_worker.trace]`。
+            let trace = VendorTrace::new(push_trace_recorder(&config.device_token_redis_url));
+            let governance = Arc::new(VendorGovernance::new(|vendor| config.vendor_limits(vendor)));
+            let coalescer = Arc::new(DigestCoalescer::new(
+                CoalescerLimits::default(),
+                governance.clone(),
+                trace.clone(),
+            ));
+            let runtime = Arc::new(DeliveryRuntime {
+                binding_order: config.binding_order.clone(),
+                governance,
+                coalescer: coalescer.clone(),
+                trace: trace.clone(),
+                usage: usage.recorder(),
+            });
+            let binding_order = config
+                .binding_order
+                .iter()
+                .map(|vendor| vendor.as_str())
+                .collect::<Vec<_>>()
+                .join(",");
+            tracing::info!(binding_order = %binding_order, "offline push binding order");
             let executor: Arc<dyn crate::domain::offline_delivery::OfflinePushExecutor> = match (
                 &config.mobile_applications_file,
                 &config.mobile_snapshot_file,
@@ -138,7 +186,7 @@ pub async fn initialize(
                     std::path::Path::new(path),
                     &providers,
                     tokens,
-                    usage.recorder(),
+                    runtime,
                     config.getui_default_ttl_ms,
                     config.getui_request_timeout_ms,
                 )?),
@@ -146,7 +194,7 @@ pub async fn initialize(
                     path.into(),
                     providers,
                     tokens,
-                    usage.recorder(),
+                    runtime,
                     config.getui_default_ttl_ms,
                     config.getui_request_timeout_ms,
                 )),
@@ -157,62 +205,89 @@ pub async fn initialize(
                     ));
                 }
             };
+            // 攒下的提示交还给同一个投递后端（弱引用：后端本身持有攒提示的地方）。
+            coalescer.set_target(Arc::downgrade(&executor));
+            digest_coalescer = Some(coalescer);
+            // 每次启动一行，说明在用哪个厂商后端（部署冒烟据此核对）。
+            tracing::info!(providers = %provider_names, "{}", backend.enabled_line());
             OfflinePushConsumerFactory::create_handler_with_delivery(
                 dlq,
                 executor,
                 config.offline_parking_capacity,
                 metrics,
+                trace,
             )
         }
         OfflineDeliveryBackend::Disabled => {
-            tracing::warn!("offline push delivery disabled; tasks will go to DLQ/parking");
+            // 启动时只说这一次：离线推送是关着的，不是坏了。生产环境走到这里必然是显式配置的，
+            // 其他环境也可能只是没配置。
+            tracing::warn!(
+                "offline push is off: PUSH_WORKER_OFFLINE_DELIVERY_BACKEND is disabled or unset; nothing reaches a phone and offline tasks go to the DLQ"
+            );
             OfflinePushConsumerFactory::create_handler(
                 dlq,
                 config.offline_parking_capacity,
                 metrics,
+                VendorTrace::disabled(),
             )
         }
     };
 
-    // 6. 配置 ConsumerConfig
-    let consumer_cfg = push_consumer_config(config.batch_size(), config.batch_timeout_ms());
-
-    // 7. 注册到 Dispatcher
-    let mut dispatcher = TopicDispatcher::new();
-
-    Dispatcher::register(
-        &mut dispatcher,
-        config.push_online_topic.clone(),
-        Arc::new(AttestedRecordHandler::new(identity.clone(), online_handler)),
-    )
-    .map_err(|err| {
-        flare_server_core::error::FlareError::system(format!(
-            "register push worker consumer {}: {err}",
-            config.push_online_topic
-        ))
-    })?;
-
-    Dispatcher::register(
-        &mut dispatcher,
-        config.push_offline_topic.clone(),
-        Arc::new(AttestedRecordHandler::new(identity, offline_handler)),
-    )
-    .map_err(|err| {
-        flare_server_core::error::FlareError::system(format!(
-            "register push worker consumer {}: {err}",
-            config.push_offline_topic
-        ))
-    })?;
+    // 6. 每个主题一个消费者：在线投递，与离线任务的单聊、群、批量三条通道。三条离线通道共用
+    //    同一个处理器，只是各自拉取、各自限并发：批量通道积压不影响单聊。
+    let online_handler: Arc<dyn MessageHandler> =
+        Arc::new(AttestedRecordHandler::new(identity.clone(), online_handler));
+    let offline_handler: Arc<dyn MessageHandler> =
+        Arc::new(AttestedRecordHandler::new(identity, offline_handler));
+    let mut consumers = Vec::new();
+    for spec in lane_specs(&config) {
+        let handler = match spec.kind {
+            LaneKind::Online => online_handler.clone(),
+            LaneKind::Offline => offline_handler.clone(),
+        };
+        let mut dispatcher = TopicDispatcher::new();
+        Dispatcher::register(&mut dispatcher, spec.topic.clone(), handler).map_err(|err| {
+            flare_server_core::error::FlareError::system(format!(
+                "register push worker consumer {}: {err}",
+                spec.topic
+            ))
+        })?;
+        tracing::info!(
+            consumer = spec.name,
+            topic = %spec.topic,
+            group = %spec.group,
+            concurrency = spec.concurrency,
+            "push worker consumer registered"
+        );
+        consumers.push(ConsumerLane {
+            consumer_config: push_consumer_config(config.batch_size(), config.batch_timeout_ms())
+                .with_concurrency(spec.concurrency),
+            dispatcher: Arc::new(dispatcher),
+            spec,
+        });
+    }
 
     Ok(ApplicationContext {
         config,
-        consumer_config: consumer_cfg,
-        dispatcher: Arc::new(dispatcher),
+        consumers,
         usage,
+        digest_coalescer,
     })
 }
 
-/// 推送消费者的重试次数上限（online 与 offline 两个 handler 共用这一个消费者配置）。
+/// 决策链的写入端：推送 Redis 地址读不懂时关掉决策链（不拦启动，也不把地址写进日志）。
+fn push_trace_recorder(redis_url: &str) -> PushTraceRecorder {
+    let config = PushTraceConfig::for_service("push_worker");
+    match redis::Client::open(redis_url) {
+        Ok(client) => PushTraceRecorder::spawn(client, config),
+        Err(_) => {
+            tracing::warn!("push decision trace disabled: the push Redis address is not usable");
+            PushTraceRecorder::disabled()
+        }
+    }
+}
+
+/// 推送消费者的重试次数上限（四个消费者共用，各自只改并发）。
 ///
 /// handler 遇到暂时性失败（Access Gateway 停机或重启、网关过载、离线推送后端暂时不可用）
 /// 返回 Nack，交给 JetStream 按 [`push_delivery_retry_backoff`] 延迟重投：12 次重试的等待合计
@@ -228,6 +303,7 @@ pub(crate) fn push_delivery_retry_backoff() -> RetryBackoff {
     RetryBackoff::new(Duration::from_secs(1), Duration::from_secs(15))
 }
 
+/// 推送消费者的共同配置；每个消费者再按自己的并发设置覆盖 `concurrency`。
 pub(crate) fn push_consumer_config(batch_size: usize, batch_timeout_ms: u64) -> ConsumerConfig {
     ConsumerConfig::default()
         .with_concurrency(128)

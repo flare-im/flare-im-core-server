@@ -661,6 +661,7 @@ CREATE TABLE conversation_participants (
     visible_from_seq BIGINT NOT NULL DEFAULT 0,
     history_cleared_through_seq BIGINT NOT NULL DEFAULT 0,
     mention_only BOOLEAN NOT NULL DEFAULT FALSE,
+    notify_all BOOLEAN NOT NULL DEFAULT FALSE,
     created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (tenant_id, conversation_id, user_id),
@@ -683,6 +684,7 @@ COMMENT ON COLUMN conversation_participants.is_deleted IS '用户侧删除会话
 COMMENT ON COLUMN conversation_participants.mute_until IS '静音截止时间（空=长期免打扰）';
 COMMENT ON COLUMN conversation_participants.quit_at IS '退出时间（NULL=仍在会话中）';
 COMMENT ON COLUMN conversation_participants.mention_only IS '只接收提到我的消息：其余消息照常投递，但不产生离线推送。与 muted 正交';
+COMMENT ON COLUMN conversation_participants.notify_all IS '大群里显式开启「全部消息通知」：进入该会话的通知订阅者，按会话限频的波次推送';
 COMMENT ON COLUMN conversation_participants.visible_from_seq IS '该成员可见的历史下限：只能读到 seq > 此值的消息；0=不限。业务层（如群历史可见性策略）决定是否设值';
 COMMENT ON COLUMN conversation_participants.history_cleared_through_seq IS '个人历史清除的序列截止；只展示高于此值的消息';
 COMMENT ON COLUMN conversation_participants.created_at IS '创建时间';
@@ -692,6 +694,42 @@ CREATE INDEX IF NOT EXISTS idx_conversation_participants_tenant_conv ON conversa
 -- 成员预览 LATERAL 与成员分页 keyset 游标都按 (joined_at, user_id) 排序取数；
 -- 没有这个索引就会退化成对全会话成员做 top-N heapsort（十万人群实测 106ms/会话）。
 CREATE INDEX IF NOT EXISTS idx_conversation_participants_conv_joined ON conversation_participants(tenant_id, conversation_id, joined_at, user_id);
+-- 推送按会话枚举「全部消息通知」的订阅者：部分索引只收 notify_all 为真的行，开启的人很少。
+CREATE INDEX IF NOT EXISTS idx_conversation_participants_notify_all ON conversation_participants(tenant_id, conversation_id, user_id) WHERE notify_all;
+
+CREATE TABLE user_notification_settings (
+    tenant_id TEXT NOT NULL,
+    user_id TEXT NOT NULL,
+    quiet_start_minute SMALLINT,
+    quiet_end_minute SMALLINT,
+    quiet_weekdays SMALLINT NOT NULL DEFAULT 0,
+    quiet_allow_mentions BOOLEAN NOT NULL DEFAULT FALSE,
+    preview SMALLINT NOT NULL DEFAULT 0,
+    multi_device SMALLINT NOT NULL DEFAULT 0,
+    settings_version BIGINT NOT NULL DEFAULT 0,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (tenant_id, user_id),
+    CONSTRAINT user_notification_settings_quiet_pair
+        CHECK ((quiet_start_minute IS NULL) = (quiet_end_minute IS NULL)),
+    CONSTRAINT user_notification_settings_quiet_range
+        CHECK (quiet_start_minute BETWEEN 0 AND 1439 AND quiet_end_minute BETWEEN 0 AND 1439),
+    CONSTRAINT user_notification_settings_weekdays
+        CHECK (quiet_weekdays BETWEEN 0 AND 127),
+    CONSTRAINT user_notification_settings_preview
+        CHECK (preview BETWEEN 0 AND 3),
+    CONSTRAINT user_notification_settings_multi_device
+        CHECK (multi_device BETWEEN 0 AND 3),
+    CONSTRAINT user_notification_settings_version
+        CHECK (settings_version >= 0)
+);
+COMMENT ON TABLE user_notification_settings IS '用户级通知设置（UserNotificationSettings）：勿扰时段、通知预览、多端提示策略；没有行即默认值';
+COMMENT ON COLUMN user_notification_settings.quiet_start_minute IS '勿扰开始，设备当地时间一天中的分钟 0..1439；与 quiet_end_minute 同为 NULL 表示没有勿扰时段';
+COMMENT ON COLUMN user_notification_settings.quiet_end_minute IS '勿扰结束分钟；等于开始表示全天，小于开始表示跨零点';
+COMMENT ON COLUMN user_notification_settings.quiet_weekdays IS '勿扰生效的星期，按位 bit0 周一 … bit6 周日；0 表示每天';
+COMMENT ON COLUMN user_notification_settings.quiet_allow_mentions IS '勿扰时段内点名到我的消息照常响铃';
+COMMENT ON COLUMN user_notification_settings.preview IS 'NotificationPreview 枚举值：0 未指定（按完整）、1 完整、2 只显示发送者、3 隐藏';
+COMMENT ON COLUMN user_notification_settings.multi_device IS 'MultiDeviceAlertPolicy 枚举值：0 未指定（按延迟）、1 延迟、2 立即、3 只更新角标';
+COMMENT ON COLUMN user_notification_settings.settings_version IS '设置版本，每次写入加一；客户端带 base_settings_version 做乐观并发';
 
 -- ============================================================================
 -- 7. Sync 游标（common/sync.proto）

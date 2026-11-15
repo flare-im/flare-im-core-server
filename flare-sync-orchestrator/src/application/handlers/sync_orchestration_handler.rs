@@ -6,8 +6,9 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
 use flare_grpc_proto::conversation::{
-    ConversationBootstrapRequest, ListConversationParticipantsRequest,
-    UpdateConversationUserSettingsRequest, UpdateCursorRequest,
+    ConversationBootstrapRequest, GetUserNotificationSettingsRequest,
+    ListConversationParticipantsRequest, UpdateConversationUserSettingsRequest,
+    UpdateCursorRequest, UpdateUserNotificationSettingsRequest,
 };
 use flare_im_contracts::Ctx;
 use flare_im_contracts::utils::normalize_optional_tenant_id;
@@ -23,11 +24,12 @@ use flare_proto::common::{
     ConversationUserSettingsSyncRes, ConversationVersion, ConversationsSync, ConversationsSyncRes,
     EnsureConversationSync, EnsureConversationSyncRes, EventEnvelope, EventEnvelopeDeliveryMode,
     EventReplayPreset, EventStreamAckSyncRes, GetSyncCursorSync, GetSyncCursorSyncRes,
-    MessagePreview, MultiConversationSync, MultiConversationSyncRes, MultiDeviceCursor,
-    QueryEventsSync, QueryEventsSyncRes, SingleConversationSync, SingleConversationSyncRes,
-    SnapshotConversationRow, SyncRes, SyncSessionHints, SyncSkipItem, SyncSliceItem,
-    SyncSnapshotSync, SyncSnapshotSyncRes, SyncStaleContext, SyncTombstoneItem,
-    UpdateSyncCursorSync, UpdateSyncCursorSyncRes,
+    GetUserNotificationSettingsSync, GetUserNotificationSettingsSyncRes, MessagePreview,
+    MultiConversationSync, MultiConversationSyncRes, MultiDeviceCursor, QueryEventsSync,
+    QueryEventsSyncRes, SingleConversationSync, SingleConversationSyncRes, SnapshotConversationRow,
+    SyncRes, SyncSessionHints, SyncSkipItem, SyncSliceItem, SyncSnapshotSync, SyncSnapshotSyncRes,
+    SyncStaleContext, SyncTombstoneItem, UpdateSyncCursorSync, UpdateSyncCursorSyncRes,
+    UserNotificationSettingsSync, UserNotificationSettingsSyncRes,
 };
 use flare_server_core::error::{ErrorBuilder, ErrorCode, FlareError};
 use tracing::{debug, trace, warn};
@@ -65,6 +67,7 @@ struct ConversationSyncRoutingHint {
     member_preview: Vec<ConversationParticipant>,
     is_muted: bool,
     is_mention_only: Option<bool>,
+    notify_all: Option<bool>,
     is_pinned: bool,
     is_archived: bool,
     user_settings_version: u64,
@@ -198,6 +201,22 @@ where
                 let v = self.ensure_conversation_sync(ctx, user_id, req).await?;
                 Ok(SyncRes {
                     payload: Some(SyncResPayload::EnsureConversation(v)),
+                })
+            }
+            SyncPayload::UserNotificationSettings(req) => {
+                let v = self
+                    .user_notification_settings_sync(ctx, user_id, req)
+                    .await?;
+                Ok(SyncRes {
+                    payload: Some(SyncResPayload::UserNotificationSettings(v)),
+                })
+            }
+            SyncPayload::GetUserNotificationSettings(req) => {
+                let v = self
+                    .get_user_notification_settings_sync(ctx, user_id, req)
+                    .await?;
+                Ok(SyncRes {
+                    payload: Some(SyncResPayload::GetUserNotificationSettings(v)),
                 })
             }
             SyncPayload::ConversationsIncremental(_)
@@ -465,6 +484,7 @@ where
                     member_preview: m.bootstrap.member_preview.clone(),
                     is_muted: m.bootstrap.is_muted,
                     is_mention_only: m.bootstrap.is_mention_only,
+                    notify_all: m.bootstrap.notify_all,
                     is_pinned: m.bootstrap.is_pinned,
                     is_archived: m.bootstrap.is_archived,
                     user_settings_version: m.bootstrap.user_settings_version,
@@ -1347,10 +1367,59 @@ where
                     // 投影下来，不是客户端直接改的。None = 不修改。
                     is_mention_only: None,
                     clear_history_through_seq: req.clear_history_through_seq,
+                    notify_all: req.notify_all,
                 },
             )
             .await?;
         Ok(ConversationUserSettingsSyncRes {
+            settings: resp.settings,
+        })
+    }
+
+    /// 部分更新当前用户的用户级通知设置：原样转给会话服务（校验与版本冲突都在那边），用户只取
+    /// 认证上下文，请求里不带。
+    async fn user_notification_settings_sync(
+        &self,
+        ctx: &Ctx,
+        user_id: &str,
+        req: UserNotificationSettingsSync,
+    ) -> Result<UserNotificationSettingsSyncRes, FlareError> {
+        debug!(
+            user_id = %user_id,
+            base_settings_version = req.base_settings_version,
+            "user_notification_settings sync"
+        );
+        let resp = self
+            .infra
+            .update_user_notification_settings(
+                ctx,
+                UpdateUserNotificationSettingsRequest {
+                    quiet_hours: req.quiet_hours,
+                    clear_quiet_hours: req.clear_quiet_hours,
+                    preview: req.preview,
+                    multi_device: req.multi_device,
+                    base_settings_version: req.base_settings_version,
+                },
+            )
+            .await?;
+        Ok(UserNotificationSettingsSyncRes {
+            settings: resp.settings,
+        })
+    }
+
+    /// 读当前用户的用户级通知设置。
+    async fn get_user_notification_settings_sync(
+        &self,
+        ctx: &Ctx,
+        user_id: &str,
+        _req: GetUserNotificationSettingsSync,
+    ) -> Result<GetUserNotificationSettingsSyncRes, FlareError> {
+        debug!(user_id = %user_id, "get_user_notification_settings sync");
+        let resp = self
+            .infra
+            .get_user_notification_settings(ctx, GetUserNotificationSettingsRequest {})
+            .await?;
+        Ok(GetUserNotificationSettingsSyncRes {
             settings: resp.settings,
         })
     }
@@ -1738,6 +1807,7 @@ fn snapshot_row_to_summary(
         last_read_seq,
         is_muted: hint.is_muted,
         is_mention_only: hint.is_mention_only,
+        notify_all: hint.notify_all,
         is_pinned: hint.is_pinned,
         mute_until: None,
         is_archived: hint.is_archived,
@@ -1861,6 +1931,7 @@ mod tests {
     use super::*;
     use flare_grpc_proto::conversation::{
         ConversationBootstrapResponse, UpdateConversationUserSettingsRequest,
+        UpdateUserNotificationSettingsRequest,
     };
     use flare_server_core::context::Context;
     use std::sync::Mutex;
@@ -1940,6 +2011,8 @@ mod tests {
         events_page: crate::application::ports::QueryEventsPage,
         updates: Mutex<Vec<UpdateCursorRequest>>,
         settings_updates: Mutex<Vec<UpdateConversationUserSettingsRequest>>,
+        notification_settings_updates: Mutex<Vec<UpdateUserNotificationSettingsRequest>>,
+        notification_settings_reads: Mutex<usize>,
         version_changes: Vec<crate::application::ports::ConversationVersionChange>,
         read_access: Option<HashSet<(String, String, String)>>,
         detail_error: Option<ErrorCode>,
@@ -2068,6 +2141,50 @@ mod tests {
         ) -> Result<flare_grpc_proto::conversation::CreateConversationResponse, FlareError>
         {
             Ok(flare_grpc_proto::conversation::CreateConversationResponse { conversation: None })
+        }
+
+        async fn get_user_notification_settings(
+            &self,
+            _ctx: &Ctx,
+            _req: GetUserNotificationSettingsRequest,
+        ) -> Result<flare_grpc_proto::conversation::GetUserNotificationSettingsResponse, FlareError>
+        {
+            *self
+                .notification_settings_reads
+                .lock()
+                .expect("notification settings reads lock") += 1;
+            Ok(
+                flare_grpc_proto::conversation::GetUserNotificationSettingsResponse {
+                    settings: Some(flare_proto::common::UserNotificationSettings {
+                        settings_version: 3,
+                        ..Default::default()
+                    }),
+                },
+            )
+        }
+
+        async fn update_user_notification_settings(
+            &self,
+            _ctx: &Ctx,
+            req: UpdateUserNotificationSettingsRequest,
+        ) -> Result<
+            flare_grpc_proto::conversation::UpdateUserNotificationSettingsResponse,
+            FlareError,
+        > {
+            self.notification_settings_updates
+                .lock()
+                .expect("notification settings updates lock")
+                .push(req);
+            Ok(
+                flare_grpc_proto::conversation::UpdateUserNotificationSettingsResponse {
+                    settings: Some(flare_proto::common::UserNotificationSettings {
+                        quiet_hours: req.quiet_hours,
+                        preview: req.preview.unwrap_or_default(),
+                        multi_device: req.multi_device.unwrap_or_default(),
+                        settings_version: req.base_settings_version.saturating_add(1),
+                    }),
+                },
+            )
         }
     }
 
@@ -2795,6 +2912,7 @@ mod tests {
                             draft: Some("draft text".to_string()),
                             base_settings_version: 7,
                             clear_history_through_seq: Some(42),
+                            notify_all: Some(true),
                         },
                     )),
                 },
@@ -2820,6 +2938,94 @@ mod tests {
         assert_eq!(updates[0].conversation_id, "c1");
         assert_eq!(updates[0].base_settings_version, 7);
         assert_eq!(updates[0].clear_history_through_seq, Some(42));
+        assert_eq!(updates[0].notify_all, Some(true));
+    }
+
+    #[tokio::test]
+    async fn user_notification_settings_sync_forwards_to_conversation_port() {
+        let infra = Arc::new(MockInfra::default());
+        let handler =
+            SyncOrchestrationHandler::new(infra.clone(), Arc::new(MemorySyncCursorCache::new()));
+        let quiet = flare_proto::common::QuietHours {
+            start_minute: 22 * 60,
+            end_minute: 7 * 60,
+            weekdays: 0,
+            allow_mentions: true,
+        };
+
+        let response = handler
+            .execute_sync(
+                &ctx(),
+                "22",
+                flare_proto::common::Sync {
+                    device_id: "device-a".to_string(),
+                    payload: Some(SyncPayload::UserNotificationSettings(
+                        UserNotificationSettingsSync {
+                            quiet_hours: Some(quiet),
+                            clear_quiet_hours: false,
+                            preview: Some(flare_proto::common::NotificationPreview::Hidden as i32),
+                            multi_device: None,
+                            base_settings_version: 4,
+                        },
+                    )),
+                },
+            )
+            .await
+            .expect("user notification settings sync");
+
+        let Some(SyncResPayload::UserNotificationSettings(res)) = response.payload else {
+            panic!("expected user notification settings response");
+        };
+        let settings = res.settings.expect("settings");
+        assert_eq!(settings.quiet_hours, Some(quiet));
+        assert_eq!(
+            settings.preview,
+            flare_proto::common::NotificationPreview::Hidden as i32
+        );
+        assert_eq!(settings.settings_version, 5);
+
+        let updates = infra
+            .notification_settings_updates
+            .lock()
+            .expect("notification settings updates lock");
+        assert_eq!(updates.len(), 1);
+        assert_eq!(updates[0].quiet_hours, Some(quiet));
+        assert!(!updates[0].clear_quiet_hours);
+        assert_eq!(updates[0].multi_device, None);
+        assert_eq!(updates[0].base_settings_version, 4);
+    }
+
+    #[tokio::test]
+    async fn get_user_notification_settings_sync_reads_through_the_conversation_port() {
+        let infra = Arc::new(MockInfra::default());
+        let handler =
+            SyncOrchestrationHandler::new(infra.clone(), Arc::new(MemorySyncCursorCache::new()));
+
+        let response = handler
+            .execute_sync(
+                &ctx(),
+                "22",
+                flare_proto::common::Sync {
+                    device_id: "device-a".to_string(),
+                    payload: Some(SyncPayload::GetUserNotificationSettings(
+                        GetUserNotificationSettingsSync {},
+                    )),
+                },
+            )
+            .await
+            .expect("get user notification settings sync");
+
+        let Some(SyncResPayload::GetUserNotificationSettings(res)) = response.payload else {
+            panic!("expected get user notification settings response");
+        };
+        assert_eq!(res.settings.expect("settings").settings_version, 3);
+        assert_eq!(
+            *infra
+                .notification_settings_reads
+                .lock()
+                .expect("notification settings reads lock"),
+            1
+        );
     }
 
     #[test]
@@ -3001,6 +3207,29 @@ mod tests {
         assert_eq!(summary.max_conversation_seq, 11);
     }
 
+    /// 冷启 bundle 的摘要由路由提示重建：本人的「仅 @我」与「全部消息通知」都要原样带出，
+    /// 否则冷启后的会话行与会话列表同步给的行不一致。
+    #[test]
+    fn snapshot_summary_carries_the_users_notification_settings() {
+        let item = SnapshotConversationRow {
+            conversation_id: "c1".to_string(),
+            last_conversation_seq: 10,
+            ..Default::default()
+        };
+        let hint = ConversationSyncRoutingHint {
+            is_mention_only: Some(false),
+            notify_all: Some(true),
+            ..Default::default()
+        };
+        let summary = snapshot_row_to_summary(&item, &hint);
+        assert_eq!(summary.is_mention_only, Some(false));
+        assert_eq!(summary.notify_all, Some(true));
+
+        let older_server = snapshot_row_to_summary(&item, &ConversationSyncRoutingHint::default());
+        assert_eq!(older_server.is_mention_only, None);
+        assert_eq!(older_server.notify_all, None);
+    }
+
     #[test]
     fn snapshot_summary_drops_impossible_peer_read_seq_hint() {
         let item = SnapshotConversationRow {
@@ -3031,6 +3260,8 @@ mod tests {
                     unread_count: 39,
                     last_read_seq: 99,
                     updated_at: 1_000,
+                    is_mention_only: Some(false),
+                    notify_all: Some(true),
                     ..Default::default()
                 }],
                 ..Default::default()
@@ -3054,6 +3285,9 @@ mod tests {
         assert_eq!(response.conversations.len(), 1);
         assert_eq!(response.conversations[0].last_read_seq, 99);
         assert_eq!(response.conversations[0].unread_count, 39);
+        // 本人的通知设置从会话摘要原样带到同步结果。
+        assert_eq!(response.conversations[0].is_mention_only, Some(false));
+        assert_eq!(response.conversations[0].notify_all, Some(true));
     }
 
     #[tokio::test]

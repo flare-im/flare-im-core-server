@@ -231,6 +231,7 @@ async fn every_repository_method_requires_a_context_tenant() {
                     draft: None,
                     base_settings_version: 0,
                     clear_history_through_seq: None,
+                    notify_all: None,
                 },
             )
             .await,

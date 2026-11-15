@@ -177,6 +177,11 @@ docker compose -f deploy/docker-compose.yml -f deploy/docker-compose.nats.yml up
 2. **存储**：`config/services/*.toml` 里的 Postgres / 对象存储指向你自己的实例。
 3. **推送证书**：要离线推送的话配 APNs（.p8）与 FCM（service account JSON），
    见 `flare-push/` 下各 channel 的实现（APNs 用 .p8，FCM 用 service account JSON）。
+   `PUSH_WORKER_OFFLINE_DELIVERY_BACKEND` 要显式设置（`FLARE_ENV=production` 时不设就拒绝启动）；
+   APNs 凭据的 `topics` 列出客户端登记的每个 iOS 包名；依赖个推厂商通道之前，先在华为、荣耀、
+   小米、OPPO、vivo 各自的开发者后台申请即时通讯类目；Push Proxy、Push Server、Push Worker
+   指向同一个设备绑定 Redis；Online 配 `SIGNALING_ONLINE_PUSH_PROXY_URL` 并拿到 Cell 私钥。
+   详见 [offline-push-delivery.md](offline-push-delivery.md#deployment-settings)。
 
 服务是无状态的，横向扩容直接加副本；会话路由经 Consul 发现。
 

@@ -3,16 +3,15 @@
 //! 只经 `admin_auth_middleware` 可达。下游调用只带中间件刚验过的 Staff `x-flare-ctx` 原样转发
 //! （[`VerifiedStaffContext`]），不带任何未签名的身份头；租户只取自签名。写操作的审计原因与
 //! 幂等键已由中间件强制，这里记审计日志并在成功后发 `flare.audit.effect.v1`；会话成员、用户
-//! 设备、在线状态三条敏感读也记一条审计日志。每次下游调用都受
+//! 设备、在线状态、推送决策链四条敏感读也记一条审计日志。每次下游调用都受
 //! `FLARE_ADMIN_GATEWAY_GRPC_REQUEST_TIMEOUT_SECS` 限时。
 use axum::{Json, extract::Extension, http::HeaderMap};
 use flare_core_base::context::keys;
-use flare_grpc_proto::capability::{
-    SetTenantCapabilitySwitchRequest,
-};
+use flare_grpc_proto::capability::SetTenantCapabilitySwitchRequest;
 use flare_grpc_proto::conversation::{
     AdminGetConversationRequest, AdminListConversationsRequest, AdminListParticipantsRequest,
 };
+use flare_grpc_proto::push::AdminQueryPushTraceRequest;
 use flare_grpc_proto::signaling::online::{
     AdminGetUserPresenceRequest, AdminListUserDevicesRequest, KickDeviceRequest, KickTenantRequest,
 };
@@ -33,14 +32,14 @@ use super::audit_target::AuditTarget;
 use crate::application::admin_ops::{
     AdminCapabilityCatalogHttp, AdminCapabilitySwitchUpdateHttp, AdminConversationDetailHttp,
     AdminConversationListQuery, AdminConversationPageHttp, AdminDeviceKickHttp,
-    AdminParticipantListQuery, AdminParticipantPageHttp, AdminPluginListQuery,
-    AdminPluginsHttp, AdminTenantCapabilitiesHttp,
+    AdminParticipantListQuery, AdminParticipantPageHttp, AdminPluginListQuery, AdminPluginsHttp,
+    AdminPushTraceQuery, AdminPushTracesHttp, AdminTenantCapabilitiesHttp,
     AdminTenantCapabilitySwitchHttpRequest, AdminTenantKickHttp, AdminTenantRuntimeHttp,
     AdminUserDevicesHttp, AdminUserKickHttp, AdminUserPresenceHttp, DEFAULT_CONVERSATION_PAGE,
-    DEFAULT_PARTICIPANT_PAGE, MAX_CONVERSATION_PAGE, MAX_PARTICIPANT_PAGE, capability_catalog_http,
-    conversation_http, conversation_page_http, page_limit, participant_page_http, plugins_http,
-    tenant_capabilities_http, tenant_runtime_http, user_devices_http,
-    user_presence_http,
+    DEFAULT_PARTICIPANT_PAGE, DEFAULT_PUSH_TRACE_PAGE, MAX_CONVERSATION_PAGE, MAX_PARTICIPANT_PAGE,
+    MAX_PUSH_TRACE_PAGE, capability_catalog_http, conversation_http, conversation_page_http,
+    page_limit, participant_page_http, plugins_http, push_traces_http, tenant_capabilities_http,
+    tenant_runtime_http, user_devices_http, user_presence_http,
 };
 
 /// Admin Gateway 的可选 Capability 下游（租户运行时、能力目录与开关、插件、Hook 治理）。
@@ -219,7 +218,7 @@ pub(super) fn audit_write(
     reason
 }
 
-/// 敏感读审计：会话成员、用户设备、在线状态能看出某人在哪些会话、用什么设备、何时在线，
+/// 敏感读审计：会话成员、用户设备、在线状态、推送决策链能看出某人在哪些会话、用什么设备、何时在线，
 /// 因此与写操作记同一种 `admin_audit` 事件（`access=read`）；其余管理读不记。读不强制审计
 /// 原因，调用方带了 `x-audit-reason` 就一并记下。
 ///
@@ -444,6 +443,66 @@ pub async fn list_user_devices(
     Ok(Json(ApiResponse::success(user_devices_http(
         user_id,
         response.devices,
+    ))))
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/v1/admin/users/{user_id}/push-traces",
+    tag = "Admin",
+    params(
+        ("user_id" = String, Path, description = "User id in the staff application"),
+        ("message_id" = Option<String>, Query, description = "One message's trace (a `conversation#seq` key is accepted too); without it the newest traces of the user"),
+        ("limit" = Option<i32>, Query, description = "Number of traces without message_id, default 20, capped at 50"),
+    ),
+    responses(
+        (status = 200, description = "Push decision traces of the user (kept 24 hours), newest first; empty when the message's trace expired", body = ApiResponse<AdminPushTracesHttp>),
+        (status = 400, description = "Limit below 1 (ADMIN_PAGE_LIMIT_INVALID), or Push Proxy refused the user or message id (BAD_REQUEST)"),
+        (status = 401, description = "Staff context is missing or invalid"),
+        (status = 403, description = "Signed permission is not core:users:read (ADMIN_PERMISSION_DENIED), or Push Proxy refused the application (FORBIDDEN)"),
+        (status = 500, description = "Push Proxy failed (ADMIN_USER_PUSH_TRACES_FAILED); its error text is not returned"),
+        (status = 502, description = "Push Proxy refused the forwarded staff context as unauthenticated, a deployment error (ADMIN_UPSTREAM_REJECTED_ASSERTION)"),
+        (status = 503, description = "Push Proxy or its trace store is unavailable (ADMIN_UPSTREAM_UNAVAILABLE)"),
+        (status = 504, description = "Push Proxy did not answer in time (ADMIN_UPSTREAM_TIMEOUT)"),
+    ),
+)]
+pub async fn list_user_push_traces(
+    headers: HeaderMap,
+    Extension(clients): Extension<Arc<AdminGrpcClients>>,
+    Extension(staff): Extension<VerifiedStaffContext>,
+    Extension(principal): Extension<AuthenticatedPrincipal>,
+    AdminPath(user_id): AdminPath<String>,
+    AdminQuery(query): AdminQuery<AdminPushTraceQuery>,
+) -> Result<Json<ApiResponse<AdminPushTracesHttp>>> {
+    let limit = page_limit(query.limit, DEFAULT_PUSH_TRACE_PAGE, MAX_PUSH_TRACE_PAGE)
+        .map_err(|err| bad_request(err.code, err.message))?;
+    audit_sensitive_read(
+        "users.push_traces",
+        &principal,
+        &headers,
+        &AuditTarget::id(&user_id),
+    );
+    let message_id = query
+        .message_id
+        .map(|message_id| message_id.trim().to_string())
+        .filter(|message_id| !message_id.is_empty());
+    let response = clients
+        .bounded(async {
+            let mut push = clients.push.lock().await.clone();
+            push.admin_query_push_trace(
+                staff.token(),
+                AdminQueryPushTraceRequest {
+                    user_id: user_id.clone(),
+                    message_id,
+                    limit: u32::try_from(limit).unwrap_or_default(),
+                },
+            )
+            .await
+        })
+        .await
+        .map_err(|err| admin_rpc_error(err, "ADMIN_USER_PUSH_TRACES_FAILED"))?;
+    Ok(Json(ApiResponse::success(push_traces_http(
+        user_id, response,
     ))))
 }
 

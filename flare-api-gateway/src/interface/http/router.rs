@@ -14,6 +14,7 @@ use super::conversation_handler;
 use super::media_handler;
 use super::message_handler;
 use super::presence_handler;
+use super::push_receipt_handler;
 use super::push_token_handler;
 use super::read_receipt_handler;
 use flare_im_service_kit::clients::GrpcClients;
@@ -62,6 +63,7 @@ use flare_server_core::http::HttpApiError;
         push_token_handler::register_push_token,
         push_token_handler::inspect_push_token,
         push_token_handler::revoke_push_token,
+        push_receipt_handler::report_push_receipts,
         auth_handler::issue_token,
         auth_handler::refresh_token,
         auth_handler::revoke_user,
@@ -139,6 +141,9 @@ use flare_server_core::http::HttpApiError;
             super::push_token_handler::PushTokenHttpResponse,
             super::push_token_handler::PushBindingView,
             super::push_token_handler::RevokePushTokenRequest,
+            super::push_receipt_handler::ReportPushReceiptsHttpRequest,
+            super::push_receipt_handler::PushReceiptHttp,
+            super::push_receipt_handler::ReportPushReceiptsHttpResponse,
             super::auth_handler::IssueTokenHttpRequest,
         auth_handler::RevokeUserHttpRequest,
             super::auth_handler::IssuedTokenHttp,
@@ -148,7 +153,7 @@ use flare_server_core::http::HttpApiError;
         (name = "Media", description = "媒体文件管理接口"),
         (name = "Message", description = "消息管理接口"),
         (name = "Presence", description = "在线状态接口"),
-        (name = "Device", description = "设备推送令牌接口"),
+        (name = "Device", description = "设备推送令牌与到达回执接口"),
     )
 )]
 struct ApiDoc;
@@ -373,6 +378,15 @@ pub fn create_public_router(clients: Arc<GrpcClients>) -> Router {
             "/api/v1/push/bindings/revoke",
             post(push_token_handler::revoke_push_token)
                 .layer(axum::extract::DefaultBodyLimit::max(512)),
+        )
+        // 推送到达回执：与设备推送令牌同一套鉴权（用户与租户只取自 IM 令牌）。
+        .route(
+            "/api/v1/push/receipts",
+            post(push_receipt_handler::report_push_receipts)
+                .layer(axum::extract::DefaultBodyLimit::max(
+                    push_receipt_handler::RECEIPTS_BODY_LIMIT,
+                ))
+                .route_layer(middleware::from_fn(gateway_auth_middleware)),
         )
         .nest("/api/v1/auth", auth_router)
         .nest("/api/v1/capabilities", capability_router)

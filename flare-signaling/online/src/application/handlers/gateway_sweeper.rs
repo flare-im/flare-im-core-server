@@ -6,6 +6,11 @@
 //! 按正常断开的同一路径（[`OnlineCommandHandler`] 的注销 + presence 快照）移除这些连接，最后删掉
 //! 索引、移出 `gw:known`。网关宕机到开始清扫至多 15s + 6s + 5s。
 //!
+//! 被移除的会话所属设备随后交接给推送通道：这些设备从网关失联起就收不到链路上的投递，推送侧
+//! 据此补一次提示。清扫器只把交接放进 [`HandoffQueue`]（不等待），上报由派发任务完成；提示本来
+//! 就归推送通道的设备（已托管，或在后台不能自己提示）不用补，不再报。没接推送通道时不产生交接，
+//! 清扫只移除会话。
+//!
 //! 多个 Online 实例只有持有 Redis 单例锁的那个在扫（`SET NX PX` + 续期）。
 
 use std::collections::HashMap;
@@ -15,7 +20,7 @@ use std::time::{Duration, Instant};
 
 use flare_grpc_proto::signaling::online::LogoutRequest;
 use flare_im_service_kit::gateway::lease::{
-    LEASE_RENEW_INTERVAL, base_gateway_id, parse_connection_member,
+    LEASE_RENEW_INTERVAL, LEASE_TTL_SECS, base_gateway_id, parse_connection_member,
 };
 use flare_im_service_kit::metrics::OnlineSweeperMetrics;
 use flare_server_core::context::Context;
@@ -25,8 +30,11 @@ use tracing::{debug, info, warn};
 
 use crate::application::commands::LogoutCommand;
 use crate::application::handlers::OnlineCommandHandler;
+use crate::application::handlers::handoff_dispatcher::HandoffQueue;
+use crate::domain::device_handoff::GatewayLostHandoff;
 use crate::domain::repository::{
-    ConversationRepository, GatewaySweepRepository, PresencePublisher, SubscriptionRepository,
+    ConversationRepository, GatewaySweepRepository, PresencePublisher, SessionOwner,
+    SubscriptionRepository,
 };
 
 /// 清扫节奏与批量。
@@ -67,6 +75,8 @@ pub struct SweepReport {
     pub dead_gateways: usize,
     /// 移除的连接数。
     pub removed: u64,
+    /// 其中交接给推送通道的设备数（已入队上报）。
+    pub handoffs: u64,
     /// 清扫完成、已从 `gw:known` 移出的网关数。
     pub retired: usize,
 }
@@ -74,8 +84,56 @@ pub struct SweepReport {
 #[derive(Debug, Default)]
 struct GatewayOutcome {
     removed: u64,
+    handoffs: u64,
     retired: bool,
     lost_lock: bool,
+}
+
+/// 一条连接的清扫结果。
+#[derive(Debug, Default, Clone, Copy)]
+struct Retired {
+    removed: bool,
+    handed_off: bool,
+}
+
+/// 租约缺失的网关。
+#[derive(Debug, Clone, Copy)]
+struct Suspect {
+    /// 第一次看到租约缺失的时刻（见 [`GatewaySweeperConfig::confirm_after`]）。
+    first_missing: Instant,
+    /// 这台网关最早可能从何时起不再投递（Unix 毫秒），见 [`lost_since_ms`]。
+    lost_since_ms: i64,
+}
+
+/// 租约观察记录。
+#[derive(Debug, Default)]
+struct LeaseWatch {
+    /// 本实例上一轮读租约的时刻；刚接手单例锁、还没读过时为空。
+    last_check: Option<Instant>,
+    /// 租约缺失的网关。只留本轮仍缺失的：租约回来、或已不在 `gw:known` 里的都清掉。
+    suspects: HashMap<String, Suspect>,
+}
+
+/// 确认宕机、本轮要清扫的网关。
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DeadGateway {
+    /// `gw:known` 里的 ID（重启遗留的集合是孤儿 ID）。
+    id: String,
+    lost_since_ms: i64,
+}
+
+/// 网关最早可能从何时起不再投递（Unix 毫秒）：交接的 `since`，推送侧从这里起找有新消息的会话。
+///
+/// 第一次看到租约缺失时，只知道上一轮检查那一刻租约可能还在；租约在，说明网关在那之前的一个
+/// 租约 TTL 内续过期。所以网关最后一次确定活着，不早于「上一轮检查 − 租约 TTL」。用「第一次看到
+/// 缺失 − 租约 TTL」会偏晚：缺失是在租约过期之后的下一轮才看到的，中间至多隔一个检查间隔，这段
+/// 时间里的消息就落在补提示范围之外。宁可把下界取早：多看几秒只会多核对几个会话。
+fn lost_since_ms(first_missing_ms: i64, since_last_check: Duration) -> i64 {
+    let unobserved_ms = i64::try_from(since_last_check.as_millis()).unwrap_or(i64::MAX);
+    let lease_ttl_ms = i64::try_from(LEASE_TTL_SECS.saturating_mul(1_000)).unwrap_or(i64::MAX);
+    first_missing_ms
+        .saturating_sub(unobserved_ms)
+        .saturating_sub(lease_ttl_ms)
 }
 
 pub struct GatewaySweeper<G, CR, SR, PP>
@@ -91,8 +149,10 @@ where
     /// 本实例的锁持有者标识。
     token: String,
     config: GatewaySweeperConfig,
-    /// 租约缺失的网关第一次被看到缺失的时刻（见 [`GatewaySweeperConfig::confirm_after`]）。
-    suspects: std::sync::Mutex<HashMap<String, Instant>>,
+    /// 租约缺失的网关与上一轮读租约的时刻。
+    watch: std::sync::Mutex<LeaseWatch>,
+    /// 交接上报队列；没接推送通道时为空。
+    handoffs: Option<HandoffQueue>,
 }
 
 impl<G, CR, SR, PP> GatewaySweeper<G, CR, SR, PP>
@@ -113,12 +173,19 @@ where
             metrics,
             token: uuid::Uuid::new_v4().to_string(),
             config: GatewaySweeperConfig::default(),
-            suspects: std::sync::Mutex::new(HashMap::new()),
+            watch: std::sync::Mutex::new(LeaseWatch::default()),
+            handoffs: None,
         }
     }
 
     pub fn with_config(mut self, config: GatewaySweeperConfig) -> Self {
         self.config = config;
+        self
+    }
+
+    /// 接上交接上报队列：被清扫的设备交接给推送通道。不接（`None`）时清扫只移除会话。
+    pub fn with_handoff_queue(mut self, handoffs: Option<HandoffQueue>) -> Self {
+        self.handoffs = handoffs;
         self
     }
 
@@ -136,6 +203,7 @@ where
                     Ok(report) if report.removed > 0 || report.retired > 0 => info!(
                         dead_gateways = report.dead_gateways,
                         removed = report.removed,
+                        handoffs = report.handoffs,
                         retired = report.retired,
                         "gateway sweep removed connections of dead gateways"
                     ),
@@ -157,16 +225,21 @@ where
             .hold_sweeper_lock(&self.token, self.config.lock_ttl)
             .await?
         {
+            // 这段时间的租约由别的实例在看：重新接手时不能拿自己上一次读租约的时刻当基准。
+            if let Ok(mut watch) = self.watch.lock() {
+                watch.last_check = None;
+            }
             return Ok(report);
         }
         report.leader = true;
         let known = self.repository.known_gateways().await?;
         let present = self.repository.leases_present(&known).await?;
         let dead = self.confirmed_dead(&known, &present);
-        for gateway_id in &dead {
+        for gateway in &dead {
             report.dead_gateways += 1;
-            let outcome = self.sweep_gateway(gateway_id).await?;
+            let outcome = self.sweep_gateway(gateway).await?;
             report.removed += outcome.removed;
+            report.handoffs += outcome.handoffs;
             if outcome.retired {
                 report.retired += 1;
             }
@@ -179,29 +252,48 @@ where
     }
 
     /// 租约缺失已持续 `confirm_after` 的网关。嫌疑表只留本轮仍缺失的网关：租约回来、或已不在
-    /// `gw:known` 里的都清掉，下次缺失重新计时。
-    fn confirmed_dead(&self, known: &[String], present: &[bool]) -> Vec<String> {
+    /// `gw:known` 里的都清掉，下次缺失重新计时。第一次看到缺失时顺带记下它最早可能从何时起
+    /// 不再投递（[`lost_since_ms`]）。
+    fn confirmed_dead(&self, known: &[String], present: &[bool]) -> Vec<DeadGateway> {
         let now = Instant::now();
-        let Ok(mut suspects) = self.suspects.lock() else {
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        let Ok(mut watch) = self.watch.lock() else {
             return Vec::new();
         };
+        // 上一轮读租约到现在隔了多久。本实例刚接手单例锁时没有上一轮：前一个持有者最迟在锁 TTL
+        // 之前还在检查，再加它自己的一个检查周期。
+        let since_last_check = watch
+            .last_check
+            .map_or(self.config.lock_ttl + self.config.interval, |last| {
+                now.duration_since(last)
+            });
+        watch.last_check = Some(now);
         let missing: Vec<&String> = known
             .iter()
             .zip(present)
             .filter_map(|(gateway_id, alive)| (!alive).then_some(gateway_id))
             .collect();
+        let suspects = &mut watch.suspects;
         suspects.retain(|gateway_id, _| missing.contains(&gateway_id));
         missing
             .into_iter()
-            .filter(|gateway_id| {
-                let since = *suspects.entry((*gateway_id).clone()).or_insert(now);
-                now.duration_since(since) >= self.config.confirm_after
+            .filter_map(|gateway_id| {
+                let suspect = *suspects.entry(gateway_id.clone()).or_insert(Suspect {
+                    first_missing: now,
+                    lost_since_ms: lost_since_ms(now_ms, since_last_check),
+                });
+                (now.duration_since(suspect.first_missing) >= self.config.confirm_after).then(
+                    || DeadGateway {
+                        id: gateway_id.clone(),
+                        lost_since_ms: suspect.lost_since_ms,
+                    },
+                )
             })
-            .cloned()
             .collect()
     }
 
-    async fn sweep_gateway(&self, gateway_id: &str) -> Result<GatewayOutcome> {
+    async fn sweep_gateway(&self, gateway: &DeadGateway) -> Result<GatewayOutcome> {
+        let gateway_id = gateway.id.as_str();
         // 只清这一刻之前登记的会话：清扫途中网关带着同一 ID 回来，它的新连接登记在这之后，
         // 而且会写进同一个集合。
         let cutoff_ms = chrono::Utc::now().timestamp_millis();
@@ -237,15 +329,18 @@ where
                 .repository
                 .scan_gateway_connections(gateway_id, cursor, self.config.batch_size)
                 .await?;
-            let removed = futures_util::stream::iter(members)
-                .map(|member| self.retire_member(gateway_id, owner_id, cutoff_ms, member))
+            let (removed, handoffs) = futures_util::stream::iter(members)
+                .map(|member| self.retire_member(gateway, owner_id, cutoff_ms, member))
                 .buffer_unordered(self.config.concurrency.max(1))
-                .fold(
-                    0u64,
-                    |total, removed| async move { total + u64::from(removed) },
-                )
+                .fold((0u64, 0u64), |(removed, handoffs), retired| async move {
+                    (
+                        removed + u64::from(retired.removed),
+                        handoffs + u64::from(retired.handed_off),
+                    )
+                })
                 .await;
             outcome.removed += removed;
+            outcome.handoffs += handoffs;
             self.metrics.record_removed(owner_id, removed);
             cursor = next;
             if cursor == 0 {
@@ -257,23 +352,25 @@ where
             info!(
                 gateway_id,
                 removed = outcome.removed,
+                handoffs = outcome.handoffs,
                 "dead gateway swept and retired"
             );
         }
         Ok(outcome)
     }
 
-    /// 移除一条连接，返回是否真的移除了。
+    /// 移除一条连接，返回是否真的移除了、以及它的设备有没有交接给推送通道。
     async fn retire_member(
         &self,
-        gateway_id: &str,
+        gateway: &DeadGateway,
         owner_id: &str,
         cutoff_ms: i64,
         member: String,
-    ) -> bool {
+    ) -> Retired {
+        let gateway_id = gateway.id.as_str();
         let Some((tenant_id, user_id, session_field)) = parse_connection_member(&member) else {
             self.forget(gateway_id, &member).await;
-            return false;
+            return Retired::default();
         };
         match self
             .repository
@@ -283,13 +380,13 @@ where
             // 会话已经不在（正常断开与清扫交错、或会话已过期）：只清索引。
             Ok(None) => {
                 self.forget(gateway_id, &member).await;
-                false
+                Retired::default()
             }
             // 不是这台网关登记的、或是网关回来之后才登记的：不动。
             Ok(Some(owner)) if owner.gateway_id != owner_id || owner.created_at_ms > cutoff_ms => {
-                false
+                Retired::default()
             }
-            Ok(Some(_)) => {
+            Ok(Some(owner)) => {
                 let ctx = Context::root()
                     .with_tenant_id(tenant_id)
                     .with_user_id(user_id);
@@ -301,7 +398,17 @@ where
                     ctx: ctx.clone(),
                 };
                 match self.commands.handle_gateway_lost(&ctx, command).await {
-                    Ok(_) => true,
+                    Ok(_) => Retired {
+                        removed: true,
+                        handed_off: self.hand_off(
+                            gateway,
+                            owner_id,
+                            tenant_id,
+                            user_id,
+                            session_field,
+                            &owner,
+                        ),
+                    },
                     Err(error) => {
                         warn!(
                             gateway_id,
@@ -309,15 +416,48 @@ where
                             %error,
                             "failed to remove a connection of a dead gateway; retrying next round"
                         );
-                        false
+                        Retired::default()
                     }
                 }
             }
             Err(error) => {
                 warn!(gateway_id, %error, "session lookup failed during gateway sweep");
-                false
+                Retired::default()
             }
         }
+    }
+
+    /// 把刚移除的会话所属设备交接给推送通道，返回是否已入队。只在会话确实移除之后调用：没移除
+    /// 成功的下一轮还会再清，届时再交接，不会报两次。没接推送通道时什么都不做。
+    ///
+    /// 提示本来就归推送通道的设备不交接：已托管的在网关失联前就由网关交接过；在后台不能自己
+    /// 提示的，每条消息在路由时就已经直接推送，网关失联期间没有哪条提示是只压在链路上的。
+    fn hand_off(
+        &self,
+        gateway: &DeadGateway,
+        owner_id: &str,
+        tenant_id: &str,
+        user_id: &str,
+        session_field: &str,
+        owner: &SessionOwner,
+    ) -> bool {
+        let Some(queue) = self.handoffs.as_ref() else {
+            return false;
+        };
+        if owner.app_state.alerts_owned_by_push() || owner.device_id.is_empty() {
+            return false;
+        }
+        queue.offer(GatewayLostHandoff {
+            tenant_id: tenant_id.to_string(),
+            user_id: user_id.to_string(),
+            device_id: owner.device_id.clone(),
+            session_id: session_field.to_string(),
+            // 真实网关 ID：重启遗留的孤儿集合也记在原网关名下。
+            gateway_id: owner_id.to_string(),
+            // 这条会话登记之前谈不上投递失败：登记晚于网关失联下界的，从登记时刻算起。
+            since_ms: gateway.lost_since_ms.max(owner.created_at_ms),
+            occurred_at_ms: chrono::Utc::now().timestamp_millis(),
+        })
     }
 
     async fn forget(&self, gateway_id: &str, member: &str) {
@@ -342,11 +482,15 @@ mod tests {
     use flare_im_service_kit::gateway::lease::{connection_member, orphan_gateway_id};
 
     use super::*;
+    use crate::application::handlers::handoff_dispatcher::{
+        HandoffDispatchConfig, handoff_channel,
+    };
     use crate::domain::aggregate::Connection;
+    use crate::domain::device_handoff::DeviceHandoffReporter;
     use crate::domain::model::OnlineStatusRecord;
-    use crate::domain::repository::{EvictedConnection, SessionOwner};
+    use crate::domain::repository::EvictedConnection;
     use crate::domain::service::{OnlineStatusService, SubscriptionService};
-    use crate::domain::value_object::{ConnectionId, DeviceId, UserId};
+    use crate::domain::value_object::{ConnectionId, DeviceAppState, DeviceId, UserId};
 
     type Sessions = Arc<Mutex<HashMap<(String, String, String), SessionOwner>>>;
 
@@ -373,12 +517,34 @@ mod tests {
             user: &str,
             created_at_ms: i64,
         ) -> String {
+            self.add_session_in_state(
+                gateway_set,
+                owner,
+                tenant,
+                user,
+                created_at_ms,
+                DeviceAppState::Active,
+            )
+        }
+
+        /// 设备 ID 取 `{user}-device`。
+        fn add_session_in_state(
+            &self,
+            gateway_set: &str,
+            owner: &str,
+            tenant: &str,
+            user: &str,
+            created_at_ms: i64,
+            app_state: DeviceAppState,
+        ) -> String {
             let field = uuid::Uuid::new_v4().to_string();
             self.sessions.lock().unwrap().insert(
                 (tenant.into(), user.into(), field.clone()),
                 SessionOwner {
                     gateway_id: owner.into(),
                     created_at_ms,
+                    device_id: format!("{user}-device"),
+                    app_state,
                 },
             );
             self.conns
@@ -732,6 +898,8 @@ mod tests {
         assert!(report.leader);
         assert_eq!(report.dead_gateways, 1);
         assert_eq!(report.removed, 2);
+        // 没接推送通道：只移除会话，不产生交接。
+        assert_eq!(report.handoffs, 0);
         assert_eq!(report.retired, 1);
         let remaining: HashSet<String> = store
             .sessions
@@ -828,5 +996,191 @@ mod tests {
         assert!(report.leader);
         assert_eq!(report.removed, 1);
         assert_eq!(store.session_count(), 0);
+    }
+
+    /// 推送通道的替身：记下收到的交接。
+    #[derive(Default)]
+    struct RecordedHandoffs(Mutex<Vec<GatewayLostHandoff>>);
+
+    impl DeviceHandoffReporter for RecordedHandoffs {
+        async fn report(&self, handoff: &GatewayLostHandoff) -> Result<()> {
+            self.0.lock().unwrap().push(handoff.clone());
+            Ok(())
+        }
+    }
+
+    /// 跑完一轮清扫并把入队的交接全部送出，按用户排序返回。
+    async fn swept_handoffs(
+        store: &Arc<MemoryStore>,
+        config: HandoffDispatchConfig,
+    ) -> (SweepReport, Vec<GatewayLostHandoff>, u64) {
+        let presence = Arc::new(RecordedPresence::default());
+        let reporter = Arc::new(RecordedHandoffs::default());
+        let (queue, dispatcher) = handoff_channel(reporter.clone(), config);
+        let stats = dispatcher.stats();
+        let sweeper = sweeper(store, &presence).with_handoff_queue(Some(queue));
+        let report = sweeper.sweep_once().await.unwrap();
+        // 清扫器退出即关闭队列，派发把剩下的送完就结束。
+        drop(sweeper);
+        dispatcher.run(std::future::pending()).await;
+        let mut handoffs = reporter.0.lock().unwrap().clone();
+        handoffs.sort_by(|a, b| a.user_id.cmp(&b.user_id));
+        (report, handoffs, stats.dropped())
+    }
+
+    const LEASE_TTL_MS: i64 = (LEASE_TTL_SECS * 1_000) as i64;
+
+    /// 网关失联时被移除的设备交接给推送通道：带租户、用户、设备、会话与真实网关 ID。提示本来
+    /// 就归推送通道的设备不用补提示，不交接：已托管的，以及在后台保着链路但不能自己提示的。
+    /// 它们的会话照样移除。
+    #[tokio::test]
+    async fn swept_devices_are_handed_off_unless_push_already_owns_their_alerts() {
+        let store = Arc::new(MemoryStore::default());
+        store.known.lock().unwrap().push("gw-dead".to_string());
+        let alice = store.add_session("gw-dead", "gw-dead", "tenant-a", "alice");
+        store.add_session_in_state(
+            "gw-dead",
+            "gw-dead",
+            "tenant-a",
+            "bob",
+            1,
+            DeviceAppState::Parking,
+        );
+        store.add_session_in_state(
+            "gw-dead",
+            "gw-dead",
+            "tenant-a",
+            "dave",
+            1,
+            DeviceAppState::Deferred,
+        );
+        let carol = store.add_session_in_state(
+            "gw-dead",
+            "gw-dead",
+            "tenant-b",
+            "carol",
+            1,
+            DeviceAppState::Standby,
+        );
+        let started_ms = chrono::Utc::now().timestamp_millis();
+
+        let (report, handoffs, dropped) =
+            swept_handoffs(&store, HandoffDispatchConfig::default()).await;
+
+        assert_eq!((report.removed, report.handoffs, dropped), (4, 2, 0));
+        assert_eq!(store.session_count(), 0);
+        assert_eq!(handoffs.len(), 2);
+        for (handoff, tenant, user, session) in [
+            (&handoffs[0], "tenant-a", "alice", &alice),
+            (&handoffs[1], "tenant-b", "carol", &carol),
+        ] {
+            assert_eq!(handoff.tenant_id, tenant);
+            assert_eq!(handoff.user_id, user);
+            assert_eq!(handoff.device_id, format!("{user}-device"));
+            assert_eq!(&handoff.session_id, session);
+            assert_eq!(handoff.gateway_id, "gw-dead");
+            assert!(handoff.occurred_at_ms >= started_ms);
+            // 下界至少比第一次看到租约缺失早一个租约 TTL。
+            assert!(handoff.since_ms <= handoff.occurred_at_ms - LEASE_TTL_MS);
+        }
+    }
+
+    /// 交接的起点是「上一轮读租约的时刻 − 租约 TTL」：那一刻租约可能还在，网关最后一次确定
+    /// 活着不早于它。同一台网关上的设备共用这个起点；会话登记得比它晚的，从登记时刻算起。
+    #[tokio::test]
+    async fn the_handoff_window_starts_one_lease_ttl_before_the_previous_check() {
+        let store = Arc::new(MemoryStore::default());
+        let presence = Arc::new(RecordedPresence::default());
+        store.known.lock().unwrap().push("gw-1".to_string());
+        store.leases.lock().unwrap().insert("gw-1".to_string());
+        store.add_session("gw-1", "gw-1", "tenant-a", "alice");
+        let reporter = Arc::new(RecordedHandoffs::default());
+        let (queue, dispatcher) =
+            handoff_channel(reporter.clone(), HandoffDispatchConfig::default());
+        let sweeper = sweeper(&store, &presence).with_handoff_queue(Some(queue));
+
+        // 第一轮：租约还在。
+        let before_check_ms = chrono::Utc::now().timestamp_millis();
+        sweeper.sweep_once().await.unwrap();
+        let after_check_ms = chrono::Utc::now().timestamp_millis();
+
+        tokio::time::sleep(Duration::from_millis(60)).await;
+        // 网关失联之后才登记的会话不存在；这条在上一轮检查之后、失联之前登记。
+        let recent_ms = chrono::Utc::now().timestamp_millis();
+        store.add_session_at("gw-1", "gw-1", "tenant-a", "bob", recent_ms);
+        store.leases.lock().unwrap().clear();
+        let report = sweeper.sweep_once().await.unwrap();
+        assert_eq!((report.removed, report.handoffs), (2, 2));
+
+        drop(sweeper);
+        dispatcher.run(std::future::pending()).await;
+        let mut handoffs = reporter.0.lock().unwrap().clone();
+        handoffs.sort_by(|a, b| a.user_id.cmp(&b.user_id));
+        // 单调时钟与墙上时钟各取各的，留几毫秒余量。
+        let slack_ms = 20;
+        let alice = &handoffs[0];
+        assert!(
+            (before_check_ms - LEASE_TTL_MS - slack_ms..=after_check_ms - LEASE_TTL_MS + slack_ms)
+                .contains(&alice.since_ms),
+            "since {} is not one lease TTL before the previous check ({before_check_ms}..={after_check_ms})",
+            alice.since_ms
+        );
+        assert_eq!(handoffs[1].since_ms, recent_ms);
+    }
+
+    /// 本实例第一次读租约（刚接手单例锁）时没有上一轮可依据：按前一个持有者的锁 TTL 加一个检查
+    /// 周期往前推。
+    #[test]
+    fn the_handoff_window_reaches_back_past_the_unobserved_interval() {
+        let first_missing_ms = 1_700_000_100_000;
+        assert_eq!(
+            lost_since_ms(first_missing_ms, Duration::from_secs(5)),
+            first_missing_ms - 5_000 - LEASE_TTL_MS
+        );
+        // 上一轮清扫拖得久，没看到的那段也更长。
+        assert_eq!(
+            lost_since_ms(first_missing_ms, Duration::from_secs(40)),
+            first_missing_ms - 40_000 - LEASE_TTL_MS
+        );
+        assert_eq!(lost_since_ms(0, Duration::MAX), i64::MIN);
+    }
+
+    /// 网关重启后遗留的孤儿集合：交接记在原网关名下。
+    #[tokio::test]
+    async fn an_orphaned_connection_is_handed_off_under_its_real_gateway() {
+        let store = Arc::new(MemoryStore::default());
+        let orphan = orphan_gateway_id("gw-1", "b00t");
+        store.known.lock().unwrap().push(orphan.clone());
+        store.leases.lock().unwrap().insert("gw-1".to_string());
+        store.add_session(&orphan, "gw-1", "tenant-a", "alice");
+
+        let (report, handoffs, _) = swept_handoffs(&store, HandoffDispatchConfig::default()).await;
+
+        assert_eq!((report.removed, report.handoffs), (1, 1));
+        assert_eq!(handoffs[0].gateway_id, "gw-1");
+    }
+
+    /// 上报跟不上（队列满）不拖住清扫：会话照常移除，入不了队的交接丢弃并计数。
+    #[tokio::test]
+    async fn a_full_handoff_queue_does_not_hold_the_sweep() {
+        let store = Arc::new(MemoryStore::default());
+        store.known.lock().unwrap().push("gw-dead".to_string());
+        for user in ["alice", "bob", "carol"] {
+            store.add_session("gw-dead", "gw-dead", "tenant-a", user);
+        }
+
+        let (report, handoffs, dropped) = swept_handoffs(
+            &store,
+            HandoffDispatchConfig {
+                queue_capacity: 1,
+                ..HandoffDispatchConfig::default()
+            },
+        )
+        .await;
+
+        assert_eq!((report.removed, report.retired), (3, 1));
+        assert_eq!(store.session_count(), 0);
+        assert_eq!((report.handoffs, dropped), (1, 2));
+        assert_eq!(handoffs.len(), 1);
     }
 }

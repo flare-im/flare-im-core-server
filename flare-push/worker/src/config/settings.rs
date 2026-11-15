@@ -1,18 +1,24 @@
 //! Push Worker 配置（以设计文档为准）
 
-use std::{collections::HashMap, env};
+use std::{collections::HashMap, env, time::Duration};
 
 use flare_im_contracts::constants::groups::PUSH_WORKER_GROUP_DEFAULT;
 use flare_im_contracts::constants::topics::{
-    TOPIC_PUSH_DLQ, TOPIC_PUSH_OFFLINE, TOPIC_PUSH_ONLINE,
+    TOPIC_PUSH_DLQ, TOPIC_PUSH_OFFLINE, TOPIC_PUSH_OFFLINE_BULK, TOPIC_PUSH_OFFLINE_GROUP,
+    TOPIC_PUSH_ONLINE,
 };
-use flare_im_service_kit::config::FlareAppConfig;
+use flare_im_service_kit::config::{
+    FlareAppConfig, PushVendorGovernanceConfig, PushWorkerVendorsConfig,
+};
 use flare_im_service_kit::metrics::MetricsEndpointConfig;
 use flare_server_core::error::{FlareError, Result};
 use flare_server_core::mq::kafka::{KafkaConsumerConfig, KafkaProducerConfig};
 use flare_server_core::mq::nats::{
     NatsConsumerConfig, NatsProducerConfig, NatsStreamSpec, default_stream_specs,
 };
+
+use crate::domain::vendor_delivery::{Vendor, resolve_binding_order};
+use crate::domain::vendor_policy::{BreakerConfig, VendorLimits};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OfflineDeliveryBackend {
@@ -41,13 +47,71 @@ impl OfflineDeliveryBackend {
         })
     }
 
-    fn validate_environment(self, environment: &str) -> Result<Self> {
-        if environment.trim().eq_ignore_ascii_case("production") && self == Self::Outbox {
-            return Err(FlareError::system(
-                "FLARE_ENV=production forbids offline outbox: configure fcm/apns/getui or explicitly disabled",
-            ));
+    /// 后端的主名（`parse` 接受的第一个写法），用在启动日志里。
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Outbox => "outbox",
+            Self::Getui => "getui",
+            Self::Fcm => "fcm",
+            Self::Apns => "apns",
+            Self::Mobile => "mobile",
+            Self::Disabled => "disabled",
         }
-        Ok(self)
+    }
+
+    /// 投递后端启动时打的那一行。部署冒烟（flarectl smoke）按这行认出 worker 在用哪个后端，
+    /// 改措辞要同步那边；关闭时另有一行说明离线推送是关着的。
+    pub fn enabled_line(self) -> String {
+        format!("offline push {} backend enabled", self.name())
+    }
+}
+
+/// 每个消费者同时处理多少条。四个主题各一个消费者：批量通道积压时，单聊与在线投递照常。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ConsumerConcurrency {
+    pub online: usize,
+    /// 单聊、紧急、点名与修正。
+    pub offline: usize,
+    /// 群里的普通提示与尾部刷新。
+    pub offline_group: usize,
+    /// 大群波次、@所有人 波次、摘要与补提示。
+    pub offline_bulk: usize,
+}
+
+impl Default for ConsumerConcurrency {
+    /// 单聊通道拿得最多：批量通道再忙，也只占它自己那一份。
+    fn default() -> Self {
+        Self {
+            online: 128,
+            offline: 64,
+            offline_group: 32,
+            offline_bulk: 16,
+        }
+    }
+}
+
+impl ConsumerConcurrency {
+    fn from_env() -> Self {
+        let defaults = Self::default();
+        let read = |name: &str, default: usize| {
+            env::var(name)
+                .ok()
+                .and_then(|value| value.trim().parse::<usize>().ok())
+                .filter(|value| *value > 0)
+                .unwrap_or(default)
+        };
+        Self {
+            online: read("PUSH_WORKER_ONLINE_CONCURRENCY", defaults.online),
+            offline: read("PUSH_WORKER_OFFLINE_CONCURRENCY", defaults.offline),
+            offline_group: read(
+                "PUSH_WORKER_OFFLINE_GROUP_CONCURRENCY",
+                defaults.offline_group,
+            ),
+            offline_bulk: read(
+                "PUSH_WORKER_OFFLINE_BULK_CONCURRENCY",
+                defaults.offline_bulk,
+            ),
+        }
     }
 }
 
@@ -62,11 +126,19 @@ pub struct PushWorkerConfig {
     pub kafka_brokers: Vec<String>,
     pub kafka_client_id: String,
     pub kafka_options: HashMap<String, String>,
+    /// 在线投递消费者的消费组；三条离线通道的消费组在它后面加 `-offline`、`-offline-group`、
+    /// `-offline-bulk`。
     pub consumer_group: String,
 
     pub push_online_topic: String,
+    /// 离线任务的单聊通道（单聊、紧急、点名、修正）。
     pub push_offline_topic: String,
+    /// 离线任务的群通道（群里的普通提示、尾部刷新）。
+    pub push_offline_group_topic: String,
+    /// 离线任务的批量通道（大群波次、@所有人 波次、摘要、补提示）。
+    pub push_offline_bulk_topic: String,
     pub push_dlq_topic: String,
+    pub consumer_concurrency: ConsumerConcurrency,
 
     /// flare-signaling/online（ListUserDevices）gRPC 地址（与 `config/services/signaling-online.toml` 中 server.port 一致）
     pub online_service_endpoint: String,
@@ -74,7 +146,7 @@ pub struct PushWorkerConfig {
     pub access_gateway_static_endpoint: Option<String>,
     /// 未配置离线推送提供者时的有界本地 parking 容量。
     pub offline_parking_capacity: usize,
-    /// 离线推送后端：outbox/getui/fcm/apns/disabled。
+    /// 离线推送后端：outbox/getui/fcm/apns/mobile/disabled。生产环境必须显式配置，且不接受 outbox。
     pub offline_delivery_backend: OfflineDeliveryBackend,
     pub offline_mobile_providers: Vec<OfflineDeliveryBackend>,
     /// 离线推送 outbox Redis 地址；None 表示禁用（PUSH_WORKER_OFFLINE_REDIS_URL=off）
@@ -87,6 +159,8 @@ pub struct PushWorkerConfig {
     pub device_token_redis_url: String,
     /// 设备厂商 token registry Redis key 前缀。
     pub device_token_key_prefix: String,
+    /// 多少天没活跃的绑定视为不存在：投递时跳过并删除。应与 Push Server 的同名设置一致。
+    pub binding_inactive_days: u32,
     /// Private per-application credentials mount, consumed only by push-worker.
     pub mobile_applications_file: Option<String>,
     /// Neutral leased configuration authority; no Platform API dependency.
@@ -95,9 +169,21 @@ pub struct PushWorkerConfig {
     pub getui_default_ttl_ms: u64,
     /// 个推 HTTP 请求超时。
     pub getui_request_timeout_ms: u64,
-    /// 在线事件 ping 防抖窗口（毫秒），0 表示关闭。
-    pub event_ping_debounce_window_ms: u64,
     pub metrics: MetricsEndpointConfig,
+    /// 设备有多条推送绑定时依次尝试的厂商（`[services.push_worker] binding_order`），总是含全部厂商。
+    pub binding_order: Vec<Vendor>,
+    /// 各厂商的并发、速率与熔断（`[services.push_worker.vendors.<vendor>]` 叠在缺省值上）。
+    pub vendor_limits: HashMap<Vendor, VendorLimits>,
+}
+
+impl PushWorkerConfig {
+    /// 一个厂商的治理参数；没解析到的厂商用缺省值。
+    pub fn vendor_limits(&self, vendor: Vendor) -> VendorLimits {
+        self.vendor_limits
+            .get(&vendor)
+            .copied()
+            .unwrap_or_else(|| VendorLimits::defaults(vendor))
+    }
 }
 
 /// 与 `signaling-online` 监听地址对齐：优先读 app 中 `[services.signaling_online.server]`，否则本地默认 50061。
@@ -190,6 +276,15 @@ impl PushWorkerConfig {
             .ok()
             .or_else(|| service.push_offline_topic.clone())
             .unwrap_or_else(|| TOPIC_PUSH_OFFLINE.to_string());
+        // 另外两条通道只走环境变量，缺省与 Push Server 的同名设置一致。
+        let push_offline_group_topic = env::var("PUSH_WORKER_PUSH_OFFLINE_GROUP_TOPIC")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| TOPIC_PUSH_OFFLINE_GROUP.to_string());
+        let push_offline_bulk_topic = env::var("PUSH_WORKER_PUSH_OFFLINE_BULK_TOPIC")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| TOPIC_PUSH_OFFLINE_BULK.to_string());
         let push_dlq_topic = env::var("PUSH_WORKER_PUSH_DLQ_TOPIC")
             .ok()
             .or_else(|| service.push_dlq_topic.clone())
@@ -205,12 +300,12 @@ impl PushWorkerConfig {
             .and_then(|value| value.parse::<usize>().ok())
             .or(service.offline_parking_capacity)
             .unwrap_or(4096);
-        let offline_delivery_backend = env::var("PUSH_WORKER_OFFLINE_DELIVERY_BACKEND")
-            .ok()
-            .map(|value| OfflineDeliveryBackend::parse(&value))
-            .transpose()?
-            .unwrap_or(OfflineDeliveryBackend::Disabled)
-            .validate_environment(&env::var("FLARE_ENV").unwrap_or_default())?;
+        let offline_delivery_backend = resolve_offline_delivery_backend(
+            env::var("PUSH_WORKER_OFFLINE_DELIVERY_BACKEND")
+                .ok()
+                .as_deref(),
+            &env::var("FLARE_ENV").unwrap_or_default(),
+        )?;
         let offline_mobile_providers = mobile_providers(
             offline_delivery_backend,
             non_empty_env("PUSH_WORKER_OFFLINE_PROVIDERS").as_deref(),
@@ -237,7 +332,17 @@ impl PushWorkerConfig {
             .ok()
             .filter(|value| !value.trim().is_empty())
             .unwrap_or_else(|| "flare:im:push:device_tokens".to_string());
+        let binding_inactive_days = env::var("PUSH_WORKER_BINDING_INACTIVE_DAYS")
+            .ok()
+            .and_then(|value| value.trim().parse::<u32>().ok())
+            .filter(|days| *days > 0)
+            .unwrap_or(
+                flare_im_contracts::domain::push_binding::PUSH_BINDING_INACTIVE_DAYS_DEFAULT,
+            );
         reject_global_vendor_credentials()?;
+        let binding_order =
+            resolve_binding_order(service.binding_order.as_deref().unwrap_or_default())?;
+        let vendor_limits = resolve_vendor_limits(service.vendors.as_ref())?;
         let mobile_applications_file = non_empty_env("PUSH_WORKER_MOBILE_APPLICATIONS_FILE");
         let mobile_snapshot_file = non_empty_env("PUSH_WORKER_MOBILE_SNAPSHOT_FILE");
         if mobile_applications_file.is_some() && mobile_snapshot_file.is_some() {
@@ -254,11 +359,6 @@ impl PushWorkerConfig {
             .ok()
             .and_then(|value| value.parse::<u64>().ok())
             .unwrap_or(5_000);
-        let event_ping_debounce_window_ms = env::var("PUSH_WORKER_EVENT_PING_DEBOUNCE_WINDOW_MS")
-            .ok()
-            .and_then(|value| value.parse::<u64>().ok())
-            .or(service.event_ping_debounce_window_ms)
-            .unwrap_or(200);
         let metrics_enabled = parse_bool_env("PUSH_WORKER_METRICS_ENABLED")
             .or(service.metrics_enabled)
             .unwrap_or(true);
@@ -292,7 +392,10 @@ impl PushWorkerConfig {
             consumer_group,
             push_online_topic,
             push_offline_topic,
+            push_offline_group_topic,
+            push_offline_bulk_topic,
             push_dlq_topic,
+            consumer_concurrency: ConsumerConcurrency::from_env(),
             online_service_endpoint,
             access_gateway_static_endpoint,
             offline_parking_capacity,
@@ -303,14 +406,117 @@ impl PushWorkerConfig {
             offline_outbox_maxlen,
             device_token_redis_url,
             device_token_key_prefix,
+            binding_inactive_days,
             mobile_applications_file,
             mobile_snapshot_file,
             getui_default_ttl_ms,
             getui_request_timeout_ms,
-            event_ping_debounce_window_ms,
             metrics,
+            binding_order,
+            vendor_limits,
         })
     }
+}
+
+/// `[services.push_worker.vendors.<apns|fcm|getui>]` 叠到各厂商的缺省值上。取值越界是配置错误，
+/// 启动即失败，不悄悄改成别的值。
+fn resolve_vendor_limits(
+    section: Option<&PushWorkerVendorsConfig>,
+) -> Result<HashMap<Vendor, VendorLimits>> {
+    Vendor::ALL
+        .into_iter()
+        .map(|vendor| {
+            let configured = section.and_then(|vendors| match vendor {
+                Vendor::Apns => vendors.apns.as_ref(),
+                Vendor::Fcm => vendors.fcm.as_ref(),
+                Vendor::Getui => vendors.getui.as_ref(),
+            });
+            Ok((vendor, configured_vendor_limits(vendor, configured)?))
+        })
+        .collect()
+}
+
+fn configured_vendor_limits(
+    vendor: Vendor,
+    configured: Option<&PushVendorGovernanceConfig>,
+) -> Result<VendorLimits> {
+    let defaults = VendorLimits::defaults(vendor);
+    let Some(configured) = configured else {
+        return Ok(defaults);
+    };
+    let rate_per_sec = configured.rate_per_sec.unwrap_or(defaults.rate_per_sec);
+    let window = configured.window.unwrap_or(defaults.breaker.window);
+    let limits = VendorLimits {
+        max_concurrency: configured
+            .max_concurrency
+            .unwrap_or(defaults.max_concurrency),
+        rate_per_sec,
+        // 没写容量时与速率相同：一秒的量可以一次用掉。
+        burst: configured.burst.unwrap_or(rate_per_sec),
+        breaker: BreakerConfig {
+            failure_ratio: configured
+                .failure_ratio
+                .unwrap_or(defaults.breaker.failure_ratio),
+            window,
+            // 窗口改小时，缺省的最少调用数随窗口收小。
+            min_calls: configured
+                .min_calls
+                .unwrap_or(defaults.breaker.min_calls.min(window)),
+            open_for: configured
+                .open_ms
+                .map_or(defaults.breaker.open_for, Duration::from_millis),
+            half_open_probes: configured
+                .half_open_probes
+                .unwrap_or(defaults.breaker.half_open_probes),
+        },
+    };
+    let breaker = &limits.breaker;
+    let valid = limits.max_concurrency >= 1
+        && limits.rate_per_sec >= 1
+        && limits.burst >= 1
+        && breaker.failure_ratio.is_finite()
+        && breaker.failure_ratio > 0.0
+        && breaker.failure_ratio <= 1.0
+        && breaker.window >= 1
+        && (1..=breaker.window).contains(&breaker.min_calls)
+        && !breaker.open_for.is_zero()
+        && breaker.half_open_probes >= 1;
+    if !valid {
+        return Err(FlareError::system(format!(
+            "[services.push_worker.vendors.{}] has a value out of range: max_concurrency, rate_per_sec, burst, window, open_ms and half_open_probes must be at least 1, failure_ratio in (0, 1], min_calls between 1 and window",
+            vendor.as_str()
+        )));
+    }
+    Ok(limits)
+}
+
+/// 解析离线投递后端。没配置时缺省为 `disabled`：不选后端就不投递，也不冒充投递。
+///
+/// 生产环境另有规则，都在连 MQ 之前生效：
+/// - 没配置就拒绝启动。缺省的 `disabled` 会把每条离线任务送进死信，进程照常运行、没有任何报错，
+///   漏配一个变量不该变成「用户离线就收不到提示」。
+/// - 显式写 `disabled` 可以启动：没有移动端的部署仍然需要 worker 做在线推送，这是有意的选择。
+/// - `outbox` 只落库不投递，生产上没有人消费它，照旧拒绝。
+fn resolve_offline_delivery_backend(
+    raw: Option<&str>,
+    environment: &str,
+) -> Result<OfflineDeliveryBackend> {
+    let production = environment.trim().eq_ignore_ascii_case("production");
+    let Some(raw) = raw else {
+        if production {
+            return Err(FlareError::system(
+                "FLARE_ENV=production requires PUSH_WORKER_OFFLINE_DELIVERY_BACKEND to be set: choose fcm, apns, getui or mobile, or set it to disabled to run without offline push",
+            ));
+        }
+        return Ok(OfflineDeliveryBackend::Disabled);
+    };
+    let backend = OfflineDeliveryBackend::parse(raw)?;
+    if production && backend == OfflineDeliveryBackend::Outbox {
+        return Err(FlareError::system(
+            "FLARE_ENV=production forbids the offline outbox backend: it stores tasks and delivers nothing; set PUSH_WORKER_OFFLINE_DELIVERY_BACKEND to fcm, apns, getui or mobile, or to disabled to run without offline push",
+        ));
+    }
+    Ok(backend)
 }
 
 fn mobile_providers(
@@ -462,8 +668,105 @@ impl KafkaConsumerConfig for PushWorkerConfig {
 }
 
 #[cfg(test)]
+impl PushWorkerConfig {
+    /// 测试用配置：不指向任何真实依赖，用例用结构体更新语法只覆盖自己关心的字段。
+    pub(crate) fn for_tests() -> Self {
+        Self {
+            mq_backend: "nats".into(),
+            jetstream_url: "nats://127.0.0.1:1".into(),
+            jetstream_timeout_ms: 1_000,
+            jetstream_retries: 0,
+            jetstream_retry_backoff_ms: 0,
+            jetstream_stream_specs: default_stream_specs(),
+            kafka_brokers: Vec::new(),
+            kafka_client_id: String::new(),
+            kafka_options: HashMap::new(),
+            consumer_group: PUSH_WORKER_GROUP_DEFAULT.into(),
+            push_online_topic: TOPIC_PUSH_ONLINE.into(),
+            push_offline_topic: TOPIC_PUSH_OFFLINE.into(),
+            push_offline_group_topic: TOPIC_PUSH_OFFLINE_GROUP.into(),
+            push_offline_bulk_topic: TOPIC_PUSH_OFFLINE_BULK.into(),
+            push_dlq_topic: TOPIC_PUSH_DLQ.into(),
+            consumer_concurrency: ConsumerConcurrency::default(),
+            online_service_endpoint: String::new(),
+            access_gateway_static_endpoint: None,
+            offline_parking_capacity: 16,
+            offline_delivery_backend: OfflineDeliveryBackend::Disabled,
+            offline_mobile_providers: Vec::new(),
+            offline_outbox_redis_url: None,
+            offline_outbox_stream: String::new(),
+            offline_outbox_maxlen: 0,
+            device_token_redis_url: String::new(),
+            device_token_key_prefix: String::new(),
+            binding_inactive_days: 60,
+            mobile_applications_file: None,
+            mobile_snapshot_file: None,
+            getui_default_ttl_ms: 0,
+            getui_request_timeout_ms: 0,
+            metrics: MetricsEndpointConfig::new("127.0.0.1", 0),
+            binding_order: crate::domain::vendor_delivery::DEFAULT_BINDING_ORDER.to_vec(),
+            vendor_limits: HashMap::new(),
+        }
+    }
+}
+
+#[cfg(test)]
 mod tests {
-    use super::{OfflineDeliveryBackend, mobile_providers, resolve_offline_outbox_redis_url};
+    use super::{
+        OfflineDeliveryBackend, mobile_providers, resolve_offline_delivery_backend,
+        resolve_offline_outbox_redis_url, resolve_vendor_limits,
+    };
+    use crate::domain::vendor_delivery::Vendor;
+    use crate::domain::vendor_policy::VendorLimits;
+    use flare_im_service_kit::config::{PushVendorGovernanceConfig, PushWorkerVendorsConfig};
+
+    /// 没写的厂商与字段用缺省值；容量缺省跟速率走，最少调用数随窗口收小；越界的值拒绝启动。
+    #[test]
+    fn vendor_governance_overrides_layer_on_the_defaults() {
+        let defaults = resolve_vendor_limits(None).unwrap();
+        for vendor in Vendor::ALL {
+            assert_eq!(defaults[&vendor], VendorLimits::defaults(vendor));
+        }
+        let section = PushWorkerVendorsConfig {
+            getui: Some(PushVendorGovernanceConfig {
+                rate_per_sec: Some(50),
+                window: Some(4),
+                open_ms: Some(5_000),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let limits = resolve_vendor_limits(Some(&section)).unwrap();
+        let getui = limits[&Vendor::Getui];
+        assert_eq!((getui.rate_per_sec, getui.burst), (50, 50));
+        assert_eq!(getui.max_concurrency, 64);
+        assert_eq!((getui.breaker.window, getui.breaker.min_calls), (4, 4));
+        assert_eq!(getui.breaker.open_for, std::time::Duration::from_secs(5));
+        assert_eq!(limits[&Vendor::Apns], VendorLimits::defaults(Vendor::Apns));
+
+        for bad in [
+            PushVendorGovernanceConfig {
+                failure_ratio: Some(1.5),
+                ..Default::default()
+            },
+            PushVendorGovernanceConfig {
+                max_concurrency: Some(0),
+                ..Default::default()
+            },
+            PushVendorGovernanceConfig {
+                window: Some(5),
+                min_calls: Some(6),
+                ..Default::default()
+            },
+        ] {
+            let section = PushWorkerVendorsConfig {
+                fcm: Some(bad),
+                ..Default::default()
+            };
+            let error = resolve_vendor_limits(Some(&section)).unwrap_err();
+            assert!(error.to_string().contains("vendors.fcm"), "{error}");
+        }
+    }
 
     #[test]
     fn offline_delivery_backend_is_explicit() {
@@ -492,32 +795,107 @@ mod tests {
         );
     }
 
+    /// 生产上漏配后端不能悄悄落回缺省的 `disabled`：那样进程照常运行，
+    /// 每条离线任务却都进了死信。`outbox` 只落库不投递，同样拒绝。
     #[test]
     fn production_never_silently_parks_offline_notifications() {
-        assert!(
-            OfflineDeliveryBackend::Outbox
-                .validate_environment("production")
-                .is_err()
-        );
-        assert!(
-            OfflineDeliveryBackend::Outbox
-                .validate_environment(" Production ")
-                .is_err()
-        );
-        assert!(
-            OfflineDeliveryBackend::Outbox
-                .validate_environment("development")
-                .is_ok()
-        );
-        for backend in [
-            OfflineDeliveryBackend::Fcm,
-            OfflineDeliveryBackend::Apns,
-            OfflineDeliveryBackend::Getui,
-            OfflineDeliveryBackend::Disabled,
+        for environment in ["production", " Production ", "PRODUCTION"] {
+            for raw in [None, Some("outbox")] {
+                let error = resolve_offline_delivery_backend(raw, environment)
+                    .expect_err("production needs an explicit, delivering backend");
+                // 报错要让运维知道改哪个变量。
+                assert!(
+                    error
+                        .to_string()
+                        .contains("PUSH_WORKER_OFFLINE_DELIVERY_BACKEND")
+                );
+            }
+        }
+        for (raw, backend) in [
+            ("fcm", OfflineDeliveryBackend::Fcm),
+            ("apns", OfflineDeliveryBackend::Apns),
+            ("getui", OfflineDeliveryBackend::Getui),
+            ("mobile", OfflineDeliveryBackend::Mobile),
         ] {
-            assert!(backend.validate_environment("production").is_ok());
+            assert_eq!(
+                resolve_offline_delivery_backend(Some(raw), "production").unwrap(),
+                backend
+            );
         }
         assert!(OfflineDeliveryBackend::parse("typo").is_err());
+    }
+
+    /// 显式写 `disabled` 是有意的选择：没有移动端的部署仍然要靠 worker 做在线推送，
+    /// 生产上必须能启动。与「没配置」的区别只在于有人确实做了这个决定。
+    #[test]
+    fn an_explicit_disabled_backend_starts_in_production() {
+        for raw in ["disabled", "off", "none", " Disabled "] {
+            assert_eq!(
+                resolve_offline_delivery_backend(Some(raw), "production").unwrap(),
+                OfflineDeliveryBackend::Disabled
+            );
+        }
+        assert!(resolve_offline_delivery_backend(None, "production").is_err());
+    }
+
+    /// 其他环境保持原有行为：没配置就是 `disabled`，开发栈也可以用 `outbox`。
+    #[test]
+    fn outside_production_an_unset_backend_defaults_to_disabled() {
+        for environment in ["", "development", "staging", "test"] {
+            assert_eq!(
+                resolve_offline_delivery_backend(None, environment).unwrap(),
+                OfflineDeliveryBackend::Disabled
+            );
+            assert_eq!(
+                resolve_offline_delivery_backend(Some("disabled"), environment).unwrap(),
+                OfflineDeliveryBackend::Disabled
+            );
+            assert_eq!(
+                resolve_offline_delivery_backend(Some("outbox"), environment).unwrap(),
+                OfflineDeliveryBackend::Outbox
+            );
+        }
+        // 写错的后端名在任何环境都是配置错误，不会被当成「没配置」而落回缺省。
+        for environment in ["development", "production"] {
+            assert!(resolve_offline_delivery_backend(Some("typo"), environment).is_err());
+        }
+    }
+
+    /// 每个后端的主名都能被 `parse` 认回来，启动行按固定格式带上它。
+    #[test]
+    fn every_backend_names_itself_in_its_startup_line() {
+        for (backend, line) in [
+            (
+                OfflineDeliveryBackend::Outbox,
+                "offline push outbox backend enabled",
+            ),
+            (
+                OfflineDeliveryBackend::Getui,
+                "offline push getui backend enabled",
+            ),
+            (
+                OfflineDeliveryBackend::Fcm,
+                "offline push fcm backend enabled",
+            ),
+            (
+                OfflineDeliveryBackend::Apns,
+                "offline push apns backend enabled",
+            ),
+            (
+                OfflineDeliveryBackend::Mobile,
+                "offline push mobile backend enabled",
+            ),
+        ] {
+            assert_eq!(
+                OfflineDeliveryBackend::parse(backend.name()).unwrap(),
+                backend
+            );
+            assert_eq!(backend.enabled_line(), line);
+        }
+        assert_eq!(
+            OfflineDeliveryBackend::parse(OfflineDeliveryBackend::Disabled.name()).unwrap(),
+            OfflineDeliveryBackend::Disabled
+        );
     }
 
     #[test]

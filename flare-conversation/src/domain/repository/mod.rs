@@ -122,6 +122,19 @@ pub trait ConversationRepository: Send + Sync {
         user_ids: &[String],
     ) -> Result<Vec<ConversationParticipant>>;
 
+    /// `user_id` 在席（未隐藏、未退出）的会话里，最后一条消息晚于 `since`、不是他自己发的、且他
+    /// 仍有未读的那些，按最后一条消息的时间从新到旧，至多 `limit` 个。「最后一条消息」是他看得到
+    /// 的、未撤回也未删除的最新一条；未读数口径与会话摘要（`load_bootstrap`）相同。
+    ///
+    /// 按用户读、不取调用上下文里的用户：调用方是 Cell 内服务，接口层已核对身份。租户仍只取上下文。
+    async fn list_recent_unread_conversations(
+        &self,
+        ctx: &flare_server_core::context::Context,
+        user_id: &str,
+        since: chrono::DateTime<chrono::Utc>,
+        limit: usize,
+    ) -> Result<Vec<crate::domain::model::RecentUnreadConversation>>;
+
     /// 一条消息被撤回或对全会话删除后，重算还没读到它的成员的物化未读：按剩余的、未撤回未删除的
     /// 他人消息计数，只会变少，重复调用结果相同。超过精确未读阈值的会话本来就不物化未读，跳过。
     async fn retract_message_unread(
@@ -187,6 +200,44 @@ pub trait ConversationRepository: Send + Sync {
         ctx: &flare_server_core::context::Context,
         conversation_id: &str,
     ) -> Result<i32>;
+}
+
+/// 用户级通知设置与会话通知订阅者的存储。租户一律只取上下文；用户由调用方给出（用户态调用是
+/// 调用者本人，服务态调用是请求里的用户，身份在接口层核对）。
+pub trait NotificationSettingsRepository: Send + Sync {
+    /// 一个用户存过的设置；从没存过时 `None`。
+    async fn get_user_notification_settings(
+        &self,
+        ctx: &flare_server_core::context::Context,
+        user_id: &str,
+    ) -> Result<Option<crate::domain::model::UserNotificationSettings>>;
+
+    /// 一批用户里存过设置的那些（没存过的不返回，由调用方补默认值）。
+    async fn batch_get_user_notification_settings(
+        &self,
+        ctx: &flare_server_core::context::Context,
+        user_ids: &[String],
+    ) -> Result<Vec<(String, crate::domain::model::UserNotificationSettings)>>;
+
+    /// 按补丁写入，返回写入后的设置（版本加一）。从没存过的用户以默认值为底插入。
+    /// `base_settings_version` 非 0 时必须等于当前版本（没存过的用户当前版本是 0），否则整次写入
+    /// 不生效并返回冲突。
+    async fn update_user_notification_settings(
+        &self,
+        ctx: &flare_server_core::context::Context,
+        user_id: &str,
+        patch: &crate::domain::model::UserNotificationSettingsPatch,
+    ) -> Result<crate::domain::model::UserNotificationSettings>;
+
+    /// 会话里开启了「全部消息通知」、仍在席（未退出、未删除会话）、没有设免打扰或仅 @我 的成员，
+    /// 按 user_id 升序，只要严格大于 `after_user_id` 的，至多 `limit` 个。
+    async fn list_notification_subscribers(
+        &self,
+        ctx: &flare_server_core::context::Context,
+        conversation_id: &str,
+        after_user_id: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<String>>;
 }
 
 /// Presence 仓储接口

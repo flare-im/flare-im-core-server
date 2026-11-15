@@ -278,7 +278,8 @@ GROUP BY write_state;
   `{gateway_id}#orphan-{启动串}` 交给清扫器。
 - **推送**：push-worker 与网关间广播投递前查租约（本地缓存 2s），租约缺失的网关上的设备不再投递、不再 Nack 重投；
   Redis 读不到时照常投递。在清扫完成前的窗口里，这些设备不会改走离线推送（离线与否由 push-server 依据 Online
-  在线状态决定）。
+  在线状态决定）。配了 `SIGNALING_ONLINE_PUSH_PROXY_URL` 时，清扫器对每个被清掉的会话上报一次 `gateway_lost`
+  交接（提示本来就归推送的设备除外），push-server 按这段窗口里有新未读的会话补提示；没配则窗口里的消息只靠回到应用后同步。
 - **就绪探针**：api-gateway 在业务端口、signaling-gateway 在指标端口提供 `GET /readyz`：启动完成且
   `<SERVICE>_HEALTH_TARGETS` 声明的依赖可达才 200，收到停机信号即 503；signaling-gateway 的指标端口保持到长连接
   关完再停，负载均衡在排空期间探测到的是 503 而不是连接被拒。`/health` 仍只说明进程活着。
@@ -560,7 +561,10 @@ topic 与 DLQ（与 orchestrator、storage-writer 相同的 `ConsumerFailurePubl
 - JetStream/Kafka durable、retry、DLQ 配置确认。
 - `flare-dlq-replay` dry-run 与受控重放演练通过，DLQ replay headers 可在链路追踪中检索；运维知道会话服务已读回执死信里的消息本体重放不幂等（见「重放死信（DLQ）」）。
 - 使用 Kafka 后端时，push-server 与会话服务的消费者已接上重试 topic 与 DLQ（见「Kafka 后端的消费失败」）。
-- offline push backend 已配置，或 push-worker 对不可投递任务有 park/DLQ 策略。
+- offline push backend 已配置，或 push-worker 对不可投递任务有 park/DLQ 策略。`FLARE_ENV=production` 时 `PUSH_WORKER_OFFLINE_DELIVERY_BACKEND` 必须显式设置（没有移动端就写 `disabled`），凭据文件是 `flare.mobile-push-applications/v2`。
+- 设备推送绑定登记表：Push Proxy、Push Server、Push Worker 的 `*_DEVICE_TOKEN_REDIS_URL` 与 `*_DEVICE_TOKEN_KEY_PREFIX` 指向同一实例，且 Push Server 能连上它（三者缺省都取 `[redis.push]` profile）。两个 `*_BINDING_INACTIVE_DAYS` 一致。
+- Online 配了 `SIGNALING_ONLINE_PUSH_PROXY_URL` 并拿到 `FLARE_INTERNAL_CTX_PRIVATE_KEY`，网关失联的设备才会交接给推送、踢线才会吊销推送绑定；Push Server 带签名读会话服务的 `ConversationInternalReadService`。
+- APNs 凭据的 `topics` 列全客户端登记的包名（平台控制台的应用 APNs 凭据里填）；华为、荣耀、小米、OPPO、vivo 的即时通讯类目已获批，并写进个推凭据的 `android_vendor`。
 - `MESSAGE_ORCHESTRATOR_INLINE_MESSAGE_PUSH_ENABLED` 泄压阀在预发验证过：关闭 inline 后客户端可通过 sync 收敛。
 - Push Server `online_status_backend=redis` 与 `grpc` fallback 均完成连通性验证。
 - Push Server `event_ping_coalesce_window_ms` 在预发压测验证过：10 万人大群连发消息不会按消息数重复分页扫描成员，trailing ping 携带最高 conversation seq。
@@ -569,7 +573,7 @@ topic 与 DLQ（与 orchestrator、storage-writer 相同的 `ConsumerFailurePubl
 - message write ledger、MQ lag、DLQ、WAL pending、send stage metrics 接入 Dashboard。
 - Admin Gateway 查询接口有分页、limit、时间范围和审计。
 - 压测分离写路径和推送路径，端到端压测不替代分层基线。
-- 大群压测必须单独验证 recipient-less ping、Push Server pre-pagination coalescing、Push Worker ping debounce、pull rate-limit、热缓存命中率和大群未读近似策略。
+- 大群压测必须单独验证 recipient-less ping、Push Server pre-pagination coalescing、pull rate-limit、热缓存命中率和大群未读近似策略。
 
 ## 建议后续优化
 

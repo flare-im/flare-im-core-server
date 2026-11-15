@@ -3,6 +3,7 @@
 mod connection;
 mod connection_config;
 mod connection_info;
+mod device_state;
 mod event_uplink_outcome;
 mod message;
 mod message_send_outcome;
@@ -14,6 +15,7 @@ pub use connection_config::ConnectionDomainServiceConfig;
 pub use connection_info::ConnectionInfo;
 /// 连接上下文（ConnectionInfo 的别名，供 Port/Resolver 使用）
 pub use connection_info::ConnectionInfo as ConnectionContext;
+pub use device_state::DeviceLinkState;
 pub use event_uplink_outcome::EventUplinkOutcome;
 pub use message::MessageWrapper;
 pub use message_send_outcome::MessageSendOutcome;

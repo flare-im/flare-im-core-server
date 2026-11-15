@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use flare_grpc_proto::signaling::online::{
     BatchGetUserPresenceRequest, BatchGetUserPresenceResponse, DeviceInfo, GetDeviceRequest,
     GetDeviceResponse, GetUserPresenceRequest, GetUserPresenceResponse, KickDeviceRequest,
@@ -17,7 +17,13 @@ use prost_types::Timestamp;
 use tracing::{info, warn};
 
 use super::loggable_reason;
-use crate::domain::repository::{ConversationRepository, kick_reason, parse_tenant_session_member};
+use crate::domain::aggregate::Connection;
+use crate::domain::push_binding::{
+    BindingRevocation, BindingRevocationReason, BindingRevocationSink,
+};
+use crate::domain::repository::{
+    ConversationRepository, is_kick_pending_confirmation, kick_reason, parse_tenant_session_member,
+};
 use crate::domain::value_object::UserId;
 
 const ONLINE_SESSION_FRESHNESS_SECONDS: i64 = 90;
@@ -28,16 +34,140 @@ const KICK_TENANT_SCAN_PAGE: usize = 256;
 /// 请求里的原因是运维说明，只进日志。
 const KICK_TENANT_DEFAULT_REASON: &str = "TENANT_UNAVAILABLE";
 
+/// 一次踢线针对的范围。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum KickScope {
+    /// 点名踢一台设备：运维踢，或用户踢自己的设备。
+    Device,
+    /// 踢整个租户时按在线索引逐台踢。
+    Tenant,
+}
+
+impl KickScope {
+    /// 下发给被踢连接的类型化原因。
+    fn wire_reason(self) -> &'static str {
+        match self {
+            Self::Device => kick_reason::DEVICE_KICKED,
+            Self::Tenant => kick_reason::TENANT_UNAVAILABLE,
+        }
+    }
+
+    /// 吊销被踢设备推送绑定的原因。
+    fn binding_reason(self) -> BindingRevocationReason {
+        match self {
+            Self::Device => BindingRevocationReason::Kicked,
+            Self::Tenant => BindingRevocationReason::TenantKicked,
+        }
+    }
+}
+
 /// 用户领域服务 - 包含所有业务逻辑（泛型仓储，避免 `dyn` 异步 trait）
 pub struct UserService<R: ConversationRepository + Send + Sync> {
     conversation_repository: Arc<R>,
+    /// 推送绑定吊销的出口；没接推送通道时为空，踢线与身份吊销都不吊销绑定。
+    binding_revocations: Option<Arc<dyn BindingRevocationSink>>,
 }
 
 impl<R: ConversationRepository + Send + Sync> UserService<R> {
     pub fn new(conversation_repository: Arc<R>) -> Self {
         Self {
             conversation_repository,
+            binding_revocations: None,
         }
+    }
+
+    /// 接上推送绑定吊销的出口：踢设备、踢租户、吊销身份会话时，吊销被结束的设备的绑定。
+    pub fn with_binding_revocations(
+        mut self,
+        sink: Option<Arc<dyn BindingRevocationSink>>,
+    ) -> Self {
+        self.binding_revocations = sink;
+        self
+    }
+
+    /// 吊销一台被踢设备的推送绑定。只提交请求，不等推送侧。
+    ///
+    /// 登记时刻的上限取提交的这一刻：踢线已经生效（或已经登记、必然生效），在这之前登记的绑定
+    /// 都属于被踢掉的那次登录；设备之后重新登录登记的绑定不在范围内，吊销送得再晚也不会清掉它。
+    fn revoke_device_bindings(
+        &self,
+        tenant_id: &str,
+        user_id: &str,
+        device_id: &str,
+        reason: BindingRevocationReason,
+    ) {
+        if let Some(sink) = self.binding_revocations.as_ref() {
+            let kicked_at_ms = Utc::now().timestamp_millis();
+            sink.submit(BindingRevocation::device(
+                tenant_id,
+                user_id,
+                device_id,
+                reason,
+                kicked_at_ms,
+            ));
+        }
+    }
+
+    /// 身份会话被吊销的设备，推送绑定一并吊销。
+    ///
+    /// 在仓储结束这些会话之前算出涉及的设备并提交：会话一旦移除就再也对不上设备。身份侧的吊销
+    /// 此时已成事实，哪怕这一次网关还没确认断开（仓储返回错误、调用方稍后重试），绑定也该吊销；
+    /// 重试会重复提交，吊销可以重复执行。
+    ///
+    /// - 请求没有点名会话：这次吊销针对该用户的全部登录，凡是还留着的绑定都失效，一次吊销他在
+    ///   本租户下全部设备的绑定。
+    /// - 请求点名了会话：只吊销被这次吊销结束的在线会话所属的设备。已托管的设备没有在线会话，
+    ///   这里对不上它属于哪个身份会话，不会被吊销；要覆盖它，推送绑定得先带上身份会话 ID。
+    ///
+    /// 登记时刻的上限是身份侧吊销发生的时刻，即请求的 `cutoff_ms`：调用方重投时它不变，用户在那
+    /// 之后重新登录登记的绑定不受影响。请求没带截止时刻时退到收到请求的时刻 `received_at_ms`。
+    async fn revoke_bindings_of_identity_sessions(
+        &self,
+        tenant: &str,
+        user: &UserId,
+        sessions: &[String],
+        cutoff_ms: i64,
+        received_at_ms: i64,
+    ) -> Result<()> {
+        let Some(sink) = self.binding_revocations.as_ref() else {
+            return Ok(());
+        };
+        let registered_before_ms = if cutoff_ms > 0 {
+            cutoff_ms
+        } else {
+            received_at_ms
+        };
+        if sessions.is_empty() {
+            sink.submit(BindingRevocation::all_devices(
+                tenant,
+                user.as_str(),
+                BindingRevocationReason::IdentityRevoked,
+                registered_before_ms,
+            ));
+            return Ok(());
+        }
+        let live = self
+            .conversation_repository
+            .get_user_connections(tenant, user)
+            .await?;
+        let mut devices: Vec<&str> = live
+            .iter()
+            .filter(|connection| connection.ended_by_identity_revocation(sessions, cutoff_ms))
+            .map(|connection| connection.device_id().as_str())
+            .collect();
+        // 一台设备可以同时挂着几条连接，只报一次。
+        devices.sort_unstable();
+        devices.dedup();
+        for device_id in devices {
+            sink.submit(BindingRevocation::device(
+                tenant,
+                user.as_str(),
+                device_id,
+                BindingRevocationReason::IdentityRevoked,
+                registered_before_ms,
+            ));
+        }
+        Ok(())
     }
 
     /// 查询用户在线状态
@@ -87,29 +217,8 @@ impl<R: ConversationRepository + Send + Sync> UserService<R> {
         let presence = UserPresence {
             user_id: user_id.clone(),
             is_online,
-            devices: sessions
-                .into_iter()
-                .map(|s| DeviceInfo {
-                    device_id: s.device_id().as_str().to_string(),
-                    platform: s.device_platform().to_string(),
-                    model: String::new(),
-                    os_version: String::new(),
-                    last_active_time: Some(Timestamp {
-                        seconds: s.last_heartbeat_at().timestamp(),
-                        nanos: s.last_heartbeat_at().timestamp_subsec_nanos() as i32,
-                    }),
-                    priority: s.device_priority() as i32,
-                    token_version: s.token_version().value(),
-                    connection_quality: s.connection_quality().cloned().map(|cq| cq.into()),
-                    conversation_id: s.id().as_str().to_string(),
-                    gateway_id: s.gateway_id().to_string(),
-                    server_id: s.server_id().to_string(),
-                })
-                .collect(),
-            last_seen: Some(Timestamp {
-                seconds: last_seen.timestamp(),
-                nanos: last_seen.timestamp_subsec_nanos() as i32,
-            }),
+            devices: sessions.iter().map(device_info).collect(),
+            last_seen: Some(timestamp(last_seen)),
         };
 
         Ok(GetUserPresenceResponse {
@@ -188,25 +297,7 @@ impl<R: ConversationRepository + Send + Sync> UserService<R> {
             .collect::<Vec<_>>();
 
         Ok(ListUserDevicesResponse {
-            devices: sessions
-                .into_iter()
-                .map(|s| DeviceInfo {
-                    device_id: s.device_id().as_str().to_string(),
-                    platform: s.device_platform().to_string(),
-                    model: String::new(),
-                    os_version: String::new(),
-                    last_active_time: Some(Timestamp {
-                        seconds: s.last_heartbeat_at().timestamp(),
-                        nanos: s.last_heartbeat_at().timestamp_subsec_nanos() as i32,
-                    }),
-                    priority: s.device_priority() as i32,
-                    token_version: s.token_version().value(),
-                    connection_quality: s.connection_quality().cloned().map(|cq| cq.into()),
-                    conversation_id: s.id().as_str().to_string(),
-                    gateway_id: s.gateway_id().to_string(),
-                    server_id: s.server_id().to_string(),
-                })
-                .collect(),
+            devices: sessions.iter().map(device_info).collect(),
         })
     }
 
@@ -220,29 +311,49 @@ impl<R: ConversationRepository + Send + Sync> UserService<R> {
         request_id: &str,
         signing_key_id: &str,
     ) -> Result<u32> {
+        let received_at_ms = Utc::now().timestamp_millis();
         let user = crate::domain::value_object::UserId::new(user.to_owned())
             .map_err(|error| flare_server_core::error::FlareError::system(error.to_string()))?;
+        self.revoke_bindings_of_identity_sessions(
+            tenant,
+            &user,
+            sessions,
+            cutoff_ms,
+            received_at_ms,
+        )
+        .await?;
         self.conversation_repository
-            .revoke_identity_sessions(tenant, &user, sessions, cutoff_ms, request_id, signing_key_id)
+            .revoke_identity_sessions(
+                tenant,
+                &user,
+                sessions,
+                cutoff_ms,
+                request_id,
+                signing_key_id,
+            )
             .await
     }
 
-    /// 踢出设备（运维操作）：连接端收到 [`kick_reason::DEVICE_KICKED`]，请求里的原因只进日志。
+    /// 踢出设备（运维操作，或用户踢自己的设备）：连接端收到 [`kick_reason::DEVICE_KICKED`]，请求
+    /// 里的原因只进日志。被踢设备的推送绑定一并吊销，设备当时不在线也一样。
     pub async fn kick_device(
         &self,
         request: KickDeviceRequest,
         expected_tenant_id: &str,
     ) -> Result<KickDeviceResponse> {
-        self.kick_device_because(request, expected_tenant_id, kick_reason::DEVICE_KICKED)
+        self.kick_device_because(request, expected_tenant_id, KickScope::Device)
             .await
     }
 
+    /// `scope` 决定下发给被踢连接的原因、吊销推送绑定的原因，以及设备没有在线会话时吊不吊销。
     async fn kick_device_because(
         &self,
         request: KickDeviceRequest,
         expected_tenant_id: &str,
-        wire_reason: &str,
+        scope: KickScope,
     ) -> Result<KickDeviceResponse> {
+        let wire_reason = scope.wire_reason();
+        let binding_reason = scope.binding_reason();
         let user_id = &request.user_id;
         let device_id = &request.device_id;
 
@@ -264,13 +375,32 @@ impl<R: ConversationRepository + Send + Sync> UserService<R> {
                 ));
             }
             // 删除会话
-            let physical = self
+            let physical = match self
                 .conversation_repository
                 .remove_connection_for_kick(expected_tenant_id, session.id(), &user_vo, wire_reason)
-                .await?;
+                .await
+            {
+                Ok(physical) => physical,
+                Err(error) => {
+                    // 踢线已经持久登记、只是网关还没确认：这条会话必然结束，但结束时不再经过
+                    // 这里，绑定现在就吊销。其余失败会话还在，绑定不动。
+                    if is_kick_pending_confirmation(&error) {
+                        self.revoke_device_bindings(
+                            expected_tenant_id,
+                            user_id,
+                            device_id,
+                            binding_reason,
+                        );
+                    }
+                    return Err(error);
+                }
+            };
+            // 同设备的新连接在移除之前接替了它：设备仍然在线，没有被踢，绑定不动。
             let Some(physical) = physical else {
                 return Ok(KickDeviceResponse { success: false });
             };
+            // 被踢的设备可能根本收不到踢线通知（不在线、连接半死），不会自己吊销绑定。
+            self.revoke_device_bindings(expected_tenant_id, user_id, device_id, binding_reason);
 
             info!(
                 user_id = %user_id,
@@ -283,6 +413,12 @@ impl<R: ConversationRepository + Send + Sync> UserService<R> {
 
             Ok(KickDeviceResponse { success: true })
         } else {
+            // 点名踢的设备没有在线会话（已托管、已断开）：它收不到踢线，推送却还在往它的绑定上发，
+            // 这正是踢它要止住的。绑定照样吊销，调用方拿到的仍是「设备不存在」。
+            // 踢租户时走到这里的是只剩索引的陈旧成员，不是谁点名要踢的设备，不吊销。
+            if scope == KickScope::Device {
+                self.revoke_device_bindings(expected_tenant_id, user_id, device_id, binding_reason);
+            }
             Err(flare_err!(ErrorCode::UserNotFound, "device not found"))
         }
     }
@@ -327,7 +463,7 @@ impl<R: ConversationRepository + Send + Sync> UserService<R> {
                             reason: reason.to_string(),
                         },
                         &tenant_id,
-                        kick_reason::TENANT_UNAVAILABLE,
+                        KickScope::Tenant,
                     )
                     .await
                 {
@@ -393,26 +529,40 @@ impl<R: ConversationRepository + Send + Sync> UserService<R> {
 
         if let Some(session) = session {
             Ok(GetDeviceResponse {
-                device: Some(DeviceInfo {
-                    device_id: session.device_id().as_str().to_string(),
-                    platform: session.device_platform().to_string(),
-                    model: String::new(),
-                    os_version: String::new(),
-                    last_active_time: Some(Timestamp {
-                        seconds: session.last_heartbeat_at().timestamp(),
-                        nanos: session.last_heartbeat_at().timestamp_subsec_nanos() as i32,
-                    }),
-                    priority: session.device_priority() as i32,
-                    token_version: session.token_version().value(),
-                    connection_quality: session.connection_quality().cloned().map(|cq| cq.into()),
-                    conversation_id: session.id().as_str().to_string(),
-                    gateway_id: session.gateway_id().to_string(),
-                    server_id: session.server_id().to_string(),
-                }),
+                device: Some(device_info(&session)),
             })
         } else {
             Err(flare_err!(ErrorCode::InvalidParameter, "device not found"))
         }
+    }
+}
+
+/// 一条会话对外的设备信息：设备列表、在线状态与单设备查询（含管理员入口）共用这一处，
+/// 设备可达状态（应用状态、注意力、进入当前状态的时刻、角标）随会话记录带出。
+fn device_info(session: &Connection) -> DeviceInfo {
+    DeviceInfo {
+        device_id: session.device_id().as_str().to_string(),
+        platform: session.device_platform().to_string(),
+        model: String::new(),
+        os_version: String::new(),
+        last_active_time: Some(timestamp(session.last_heartbeat_at())),
+        priority: session.device_priority() as i32,
+        token_version: session.token_version().value(),
+        connection_quality: session.connection_quality().cloned().map(|cq| cq.into()),
+        conversation_id: session.id().as_str().to_string(),
+        gateway_id: session.gateway_id().to_string(),
+        server_id: session.server_id().to_string(),
+        app_state: session.app_state().to_proto() as i32,
+        attention: session.attention().to_proto() as i32,
+        state_since: Some(timestamp(session.state_since())),
+        badge: session.badge(),
+    }
+}
+
+fn timestamp(at: DateTime<Utc>) -> Timestamp {
+    Timestamp {
+        seconds: at.timestamp(),
+        nanos: at.timestamp_subsec_nanos() as i32,
     }
 }
 
@@ -422,7 +572,10 @@ mod tests {
     use crate::domain::aggregate::{Connection, ConnectionCreateParams};
     use crate::domain::model::OnlineStatusRecord;
     use crate::domain::repository::tenant_session_member;
-    use crate::domain::value_object::{ConnectionId, DeviceId, DevicePriority, TokenVersion};
+    use crate::domain::value_object::{
+        ConnectionId, DeviceAppState, DeviceAttention, DeviceId, DevicePriority, DeviceStateUpdate,
+        TokenVersion,
+    };
     use std::collections::{BTreeSet, HashMap};
     use std::sync::Mutex;
 
@@ -437,6 +590,24 @@ mod tests {
         /// 每次 kick 广播带给连接端的原因。
         kick_reasons: Mutex<Vec<String>>,
         page_size_seen: Mutex<Vec<usize>>,
+        /// 踢线时仓储的表现；缺省是真的移除。
+        kick_behaviour: Mutex<KickBehaviour>,
+        /// 身份会话吊销时网关迟迟不确认：仓储报错，调用方稍后重试。
+        identity_revocation_pending: Mutex<bool>,
+    }
+
+    /// 踢线时仓储的表现。
+    #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+    enum KickBehaviour {
+        /// 通知连接端并移除会话。
+        #[default]
+        Remove,
+        /// 踢线已登记，网关还没确认。
+        Pending,
+        /// 同设备的新连接已经接替，没有可移除的。
+        Replaced,
+        /// 存储不可用。
+        Unavailable,
     }
 
     impl MemoryRepo {
@@ -552,6 +723,23 @@ mod tests {
             let Some(session) = session else {
                 return Ok(None);
             };
+            let behaviour = *self.kick_behaviour.lock().unwrap();
+            match behaviour {
+                KickBehaviour::Remove => {}
+                KickBehaviour::Pending => {
+                    return Err(flare_err!(
+                        ErrorCode::ServiceUnavailable,
+                        crate::domain::repository::KICK_PENDING_CONFIRMATION
+                    ));
+                }
+                KickBehaviour::Replaced => return Ok(None),
+                KickBehaviour::Unavailable => {
+                    return Err(flare_err!(
+                        ErrorCode::DatabaseError,
+                        "conditional session removal failed"
+                    ));
+                }
+            }
             self.broadcast_user_kick(
                 tenant,
                 user.as_str(),
@@ -562,6 +750,30 @@ mod tests {
             .await?;
             self.remove_connection(tenant, id, user).await?;
             Ok(Some(format!("physical-{}", id.as_str())))
+        }
+
+        async fn revoke_identity_sessions(
+            &self,
+            tenant: &str,
+            user: &UserId,
+            session_ids: &[String],
+            cutoff_ms: i64,
+            _request_id: &str,
+            _signing_key_id: &str,
+        ) -> Result<u32> {
+            if *self.identity_revocation_pending.lock().unwrap() {
+                return Err(flare_err!(
+                    ErrorCode::ServiceUnavailable,
+                    "identity connection retirement pending receiver confirmation"
+                ));
+            }
+            let mut sessions = self.sessions.lock().unwrap();
+            let list = sessions
+                .entry(format!("{}:{}", tenant, user.as_str()))
+                .or_default();
+            let before = list.len();
+            list.retain(|c| !c.ended_by_identity_revocation(session_ids, cutoff_ms));
+            Ok((before - list.len()) as u32)
         }
 
         async fn fetch_statuses(
@@ -687,7 +899,92 @@ mod tests {
             device_priority: DevicePriority::Normal,
             token_version: TokenVersion::from(0),
             initial_quality: None,
+            app_state: DeviceAppState::Active,
+            attention: DeviceAttention::Unspecified,
         })
+    }
+
+    /// 设备列表、在线状态与单设备查询带出同一份设备可达状态：应用状态、注意力、进入当前状态的
+    /// 时刻与角标。
+    #[tokio::test]
+    async fn device_queries_expose_the_reported_device_state() {
+        use flare_proto::common::{
+            DeviceAppState as ProtoAppState, DeviceAttention as ProtoAttention,
+        };
+
+        let repo = Arc::new(MemoryRepo::default());
+        let mut parked = connection("acme", "u1", "phone");
+        let parked_at = parked.created_at() + chrono::Duration::seconds(3);
+        parked.report_device_state(
+            DeviceStateUpdate {
+                app_state: DeviceAppState::Parking,
+                attention: DeviceAttention::Idle,
+                badge: 4,
+            },
+            parked_at,
+        );
+        repo.save_connection(&parked).await.unwrap();
+        let untouched = connection("acme", "u1", "desk");
+        repo.save_connection(&untouched).await.unwrap();
+        let service = UserService::new(repo);
+
+        let assert_parked = |device: &DeviceInfo| {
+            assert_eq!(device.app_state, ProtoAppState::Parking as i32);
+            assert_eq!(device.attention, ProtoAttention::Idle as i32);
+            assert_eq!(device.badge, 4);
+            assert_eq!(device.state_since, Some(timestamp(parked_at)));
+        };
+        let find = |devices: Vec<DeviceInfo>, id: &str| {
+            devices
+                .into_iter()
+                .find(|device| device.device_id == id)
+                .unwrap()
+        };
+
+        let listed = service
+            .list_user_devices(
+                "acme",
+                ListUserDevicesRequest {
+                    user_id: "u1".into(),
+                },
+            )
+            .await
+            .unwrap()
+            .devices;
+        assert_parked(&find(listed.clone(), "phone"));
+        // 没上报过的设备：建连时的状态、自建连起、角标 0。
+        let desk = find(listed, "desk");
+        assert_eq!(desk.app_state, ProtoAppState::Active as i32);
+        assert_eq!(desk.attention, ProtoAttention::Unspecified as i32);
+        assert_eq!(desk.badge, 0);
+        assert_eq!(desk.state_since, Some(timestamp(untouched.created_at())));
+
+        let presence = service
+            .get_user_presence(
+                "acme",
+                GetUserPresenceRequest {
+                    user_id: "u1".into(),
+                },
+            )
+            .await
+            .unwrap()
+            .presence
+            .unwrap();
+        assert_parked(&find(presence.devices, "phone"));
+
+        let device = service
+            .get_device(
+                "acme",
+                GetDeviceRequest {
+                    user_id: "u1".into(),
+                    device_id: "phone".into(),
+                },
+            )
+            .await
+            .unwrap()
+            .device
+            .unwrap();
+        assert_parked(&device);
     }
 
     async fn seeded() -> (Arc<MemoryRepo>, UserService<MemoryRepo>) {
@@ -702,6 +999,409 @@ mod tests {
         }
         let service = UserService::new(repo.clone());
         (repo, service)
+    }
+
+    /// 一条吊销请求针对谁：`(租户, 用户, 设备, 原因)`；设备为 `None` 是全部设备。
+    type Target = (String, String, Option<String>, BindingRevocationReason);
+
+    fn target(
+        tenant: &str,
+        user: &str,
+        device: Option<&str>,
+        reason: BindingRevocationReason,
+    ) -> Target {
+        (
+            tenant.to_string(),
+            user.to_string(),
+            device.map(str::to_string),
+            reason,
+        )
+    }
+
+    /// 记下提交的推送绑定吊销请求。
+    #[derive(Default)]
+    struct RecordedRevocations(Mutex<Vec<BindingRevocation>>);
+
+    impl RecordedRevocations {
+        /// 各条请求针对谁，按 (用户, 设备) 排序：踢租户按索引顺序走，顺序不定。
+        fn targets(&self) -> Vec<Target> {
+            let mut targets: Vec<Target> = self
+                .0
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|r| {
+                    (
+                        r.tenant_id.clone(),
+                        r.user_id.clone(),
+                        r.device_id.clone(),
+                        r.reason,
+                    )
+                })
+                .collect();
+            targets.sort_by(|a, b| (&a.1, &a.2).cmp(&(&b.1, &b.2)));
+            targets
+        }
+
+        /// 各条请求的登记时刻上限。
+        fn cutoffs(&self) -> Vec<i64> {
+            self.0
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|r| r.registered_before_ms)
+                .collect()
+        }
+    }
+
+    impl BindingRevocationSink for RecordedRevocations {
+        fn submit(&self, revocation: BindingRevocation) {
+            self.0.lock().unwrap().push(revocation);
+        }
+    }
+
+    fn now_ms() -> i64 {
+        Utc::now().timestamp_millis()
+    }
+
+    /// [`seeded`] 的会话，外加接好的吊销出口。
+    async fn seeded_with_revocations() -> (
+        Arc<MemoryRepo>,
+        UserService<MemoryRepo>,
+        Arc<RecordedRevocations>,
+    ) {
+        let (repo, service) = seeded().await;
+        let revocations = Arc::new(RecordedRevocations::default());
+        let service = service
+            .with_binding_revocations(Some(revocations.clone() as Arc<dyn BindingRevocationSink>));
+        (repo, service, revocations)
+    }
+
+    fn kick(user: &str, device: &str) -> KickDeviceRequest {
+        KickDeviceRequest {
+            user_id: user.into(),
+            device_id: device.into(),
+            reason: "lost phone".into(),
+        }
+    }
+
+    /// 踢设备（运维踢或用户踢自己的设备走的是同一个入口）：被踢设备的推送绑定吊销，别的设备、
+    /// 别的租户不动。只吊销踢线那一刻之前登记的绑定。
+    #[tokio::test]
+    async fn a_kicked_device_loses_its_push_bindings() {
+        let (_repo, service, revocations) = seeded_with_revocations().await;
+
+        let before_ms = now_ms();
+        assert!(
+            service
+                .kick_device(kick("u1", "d1"), "acme")
+                .await
+                .unwrap()
+                .success
+        );
+        let after_ms = now_ms();
+
+        assert_eq!(
+            revocations.targets(),
+            vec![target(
+                "acme",
+                "u1",
+                Some("d1"),
+                BindingRevocationReason::Kicked
+            )]
+        );
+        let cutoffs = revocations.cutoffs();
+        assert!(
+            (before_ms..=after_ms).contains(&cutoffs[0]),
+            "the cutoff {} is the moment of the kick ({before_ms}..={after_ms})",
+            cutoffs[0]
+        );
+    }
+
+    /// 点名踢的设备没有在线会话（已托管的手机）：调用方拿到的仍是「设备不存在」，但它的推送绑定
+    /// 照样吊销，推送到此为止。
+    #[tokio::test]
+    async fn a_kick_of_a_device_without_a_live_session_still_revokes_its_bindings() {
+        let (_repo, service, revocations) = seeded_with_revocations().await;
+
+        let before_ms = now_ms();
+        let missing = service
+            .kick_device(kick("u1", "parked-phone"), "acme")
+            .await;
+        let after_ms = now_ms();
+
+        assert_eq!(missing.unwrap_err().code(), Some(ErrorCode::UserNotFound));
+        assert_eq!(
+            revocations.targets(),
+            vec![target(
+                "acme",
+                "u1",
+                Some("parked-phone"),
+                BindingRevocationReason::Kicked
+            )]
+        );
+        assert!((before_ms..=after_ms).contains(&revocations.cutoffs()[0]));
+    }
+
+    /// 设备仍然在线的踢线不吊销绑定：同设备的新连接已经接替（没有被踢），或存储报错（会话还在，
+    /// 调用方重试）。
+    #[tokio::test]
+    async fn a_kick_that_leaves_the_device_online_revokes_nothing() {
+        let (repo, service, revocations) = seeded_with_revocations().await;
+
+        *repo.kick_behaviour.lock().unwrap() = KickBehaviour::Replaced;
+        assert!(
+            !service
+                .kick_device(kick("u1", "d1"), "acme")
+                .await
+                .unwrap()
+                .success
+        );
+
+        *repo.kick_behaviour.lock().unwrap() = KickBehaviour::Unavailable;
+        assert!(service.kick_device(kick("u1", "d1"), "acme").await.is_err());
+
+        assert!(revocations.targets().is_empty());
+    }
+
+    /// 踢线已登记、网关还没确认：这次调用报错，但会话必然结束、结束时不再经过领域服务，所以
+    /// 绑定现在就吊销。
+    #[tokio::test]
+    async fn a_kick_awaiting_gateway_confirmation_still_revokes_the_bindings() {
+        let (repo, service, revocations) = seeded_with_revocations().await;
+        *repo.kick_behaviour.lock().unwrap() = KickBehaviour::Pending;
+
+        let error = service
+            .kick_device(kick("u1", "d1"), "acme")
+            .await
+            .unwrap_err();
+
+        assert!(is_kick_pending_confirmation(&error));
+        assert_eq!(
+            revocations.targets(),
+            vec![target(
+                "acme",
+                "u1",
+                Some("d1"),
+                BindingRevocationReason::Kicked
+            )]
+        );
+    }
+
+    /// 踢整个租户：每条被移除的会话所属设备各吊销一次，原因是租户被踢；只剩索引的陈旧成员（没有
+    /// 在线会话，也不是谁点名要踢的设备）与别的租户不吊销。
+    #[tokio::test]
+    async fn kicking_a_tenant_revokes_the_bindings_of_each_removed_device() {
+        let (repo, service, revocations) = seeded_with_revocations().await;
+        repo.seed_stale("acme", &tenant_session_member("ghost", "d1"));
+
+        let response = service
+            .kick_tenant(KickTenantRequest {
+                tenant_id: "acme".to_string(),
+                reason: "suspended".to_string(),
+                expected_tenant_version: None,
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(response.kicked, 3);
+        let tenant_kicked = |user: &str, device: &str| {
+            target(
+                "acme",
+                user,
+                Some(device),
+                BindingRevocationReason::TenantKicked,
+            )
+        };
+        assert_eq!(
+            revocations.targets(),
+            vec![
+                tenant_kicked("u1", "d1"),
+                tenant_kicked("u1", "d2"),
+                tenant_kicked("u2", "d1"),
+            ]
+        );
+    }
+
+    fn bound(tenant: &str, user: &str, device: &str, identity_session: &str) -> Connection {
+        connection(tenant, user, device).with_identity_session_id(Some(identity_session.into()))
+    }
+
+    /// 身份吊销点名了会话：只吊销被这次吊销结束的在线会话所属的设备（一台设备挂几条连接也只报
+    /// 一次），包括截止时刻之前登记、没有身份会话 ID 的连接；别的身份会话的设备不动。登记时刻的
+    /// 上限是请求的截止时刻。
+    #[tokio::test]
+    async fn an_identity_revocation_with_named_sessions_revokes_the_devices_it_ends() {
+        let repo = Arc::new(MemoryRepo::default());
+        for session in [
+            bound("acme", "u1", "phone", "sid-old"),
+            bound("acme", "u1", "phone", "sid-old"),
+            bound("acme", "u1", "tablet", "sid-older"),
+            bound("acme", "u1", "desk", "sid-new"),
+            connection("acme", "u1", "legacy"),
+            bound("other", "u1", "phone-b", "sid-old"),
+        ] {
+            repo.save_connection(&session).await.unwrap();
+        }
+        let revocations = Arc::new(RecordedRevocations::default());
+        let service = UserService::new(repo.clone())
+            .with_binding_revocations(Some(revocations.clone() as Arc<dyn BindingRevocationSink>));
+        let sessions = vec!["sid-old".to_string(), "sid-older".to_string()];
+        let cutoff_ms = now_ms() + 1_000;
+
+        let kicked = service
+            .revoke_identity_sessions("acme", "u1", &sessions, cutoff_ms, "req-1", "legacy")
+            .await
+            .unwrap();
+
+        assert_eq!(kicked, 4);
+        let identity_revoked = |device: &str| {
+            target(
+                "acme",
+                "u1",
+                Some(device),
+                BindingRevocationReason::IdentityRevoked,
+            )
+        };
+        assert_eq!(
+            revocations.targets(),
+            vec![
+                identity_revoked("legacy"),
+                identity_revoked("phone"),
+                identity_revoked("tablet"),
+            ]
+        );
+        assert_eq!(revocations.cutoffs(), vec![cutoff_ms; 3]);
+        // 没被吊销的身份会话还在线。
+        let remaining = repo
+            .get_user_connections("acme", &UserId::new("u1".into()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].device_id().as_str(), "desk");
+    }
+
+    /// 身份吊销没有点名会话：一次吊销该用户在本租户下全部设备的绑定，不逐台列。
+    #[tokio::test]
+    async fn an_identity_revocation_without_named_sessions_revokes_every_device() {
+        let (_repo, service, revocations) = seeded_with_revocations().await;
+        let cutoff_ms = 1_700_000_000_000;
+
+        service
+            .revoke_identity_sessions("acme", "u1", &[], cutoff_ms, "req-1", "legacy")
+            .await
+            .unwrap();
+
+        assert_eq!(
+            revocations.targets(),
+            vec![target(
+                "acme",
+                "u1",
+                None,
+                BindingRevocationReason::IdentityRevoked
+            )]
+        );
+        assert_eq!(revocations.cutoffs(), vec![cutoff_ms]);
+    }
+
+    /// 调用方重投同一次身份吊销（截止时刻不变）：再提交的吊销带的仍是原来的截止时刻，用户在那
+    /// 之后重新登录登记的绑定不会被迟到的重投清掉。
+    #[tokio::test]
+    async fn a_redelivered_identity_revocation_keeps_its_original_cutoff() {
+        let (_repo, service, revocations) = seeded_with_revocations().await;
+        let cutoff_ms = now_ms() - 3_600_000;
+
+        for _ in 0..2 {
+            service
+                .revoke_identity_sessions("acme", "u1", &[], cutoff_ms, "req-1", "legacy")
+                .await
+                .unwrap();
+        }
+
+        assert_eq!(revocations.cutoffs(), vec![cutoff_ms, cutoff_ms]);
+    }
+
+    /// 请求没带截止时刻：以收到请求的时刻为上限，不发不带上限的吊销。
+    #[tokio::test]
+    async fn an_identity_revocation_without_a_cutoff_uses_the_time_it_was_received() {
+        let (_repo, service, revocations) = seeded_with_revocations().await;
+
+        let before_ms = now_ms();
+        service
+            .revoke_identity_sessions("acme", "u1", &[], 0, "req-1", "legacy")
+            .await
+            .unwrap();
+        let after_ms = now_ms();
+
+        let cutoffs = revocations.cutoffs();
+        assert_eq!(cutoffs.len(), 1);
+        assert!((before_ms..=after_ms).contains(&cutoffs[0]));
+    }
+
+    /// 网关还没确认断开、仓储报错（调用方稍后重试）时，绑定照样吊销：身份侧的吊销已成事实，
+    /// 重试时这些会话可能已经被后台移除，再也对不上设备。
+    #[tokio::test]
+    async fn an_identity_revocation_revokes_bindings_even_while_retirement_is_pending() {
+        let repo = Arc::new(MemoryRepo::default());
+        repo.save_connection(&bound("acme", "u1", "phone", "sid-old"))
+            .await
+            .unwrap();
+        *repo.identity_revocation_pending.lock().unwrap() = true;
+        let revocations = Arc::new(RecordedRevocations::default());
+        let service = UserService::new(repo)
+            .with_binding_revocations(Some(revocations.clone() as Arc<dyn BindingRevocationSink>));
+        let cutoff_ms = now_ms();
+
+        let outcome = service
+            .revoke_identity_sessions(
+                "acme",
+                "u1",
+                &["sid-old".to_string()],
+                cutoff_ms,
+                "req-1",
+                "legacy",
+            )
+            .await;
+
+        assert!(outcome.is_err());
+        assert_eq!(
+            revocations.targets(),
+            vec![target(
+                "acme",
+                "u1",
+                Some("phone"),
+                BindingRevocationReason::IdentityRevoked
+            )]
+        );
+        assert_eq!(revocations.cutoffs(), vec![cutoff_ms]);
+    }
+
+    /// 没接推送通道：踢线、踢租户、身份吊销照旧，身份吊销也不多读一次会话。
+    #[tokio::test]
+    async fn without_a_revocation_sink_nothing_changes() {
+        let (repo, service) = seeded().await;
+
+        assert!(
+            service
+                .kick_device(kick("u1", "d1"), "acme")
+                .await
+                .unwrap()
+                .success
+        );
+        let missing = service.kick_device(kick("u1", "gone"), "acme").await;
+        assert_eq!(missing.unwrap_err().code(), Some(ErrorCode::UserNotFound));
+        let kicked = service
+            .revoke_identity_sessions("acme", "u1", &[], i64::MAX, "req-1", "legacy")
+            .await
+            .unwrap();
+        // 剩下的 u1/d2 没有身份会话 ID，按截止时刻被结束。
+        assert_eq!(kicked, 1);
+        assert!(
+            repo.get_user_connections("acme", &UserId::new("u1".into()).unwrap())
+                .await
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[tokio::test]

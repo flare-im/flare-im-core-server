@@ -66,6 +66,7 @@ impl ApplicationBootstrap {
             conversation_service_url = %settings.grpc.conversation_service_url,
             online_service_url = %settings.grpc.online_service_url,
             media_service_url = %settings.grpc.media_service_url,
+            push_proxy_service_url = %settings.grpc.push_proxy_service_url,
             request_timeout_secs = settings.grpc.request_timeout_secs,
             "Using downstream grpc endpoints for admin typed facade"
         );

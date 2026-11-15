@@ -356,6 +356,7 @@ impl ConversationManageService for ConversationGrpcHandler {
                     draft: req.draft,
                     base_settings_version: req.base_settings_version,
                     clear_history_through_seq: req.clear_history_through_seq,
+                    notify_all: req.notify_all,
                 },
             )
             .await
@@ -370,6 +371,7 @@ impl ConversationManageService for ConversationGrpcHandler {
                 settings_version: settings.settings_version,
                 is_mention_only: settings.is_mention_only,
                 history_cleared_through_seq: Some(settings.history_cleared_through_seq),
+                notify_all: settings.notify_all,
             }),
         }))
     }

@@ -641,7 +641,10 @@ async fn administer_reads_the_recorded_executions_of_its_own_tenant() {
     assert_eq!(stats.total_executions, 2);
     assert_eq!(stats.success_count, 1);
     assert_eq!(stats.failure_count, 1);
-    assert_eq!(stats.circuit_break_count, 0, "the deleted predecessor's rows stay its own");
+    assert_eq!(
+        stats.circuit_break_count, 0,
+        "the deleted predecessor's rows stay its own"
+    );
     assert_eq!(
         stats.error_count_by_code,
         HashMap::from([("SERVICE_UNAVAILABLE".to_string(), 1)])

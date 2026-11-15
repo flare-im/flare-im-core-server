@@ -1,6 +1,6 @@
-//! Push Proxy → Push Server 在 `flare.im.push.messages` 上的线格式契约。
+//! Push Proxy → Push Server 在 `flare.im.push.messages` 与 `flare.im.push.handoff` 上的线格式契约。
 //!
-//! Proxy 真实发布路径写出的字节必须能被 Server 消息消费端的解码函数还原出全部字段；
+//! Proxy 真实发布路径写出的字节必须能被 Server 消费端的解码函数还原出全部字段；
 //! 旧的 `EventBusEnvelope(PushMessageRequest)` 编码会被消费端拒绝（进 DLQ）。
 
 use std::collections::HashMap;
@@ -9,15 +9,16 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use flare_grpc_proto::push::{PushMessageRequest, PushOptions};
 use flare_im_contracts::Ctx;
-use flare_im_contracts::constants::topics::TOPIC_PUSH_MESSAGES;
+use flare_im_contracts::constants::topics::{TOPIC_PUSH_HANDOFF, TOPIC_PUSH_MESSAGES};
 use flare_im_contracts::event::types::types;
 use flare_proto::common::message_content::Content;
 use flare_proto::common::{
-    ConversationType, Message, MessageContent, MessageSource, MessageType, MqPayloadKind,
-    TextContent,
+    ConversationType, DeviceHandoff, DeviceHandoffCause, DeviceHandoffItem, Message,
+    MessageContent, MessageSource, MessageType, MqPayloadKind, TextContent,
 };
 use flare_push_proxy::config::PushProxyConfig;
 use flare_push_proxy::infrastructure::PushProxyMqPublisher;
+use flare_push_server::interface::messaging::handoff_consumer::decode_device_handoff_record;
 use flare_push_server::interface::messaging::message_consumer::decode_push_message_record;
 use flare_server_core::Context;
 use flare_server_core::eventbus::{EventEnvelope, EventPublisher, MqEventBus};
@@ -231,4 +232,76 @@ async fn legacy_event_bus_encoding_is_rejected_by_push_server() {
     let records = producer.take();
     assert_eq!(records.len(), 1);
     assert!(decode_push_message_record(&records[0].payload).is_err());
+}
+
+/// 设备交接：Proxy 写出的字节就是 Server 交接消费端解码的 `DeviceHandoff`，分区键是用户，
+/// 记录头里的租户就是交接的租户（Server 以它为记录背书）。
+#[tokio::test]
+async fn proxy_device_handoff_bytes_decode_in_push_server() {
+    let producer = Arc::new(RecordingProducer::default());
+    let publisher = PushProxyMqPublisher::with_producer(Arc::new(proxy_config()), producer.clone());
+    let handoff = DeviceHandoff {
+        tenant_id: "tenant-golden".to_string(),
+        user_id: "user-a".to_string(),
+        device_id: "phone-a".to_string(),
+        connection_id: "conn-golden".to_string(),
+        gateway_id: "gw-golden".to_string(),
+        cause: DeviceHandoffCause::AckTimeout as i32,
+        since: 1_760_000_000_000,
+        occurred_at: 1_760_000_003_000,
+        pending: vec![
+            DeviceHandoffItem {
+                conversation_id: "conv-golden".to_string(),
+                seq: 42,
+                message_id: "srv-golden".to_string(),
+            },
+            DeviceHandoffItem {
+                conversation_id: "conv-other".to_string(),
+                seq: 7,
+                message_id: String::new(),
+            },
+        ],
+    };
+
+    publisher
+        .publish_device_handoff(&golden_ctx(), &handoff)
+        .await
+        .expect("proxy publishes device handoff");
+
+    let records = producer.take();
+    assert_eq!(records.len(), 1);
+    let record = &records[0];
+    assert_eq!(record.topic, TOPIC_PUSH_HANDOFF);
+    assert_eq!(record.key.as_deref(), Some("user-a"));
+    assert_eq!(
+        decode_device_handoff_record(&record.payload).expect("push server decodes the handoff"),
+        handoff
+    );
+
+    let consumer_ctx = mq_headers_to_ctx(&record.headers);
+    assert_eq!(consumer_ctx.tenant_id(), Some("tenant-golden"));
+    assert_eq!(consumer_ctx.trace_id(), "trace-golden");
+    assert_eq!(consumer_ctx.request_id(), "req-golden");
+}
+
+/// 交接的租户与发布上下文的租户不一致时 Proxy 不发布：消费端会以记录头里的租户处理它。
+#[tokio::test]
+async fn proxy_refuses_to_publish_a_handoff_for_another_tenant() {
+    let producer = Arc::new(RecordingProducer::default());
+    let publisher = PushProxyMqPublisher::with_producer(Arc::new(proxy_config()), producer.clone());
+    let handoff = DeviceHandoff {
+        tenant_id: "tenant-other".to_string(),
+        user_id: "user-a".to_string(),
+        device_id: "phone-a".to_string(),
+        cause: DeviceHandoffCause::LinkLost as i32,
+        ..Default::default()
+    };
+
+    assert!(
+        publisher
+            .publish_device_handoff(&golden_ctx(), &handoff)
+            .await
+            .is_err()
+    );
+    assert!(producer.take().is_empty());
 }

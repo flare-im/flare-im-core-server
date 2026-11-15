@@ -4,12 +4,15 @@
 
 use flare_grpc_proto::conversation::conversation_manage_service_client::ConversationManageServiceClient;
 use flare_grpc_proto::conversation::conversation_read_service_client::ConversationReadServiceClient;
+use flare_grpc_proto::conversation::user_notification_settings_service_client::UserNotificationSettingsServiceClient;
 use flare_grpc_proto::conversation::{
     ConversationBootstrapRequest, ConversationBootstrapResponse, CreateConversationRequest,
     CreateConversationResponse, GetConversationDetailRequest, GetConversationDetailResponse,
+    GetUserNotificationSettingsRequest, GetUserNotificationSettingsResponse,
     ListConversationParticipantsRequest, ListConversationParticipantsResponse,
     UpdateConversationUserSettingsRequest, UpdateConversationUserSettingsResponse,
-    UpdateCursorRequest,
+    UpdateCursorRequest, UpdateUserNotificationSettingsRequest,
+    UpdateUserNotificationSettingsResponse,
 };
 use flare_grpc_proto::storage::storage_reader_service_client::StorageReaderServiceClient;
 use flare_grpc_proto::storage::{
@@ -136,6 +139,13 @@ impl GrpcSyncAdapters {
     -> Result<ConversationManageServiceClient<Channel>, FlareError> {
         let ch = Self::create_channel(CONVERSATION).await?;
         Ok(ConversationManageServiceClient::new(ch))
+    }
+
+    async fn user_notification_settings_client()
+    -> Result<UserNotificationSettingsServiceClient<Channel>, FlareError> {
+        let name = get_service_name(CONVERSATION);
+        let ch = Self::create_channel(&name).await?;
+        Ok(UserNotificationSettingsServiceClient::new(ch))
     }
 
     async fn storage_client() -> Result<StorageReaderServiceClient<Channel>, FlareError> {
@@ -347,6 +357,32 @@ impl ConversationSyncPort for GrpcSyncAdapters {
         let mut client = Self::conversation_manage_client().await?;
         let resp = client
             .create_conversation(request_with_context(req, ctx))
+            .await
+            .map_err(|e| flare_from_tonic_status(&e))?;
+        Ok(resp.into_inner())
+    }
+
+    async fn get_user_notification_settings(
+        &self,
+        ctx: &Ctx,
+        req: GetUserNotificationSettingsRequest,
+    ) -> Result<GetUserNotificationSettingsResponse, FlareError> {
+        let mut client = Self::user_notification_settings_client().await?;
+        let resp = client
+            .get_user_notification_settings(request_with_context(req, ctx))
+            .await
+            .map_err(|e| flare_from_tonic_status(&e))?;
+        Ok(resp.into_inner())
+    }
+
+    async fn update_user_notification_settings(
+        &self,
+        ctx: &Ctx,
+        req: UpdateUserNotificationSettingsRequest,
+    ) -> Result<UpdateUserNotificationSettingsResponse, FlareError> {
+        let mut client = Self::user_notification_settings_client().await?;
+        let resp = client
+            .update_user_notification_settings(request_with_context(req, ctx))
             .await
             .map_err(|e| flare_from_tonic_status(&e))?;
         Ok(resp.into_inner())

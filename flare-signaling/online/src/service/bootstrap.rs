@@ -66,6 +66,34 @@ impl ApplicationBootstrap {
                 Ok(())
             },
         );
+        // 交接上报与清扫分开跑：清扫器只入队，推送代理慢或不可达都不拖住清扫。
+        if let Some(dispatcher) = context.handoff_dispatcher {
+            runtime = runtime.add_spawn_with_shutdown(
+                "online-handoff-reporter",
+                move |shutdown| async move {
+                    dispatcher
+                        .run(async {
+                            let _ = shutdown.await;
+                        })
+                        .await;
+                    Ok(())
+                },
+            );
+        }
+        // 推送绑定吊销同样在后台送：踢线与身份吊销只提交请求，不等推送代理，也不因它失败。
+        if let Some(dispatcher) = context.revocation_dispatcher {
+            runtime = runtime.add_spawn_with_shutdown(
+                "online-binding-revoker",
+                move |shutdown| async move {
+                    dispatcher
+                        .run(async {
+                            let _ = shutdown.await;
+                        })
+                        .await;
+                    Ok(())
+                },
+            );
+        }
         if let Some((repository, pool, publisher)) = context.command_delivery {
             runtime = runtime.add_spawn_with_shutdown(
                 "online-command-delivery",

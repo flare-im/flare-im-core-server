@@ -583,12 +583,6 @@ pub struct PushServerServiceConfig {
     /// 推送死信主题
     #[serde(default)]
     pub push_dlq_topic: Option<String>,
-    /// ConversationReadService gRPC endpoint，用于大群 pure ping 按页解析成员。
-    #[serde(default)]
-    pub conversation_read_endpoint: Option<String>,
-    /// 大群 pure ping 解析成员的分页大小。
-    #[serde(default)]
-    pub event_ping_participant_page_size: Option<i32>,
     /// 大群 pure ping 在 Push Server 解析成员前按会话合并的窗口（毫秒），0 表示关闭。
     #[serde(default)]
     pub event_ping_coalesce_window_ms: Option<u64>,
@@ -598,9 +592,6 @@ pub struct PushServerServiceConfig {
     /// 在线状态查询后端：redis 或 grpc。
     #[serde(default)]
     pub online_status_backend: Option<String>,
-    /// 在线状态过期时间（秒）
-    #[serde(default)]
-    pub online_ttl_seconds: Option<u64>,
     /// 默认租户 ID
     #[serde(default)]
     pub default_tenant_id: Option<String>,
@@ -683,9 +674,6 @@ pub struct PushWorkerServiceConfig {
     /// 未配置离线推送提供者时的有界本地 parking 容量
     #[serde(default)]
     pub offline_parking_capacity: Option<usize>,
-    /// 事件 ping 防抖窗口（毫秒），0 表示关闭
-    #[serde(default)]
-    pub event_ping_debounce_window_ms: Option<u64>,
     /// Prometheus 指标出口开关
     #[serde(default)]
     pub metrics_enabled: Option<bool>,
@@ -704,6 +692,55 @@ pub struct PushWorkerServiceConfig {
     /// Hook 配置目录
     #[serde(default)]
     pub hook_config_dir: Option<String>,
+    /// 设备有多条推送绑定时依次尝试的厂商（`apns`、`fcm`、`getui`），缺省
+    /// `["apns", "getui", "fcm"]`；没列出的厂商按缺省顺序排在后面。
+    #[serde(default)]
+    pub binding_order: Option<Vec<String>>,
+    /// 按厂商的并发、速率与熔断：`[services.push_worker.vendors.<apns|fcm|getui>]`。
+    #[serde(default)]
+    pub vendors: Option<PushWorkerVendorsConfig>,
+}
+
+/// Push Worker 各厂商的治理参数；没写的厂商、没写的字段用缺省值。
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct PushWorkerVendorsConfig {
+    #[serde(default)]
+    pub apns: Option<PushVendorGovernanceConfig>,
+    #[serde(default)]
+    pub fcm: Option<PushVendorGovernanceConfig>,
+    #[serde(default)]
+    pub getui: Option<PushVendorGovernanceConfig>,
+}
+
+/// 一个厂商的并发、速率与熔断参数。缺省值见 Push Worker（APNs 256/2000、FCM 256/1000、
+/// 个推 64/300；熔断 0.5、20、10、30000、3）。
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+pub struct PushVendorGovernanceConfig {
+    /// 本 worker 同时向这个厂商发出的请求上限。
+    #[serde(default)]
+    pub max_concurrency: Option<usize>,
+    /// 每个应用凭据每秒至多发多少条。
+    #[serde(default)]
+    pub rate_per_sec: Option<u32>,
+    /// 令牌桶容量，缺省等于 `rate_per_sec`。
+    #[serde(default)]
+    pub burst: Option<u32>,
+    /// 滚动窗口里失败占比达到它就熔断。
+    #[serde(default)]
+    pub failure_ratio: Option<f64>,
+    /// 滚动窗口的调用数。
+    #[serde(default)]
+    pub window: Option<usize>,
+    /// 窗口里至少这么多次调用才下结论。
+    #[serde(default)]
+    pub min_calls: Option<usize>,
+    /// 熔断后多久放探测请求（毫秒）。
+    #[serde(default)]
+    pub open_ms: Option<u64>,
+    /// 半开时同时放行的探测数；这么多次成功就恢复。
+    #[serde(default)]
+    pub half_open_probes: Option<u32>,
 }
 
 /// 消息编排服务配置（主消息流 fanout、消息操作事件）

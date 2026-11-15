@@ -3,14 +3,14 @@
 //! 封装连接管理的核心业务逻辑
 
 use flare_grpc_proto::signaling::{
-    DeviceConflictStrategy, HeartbeatRequest, LoginRequest, LogoutRequest,
+    DeviceConflictStrategy, HeartbeatRequest, LoginRequest, LogoutRequest, ReportDeviceStateRequest,
 };
 use flare_im_contracts::Ctx;
 use flare_server_core::error::{ErrorBuilder, ErrorCode, Result};
 use std::sync::Arc;
 use tracing::{info, instrument, warn};
 
-use crate::domain::model::ConnectionDomainServiceConfig;
+use crate::domain::model::{ConnectionDomainServiceConfig, DeviceLinkState};
 use crate::domain::ports::IConnectionPort;
 use crate::domain::service::ConnectionQualityService;
 
@@ -122,6 +122,9 @@ impl ConnectionDomainService {
         let distribution = client_build("distribution");
         let connection_epoch = client_build("connection_epoch");
         let access_serial = client_build("access_serial");
+        // 建连时的设备状态（CONNECT 里的 `device_state`，随设备元数据进连接元数据）：Online 据此
+        // 登记这台设备是前台还是后台，没带时是前台。
+        let device_state = DeviceLinkState::from_connection_metadata(connection_metadata);
 
         let login_request = LoginRequest {
             user_id: user_id.to_string(),
@@ -136,6 +139,8 @@ impl ConnectionDomainService {
             token_version: 0,
             initial_quality: None,
             resume_conversation_id: String::new(),
+            app_state: device_state.app_state as i32,
+            attention: device_state.attention as i32,
         };
 
         // 通过连接仓储调用登录，添加超时保护
@@ -239,6 +244,47 @@ impl ConnectionDomainService {
             "Connection unregistered successfully"
         );
         Ok(())
+    }
+
+    /// 上报设备状态
+    ///
+    /// 把客户端经 DEVICE_STATE 报来的状态转给 Signaling Online，按登录时拿到的会话 ID 定位。
+    /// 会话已不存在（连接刚断开）时 Online 回 `success = false`，这里按失败返回。
+    #[instrument(skip(self, ctx))]
+    pub async fn report_device_state(
+        &self,
+        ctx: &Ctx,
+        user_id: &str,
+        conversation_id: &str,
+        state: DeviceLinkState,
+        badge: u32,
+    ) -> Result<()> {
+        let request = ReportDeviceStateRequest {
+            user_id: user_id.to_string(),
+            conversation_id: conversation_id.to_string(),
+            app_state: state.app_state as i32,
+            attention: state.attention as i32,
+            badge,
+        };
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            self.connection_port.report_device_state(ctx, request),
+        )
+        .await
+        {
+            Ok(Ok(response)) if response.success => Ok(()),
+            Ok(Ok(_)) => Err(ErrorBuilder::new(
+                ErrorCode::OperationFailed,
+                "online session not found for device state report",
+            )
+            .build_error()),
+            Ok(Err(e)) => Err(e),
+            Err(_) => Err(ErrorBuilder::new(
+                ErrorCode::OperationTimeout,
+                "Device state report timeout",
+            )
+            .build_error()),
+        }
     }
 
     /// 刷新连接心跳
@@ -351,17 +397,21 @@ mod tests {
     use async_trait::async_trait;
     use flare_grpc_proto::signaling::{
         GetOnlineStatusRequest, GetOnlineStatusResponse, HeartbeatRequest, HeartbeatResponse,
-        LoginResponse, LogoutRequest, LogoutResponse,
+        LoginResponse, LogoutRequest, LogoutResponse, ReportDeviceStateResponse,
     };
     use flare_im_contracts::Ctx;
+    use flare_proto::common::{DeviceAppState, DeviceAttention};
     use std::collections::HashMap;
     use tokio::sync::Mutex;
 
     #[derive(Default)]
     struct CapturingConnectionPort {
         last_login: Mutex<Option<LoginRequest>>,
+        last_device_state: Mutex<Option<ReportDeviceStateRequest>>,
         /// 设了就让 Online 登录按这个错误失败
         login_error: Option<(ErrorCode, &'static str)>,
+        /// Online 找不到这条会话（设备状态上报回 `success = false`）
+        session_gone: bool,
     }
 
     #[async_trait]
@@ -390,6 +440,17 @@ mod tests {
             _request: HeartbeatRequest,
         ) -> Result<HeartbeatResponse> {
             Ok(HeartbeatResponse::default())
+        }
+
+        async fn report_device_state(
+            &self,
+            _ctx: &Ctx,
+            request: ReportDeviceStateRequest,
+        ) -> Result<ReportDeviceStateResponse> {
+            *self.last_device_state.lock().await = Some(request);
+            Ok(ReportDeviceStateResponse {
+                success: !self.session_gone,
+            })
         }
 
         async fn get_online_status(
@@ -507,6 +568,91 @@ mod tests {
             Some(&"platform_exclusive".to_string())
         );
         assert_eq!(request.metadata.get("tenant_id"), Some(&"acme".to_string()));
+        // 客户端没带设备状态：按前台登记。
+        assert_eq!(request.app_state, DeviceAppState::Active as i32);
+        assert_eq!(request.attention, DeviceAttention::Unspecified as i32);
+    }
+
+    /// 建连时的设备状态（连接元数据里那一份）随 Online 登录带上：后台建连的设备一登记就是后台，
+    /// 声明了提示交给推送通道的设备一登记就是 `Deferred`。
+    #[tokio::test]
+    async fn register_connection_passes_the_initial_device_state_to_online_login() {
+        for (connect_state, app_state, attention) in [
+            ("active", DeviceAppState::Active, DeviceAttention::Attentive),
+            (
+                "standby",
+                DeviceAppState::Standby,
+                DeviceAttention::Unspecified,
+            ),
+            (
+                "deferred",
+                DeviceAppState::Deferred,
+                DeviceAttention::Unspecified,
+            ),
+        ] {
+            let port = std::sync::Arc::new(CapturingConnectionPort::default());
+            let service = service_with_port(port.clone());
+            let metadata = HashMap::from([(
+                crate::constants::METADATA_KEY_DEVICE_STATE.to_string(),
+                connect_state.to_string(),
+            )]);
+
+            service
+                .register_connection(
+                    &acme_user(),
+                    "u1",
+                    "d1",
+                    Some("android"),
+                    Some("conn-1"),
+                    Some(&metadata),
+                )
+                .await
+                .expect("register connection should succeed");
+
+            let request = port
+                .last_login
+                .lock()
+                .await
+                .clone()
+                .expect("login request should be captured");
+            assert_eq!(request.app_state, app_state as i32, "{connect_state}");
+            assert_eq!(request.attention, attention as i32, "{connect_state}");
+        }
+    }
+
+    /// 设备状态上报按登录会话 ID 定位，状态、注意力与角标原样带给 Online；会话已不在时按失败返回。
+    #[tokio::test]
+    async fn device_state_reports_carry_the_session_and_fail_when_it_is_gone() {
+        let parking = DeviceLinkState {
+            app_state: DeviceAppState::Parking,
+            attention: DeviceAttention::Idle,
+        };
+        let port = std::sync::Arc::new(CapturingConnectionPort::default());
+        let service = service_with_port(port.clone());
+        service
+            .report_device_state(&acme_user(), "u1", "presence-session-1", parking, 7)
+            .await
+            .expect("report accepted");
+        assert_eq!(
+            port.last_device_state.lock().await.clone(),
+            Some(ReportDeviceStateRequest {
+                user_id: "u1".to_string(),
+                conversation_id: "presence-session-1".to_string(),
+                app_state: DeviceAppState::Parking as i32,
+                attention: DeviceAttention::Idle as i32,
+                badge: 7,
+            })
+        );
+
+        let gone = std::sync::Arc::new(CapturingConnectionPort {
+            session_gone: true,
+            ..Default::default()
+        });
+        let error = service_with_port(gone)
+            .report_device_state(&acme_user(), "u1", "presence-session-1", parking, 0)
+            .await
+            .expect_err("Online no longer has the session");
+        assert_eq!(error.code(), Some(ErrorCode::OperationFailed));
     }
 
     fn acme_user() -> Ctx {

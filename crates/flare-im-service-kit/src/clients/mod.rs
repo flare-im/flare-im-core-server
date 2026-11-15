@@ -3,6 +3,7 @@ mod conversation_client;
 mod media_client;
 mod message_client;
 mod online_client;
+mod push_client;
 mod resolver;
 mod storage_client;
 
@@ -25,6 +26,7 @@ pub use message_client::{
     MessageSendServiceClientWrapper,
 };
 pub use online_client::OnlineServiceClientWrapper;
+pub use push_client::PushAdminClientWrapper;
 pub use resolver::{DownstreamGrpcResolver, DownstreamKind};
 pub use storage_client::StorageReaderServiceClientWrapper;
 
@@ -46,6 +48,10 @@ pub struct DownstreamGrpcConfig {
     pub online_service_url: String,
     /// StorageReaderService 路由
     pub storage_reader_service_url: String,
+    /// Push Proxy 路由（只有 Admin Gateway 用：管理员查推送决策链）。API Gateway 拨 Push Proxy 用的是
+    /// 自己的静态地址 `FLARE_API_GATEWAY_GRPC_PUSH_PROXY_URL`，不读这一项。
+    #[serde(default)]
+    pub push_proxy_service_url: String,
     /// 无注册中心或发现失败时的 Media 静态回退 URI（本地开发）
     #[serde(default)]
     pub media_static_fallback: String,
@@ -59,6 +65,8 @@ pub struct DownstreamGrpcConfig {
     pub online_static_fallback: String,
     #[serde(default)]
     pub storage_reader_static_fallback: String,
+    #[serde(default)]
+    pub push_proxy_static_fallback: String,
     /// 静态地址（`http(s)://` 覆盖与静态回退）一次建连的上限（秒），见
     /// [`Self::static_channel_policy`]；`discovery://` 通道的建连由发现客户端决定。
     pub connect_timeout_secs: u64,
@@ -190,9 +198,9 @@ impl GrpcClients {
     }
 }
 
-/// Admin Gateway 的下游 gRPC 客户端：只连它用到的四个固定下游（Media、Conversation 读、
-/// Online、Storage Reader；可选的 Capability 另见 [`CapabilityAdminClientWrapper`]），不连
-/// Message Ingest 与 Orchestrator，也不要求它们的地址可达。
+/// Admin Gateway 的下游 gRPC 客户端：只连它用到的五个固定下游（Media、Conversation 读、
+/// Online、Storage Reader、Push Proxy；可选的 Capability 另见 [`CapabilityAdminClientWrapper`]），
+/// 不连 Message Ingest 与 Orchestrator，也不要求它们的地址可达。
 ///
 /// 管理员调用只带中间件验过的 Staff `x-flare-ctx` 原样转发（见
 /// [`crate::staff_context::staff_context_request`]）；Media 另由网关按 `kid=admin-gateway` 重签。
@@ -201,13 +209,15 @@ pub struct AdminGrpcClients {
     pub conversation_read: Arc<tokio::sync::Mutex<ConversationReadServiceClientWrapper>>,
     pub online: Arc<tokio::sync::Mutex<OnlineServiceClientWrapper>>,
     pub storage_reader: Arc<tokio::sync::Mutex<StorageReaderServiceClientWrapper>>,
+    /// Push Proxy 的管理员只读入口（推送决策链）。
+    pub push: Arc<tokio::sync::Mutex<PushAdminClientWrapper>>,
     /// 一次下游调用的请求超时（`FLARE_ADMIN_GATEWAY_GRPC_REQUEST_TIMEOUT_SECS`，缺省 5 秒），由
     /// [`Self::bounded`] 施加；`None` 不限时（只在测试里）。
     pub request_timeout: Option<Duration>,
 }
 
 impl AdminGrpcClients {
-    /// 通过服务发现（或静态回退）只连 Admin Gateway 用到的四个下游。
+    /// 通过服务发现（或静态回退）只连 Admin Gateway 用到的五个下游。
     pub async fn connect(
         app_config: Arc<FlareAppConfig>,
         grpc: &DownstreamGrpcConfig,
@@ -218,6 +228,7 @@ impl AdminGrpcClients {
         let conversation_channel = resolver.connect(DownstreamKind::Conversation).await?;
         let online_channel = resolver.connect(DownstreamKind::SignalingOnline).await?;
         let storage_reader_channel = resolver.connect(DownstreamKind::StorageReader).await?;
+        let push_proxy_channel = resolver.connect(DownstreamKind::PushProxy).await?;
         let media_fallback = optional_static_fallback(&grpc.media_static_fallback);
         Ok(Self {
             media: Arc::new(tokio::sync::Mutex::new(
@@ -231,6 +242,9 @@ impl AdminGrpcClients {
             )),
             storage_reader: Arc::new(tokio::sync::Mutex::new(
                 StorageReaderServiceClientWrapper::from_channel(storage_reader_channel),
+            )),
+            push: Arc::new(tokio::sync::Mutex::new(
+                PushAdminClientWrapper::from_channel(push_proxy_channel),
             )),
             request_timeout,
         })

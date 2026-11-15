@@ -1,25 +1,94 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use flare_im_contracts::constants::topics::TOPIC_PUSH_HANDOFF;
+use flare_im_service_kit::metrics::PushServerMetrics;
 use flare_im_service_kit::push_delivery::{
     AttestedRecordHandler, BrokerRecordIdentity, PushDeliveryMode,
 };
+use flare_im_service_kit::push_trace::PushTraceRecorder;
 use flare_server_core::error::Result;
 use flare_server_core::mq::consumer::ConsumerConfig;
 use flare_server_core::mq::consumer::MessageHandler;
 use flare_server_core::mq::consumer::TopicDispatcher;
 use flare_server_core::mq::consumer::dispatcher::Dispatcher;
 
-use crate::application::PushRouterHandler;
+use crate::application::{NotifyGate, NotifyWaves, PushRouterHandler};
 use crate::config::PushServerConfig;
 use crate::infrastructure::mq::publisher::PushServerMqPublisher;
+use crate::infrastructure::notify::GateKeys;
 use crate::infrastructure::online::online_status_service::OnlineStatusService;
-use crate::interface::messaging::{PushEventHandler, PushHandler, PushMessageHandler};
+use crate::infrastructure::{
+    CachedDeviceBindings, CachedUserNotifySettings, ConversationRecentUnread,
+    ConversationUserNotifySettings, MemoryGateStore, RedisDeviceBindingRegistry,
+    RedisDeviceSignals, RedisGateStore, StorageMessageLookup,
+};
+use crate::interface::messaging::{
+    PushEventHandler, PushHandler, PushHandoffHandler, PushMessageHandler,
+};
+use crate::interface::timer::NotifyDueLoop;
 
 pub struct ApplicationContext {
     pub config: Arc<PushServerConfig>,
     pub consumer_config: ConsumerConfig,
     pub dispatcher: Arc<dyn Dispatcher>,
+    /// 防打扰闸门的到期循环；闸门关闭时为空。
+    pub notify_due: Option<NotifyDueLoop>,
+}
+
+/// 防打扰闸门与群会话的波次：状态在同一个推送 Redis，不可用时退到同一个进程内存储（两者的到期
+/// 条目都由闸门的到期循环领取）；设备信号读 Online 写在会话 Redis 里的标记；用户级设置经会话
+/// 服务读，进程内缓存 60 秒。
+async fn build_notify_gate(
+    config: &PushServerConfig,
+    metrics: Arc<PushServerMetrics>,
+) -> Result<Option<(Arc<NotifyGate>, Arc<NotifyWaves>)>> {
+    let settings = &config.notify;
+    if !settings.enabled {
+        tracing::info!(
+            "notify gate disabled: offline tasks are emitted per message and group messages enumerate their recipients one by one"
+        );
+        return Ok(None);
+    }
+    let store = Arc::new(
+        RedisGateStore::connect(
+            &settings.redis_url,
+            GateKeys::new(settings.key_prefix.clone(), settings.due_shards),
+        )
+        .await?,
+    );
+    let fallback = Arc::new(MemoryGateStore::fallback());
+    let policy = Arc::new(settings.policy());
+    let user_settings =
+        CachedUserNotifySettings::new(Arc::new(ConversationUserNotifySettings::new()));
+    let mut gate = NotifyGate::new(store.clone(), fallback.clone(), policy.clone())
+        .with_settings(Arc::new(user_settings))
+        .with_metrics(metrics.clone());
+    // 设备信号只是提示：会话 Redis 连不上时闸门照常工作，只是不知道设备回过前台、角标没有基线。
+    match RedisDeviceSignals::connect(&config.redis_url).await {
+        Ok(signals) => gate = gate.with_signals(Arc::new(signals)),
+        Err(error) => tracing::warn!(
+            error = %error,
+            "device signals unavailable; the gate runs without back-to-active markers and badge bases"
+        ),
+    }
+    let waves = NotifyWaves::new(store, fallback, policy).with_metrics(metrics);
+    Ok(Some((Arc::new(gate), Arc::new(waves))))
+}
+
+/// 推送决策链写在闸门所在的推送 Redis（`[redis.push]` 或 `PUSH_SERVER_GATE_REDIS_URL`）。只进有界
+/// 队列、后台批量写，Redis 不可用或地址写错时只少了决策链，推送照常。
+fn push_trace_recorder(config: &PushServerConfig) -> PushTraceRecorder {
+    if !config.trace.enabled {
+        return PushTraceRecorder::disabled();
+    }
+    match redis::Client::open(config.notify.redis_url.as_str()) {
+        Ok(client) => PushTraceRecorder::spawn(client, config.trace.clone()),
+        Err(error) => {
+            tracing::warn!(error = %error, "push decision trace disabled: push Redis address is invalid");
+            PushTraceRecorder::disabled()
+        }
+    }
 }
 
 pub async fn initialize(
@@ -36,16 +105,53 @@ pub async fn initialize(
     let publisher = Arc::new(PushServerMqPublisher::new(config.clone()).await?);
     let online_status = Arc::new(OnlineStatusService::new(config.clone()).await?);
     let policy = Arc::new(crate::infrastructure::ConversationNotifyPolicy::new());
-    let route_handler = Arc::new(
-        PushRouterHandler::new(online_status.clone(), online_status, publisher.clone())
-            // 同一个实现同时提供通知偏好与全员枚举：读的是同一份参与者数据。
-            .with_notify_policy(policy)
-            .with_conversation_ping_coalesce_window(Duration::from_millis(
-                config.event_ping_coalesce_window_ms,
-            )),
-    );
+    // 设备推送绑定：直读 Proxy 登记的绑定表，前面加一层进程内缓存。
+    let device_bindings = Arc::new(CachedDeviceBindings::new(Arc::new(
+        RedisDeviceBindingRegistry::connect(
+            &config.device_token_redis_url,
+            config.device_token_key_prefix.clone(),
+            config.binding_inactive_days,
+        )
+        .await?,
+    )));
+    let metrics = Arc::new(PushServerMetrics::new());
+    let notify = build_notify_gate(&config, metrics.clone()).await?;
+    let mut route_handler = PushRouterHandler::new(
+        online_status.clone(),
+        online_status,
+        device_bindings,
+        publisher.clone(),
+    )
+    // 同一个实现同时提供通知偏好、成员与订阅者的枚举：读的是同一份参与者数据。
+    .with_notify_policy(policy)
+    .with_message_lookup(Arc::new(StorageMessageLookup::new()))
+    // 网关失联的交接不带未确认条目，补提示范围向会话服务问。
+    .with_recent_conversations(Arc::new(ConversationRecentUnread::new()))
+    .with_metrics(metrics)
+    .with_trace(push_trace_recorder(&config))
+    .with_conversation_ping_coalesce_window(Duration::from_millis(
+        config.event_ping_coalesce_window_ms,
+    ));
+    if let Some((gate, waves)) = &notify {
+        route_handler = route_handler
+            .with_notify_gate(gate.clone())
+            .with_notify_waves(waves.clone());
+    }
+    let route_handler = Arc::new(route_handler);
+    // 到期条目不是消息记录，没有上游上下文可以背书：按条目的租户现签一份本服务的身份。
+    let notify_due = notify.map(|(gate, _)| {
+        let identity = identity.clone();
+        NotifyDueLoop::new(
+            route_handler.clone(),
+            gate,
+            Arc::new(move |tenant_id: &str| identity.attest(tenant_id, "", "")),
+            Duration::from_millis(config.notify.due_poll_interval_ms),
+            config.notify.due_batch,
+        )
+    });
     let message_handler = PushMessageHandler::new(route_handler.clone(), publisher.clone());
     let event_handler = PushEventHandler::new(route_handler.clone(), publisher.clone());
+    let handoff_handler = PushHandoffHandler::new(route_handler.clone(), publisher.clone());
     let push_handler = PushHandler::new(route_handler);
 
     let consumer_cfg = push_server_consumer_config();
@@ -67,11 +173,18 @@ pub async fn initialize(
         config.push_envelope_topic.clone(),
         attested(Arc::new(push_handler)),
     )?;
+    // 设备交接与其它推送入站 Topic 同在 FLARE_PUSH 流里，同样逐条重新背书。
+    register_handler(
+        &mut dispatcher,
+        TOPIC_PUSH_HANDOFF.to_string(),
+        attested(Arc::new(handoff_handler)),
+    )?;
 
     Ok(ApplicationContext {
         config,
         consumer_config: consumer_cfg,
         dispatcher: Arc::new(dispatcher),
+        notify_due,
     })
 }
 
@@ -108,27 +221,8 @@ mod wire_tests {
 
     fn push_server_nats_config() -> PushServerConfig {
         PushServerConfig {
-            mq_backend: "nats".into(),
-            jetstream_url: "nats://127.0.0.1:1".into(),
-            jetstream_timeout_ms: 1_000,
-            jetstream_retries: 0,
-            jetstream_retry_backoff_ms: 0,
             jetstream_stream_specs: flare_server_core::mq::nats::default_stream_specs(),
-            kafka_brokers: Vec::new(),
-            kafka_client_id: String::new(),
-            kafka_options: Default::default(),
-            consumer_group: "push-server".into(),
-            push_message_topic: String::new(),
-            push_event_topic: String::new(),
-            push_envelope_topic: String::new(),
-            push_online_topic: String::new(),
-            push_offline_topic: String::new(),
-            push_dlq_topic: String::new(),
-            redis_url: String::new(),
-            online_status_backend: "redis".into(),
-            online_service_endpoint: String::new(),
-            event_ping_coalesce_window_ms: 0,
-            default_tenant_id: "0".into(),
+            ..PushServerConfig::for_tests()
         }
     }
 

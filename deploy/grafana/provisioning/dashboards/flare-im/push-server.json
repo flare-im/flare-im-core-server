@@ -371,6 +371,241 @@
           "legendFormat": "{{reason}} / {{action}}"
         }
       ]
+    },
+    {
+      "id": 9,
+      "type": "timeseries",
+      "title": "离线推送到达率（按厂商与应用版本）",
+      "description": "设备回报的到达回执数除以厂商受理数（只算能回报到达的推送：带通知扩展的 iOS 提示、收数据消息的 Android FCM），一小时窗口。",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 32
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (vendor, app_version) (rate(flare_push_receipts_total[1h])) / sum by (vendor, app_version) (rate(flare_push_vendor_sent_total{receipt_capable=\"true\"}[1h]))",
+          "legendFormat": "{{vendor}} / {{app_version}}"
+        }
+      ]
+    },
+    {
+      "id": 10,
+      "type": "timeseries",
+      "title": "厂商受理与失败",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 32
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (vendor) (rate(flare_push_vendor_sent_total[$__rate_interval]))",
+          "legendFormat": "受理 {{vendor}}"
+        },
+        {
+          "refId": "B",
+          "expr": "sum by (vendor, reason) (rate(flare_push_vendor_failures_total[$__rate_interval]))",
+          "legendFormat": "失败 {{vendor}} / {{reason}}"
+        }
+      ]
+    },
+    {
+      "id": 11,
+      "type": "timeseries",
+      "title": "厂商受理时延",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 40
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "histogram_quantile(0.95, sum by (le, vendor) (rate(flare_push_vendor_latency_seconds_bucket[$__rate_interval])))",
+          "legendFormat": "P95 {{vendor}}"
+        },
+        {
+          "refId": "B",
+          "expr": "histogram_quantile(0.99, sum by (le, vendor) (rate(flare_push_vendor_latency_seconds_bucket[$__rate_interval])))",
+          "legendFormat": "P99 {{vendor}}"
+        }
+      ]
+    },
+    {
+      "id": 12,
+      "type": "timeseries",
+      "title": "限流、换绑定与攒摘要",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 40
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (vendor) (rate(flare_push_vendor_throttled_total[$__rate_interval]))",
+          "legendFormat": "限流 {{vendor}}"
+        },
+        {
+          "refId": "B",
+          "expr": "sum by (from, to) (rate(flare_push_vendor_switch_total[$__rate_interval]))",
+          "legendFormat": "换绑定 {{from}} → {{to}}"
+        },
+        {
+          "refId": "C",
+          "expr": "sum by (vendor) (rate(flare_push_digest_coalesced_total[$__rate_interval]))",
+          "legendFormat": "攒入摘要 {{vendor}}"
+        },
+        {
+          "refId": "D",
+          "expr": "sum by (result) (rate(flare_push_digest_flush_total[$__rate_interval]))",
+          "legendFormat": "摘要交还 {{result}}"
+        }
+      ]
+    },
+    {
+      "id": 13,
+      "type": "timeseries",
+      "title": "厂商熔断状态",
+      "description": "0 关闭（正常），1 半开（放探测请求），2 打开（不再调用这家厂商，任务换下一条绑定）。",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 48
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never"
+          },
+          "min": 0,
+          "max": 2,
+          "decimals": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max by (vendor) (flare_push_vendor_breaker_state)",
+          "legendFormat": "{{vendor}}"
+        }
+      ]
     }
   ]
 }

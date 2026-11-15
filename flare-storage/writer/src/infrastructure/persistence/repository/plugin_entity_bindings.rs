@@ -75,10 +75,7 @@ impl EntityRules {
         let mut contributions = HashMap::new();
         for projected in &projection.plugins {
             let grant = &projected.grant;
-            if !grant.enabled
-                || grant.revoked
-                || !grant.in_effect(now_ms)
-            {
+            if !grant.enabled || grant.revoked || !grant.in_effect(now_ms) {
                 continue;
             }
             let Some(manifest) = manifests.get(projected.manifest_digest()) else {

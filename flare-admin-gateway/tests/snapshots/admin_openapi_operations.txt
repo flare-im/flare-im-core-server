@@ -37,6 +37,7 @@ GET /api/v1/admin/plugins
 GET /api/v1/admin/tenant/runtime
 GET /api/v1/admin/users/{user_id}/devices
 GET /api/v1/admin/users/{user_id}/presence
+GET /api/v1/admin/users/{user_id}/push-traces
 POST /api/v1/admin/hooks
 POST /api/v1/admin/medias/cleanup-orphaned-assets
 POST /api/v1/admin/medias/object-acl

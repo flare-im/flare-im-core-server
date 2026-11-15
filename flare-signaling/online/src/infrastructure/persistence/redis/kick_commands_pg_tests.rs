@@ -160,6 +160,7 @@ async fn check_commands(pool: Arc<PgPool>, client: Arc<redis::Client>, url: Stri
         tenant_runtime_postgres_url: None,
         tenant_policy: flare_im_service_kit::tenant_runtime::TenantAccessPolicy::Lenient,
         max_online_devices_per_user: 10,
+        push_proxy_url: None,
     });
     let repo = RedisConversationRepository::new(client.clone(), config.clone())
         .with_command_pool(pool.clone());
@@ -176,6 +177,10 @@ async fn check_commands(pool: Arc<PgPool>, client: Arc<redis::Client>, url: Stri
         device_priority: 2,
         token_version: 1,
         identity_session_id: None,
+        app_state: DeviceAppState::Active,
+        attention: DeviceAttention::Unspecified,
+        state_since_ms: 1,
+        badge: 0,
     };
     let mut redis = client.get_multiplexed_async_connection().await.unwrap();
     let _: () = redis
@@ -382,6 +387,7 @@ async fn check_identity_commands(pool: Arc<PgPool>, client: Arc<redis::Client>, 
         tenant_runtime_postgres_url: None,
         tenant_policy: flare_im_service_kit::tenant_runtime::TenantAccessPolicy::Lenient,
         max_online_devices_per_user: 10,
+        push_proxy_url: None,
     });
     let repo =
         RedisConversationRepository::new(client.clone(), config).with_command_pool(pool.clone());
@@ -400,6 +406,10 @@ async fn check_identity_commands(pool: Arc<PgPool>, client: Arc<redis::Client>, 
         device_priority: 2,
         token_version: 0,
         identity_session_id: sid,
+        app_state: DeviceAppState::Active,
+        attention: DeviceAttention::Unspecified,
+        state_since_ms: created_at,
+        badge: 0,
     };
     let old = make("physical-old", 1, Some(old_sid.clone()));
     let new = make("physical-new", 1, Some(new_sid.clone()));

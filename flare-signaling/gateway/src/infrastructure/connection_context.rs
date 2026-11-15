@@ -27,9 +27,12 @@ impl AuthenticatedConnectionOrigin {
     }
 
     pub(crate) fn with_identity_session_id(mut self, sid: Option<String>) -> Self {
-        self.identity_session_id=sid;self
+        self.identity_session_id = sid;
+        self
     }
-    pub(crate) fn identity_session_id(&self)->Option<&str> {self.identity_session_id.as_deref()}
+    pub(crate) fn identity_session_id(&self) -> Option<&str> {
+        self.identity_session_id.as_deref()
+    }
 
     pub(crate) fn connection_id(&self) -> &str {
         &self.connection_id
@@ -131,19 +134,25 @@ pub(crate) fn signed_connection_read<T>(
     let Some(signer) = signer else {
         return Ok(request);
     };
-    let identity=flare_server_core::SignedContextIdentity::new(
-        flare_server_core::SignedActorType::User,origin.user_id(),origin.tenant_id(),tx.request_id(),
-    ).with_credential_id("signaling-gateway");
-    let identity=if let Some(sid)=origin.identity_session_id() {identity.with_session_id(sid)} else {identity};
-    let token = signer
-        .sign(&identity)
-        .map_err(|_| {
-            ErrorBuilder::new(
-                ErrorCode::ServiceUnavailable,
-                "unable to sign read identity",
-            )
-            .build_error()
-        })?;
+    let identity = flare_server_core::SignedContextIdentity::new(
+        flare_server_core::SignedActorType::User,
+        origin.user_id(),
+        origin.tenant_id(),
+        tx.request_id(),
+    )
+    .with_credential_id("signaling-gateway");
+    let identity = if let Some(sid) = origin.identity_session_id() {
+        identity.with_session_id(sid)
+    } else {
+        identity
+    };
+    let token = signer.sign(&identity).map_err(|_| {
+        ErrorBuilder::new(
+            ErrorCode::ServiceUnavailable,
+            "unable to sign read identity",
+        )
+        .build_error()
+    })?;
     flare_server_core::set_signed_context_token(&mut request, &token).map_err(|_| {
         ErrorBuilder::new(
             ErrorCode::ServiceUnavailable,
@@ -251,12 +260,18 @@ mod tests {
     }
     #[test]
     fn authenticated_sid_is_bound_into_the_signed_connection_context() {
-        let (signer,verifier)=keys();let sid=uuid::Uuid::new_v4().to_string();
-        let ctx=connection_ctx("alice","tenant-a").insert_data(AuthenticatedConnectionOrigin::new("conn-1".into(),"alice".into(),"tenant-a".into()).with_identity_session_id(Some(sid.clone())));
-        let request=signed_connection_read((),&Arc::new(ctx),Some(&signer)).unwrap();
-        let ctx=verify_signed_context_metadata(request.metadata(),&verifier).unwrap();
-        let claims=ctx.get_data::<VerifiedContext>().and_then(VerifiedContext::claims).unwrap();
-        assert_eq!(claims.session_id.as_deref(),Some(sid.as_str()));
+        let (signer, verifier) = keys();
+        let sid = uuid::Uuid::new_v4().to_string();
+        let ctx = connection_ctx("alice", "tenant-a").insert_data(
+            AuthenticatedConnectionOrigin::new("conn-1".into(), "alice".into(), "tenant-a".into())
+                .with_identity_session_id(Some(sid.clone())),
+        );
+        let request = signed_connection_read((), &Arc::new(ctx), Some(&signer)).unwrap();
+        let ctx = verify_signed_context_metadata(request.metadata(), &verifier).unwrap();
+        let claims = ctx
+            .get_data::<VerifiedContext>()
+            .and_then(VerifiedContext::claims)
+            .unwrap();
+        assert_eq!(claims.session_id.as_deref(), Some(sid.as_str()));
     }
-
 }

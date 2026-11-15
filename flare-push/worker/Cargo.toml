@@ -16,6 +16,8 @@ flare-server-core = { workspace = true, features = ["nats", "kafka"] }
 flare-core-runtime = { workspace = true }
 flare-proto = { workspace = true }
 flare-grpc-proto = { workspace = true }
+# 通知文案模板（与客户端引擎共用一份）；提示规则也在这个 crate 里
+flare-notify-rules = { version = "0.1.0", path = "../../../flare-protocol/flare-notify-rules" }
 flare-im-contracts = { workspace = true }
 flare-im-service-kit = { workspace = true }
 flare-im-usage = { workspace = true }
@@ -43,6 +45,12 @@ sha2 = { workspace = true }
 reqwest = { workspace = true, features = ["http2"] }
 redis = { workspace = true }
 deadpool-redis = { workspace = true }
+# 厂商适配器自己的计数注册进 service-kit 的全局注册表，必须与它是同一个 prometheus
+prometheus = { workspace = true }
+# 推送文案按字素簇截断：emoji 序列、国旗、带变音符的字母不会被截成半个
+unicode-segmentation = "1.13"
+# 小米模板变量不收 emoji 与 Unicode「其他符号」（\p{So}）：按 Unicode 类别去掉
+regex = "1.12"
 
 [dev-dependencies]
 # 测试里为模拟的 broker 记录签发认证上下文（与 flare-im-service-kit 同一版本与特性）

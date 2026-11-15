@@ -6,6 +6,7 @@ mod connection_id;
 mod connection_quality;
 mod device_id;
 mod device_priority;
+mod device_state;
 mod token_version;
 mod user_id;
 
@@ -13,5 +14,6 @@ pub use connection_id::ConnectionId;
 pub use connection_quality::{ConnectionQuality, NetworkType, QualityLevel};
 pub use device_id::DeviceId;
 pub use device_priority::DevicePriority;
+pub use device_state::{DeviceAppState, DeviceAttention, DeviceStateUpdate};
 pub use token_version::TokenVersion;
 pub use user_id::UserId;

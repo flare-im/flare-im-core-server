@@ -10,15 +10,16 @@ use crate::domain::ports::IConnectionPort;
 use flare_im_contracts::Ctx;
 use flare_im_contracts::abstractions::state::{ConnectionState, ConnectionStateNotifier};
 use flare_im_usage::UsageRecorder;
+use flare_proto::common::{DeviceAppState, DeviceStateReport};
 use flare_server_core::error::Result;
 use std::collections::HashMap;
 use tokio::sync::RwLock;
 use tracing::{debug, instrument, warn};
 
 use crate::constants::{METADATA_KEY_APP_BUILD, METADATA_KEY_DISTRIBUTION};
-use crate::domain::model::ConnectionInfo;
-use crate::domain::service::ConnectionDomainService;
+use crate::domain::model::{ConnectionInfo, DeviceLinkState};
 use crate::domain::service::client_build_gate::{reported_build, stats_platform};
+use crate::domain::service::{ConnectionDomainService, DeliveryWatch, WatchedDevice};
 
 #[derive(Clone)]
 struct OnlineSession {
@@ -28,6 +29,28 @@ struct OnlineSession {
     authenticated_ctx: Ctx,
     /// 计入构建分布时的（平台，构建），下线时按同一对减回去
     build: (&'static str, u64),
+}
+
+/// 等着转给 Online 的一次设备状态上报。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct DeviceStateUpdate {
+    state: DeviceLinkState,
+    badge: u32,
+}
+
+/// 设备状态的转发表（`ConnectionHandler` 的 `device_state_outbox` 字段）。
+type DeviceStateOutbox = std::sync::Mutex<HashMap<String, Option<DeviceStateUpdate>>>;
+
+/// 取这条连接下一份要转发的设备状态；没有了就把它从表里摘掉，转发任务随之结束。
+fn next_device_state(outbox: &DeviceStateOutbox, connection_id: &str) -> Option<DeviceStateUpdate> {
+    let mut outbox = outbox
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let next = outbox.get_mut(connection_id).and_then(Option::take);
+    if next.is_none() {
+        outbox.remove(connection_id);
+    }
+    next
 }
 
 /// 连接在构建分布里的（平台，构建）：平台是发布清单平台段，构建号没报按 0。
@@ -71,6 +94,15 @@ pub struct ConnectionHandler {
     /// 用量计数点：`online_sessions` 写入与取出成对计连接（`connections.peak`、
     /// `connection.minutes`），写入时计当日活跃用户（`users.active_daily`）。
     usage: UsageRecorder,
+    /// 送达确认跟踪：与 `online_sessions` 成对登记、注销；客户端报来的设备状态也记在它那里。
+    delivery_watch: Arc<DeliveryWatch>,
+    /// 等着转给 Online 的设备状态，每条连接只留最新一份。表里有这条连接，就说明它的转发任务
+    /// 在跑：值是任务下一轮要发的那份，`None` 表示手头那份正在发。同一连接同一时刻只有一个任务，
+    /// 所以上报按到达顺序发出；发送途中又来的几次，只有最新的会被发出去。
+    device_state_outbox: Arc<DeviceStateOutbox>,
+    /// Online 会话登记完成之前到达的设备状态上报（引擎在 CONNECT_ACK 之后立刻发一帧，可能
+    /// 赶在登录走完之前）。每条连接只留最新一份，会话写入后转给 Online，连接断开时清掉。
+    early_device_states: std::sync::Mutex<HashMap<String, DeviceStateUpdate>>,
 }
 
 impl ConnectionHandler {
@@ -81,6 +113,7 @@ impl ConnectionHandler {
         connection_port: Arc<dyn IConnectionPort>,
         conversation_subscriptions: Arc<crate::domain::service::ConversationSubscriptionRegistry>,
         conversation_read: Arc<crate::infrastructure::ports::ConversationReadGrpcPool>,
+        delivery_watch: Arc<DeliveryWatch>,
     ) -> Self {
         Self {
             session_domain_service,
@@ -92,6 +125,9 @@ impl ConnectionHandler {
             conversation_subscriptions,
             conversation_read,
             usage: UsageRecorder::disabled(),
+            delivery_watch,
+            device_state_outbox: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            early_device_states: std::sync::Mutex::new(HashMap::new()),
         }
     }
 
@@ -223,6 +259,162 @@ impl ConnectionHandler {
         self.conversation_subscriptions.clone()
     }
 
+    /// 送达确认跟踪（下行投递、上行确认与 PONG 处理用的是同一个实例）。
+    pub fn delivery_watch(&self) -> &Arc<DeliveryWatch> {
+        &self.delivery_watch
+    }
+
+    /// 客户端经 DEVICE_STATE 报来了设备状态：立即记进这条连接的内存状态，返回已经生效的应用
+    /// 状态，调用方据此应答；转给 Online 在后台进行。
+    ///
+    /// 上报可能先于 Online 登录完成到达。这时照样生效、照样应答：用已认证的连接信息先把送达
+    /// 确认跟踪建起来，上报记在本地，会话登记完成后把最新一份转给 Online。
+    ///
+    /// 返回 `None`（不应答）只有两种情况：状态缺省或不认识；连接已经不在，或没有通过认证。
+    pub async fn apply_device_state(
+        &self,
+        connection_id: &str,
+        report: &DeviceStateReport,
+    ) -> Option<DeviceAppState> {
+        let state = DeviceLinkState::from_report(report)?;
+        let update = DeviceStateUpdate {
+            state,
+            badge: report.badge,
+        };
+        let tracked = self.delivery_watch.set_device_state(connection_id, state);
+        if tracked && self.has_online_session(connection_id).await {
+            self.forward_device_state(connection_id, update);
+            return Some(state.app_state);
+        }
+        self.apply_early_device_state(connection_id, update, tracked)
+            .await
+            .then_some(state.app_state)
+    }
+
+    /// Online 会话还没有（登录没走完）时到达的设备状态上报。返回是否生效。
+    async fn apply_early_device_state(
+        &self,
+        connection_id: &str,
+        update: DeviceStateUpdate,
+        tracked: bool,
+    ) -> bool {
+        if !tracked {
+            // 还没开始跟踪：设备标识取自已认证的连接信息；连接不在或没通过认证就无从生效。
+            let Some(device) = self.authenticated_device(connection_id).await else {
+                return false;
+            };
+            self.delivery_watch
+                .register(connection_id, device, update.state);
+            // 登记若恰好抢先建了跟踪，上面那次只更新了设备标识：状态再写一遍。
+            self.delivery_watch
+                .set_device_state(connection_id, update.state);
+        }
+        self.early_device_states
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(connection_id.to_string(), update);
+        if self.has_online_session(connection_id).await {
+            // 登记恰好在这期间完成，它来取的时候这一份可能还没记下：这里补发。
+            if let Some(update) = self.take_early_device_state(connection_id) {
+                self.forward_device_state(connection_id, update);
+            }
+        } else if self
+            .connection_port
+            .get_connection_info(connection_id)
+            .await
+            .is_err()
+        {
+            // 连接在这期间断开，断开处理已经跑完，不会再有人来清：自己收拾，也不应答。
+            self.forget_device_state(connection_id).await;
+            return false;
+        }
+        true
+    }
+
+    /// 已通过认证的连接背后的设备；连接不存在、没通过认证时为 `None`。
+    async fn authenticated_device(&self, connection_id: &str) -> Option<WatchedDevice> {
+        // `build_ctx` 只对已认证、租户与用户齐全的连接成功。
+        self.connection_port.build_ctx(connection_id).await.ok()?;
+        let info = self
+            .connection_port
+            .get_connection_info(connection_id)
+            .await
+            .ok()?;
+        Some(WatchedDevice {
+            tenant_id: info.tenant_id,
+            user_id: info.user_id,
+            device_id: info.device_id,
+        })
+    }
+
+    async fn has_online_session(&self, connection_id: &str) -> bool {
+        self.online_sessions
+            .read()
+            .await
+            .contains_key(connection_id)
+    }
+
+    fn take_early_device_state(&self, connection_id: &str) -> Option<DeviceStateUpdate> {
+        self.early_device_states
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(connection_id)
+    }
+
+    /// 连接结束：丢掉还没转给 Online 的早到上报，结束送达确认跟踪（环里还没确认的可提示帧
+    /// 交接给推送通道）。幂等。
+    async fn forget_device_state(&self, connection_id: &str) {
+        self.take_early_device_state(connection_id);
+        self.delivery_watch.unregister(connection_id).await;
+    }
+
+    /// 把一次设备状态交给这条连接的转发任务；任务没在跑就起一个。只在 Online 会话已经存在时调用。
+    fn forward_device_state(&self, connection_id: &str, update: DeviceStateUpdate) {
+        {
+            let mut outbox = self
+                .device_state_outbox
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if let Some(pending) = outbox.get_mut(connection_id) {
+                *pending = Some(update);
+                return;
+            }
+            outbox.insert(connection_id.to_string(), Some(update));
+        }
+        let outbox = Arc::clone(&self.device_state_outbox);
+        let sessions = Arc::clone(&self.online_sessions);
+        let online = Arc::clone(&self.session_domain_service);
+        let connection_id = connection_id.to_string();
+        tokio::spawn(async move {
+            while let Some(update) = next_device_state(&outbox, &connection_id) {
+                let session = sessions.read().await.get(&connection_id).cloned();
+                // 连接已经断开：Online 会话随之注销，没有可更新的记录。
+                let Some(session) = session else {
+                    continue;
+                };
+                let reported = online
+                    .report_device_state(
+                        &session.authenticated_ctx,
+                        &session.user_id,
+                        &session.conversation_id,
+                        update.state,
+                        update.badge,
+                    )
+                    .await;
+                if let Err(error) = reported {
+                    // Online 上的状态会落后到下一次上报；这期间它若把可提示的消息仍按在线投给
+                    // 一条已托管的连接，网关会在写出前拦下并交接，提示不会丢。
+                    warn!(
+                        ?error,
+                        connection_id = %connection_id,
+                        app_state = ?update.state.app_state,
+                        "failed to report device state to signaling online"
+                    );
+                }
+            }
+        });
+    }
+
     /// 为长连接请求构建请求级 `Ctx`（租户/用户/trace 等），供领域层与下游 RPC 透传。
     pub async fn build_request_ctx(&self, connection_id: &str) -> Result<Ctx> {
         self.connection_port.build_ctx(connection_id).await
@@ -327,6 +519,18 @@ impl ConnectionHandler {
                 self.metrics
                     .connection_build_opened(&connection_info.tenant_id, build.0, build.1);
                 self.usage.user_active(&connection_info.tenant_id, &user_id);
+                // 送达确认跟踪与会话同时开始：之后写给这条连接的可提示帧都要等客户端确认。
+                // 初始状态是 CONNECT 里带的那份，没带就是前台；登录途中已有设备状态上报到达时
+                // 跟踪已经建好，这里只补设备标识，保留它报来的状态。
+                self.delivery_watch.register(
+                    connection_id,
+                    WatchedDevice {
+                        tenant_id: connection_info.tenant_id.clone(),
+                        user_id: user_id.clone(),
+                        device_id: connection_info.device_id.clone(),
+                    },
+                    DeviceLinkState::from_connection_metadata(connection_info.metadata.as_ref()),
+                );
                 true
             } else {
                 false
@@ -339,6 +543,8 @@ impl ConnectionHandler {
                 conversation_id = %conversation_id,
                 "connection closed during online registration; unregistering the late login"
             );
+            // 登录途中到达的设备状态上报可能已经给这条连接建了跟踪：连接没了，一并清掉。
+            self.forget_device_state(connection_id).await;
             if let Err(err) = self
                 .session_domain_service
                 .unregister_connection(&authenticated_ctx, &user_id, &conversation_id)
@@ -357,6 +563,12 @@ impl ConnectionHandler {
                 "connection closed during online registration",
             )
             .build_error());
+        }
+
+        // 登录途中到达的设备状态上报此前只记在本地：会话有了，把最新一份转给 Online
+        // （登录请求里带的还是 CONNECT 时的状态）。
+        if let Some(update) = self.take_early_device_state(connection_id) {
+            self.forward_device_state(connection_id, update);
         }
 
         // 统一读扩散：登录即订阅用户全部会话（race-free 收会话 publish）；best-effort。
@@ -407,6 +619,14 @@ impl ConnectionHandler {
     /// 4. 记录指标和日志
     #[instrument(skip(self))]
     pub async fn handle_disconnect(&self, connection_id: &str) -> Result<()> {
+        let result = self.release_connection(connection_id).await;
+        // 收尾再清一次设备状态：注销 Online 会话要等一次 RPC，这期间排在入站队列里的设备状态
+        // 上报仍会被处理，可能又给这条连接留下跟踪状态。
+        self.forget_device_state(connection_id).await;
+        result
+    }
+
+    async fn release_connection(&self, connection_id: &str) -> Result<()> {
         // 统一读扩散地基：断线先清扫该连接的全部会话订阅（幂等，O(该连接订阅的会话数)）。
         self.conversation_subscriptions
             .remove_connection(connection_id);
@@ -432,6 +652,9 @@ impl ConnectionHandler {
             }
             session
         };
+        // 送达确认跟踪随连接结束：环里还没确认的可提示帧交接给推送通道。登记与写会话在同一把
+        // `connecting` 锁里完成，这里排在取出会话之后，两边不会交错留下没人清的跟踪状态。
+        self.forget_device_state(connection_id).await;
         let Some(session) = session else {
             debug!(
                 connection_id = %connection_id,
@@ -588,9 +811,10 @@ mod disconnect_tests {
     use async_trait::async_trait;
     use flare_grpc_proto::signaling::{
         GetOnlineStatusRequest, GetOnlineStatusResponse, HeartbeatRequest, HeartbeatResponse,
-        LoginRequest, LoginResponse, LogoutRequest, LogoutResponse,
+        LoginRequest, LoginResponse, LogoutRequest, LogoutResponse, ReportDeviceStateRequest,
+        ReportDeviceStateResponse,
     };
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     /// 只数 Online 注销次数的连接端口；其余调用不应在断开清理中出现。
     #[derive(Default)]
@@ -615,6 +839,14 @@ mod disconnect_tests {
             _request: HeartbeatRequest,
         ) -> Result<HeartbeatResponse> {
             unreachable!("disconnect never sends heartbeats")
+        }
+
+        async fn report_device_state(
+            &self,
+            _ctx: &Ctx,
+            _request: ReportDeviceStateRequest,
+        ) -> Result<ReportDeviceStateResponse> {
+            unreachable!("disconnect never reports device state")
         }
 
         async fn get_online_status(
@@ -663,6 +895,7 @@ mod disconnect_tests {
             port,
             Arc::new(ConversationSubscriptionRegistry::new()),
             Arc::new(crate::infrastructure::ports::ConversationReadGrpcPool::new()),
+            crate::domain::service::delivery_watch::testing::detached(),
         )
     }
 
@@ -726,6 +959,12 @@ mod disconnect_tests {
         release_login: tokio::sync::Notify,
         logins: AtomicUsize,
         logouts: AtomicUsize,
+        /// Online 收到的设备状态上报，按到达顺序。
+        device_states: std::sync::Mutex<Vec<ReportDeviceStateRequest>>,
+        /// 置位后设备状态上报要等测试放行，用来在上报途中再报几次。
+        hold_device_states: AtomicBool,
+        device_state_entered: tokio::sync::Notify,
+        release_device_state: tokio::sync::Notify,
     }
 
     impl GatedLoginPort {
@@ -736,6 +975,10 @@ mod disconnect_tests {
                 release_login: tokio::sync::Notify::new(),
                 logins: AtomicUsize::new(0),
                 logouts: AtomicUsize::new(0),
+                device_states: std::sync::Mutex::new(Vec::new()),
+                hold_device_states: AtomicBool::new(false),
+                device_state_entered: tokio::sync::Notify::new(),
+                release_device_state: tokio::sync::Notify::new(),
             }
         }
 
@@ -784,6 +1027,19 @@ mod disconnect_tests {
             _request: HeartbeatRequest,
         ) -> Result<HeartbeatResponse> {
             unreachable!("registration never sends heartbeats")
+        }
+
+        async fn report_device_state(
+            &self,
+            _ctx: &Ctx,
+            request: ReportDeviceStateRequest,
+        ) -> Result<ReportDeviceStateResponse> {
+            self.device_states.lock().unwrap().push(request);
+            if self.hold_device_states.load(Ordering::SeqCst) {
+                self.device_state_entered.notify_one();
+                self.release_device_state.notified().await;
+            }
+            Ok(ReportDeviceStateResponse { success: true })
         }
 
         async fn get_online_status(
@@ -975,5 +1231,260 @@ mod disconnect_tests {
             .map(|reading| (reading.app, reading.meter, reading.value))
             .collect();
         assert_eq!(live, [("tenant-a".to_string(), "connections.peak", 1)]);
+    }
+
+    /// 送达确认跟踪与 Online 会话同时开始、同时结束：登记完成之前没有，断开之后没有，
+    /// 登记途中就断开的连接也不留跟踪状态。
+    #[tokio::test]
+    async fn the_delivery_watch_follows_the_online_session() {
+        let port = Arc::new(GatedLoginPort::new());
+        let handler = Arc::new(handler(port.clone()));
+        let connect = connect_until_login_waits(&handler, &port).await;
+        assert_eq!(handler.delivery_watch().device_state("conn-1"), None);
+        port.release_login.notify_one();
+        connect.await.expect("connect task").expect("registered");
+        // CONNECT 没带设备状态：按前台开始跟踪。
+        assert_eq!(
+            handler.delivery_watch().device_state("conn-1"),
+            Some(DeviceLinkState::FOREGROUND)
+        );
+
+        handler
+            .handle_disconnect("conn-1")
+            .await
+            .expect("disconnect");
+        assert_eq!(handler.delivery_watch().device_state("conn-1"), None);
+
+        let connect = connect_until_login_waits(&handler, &port).await;
+        handler
+            .handle_disconnect("conn-1")
+            .await
+            .expect("disconnect while registering");
+        port.release_login.notify_one();
+        assert_closed_during_registration(connect.await.expect("connect task"));
+        assert_eq!(handler.delivery_watch().device_state("conn-1"), None);
+    }
+
+    fn device_state_report(state: DeviceAppState, badge: u32) -> DeviceStateReport {
+        DeviceStateReport {
+            state: state as i32,
+            badge,
+            ..Default::default()
+        }
+    }
+
+    /// 设备状态上报立即改这条连接的内存状态并给出要应答的状态；转给 Online 在后台进行，
+    /// 每条连接一次只发一份、按到达顺序，发送途中又报的几次只有最新的发出去。
+    #[tokio::test]
+    async fn device_state_reports_apply_at_once_and_reach_online_in_order_latest_wins() {
+        let port = Arc::new(GatedLoginPort::new());
+        let handler = Arc::new(handler(port.clone()));
+        let connect = connect_until_login_waits(&handler, &port).await;
+        port.release_login.notify_one();
+        connect.await.expect("connect task").expect("registered");
+
+        port.hold_device_states.store(true, Ordering::SeqCst);
+        assert_eq!(
+            handler
+                .apply_device_state("conn-1", &device_state_report(DeviceAppState::Standby, 1))
+                .await,
+            Some(DeviceAppState::Standby)
+        );
+        // 第一份上报已经在途。
+        port.device_state_entered.notified().await;
+        handler
+            .apply_device_state("conn-1", &device_state_report(DeviceAppState::Active, 2))
+            .await;
+        handler
+            .apply_device_state("conn-1", &device_state_report(DeviceAppState::Standby, 3))
+            .await;
+        assert_eq!(
+            handler
+                .apply_device_state("conn-1", &device_state_report(DeviceAppState::Parking, 4))
+                .await,
+            Some(DeviceAppState::Parking)
+        );
+        // 内存里已经是最新状态，不等 Online。
+        assert_eq!(
+            handler
+                .delivery_watch()
+                .device_state("conn-1")
+                .map(|state| state.app_state),
+            Some(DeviceAppState::Parking)
+        );
+
+        port.hold_device_states.store(false, Ordering::SeqCst);
+        port.release_device_state.notify_one();
+        for _ in 0..200 {
+            if port.device_states.lock().unwrap().len() == 2 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        let sent: Vec<(String, i32, u32)> = port
+            .device_states
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|request| {
+                (
+                    request.conversation_id.clone(),
+                    request.app_state,
+                    request.badge,
+                )
+            })
+            .collect();
+        assert_eq!(
+            sent,
+            [
+                ("presence-1".to_string(), DeviceAppState::Standby as i32, 1),
+                ("presence-1".to_string(), DeviceAppState::Parking as i32, 4),
+            ]
+        );
+        assert!(
+            handler.device_state_outbox.lock().unwrap().is_empty(),
+            "the forwarding task leaves nothing behind once drained"
+        );
+    }
+
+    /// 等到条件成立；转发任务在别的任务里跑，这里让出执行权。
+    async fn eventually(condition: impl Fn() -> bool) {
+        for _ in 0..200 {
+            if condition() {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+        panic!("condition not reached");
+    }
+
+    /// 设备状态上报先于 Online 登录完成到达：照样立即生效、照样应答，记下最新一份，会话登记
+    /// 完成后只把这一份转给 Online。
+    #[tokio::test]
+    async fn a_device_state_report_during_online_login_applies_and_is_forwarded_afterwards() {
+        let port = Arc::new(GatedLoginPort::new());
+        let handler = Arc::new(handler(port.clone()));
+        let connect = connect_until_login_waits(&handler, &port).await;
+
+        assert_eq!(
+            handler
+                .apply_device_state("conn-1", &device_state_report(DeviceAppState::Standby, 5))
+                .await,
+            Some(DeviceAppState::Standby)
+        );
+        assert_eq!(
+            handler
+                .apply_device_state("conn-1", &device_state_report(DeviceAppState::Parking, 6))
+                .await,
+            Some(DeviceAppState::Parking)
+        );
+        // 内存状态已经是报来的那个，Online 还没有会话可更新。
+        assert_eq!(
+            handler
+                .delivery_watch()
+                .device_state("conn-1")
+                .map(|state| state.app_state),
+            Some(DeviceAppState::Parking)
+        );
+        assert!(port.device_states.lock().unwrap().is_empty());
+
+        port.release_login.notify_one();
+        connect.await.expect("connect task").expect("registered");
+        eventually(|| port.device_states.lock().unwrap().len() == 1).await;
+        let forwarded = port.device_states.lock().unwrap()[0].clone();
+        assert_eq!(forwarded.conversation_id, "presence-1");
+        assert_eq!(forwarded.app_state, DeviceAppState::Parking as i32);
+        assert_eq!(forwarded.badge, 6);
+        // 登记没有把它报来的状态改回 CONNECT 时的前台。
+        assert_eq!(
+            handler
+                .delivery_watch()
+                .device_state("conn-1")
+                .map(|state| state.app_state),
+            Some(DeviceAppState::Parking)
+        );
+        assert!(handler.early_device_states.lock().unwrap().is_empty());
+        eventually(|| handler.device_state_outbox.lock().unwrap().is_empty()).await;
+    }
+
+    /// `Deferred`（后台、提示交给推送通道）与别的状态一样：立即生效、应答、转给 Online。
+    #[tokio::test]
+    async fn a_deferred_report_is_applied_acknowledged_and_forwarded_like_any_other_state() {
+        let port = Arc::new(GatedLoginPort::new());
+        let handler = Arc::new(handler(port.clone()));
+        let connect = connect_until_login_waits(&handler, &port).await;
+        port.release_login.notify_one();
+        connect.await.expect("connect task").expect("registered");
+
+        assert_eq!(
+            handler
+                .apply_device_state("conn-1", &device_state_report(DeviceAppState::Deferred, 9))
+                .await,
+            Some(DeviceAppState::Deferred)
+        );
+        assert_eq!(
+            handler
+                .delivery_watch()
+                .device_state("conn-1")
+                .map(|state| state.app_state),
+            Some(DeviceAppState::Deferred)
+        );
+        eventually(|| port.device_states.lock().unwrap().len() == 1).await;
+        let forwarded = port.device_states.lock().unwrap()[0].clone();
+        assert_eq!(forwarded.app_state, DeviceAppState::Deferred as i32);
+        assert_eq!(forwarded.badge, 9);
+    }
+
+    /// 早到的上报之后连接在登录途中断开：记下的上报与跟踪状态随断开清掉，不转给 Online。
+    #[tokio::test]
+    async fn an_early_device_state_report_is_dropped_when_the_connection_closes_first() {
+        let port = Arc::new(GatedLoginPort::new());
+        let handler = Arc::new(handler(port.clone()));
+        let connect = connect_until_login_waits(&handler, &port).await;
+        assert_eq!(
+            handler
+                .apply_device_state("conn-1", &device_state_report(DeviceAppState::Standby, 5))
+                .await,
+            Some(DeviceAppState::Standby)
+        );
+
+        handler
+            .handle_disconnect("conn-1")
+            .await
+            .expect("disconnect while registering");
+        assert_eq!(handler.delivery_watch().device_state("conn-1"), None);
+        assert!(handler.early_device_states.lock().unwrap().is_empty());
+
+        port.release_login.notify_one();
+        assert_closed_during_registration(connect.await.expect("connect task"));
+        assert_eq!(handler.delivery_watch().device_state("conn-1"), None);
+        assert!(port.device_states.lock().unwrap().is_empty());
+    }
+
+    /// 不应答的只有两种上报：状态缺省或不认识的，以及连接已经不在的。两者都不留任何状态。
+    #[tokio::test]
+    async fn a_device_state_report_that_cannot_apply_is_not_acknowledged() {
+        let port = Arc::new(GatedLoginPort::new());
+        let handler = Arc::new(handler(port.clone()));
+
+        // 连接在：状态缺省的上报不生效。
+        assert_eq!(
+            handler
+                .apply_device_state("conn-1", &DeviceStateReport::default())
+                .await,
+            None
+        );
+        // 连接已经不在连接表里。
+        port.connected.store(false, Ordering::SeqCst);
+        assert_eq!(
+            handler
+                .apply_device_state("conn-1", &device_state_report(DeviceAppState::Standby, 0))
+                .await,
+            None
+        );
+        assert_eq!(handler.delivery_watch().device_state("conn-1"), None);
+        assert!(handler.early_device_states.lock().unwrap().is_empty());
+        assert!(handler.device_state_outbox.lock().unwrap().is_empty());
+        assert!(port.device_states.lock().unwrap().is_empty());
     }
 }

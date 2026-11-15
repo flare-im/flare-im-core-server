@@ -16,6 +16,11 @@ pub const METADATA_KEY_DEVICE_ID: &str = "device_id";
 pub const METADATA_KEY_APP_BUILD: &str = "app_build";
 /// CONNECT 设备元数据 key：分发渠道（桌面据此区分 Electron 与 Tauri 外壳）
 pub const METADATA_KEY_DISTRIBUTION: &str = "distribution";
+/// CONNECT 设备元数据 key：建连时的应用状态，小写文本 `active`（前台）、`standby`（后台，本进程
+/// 自己提示）或 `deferred`（后台，提示交给推送通道），缺省或其他值按前台处理。直接取 flare-core
+/// 的键，与客户端写 CONNECT 用的是同一个。
+pub const METADATA_KEY_DEVICE_STATE: &str =
+    flare_core::common::constants::metadata_keys::DEVICE_STATE;
 /// 默认租户 ID 的环境变量名
 pub const ENV_DEFAULT_TENANT_ID: &str = "ACCESS_GATEWAY_DEFAULT_TENANT_ID";
 /// 默认租户 ID（未配置时的回退值）

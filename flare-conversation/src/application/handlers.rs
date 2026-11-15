@@ -9,7 +9,7 @@ use crate::application::commands::{
     CreateConversationCommand, DeleteConversationCommand, ForceConversationSyncCommand,
     ManageParticipantsCommand, MarkConversationAsReadCommand, PurgeConversationHistoryCommand,
     UpdateConversationCommand, UpdateConversationUserSettingsCommand, UpdateCursorCommand,
-    UpdatePresenceCommand,
+    UpdatePresenceCommand, UpdateUserNotificationSettingsCommand,
 };
 use crate::application::queries::{
     ConversationBootstrapQuery, GetConversationDetailQuery, ListConversationsQuery,
@@ -234,8 +234,34 @@ impl ConversationCommandHandler {
                     draft: command.draft,
                     base_settings_version: command.base_settings_version,
                     clear_history_through_seq: command.clear_history_through_seq,
+                    notify_all: command.notify_all,
                 },
             )
+            .await
+    }
+
+    /// 部分更新调用者本人的用户级通知设置：请求字段先校验成领域补丁（至少改一项、勿扰时段不能
+    /// 既设又取消、取值在已知范围内），再按 `base_settings_version` 做乐观并发写入。
+    pub async fn handle_update_user_notification_settings(
+        &self,
+        ctx: &Context,
+        command: UpdateUserNotificationSettingsCommand,
+    ) -> Result<crate::domain::model::UserNotificationSettings> {
+        let user_id = settings_owner(ctx)?;
+        let patch = crate::domain::model::UserNotificationSettingsPatch::from_request(
+            command.quiet_hours,
+            command.clear_quiet_hours,
+            command.preview,
+            command.multi_device,
+            command.base_settings_version,
+        )?;
+        debug!(
+            user_id = %user_id,
+            base_settings_version = command.base_settings_version,
+            "Handling update user notification settings"
+        );
+        self.domain_service
+            .update_user_notification_settings(ctx, user_id, &patch)
             .await
     }
 
@@ -430,6 +456,61 @@ impl ConversationQueryHandler {
             .await
     }
 
+    /// 处理「某用户有新未读消息的会话」查询：`user_id` 非空且不带首尾空白；`since_ms` 须是可
+    /// 表示的时刻；`limit` 为 0 或超过上限时取
+    /// [`MAX_RECENT_UNREAD_CONVERSATIONS`](crate::application::queries::MAX_RECENT_UNREAD_CONVERSATIONS)。
+    /// 调用者的身份（只能是 Cell 内服务）由接口层核对，这里按请求里的用户读。
+    pub async fn handle_list_recent_unread_conversations(
+        &self,
+        ctx: &Context,
+        query: crate::application::queries::ListRecentUnreadConversationsQuery,
+    ) -> Result<Vec<crate::domain::model::RecentUnreadConversation>> {
+        let (user_id, since, limit) = valid_recent_unread_query(&query)?;
+        self.domain_service
+            .list_recent_unread_conversations(ctx, user_id, since, limit)
+            .await
+    }
+
+    /// 调用者本人的用户级通知设置；从没设置过时是默认值（版本 0）。
+    pub async fn handle_get_user_notification_settings(
+        &self,
+        ctx: &Context,
+    ) -> Result<crate::domain::model::UserNotificationSettings> {
+        let user_id = settings_owner(ctx)?;
+        self.domain_service
+            .get_user_notification_settings(ctx, user_id)
+            .await
+    }
+
+    /// 一批用户的用户级通知设置（服务身份按用户读，身份由接口层核对）：用户非空、不带首尾空白、
+    /// 互不相同，1 到
+    /// [`MAX_NOTIFICATION_SETTINGS_BATCH`](crate::domain::model::notification_settings::MAX_NOTIFICATION_SETTINGS_BATCH)
+    /// 个。结果与请求一一对应，没设置过的用户是默认值。
+    pub async fn handle_batch_get_user_notification_settings(
+        &self,
+        ctx: &Context,
+        query: crate::application::queries::BatchGetUserNotificationSettingsQuery,
+    ) -> Result<Vec<(String, crate::domain::model::UserNotificationSettings)>> {
+        valid_settings_batch(&query.user_ids)?;
+        self.domain_service
+            .batch_get_user_notification_settings(ctx, &query.user_ids)
+            .await
+    }
+
+    /// 会话里开启了「全部消息通知」的成员的一页（服务身份读，身份由接口层核对）：会话 ID 非空且
+    /// 不带首尾空白；页令牌是上一页回的；页大小 0 或超过上限时取上限；整个列表封顶
+    /// [`MAX_NOTIFICATION_SUBSCRIBERS`](crate::domain::model::notification_settings::MAX_NOTIFICATION_SUBSCRIBERS)。
+    pub async fn handle_list_notification_subscribers(
+        &self,
+        ctx: &Context,
+        query: crate::application::queries::ListNotificationSubscribersQuery,
+    ) -> Result<crate::domain::model::NotificationSubscriberPage> {
+        let (cursor, page_size) = valid_subscriber_query(&query)?;
+        self.domain_service
+            .list_notification_subscribers(ctx, &query.conversation_id, &cursor, page_size)
+            .await
+    }
+
     /// 处理已读摘要查询：会话 ID 非空；消息 ID 非空、互不相同、不超过
     /// [`MAX_READ_SUMMARY_MESSAGES`](crate::domain::model::read_receipt::MAX_READ_SUMMARY_MESSAGES)。
     pub async fn handle_get_message_read_summaries(
@@ -575,6 +656,88 @@ impl ConversationQueryHandler {
     }
 }
 
+/// 「某用户有新未读消息的会话」的请求：返回要读的用户、时间下界与条数上限。
+fn valid_recent_unread_query(
+    query: &crate::application::queries::ListRecentUnreadConversationsQuery,
+) -> Result<(&str, chrono::DateTime<chrono::Utc>, usize)> {
+    use crate::application::queries::MAX_RECENT_UNREAD_CONVERSATIONS;
+    let user_id = query.user_id.as_str();
+    if user_id.trim().is_empty() || user_id.trim() != user_id {
+        return Err(
+            ErrorBuilder::new(ErrorCode::InvalidParameter, "user_id is required").build_error(),
+        );
+    }
+    let Some(since) = chrono::DateTime::<chrono::Utc>::from_timestamp_millis(query.since_ms) else {
+        return Err(ErrorBuilder::new(
+            ErrorCode::InvalidParameter,
+            "since must be a Unix epoch millisecond timestamp",
+        )
+        .build_error());
+    };
+    let limit = match usize::try_from(query.limit) {
+        Ok(limit) if (1..=MAX_RECENT_UNREAD_CONVERSATIONS).contains(&limit) => limit,
+        _ => MAX_RECENT_UNREAD_CONVERSATIONS,
+    };
+    Ok((user_id, since, limit))
+}
+
+/// 用户级通知设置的主人：调用者本人。没有用户、或用户带首尾空白都拒绝，不替调用方猜。
+fn settings_owner(ctx: &Context) -> Result<&str> {
+    match ctx.user_id() {
+        Some(user_id) if !user_id.trim().is_empty() && user_id.trim() == user_id => Ok(user_id),
+        _ => Err(
+            ErrorBuilder::new(ErrorCode::AuthenticationRequired, "user_id is required")
+                .build_error(),
+        ),
+    }
+}
+
+/// 批量读用户级通知设置的用户列表：1 到上限个，非空、不带首尾空白、互不相同。
+fn valid_settings_batch(user_ids: &[String]) -> Result<()> {
+    use crate::domain::model::notification_settings::MAX_NOTIFICATION_SETTINGS_BATCH;
+    if user_ids.is_empty() || user_ids.len() > MAX_NOTIFICATION_SETTINGS_BATCH {
+        return Err(ErrorBuilder::new(
+            ErrorCode::InvalidParameter,
+            "user_ids must hold 1 to 500 users",
+        )
+        .build_error());
+    }
+    let mut seen = std::collections::HashSet::with_capacity(user_ids.len());
+    for user_id in user_ids {
+        if user_id.trim().is_empty() || user_id.trim() != user_id {
+            return Err(ErrorBuilder::new(
+                ErrorCode::InvalidParameter,
+                "user_ids must not be blank or padded",
+            )
+            .build_error());
+        }
+        if !seen.insert(user_id.as_str()) {
+            return Err(ErrorBuilder::new(
+                ErrorCode::InvalidParameter,
+                "user_ids must be distinct",
+            )
+            .build_error());
+        }
+    }
+    Ok(())
+}
+
+/// 订阅者分页请求：返回解析后的位置与页大小。
+fn valid_subscriber_query(
+    query: &crate::application::queries::ListNotificationSubscribersQuery,
+) -> Result<(crate::domain::model::SubscriberCursor, usize)> {
+    use crate::domain::model::notification_settings::subscriber_page_size;
+    let conversation_id = query.conversation_id.as_str();
+    if conversation_id.trim().is_empty() || conversation_id.trim() != conversation_id {
+        return Err(
+            ErrorBuilder::new(ErrorCode::InvalidParameter, "conversation_id is required")
+                .build_error(),
+        );
+    }
+    let cursor = crate::domain::model::SubscriberCursor::parse(&query.page_token)?;
+    Ok((cursor, subscriber_page_size(query.page_size)))
+}
+
 /// 按 id 查成员的请求：会话 ID 非空；id 非空、互不相同、不超过
 /// [`MAX_PARTICIPANT_LOOKUP_IDS`](crate::application::queries::MAX_PARTICIPANT_LOOKUP_IDS)。
 fn valid_lookup(query: &crate::application::queries::FindConversationMembersQuery) -> Result<&str> {
@@ -598,4 +761,135 @@ fn valid_lookup(query: &crate::application::queries::FindConversationMembersQuer
         .build_error());
     }
     Ok(conversation_id)
+}
+
+#[cfg(test)]
+mod recent_unread_query_tests {
+    use super::*;
+    use crate::application::queries::{
+        ListRecentUnreadConversationsQuery, MAX_RECENT_UNREAD_CONVERSATIONS,
+    };
+
+    fn query(user_id: &str, since_ms: i64, limit: i32) -> ListRecentUnreadConversationsQuery {
+        ListRecentUnreadConversationsQuery {
+            user_id: user_id.to_string(),
+            since_ms,
+            limit,
+        }
+    }
+
+    /// 条数由服务端封顶：不传、传负数、传得比上限大，都按上限读。
+    #[test]
+    fn the_limit_is_capped_by_the_server() {
+        for (asked, used) in [
+            (0, MAX_RECENT_UNREAD_CONVERSATIONS),
+            (-3, MAX_RECENT_UNREAD_CONVERSATIONS),
+            (1, 1),
+            (5, 5),
+            (20, 20),
+            (21, MAX_RECENT_UNREAD_CONVERSATIONS),
+            (i32::MAX, MAX_RECENT_UNREAD_CONVERSATIONS),
+        ] {
+            let asked_query = query("alice", 1_760_000_000_000, asked);
+            let (user_id, since, limit) = valid_recent_unread_query(&asked_query).unwrap();
+            assert_eq!(user_id, "alice");
+            assert_eq!(since.timestamp_millis(), 1_760_000_000_000);
+            assert_eq!(limit, used, "limit {asked}");
+        }
+        assert_eq!(MAX_RECENT_UNREAD_CONVERSATIONS, 20);
+    }
+
+    /// 读谁必须说清楚：空的、带首尾空白的用户标识一律拒绝，不替调用方猜。
+    #[test]
+    fn a_blank_or_padded_user_is_rejected() {
+        for user_id in ["", "  ", " alice", "alice "] {
+            let error = valid_recent_unread_query(&query(user_id, 0, 5)).unwrap_err();
+            assert_eq!(
+                error.code(),
+                Some(ErrorCode::InvalidParameter),
+                "{user_id:?}"
+            );
+        }
+    }
+
+    /// since 为 0 表示不限下界；放不进时间类型的值是参数错误，不悄悄当成 0。
+    #[test]
+    fn since_must_be_a_representable_instant() {
+        let epoch = query("alice", 0, 5);
+        let (_, since, _) = valid_recent_unread_query(&epoch).unwrap();
+        assert_eq!(since.timestamp_millis(), 0);
+        for out_of_range in [i64::MAX, i64::MIN] {
+            let error = valid_recent_unread_query(&query("alice", out_of_range, 5)).unwrap_err();
+            assert_eq!(error.code(), Some(ErrorCode::InvalidParameter));
+        }
+    }
+}
+
+#[cfg(test)]
+mod notification_settings_request_tests {
+    use super::*;
+    use crate::application::queries::ListNotificationSubscribersQuery;
+
+    /// 用户级设置只读写调用者本人：没有用户、空白或带首尾空白的用户一律拒绝。
+    #[test]
+    fn the_settings_owner_is_the_authenticated_user() {
+        let alice = Context::with_request_id("req").with_user_id("alice");
+        assert_eq!(settings_owner(&alice).unwrap(), "alice");
+        for ctx in [
+            Context::with_request_id("req"),
+            Context::with_request_id("req").with_user_id(""),
+            Context::with_request_id("req").with_user_id(" alice"),
+        ] {
+            let error = settings_owner(&ctx).unwrap_err();
+            assert_eq!(error.code(), Some(ErrorCode::AuthenticationRequired));
+        }
+    }
+
+    #[test]
+    fn a_settings_batch_is_one_to_five_hundred_distinct_users() {
+        let users = |n: usize| (0..n).map(|i| format!("u{i}")).collect::<Vec<_>>();
+        assert!(valid_settings_batch(&users(1)).is_ok());
+        assert!(valid_settings_batch(&users(500)).is_ok());
+        for bad in [
+            users(0),
+            users(501),
+            vec!["a".to_string(), "a".to_string()],
+            vec!["a".to_string(), " b".to_string()],
+            vec!["".to_string()],
+        ] {
+            let error = valid_settings_batch(&bad).unwrap_err();
+            assert_eq!(error.code(), Some(ErrorCode::InvalidParameter), "{bad:?}");
+        }
+    }
+
+    fn subscribers(
+        conversation_id: &str,
+        page_token: &str,
+        page_size: i32,
+    ) -> ListNotificationSubscribersQuery {
+        ListNotificationSubscribersQuery {
+            conversation_id: conversation_id.to_string(),
+            page_token: page_token.to_string(),
+            page_size,
+        }
+    }
+
+    #[test]
+    fn a_subscriber_query_names_a_conversation_and_a_valid_page() {
+        let (cursor, size) = valid_subscriber_query(&subscribers("2G1", "", 0)).unwrap();
+        assert_eq!(cursor, crate::domain::model::SubscriberCursor::default());
+        assert_eq!(size, 1000);
+        let (cursor, size) = valid_subscriber_query(&subscribers("2G1", "1000:u9", 50)).unwrap();
+        assert_eq!(cursor.served, 1000);
+        assert_eq!(cursor.after_user_id.as_deref(), Some("u9"));
+        assert_eq!(size, 50);
+        for bad in [
+            subscribers("", "", 0),
+            subscribers(" 2G1", "", 0),
+            subscribers("2G1", "garbage", 0),
+        ] {
+            let error = valid_subscriber_query(&bad).unwrap_err();
+            assert_eq!(error.code(), Some(ErrorCode::InvalidParameter));
+        }
+    }
 }

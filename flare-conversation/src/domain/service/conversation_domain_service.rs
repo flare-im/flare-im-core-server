@@ -21,10 +21,12 @@ use crate::domain::model::{
     ConflictResolutionPolicy, Conversation, ConversationDomainConfig, ConversationFilter,
     ConversationLifecycleState, ConversationParticipant, ConversationPolicy, ConversationSort,
     ConversationSummary, ConversationType, ConversationUpdate, ConversationVisibility,
-    DevicePresence, DeviceState, MessageSyncResult,
+    DevicePresence, DeviceState, MessageSyncResult, NotificationSubscriberPage, SubscriberCursor,
+    UserNotificationSettings, UserNotificationSettingsPatch,
 };
 use crate::domain::repository::{
-    ConversationRepository, MessageProvider, PresenceRepository, PresenceUpdate,
+    ConversationRepository, MessageProvider, NotificationSettingsRepository, PresenceRepository,
+    PresenceUpdate,
 };
 
 /// 纪元属性名（消息 attributes 的键）的长度上限，字节。
@@ -924,6 +926,20 @@ impl<CR: ConversationRepository, PR: PresenceRepository, MP: MessageProvider>
         Ok(members)
     }
 
+    /// `user_id` 在 `since` 之后有新未读消息的在席会话，从新到旧，至多 `limit` 个。按用户读，
+    /// 不看调用上下文里的用户：调用方是 Cell 内服务，身份在接口层核对。
+    pub async fn list_recent_unread_conversations(
+        &self,
+        ctx: &Context,
+        user_id: &str,
+        since: chrono::DateTime<chrono::Utc>,
+        limit: usize,
+    ) -> Result<Vec<crate::domain::model::RecentUnreadConversation>> {
+        self.conversation_repo
+            .list_recent_unread_conversations(ctx, user_id, since, limit)
+            .await
+    }
+
     /// 消息被撤回或对全会话删除后，重算还没读到它的成员的未读（只会变少，可重复）。
     pub async fn retract_message_unread(
         &self,
@@ -1142,6 +1158,102 @@ impl<CR: ConversationRepository, PR: PresenceRepository, MP: MessageProvider>
         }
         keep_viewer_settings_in_previews(ctx, &mut summaries);
         Ok((summaries, total))
+    }
+}
+
+/// 用户级通知设置与会话通知订阅者。只有同时实现了 [`NotificationSettingsRepository`] 的仓储
+/// 才有这些能力（Redis 仓储没有）。
+impl<CR, PR, MP> ConversationDomainService<CR, PR, MP>
+where
+    CR: ConversationRepository + NotificationSettingsRepository,
+    PR: PresenceRepository,
+    MP: MessageProvider,
+{
+    /// `user_id` 的用户级通知设置；从没设置过时是默认值（版本 0）。
+    pub async fn get_user_notification_settings(
+        &self,
+        ctx: &Context,
+        user_id: &str,
+    ) -> Result<UserNotificationSettings> {
+        Ok(self
+            .conversation_repo
+            .get_user_notification_settings(ctx, user_id)
+            .await?
+            .unwrap_or_default())
+    }
+
+    /// 按补丁更新 `user_id` 的用户级通知设置，返回写入后的设置。补丁至少改一项（构造时已校验，
+    /// 这里再挡一次空补丁，免得一次空写也把版本加一）。
+    pub async fn update_user_notification_settings(
+        &self,
+        ctx: &Context,
+        user_id: &str,
+        patch: &UserNotificationSettingsPatch,
+    ) -> Result<UserNotificationSettings> {
+        if patch.is_empty() {
+            return Err(ErrorBuilder::new(
+                ErrorCode::InvalidParameter,
+                "at least one notification setting is required",
+            )
+            .build_error());
+        }
+        let settings = self
+            .conversation_repo
+            .update_user_notification_settings(ctx, user_id, patch)
+            .await?;
+        debug!(
+            user_id = %user_id,
+            settings_version = settings.settings_version,
+            "User notification settings updated"
+        );
+        Ok(settings)
+    }
+
+    /// 一批用户的用户级通知设置，按请求顺序一一对应；没设置过的用户是默认值。
+    pub async fn batch_get_user_notification_settings(
+        &self,
+        ctx: &Context,
+        user_ids: &[String],
+    ) -> Result<Vec<(String, UserNotificationSettings)>> {
+        let mut stored: HashMap<String, UserNotificationSettings> = self
+            .conversation_repo
+            .batch_get_user_notification_settings(ctx, user_ids)
+            .await?
+            .into_iter()
+            .collect();
+        Ok(user_ids
+            .iter()
+            .map(|user_id| {
+                let settings = stored.remove(user_id).unwrap_or_default();
+                (user_id.clone(), settings)
+            })
+            .collect())
+    }
+
+    /// 会话通知订阅者的一页：从 `cursor` 之后取，页大小与总上限取小，多取一行判断后面还有没有。
+    pub async fn list_notification_subscribers(
+        &self,
+        ctx: &Context,
+        conversation_id: &str,
+        cursor: &SubscriberCursor,
+        page_size: usize,
+    ) -> Result<NotificationSubscriberPage> {
+        let limit = cursor.page_limit(page_size);
+        if limit == 0 {
+            return Ok(NotificationSubscriberPage::default());
+        }
+        let fetched = self
+            .conversation_repo
+            .list_notification_subscribers(
+                ctx,
+                conversation_id,
+                cursor.after_user_id.as_deref(),
+                limit + 1,
+            )
+            .await?;
+        Ok(NotificationSubscriberPage::from_fetched(
+            cursor, limit, fetched,
+        ))
     }
 }
 

@@ -186,7 +186,13 @@ docker compose -f deploy/docker-compose.yml -f deploy/docker-compose.nats.yml up
 2. **Storage.** Point the Postgres and object-storage entries in `config/services/*.toml`
    at your own instances.
 3. **Push credentials.** For offline push, configure APNs (.p8) and FCM (service account
-   JSON); see the channel implementations under `flare-push/`.
+   JSON); see the channel implementations under `flare-push/`. Set
+   `PUSH_WORKER_OFFLINE_DELIVERY_BACKEND` explicitly (with `FLARE_ENV=production` the worker
+   refuses to start without it), list every iOS bundle id in the APNs `topics`, apply for the
+   instant messaging category with each Android maker before relying on Getui's vendor
+   channels, point Push Proxy, Push Server and Push Worker at the same device binding Redis,
+   and give Online `SIGNALING_ONLINE_PUSH_PROXY_URL` with the Cell private key. Details:
+   [offline-push-delivery.md](offline-push-delivery.md#deployment-settings).
 
 Services are stateless — scale horizontally by adding replicas; session routing goes
 through Consul discovery.

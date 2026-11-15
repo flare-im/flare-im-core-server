@@ -1239,10 +1239,12 @@ environment_bindings = { SDK_SIGNING_KEY = "CELL_KEY" }
         // Admin Gateway signs the Control-verified tenant admin for Media. The orchestrator
         // signs its own Service identity for conversation member reads, message ingest for
         // its seq floor reads of Storage Reader, Capability for a card's route and the plugin
-        // resource bridge's reads.
+        // resource bridge's reads, Online for the device handoffs and push binding
+        // revocations it reports to Push Proxy.
         assert_eq!(
             signer_users,
             [
+                "signaling-online",
                 "capability",
                 "message-ingest",
                 "orchestrator",
@@ -1657,5 +1659,40 @@ GW_ONLINE_URL = "http://127.0.0.1:50061"
             url(vec![mode("static"), mine]),
             Some("http://10.0.0.7:60083".to_string())
         );
+    }
+
+    #[test]
+    fn online_reports_to_the_in_container_push_proxy_in_static_mode() {
+        let manifest: Manifest =
+            toml::from_str(include_str!("../../../release/supervise-core.toml")).unwrap();
+        manifest.validate().unwrap();
+        let service = |name: &str| manifest.services.iter().find(|s| s.name == name).unwrap();
+        let online = service("signaling-online");
+        // Online signs its handoff and revocation calls itself; with the URL set it does not
+        // start without the key.
+        assert!(manifest.env_allowed(online, "FLARE_INTERNAL_CTX_PRIVATE_KEY"));
+        let proxy = format!(
+            "http://{}",
+            service("push-proxy").tcp_health.as_deref().unwrap()
+        );
+        let url = |parent: Vec<(OsString, OsString)>| {
+            manifest
+                .child_environment(online, parent)
+                .into_iter()
+                .find(|(key, _)| key == "SIGNALING_ONLINE_PUSH_PROXY_URL")
+                .map(|(_, value)| value.into_string().unwrap())
+        };
+        let mode = |value: &str| (OsString::from("FLARE_REGISTRY_MODE"), OsString::from(value));
+        assert_eq!(url(vec![mode("static")]), Some(proxy));
+        // Configured mode has no default; a value the parent sets still wins, an empty one
+        // (reports off) included.
+        assert_eq!(url(vec![mode("configured")]), None);
+        for value in ["http://10.0.0.7:50091", ""] {
+            let mine = (
+                OsString::from("SIGNALING_ONLINE_PUSH_PROXY_URL"),
+                OsString::from(value),
+            );
+            assert_eq!(url(vec![mode("static"), mine]), Some(value.to_string()));
+        }
     }
 }

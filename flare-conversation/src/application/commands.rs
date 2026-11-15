@@ -99,4 +99,21 @@ pub struct UpdateConversationUserSettingsCommand {
     pub draft: Option<String>,
     pub base_settings_version: u64,
     pub clear_history_through_seq: Option<u64>,
+    /// 大群里显式开启「全部消息通知」。
+    pub notify_all: Option<bool>,
+}
+
+/// 部分更新调用者本人的用户级通知设置（原始请求字段，处理器校验后转成领域补丁）。
+#[derive(Debug, Clone)]
+pub struct UpdateUserNotificationSettingsCommand {
+    /// 设置勿扰时段（整体替换）。
+    pub quiet_hours: Option<crate::domain::model::QuietHours>,
+    /// 取消勿扰时段；与 `quiet_hours` 互斥。
+    pub clear_quiet_hours: bool,
+    /// `NotificationPreview` 的线上取值。
+    pub preview: Option<i32>,
+    /// `MultiDeviceAlertPolicy` 的线上取值。
+    pub multi_device: Option<i32>,
+    /// 客户端已知版本；0 表示不校验。
+    pub base_settings_version: u64,
 }

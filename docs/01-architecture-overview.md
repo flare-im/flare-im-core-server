@@ -139,7 +139,10 @@ Send Command -> flare-message-ingest -> WAL -> MQ main -> flare-orchestrator fan
 | `flare.im.push.events` | main consumer / push-only path | `flare-push/server` | 统一会话投递原语：`PING_WITH_INLINE` / `PING` / 操作事件实时投递。 |
 | `flare.im.push.envelope` | orchestrator / push proxy | `flare-push/server` | ACK、通知、CustomData、系统推送信封。 |
 | `flare.im.push.online` | `flare-push/server` | online push executor | 在线投递任务。 |
-| `flare.im.push.offline` | `flare-push/server` | `flare-push/worker` | 离线推送任务。 |
+| `flare.im.push.offline` | `flare-push/server` | `flare-push/worker`（`{组}-offline`） | 离线推送任务的单聊通道：单聊、紧急、点名、对已发通知的修正。 |
+| `flare.im.push.offline_group` | `flare-push/server` | `flare-push/worker`（`{组}-offline-group`） | 离线推送任务的群通道：群里的普通提示、尾部刷新。 |
+| `flare.im.push.offline_bulk` | `flare-push/server` | `flare-push/worker`（`{组}-offline-bulk`） | 离线推送任务的批量通道：大群波次、@所有人 波次、摘要、补提示。积压不影响单聊。 |
+| `flare.im.push.handoff` | `flare-push/proxy`（代网关与 Online 发布） | `flare-push/server` | 设备交接：提示从长连接转给推送通道，按设备补提示。 |
 | retry/DLQ topics | consumers | recovery tooling | 重试、终止和人工排障。 |
 
 ## 存储与状态

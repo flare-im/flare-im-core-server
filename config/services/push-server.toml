@@ -11,18 +11,69 @@ push_message_topic = "flare.im.push.messages"
 push_event_topic = "flare.im.push.events"
 push_envelope_topic = "flare.im.push.envelope"
 
-# Push Server -> Push Worker 任务 Subject。
+# Push Server -> Push Worker 任务 Subject。离线任务分三条优先级通道，都在 FLARE_PUSH 流（flare.im.push.*）里：
+#   flare.im.push.offline        单聊、紧急、点名、修正（push_offline_topic）
+#   flare.im.push.offline_group  群里的普通提示、尾部刷新（PUSH_SERVER_PUSH_OFFLINE_GROUP_TOPIC）
+#   flare.im.push.offline_bulk   大群波次、@所有人 波次、摘要、补提示（PUSH_SERVER_PUSH_OFFLINE_BULK_TOPIC）
 push_online_topic = "flare.im.push.online"
 push_offline_topic = "flare.im.push.offline"
 push_dlq_topic = "flare.im.push.dlq"
-event_ping_participant_page_size = 500
 # 10 万人大群高频消息：recipient-less ping 在解析成员前按会话合并水位，0 表示关闭。
 event_ping_coalesce_window_ms = 200
 
-online_ttl_seconds = 3600
 default_tenant_id = "0"
+# 设备推送绑定（只走环境变量）:
+#   PUSH_SERVER_DEVICE_TOKEN_REDIS_URL  默认取 [redis.push] profile 或 redis://127.0.0.1:6379。路由按设备读绑定登记表，
+#                                       必须与 PUSH_PROXY_DEVICE_TOKEN_REDIS_URL、PUSH_WORKER_DEVICE_TOKEN_REDIS_URL
+#                                       指向同一实例，否则路由看不到绑定，一条离线任务都建不出来
+#   PUSH_SERVER_DEVICE_TOKEN_KEY_PREFIX 默认 flare:im:push:device_tokens，同样与 Proxy、Worker 一致
+#   PUSH_SERVER_BINDING_INACTIVE_DAYS  默认 60。设备这么多天没核对过的绑定视为不存在，不再为它建离线任务；
+#                                      应与 push-worker 的 PUSH_WORKER_BINDING_INACTIVE_DAYS 一致
 hook_config = "config/hooks.core.toml"
 # hook_config_dir = "config/hooks.d"
+
+# 防打扰闸门：每台设备的离线推送按提示规则（flare-notify-rules）决定响铃、静默更新、合并、推迟还是只更新角标。
+# 状态在推送 Redis（PUSH_SERVER_GATE_REDIS_URL，默认 [redis.push] profile，与设备绑定表同一实例），
+# 设备「回到前台」与角标基线读 Online 写在会话 Redis（上面的 redis profile）里的标记。
+#   enabled               关掉后每条消息直接给每台设备发一条任务，不合并、不推迟、不带角标
+#   due_shards            到期队列（尾部刷新、推迟提示）的分片数；每个实例都轮询全部分片
+#   due_poll_interval_ms  到期循环的轮询间隔，决定尾部刷新与推迟提示最多晚多少
+#   due_batch             每个分片每轮最多领取多少条
+[services.push_server.notify]
+enabled = true
+due_shards = 16
+due_poll_interval_ms = 250
+due_batch = 256
+
+# 群会话的波次（只在闸门开着时）：会话空闲时的第一条当场枚举接收者，消息密集时按 3s、10s、30s、120s
+# 限频枚举；成员数超过 PUSH_SERVER_OFFLINE_FANOUT_MEMBER_CAP（缺省 1000）的群只枚举开启了「全部消息通知」的
+# 订阅者；被点名的成员不等波次，直接按人推送。状态与闸门在同一个推送 Redis，到期条目由同一个到期循环领取。
+#
+# 按租户覆盖（键是租户 ID）。force_hidden_preview 让该租户的推送一律用通用文案；all_mention_interval_ms 是
+# 超过成员上限的群里同一个会话两次全员 @所有人 之间的最短间隔（缺省 600000，超出的按普通消息处理）；
+# gate 覆盖闸门参数，字段名与 GateConfig 相同、阶梯写毫秒数组，加载时经 GateConfig::validate 校验，
+# 不合法的租户退回缺省参数。
+# [services.push_server.notify.tenants."tenant-a"]
+# force_hidden_preview = true
+# all_mention_interval_ms = 1800000
+# [services.push_server.notify.tenants."tenant-a".gate]
+# loud_ladder_group = [60000, 300000, 900000]
+# vendor_cap = 20
+
+# 推送决策链：每条消息在路由、交接、决策、闸门与建任务各环节留一条记录（设备状态、决策与原因、闸门结果、任务处置），写在推送 Redis（与闸门同一实例，PUSH_SERVER_GATE_REDIS_URL / [redis.push]），
+# 留 24 小时，供管理员按用户与消息查「这条为什么没提示」（admin-gateway GET /api/v1/admin/users/{user_id}/push-traces）。
+# 记录只进有界队列、后台批量写，绝不拖慢推送；队列满或 Redis 不可用时丢掉并计入 flare_push_trace_dropped_total。
+#   enabled            关掉后不写任何记录
+#   ttl_secs           记录留多久（秒）
+#   queue              队列容量
+#   batch              一批至多写多少条
+#   flush_interval_ms  第一条进队后至多等多久就写
+[services.push_server.trace]
+enabled = true
+ttl_secs = 86400
+queue = 8192
+batch = 256
+flush_interval_ms = 100
 
 # Prometheus 出口（共享运行时挂载；端口表见 deploy/prometheus.yml）。
 [services.push_server.metrics]

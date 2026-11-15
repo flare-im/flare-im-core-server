@@ -47,7 +47,10 @@ reuse the same binary with its own service list. `--socket=/absolute/path` (or
   parent can still override a default), and rejects a mode pinned by a literal,
   a name that is both a literal and a default, empty or padded values, duplicate
   names and defaults that set a mode variable. Core's Cell
-  signing private key reaches only API and signaling gateways. Push credentials
+  signing private key reaches only the services that sign with it: Online,
+  Capability, Message Ingest, the Orchestrator, Push Server, Push Worker and the
+  API, signaling and Admin gateways; Push Proxy and the read services
+  (Conversation, Storage Reader, Sync Orchestrator) and Media only verify. Push credentials
   reach only `push-worker`. Add any new service setting to the proper manifest
   scope; an unlisted setting is intentionally ignored.
 - This is **environment routing, not a hard secret sandbox**: all children in
@@ -127,6 +130,12 @@ in `docs/usage-events.md`. Only Online and
 Capability inherit `FLARE_PLATFORM_PUBLIC_KEY`, which verifies the platform's
 scheduler and projection worker assertions; no Core service verifies an employee
 with it, and the platform signing keys are forbidden in the supervisor environment.
+Online also inherits the Cell private key: it signs the device handoffs and push
+binding revocations it reports to `SIGNALING_ONLINE_PUSH_PROXY_URL`, and with
+that URL set it does not start without the key. In static mode the manifest's
+`environment_defaults` point it at this container's Push Proxy (50091); in
+configured mode the deployment names the Push Proxy, and leaving the URL unset
+(or empty) turns both reports off.
 
 Push Server and Push Worker are also excluded from default `all` until the
 deployment enforces broker provenance. The manifest's

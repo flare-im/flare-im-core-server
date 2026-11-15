@@ -8,6 +8,7 @@ pub mod instrumentation;
 pub mod media_response;
 pub mod message;
 pub mod message_cache;
+pub mod push_trace;
 pub mod service_names;
 pub mod utils;
 pub mod wal;

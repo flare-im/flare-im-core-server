@@ -65,8 +65,10 @@ async fn client(
     deployment: &PluginDeploymentRecord,
     timeout: Duration,
 ) -> Result<PluginRuntimeClient<Channel>, RuntimeFailure> {
-    Ok(PluginRuntimeClient::new(channel(deployment, timeout).await?)
-        .max_decoding_message_size(MAX_ANSWER_BYTES))
+    Ok(
+        PluginRuntimeClient::new(channel(deployment, timeout).await?)
+            .max_decoding_message_size(MAX_ANSWER_BYTES),
+    )
 }
 
 #[async_trait::async_trait]
@@ -174,13 +176,8 @@ impl PluginRuntimeGateway for GrpcPluginRuntime {
             if !answer.ok || answer.request_id != request.job_id {
                 return Err(RuntimeFailure::Refused(bounded_reason(&answer.error_code)));
             }
-            serde_json::from_slice(
-                &answer
-                    .payload
-                    .ok_or(RuntimeFailure::Unavailable)?
-                    .value,
-            )
-            .map_err(|_| RuntimeFailure::Unavailable)
+            serde_json::from_slice(&answer.payload.ok_or(RuntimeFailure::Unavailable)?.value)
+                .map_err(|_| RuntimeFailure::Unavailable)
         };
         tokio::time::timeout(DATA_TIMEOUT, exchange)
             .await

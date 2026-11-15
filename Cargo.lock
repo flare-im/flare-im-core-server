@@ -2243,6 +2243,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "flare-notify-rules"
+version = "0.1.0"
+
+[[package]]
 name = "flare-orchestrator"
 version = "1.0.3"
 dependencies = [
@@ -2334,21 +2338,25 @@ dependencies = [
  "anyhow",
  "async-trait",
  "chrono",
+ "chrono-tz",
  "deadpool-redis",
  "flare-core",
  "flare-core-runtime",
  "flare-grpc-proto",
  "flare-im-contracts",
  "flare-im-service-kit",
+ "flare-notify-rules",
  "flare-proto",
  "flare-push-proxy",
  "flare-server-core",
  "futures",
+ "moka",
  "prost",
  "prost-types",
  "redis 0.32.7",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "thiserror 2.0.18",
  "tokio",
  "toml",
@@ -2375,14 +2383,17 @@ dependencies = [
  "flare-im-contracts",
  "flare-im-service-kit",
  "flare-im-usage",
+ "flare-notify-rules",
  "flare-proto",
  "flare-server-core",
  "futures",
  "hex",
  "jsonwebtoken",
+ "prometheus",
  "prost",
  "prost-types",
  "redis 0.32.7",
+ "regex",
  "reqwest",
  "serde",
  "serde_json",
@@ -2393,6 +2404,7 @@ dependencies = [
  "tonic",
  "tracing",
  "tracing-subscriber",
+ "unicode-segmentation",
  "uuid",
 ]
 
@@ -6405,6 +6417,12 @@ name = "unicode-properties"
 version = "0.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7df058c713841ad818f1dc5d3fd88063241cc61f49f5fbea4b951e8cf5a8d71d"
+
+[[package]]
+name = "unicode-segmentation"
+version = "1.13.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c6f5d3c3b1bf09027a88a6bc961fc00497d651009560b5463668dc81b0fa87a8"
 
 [[package]]
 name = "universal-hash"

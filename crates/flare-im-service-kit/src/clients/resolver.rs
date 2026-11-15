@@ -10,7 +10,7 @@ use crate::discovery::{
     resolve_grpc_channel_with_policy,
 };
 use crate::service_names::{
-    CONVERSATION, MEDIA, MESSAGE_INGEST, ORCHESTRATOR, SIGNALING_ONLINE, STORAGE_READER,
+    CONVERSATION, MEDIA, MESSAGE_INGEST, ORCHESTRATOR, PUSH_PROXY, SIGNALING_ONLINE, STORAGE_READER,
 };
 use flare_server_core::error::{AnyhowContext, Result};
 use tonic::transport::Channel;
@@ -25,6 +25,8 @@ pub enum DownstreamKind {
     Conversation,
     SignalingOnline,
     StorageReader,
+    /// Push Proxy（只有 Admin Gateway 连：推送决策链的管理员查询）。
+    PushProxy,
 }
 
 impl DownstreamKind {
@@ -36,6 +38,7 @@ impl DownstreamKind {
             Self::Conversation => CONVERSATION,
             Self::SignalingOnline => SIGNALING_ONLINE,
             Self::StorageReader => STORAGE_READER,
+            Self::PushProxy => PUSH_PROXY,
         }
     }
 
@@ -47,6 +50,7 @@ impl DownstreamKind {
             Self::Conversation => "conversation",
             Self::SignalingOnline => "signaling-online",
             Self::StorageReader => "storage-reader",
+            Self::PushProxy => "push-proxy",
         }
     }
 }
@@ -197,6 +201,10 @@ impl DownstreamGrpcResolver {
                 self.grpc.storage_reader_service_url.as_str(),
                 self.grpc.storage_reader_static_fallback.as_str(),
             ),
+            DownstreamKind::PushProxy => (
+                self.grpc.push_proxy_service_url.as_str(),
+                self.grpc.push_proxy_static_fallback.as_str(),
+            ),
         }
     }
 
@@ -297,13 +305,15 @@ mod static_policy_tests {
             message_orchestrator_service_url: unused.clone(),
             conversation_service_url: unused.clone(),
             online_service_url: unused.clone(),
-            storage_reader_service_url: unused,
+            storage_reader_service_url: unused.clone(),
+            push_proxy_service_url: unused,
             media_static_fallback: String::new(),
             message_ingest_static_fallback: String::new(),
             message_orchestrator_static_fallback: String::new(),
             conversation_static_fallback: String::new(),
             online_static_fallback: String::new(),
             storage_reader_static_fallback: String::new(),
+            push_proxy_static_fallback: String::new(),
             connect_timeout_secs,
             request_timeout_secs: 10,
         }

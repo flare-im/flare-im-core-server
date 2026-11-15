@@ -71,12 +71,18 @@ impl SendHandler {
         self.send_data_service.execute(&ctx, command).await
     }
 
-    /// 处理发送 ack（PushAck/ConversationAck/ReadAck 等上报）→ 委托 SendAckDomainService
+    /// 处理上行 ack → 委托 SendAckDomainService。
+    ///
+    /// 送达确认（ConversationAck）在网关就地消化，只清这条连接自己的待确认条目，不需要请求
+    /// 上下文；只有还剩要上报路由的回执（ReadAck / PushAck）时才解析上下文并发 RPC。
     pub async fn handle_send_ack(&self, command: &SendAckCommand) -> Result<()> {
+        let Some(upstream) = self.send_ack_service.absorb_delivery_acks(command)? else {
+            return Ok(());
+        };
         let ctx = self
             .context_resolver
             .resolve(&command.connection_id)
             .await?;
-        self.send_ack_service.execute(&ctx, command).await
+        self.send_ack_service.report_upstream(&ctx, upstream).await
     }
 }

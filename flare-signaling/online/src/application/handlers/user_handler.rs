@@ -58,7 +58,14 @@ impl<R: ConversationRepository + Send + Sync> OnlineUserHandler<R> {
         signing_key_id: &str,
     ) -> Result<u32> {
         self.inner
-            .revoke_identity_sessions(tenant, user, sessions, cutoff_ms, request_id, signing_key_id)
+            .revoke_identity_sessions(
+                tenant,
+                user,
+                sessions,
+                cutoff_ms,
+                request_id,
+                signing_key_id,
+            )
             .await
     }
 

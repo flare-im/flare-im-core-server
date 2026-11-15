@@ -96,6 +96,11 @@ async fn sensitive_reads_and_writes_are_audited_other_reads_are_not() {
         ),
         ("/api/v1/admin/users/u1/devices", "users.devices", "u1"),
         ("/api/v1/admin/users/u1/presence", "users.presence", "u1"),
+        (
+            "/api/v1/admin/users/u1/push-traces",
+            "users.push_traces",
+            "u1",
+        ),
     ];
     for (path, route, target) in sensitive {
         capture.take();
@@ -231,7 +236,7 @@ async fn sensitive_reads_and_writes_are_audited_other_reads_are_not() {
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert!(capture.take().is_empty());
 
-    // R3-2 新增的写路由同样各记一条：能力开关、插件登记与注销、Hook 创建/更新/删除/状态。
+    // R3-2 新增的写路由同样各记一条：能力开关、Hook 创建/更新/删除/状态。
     let capability_writes = [
         (
             "PUT",
@@ -398,11 +403,11 @@ async fn sensitive_reads_and_writes_are_audited_other_reads_are_not() {
         format!("{}!truncated:1000", "n".repeat(256))
     );
 
-    // 共 3+1 条敏感读、1 条踢线、1 条编码原因（带换行的被拒）、7 条 Capability 写、2 条媒资写，
+    // 共 4+1 条敏感读、1 条踢线、1 条编码原因（带换行的被拒）、5 条能力开关与 Hook 写、2 条媒资写，
     // 加上 2 条转义用例；任何事件里都没有上下文令牌，任何目标都只含 unreserved 字符、`%XX`、
     // 分隔符 `/` 与截断标记。
     let history = capture.history();
-    assert_eq!(history.len(), 17, "{history:?}");
+    assert_eq!(history.len(), 16, "{history:?}");
     let all = format!("{history:?}");
     for token in [
         h.gateway.token_for("GET", "/api/v1/admin/users/u1/devices"),

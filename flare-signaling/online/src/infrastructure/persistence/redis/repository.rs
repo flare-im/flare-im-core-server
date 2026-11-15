@@ -12,9 +12,13 @@ use crate::config::OnlineConfig;
 use crate::domain::aggregate::Connection;
 use crate::domain::model::OnlineStatusRecord;
 use crate::domain::repository::{
-    ConversationRepository, EvictedConnection, tenant_session_member, tenant_session_member_prefix,
+    ConversationRepository, EvictedConnection, KICK_PENDING_CONFIRMATION, tenant_session_member,
+    tenant_session_member_prefix,
 };
-use crate::domain::value_object::{ConnectionId, DeviceId, DevicePriority, TokenVersion, UserId};
+use crate::domain::value_object::{
+    ConnectionId, DeviceAppState, DeviceAttention, DeviceId, DevicePriority, DeviceStateUpdate,
+    TokenVersion, UserId,
+};
 use flare_server_core::context::Context as SrvContext;
 
 const CONNECTION_KEY_PREFIX: &str = "session";
@@ -153,6 +157,79 @@ struct RedisConnectionRecord {
     tenant_id: String,
     #[serde(default)]
     identity_session_id: Option<String>,
+    /// 设备应用状态：`active` / `standby` / `parking` / `deferred`，缺失即 `active`。推送路由直接
+    /// 读这几个字段判断设备的提示归链路上的进程还是推送通道，字段名与取值是两边共用的格式。
+    #[serde(default)]
+    app_state: DeviceAppState,
+    /// 用户注意力：`unspecified` / `attentive` / `idle`，缺失即 `unspecified`。
+    #[serde(default)]
+    attention: DeviceAttention,
+    /// 最近一次应用状态变化的时刻（Unix 毫秒），缺失即 0。
+    #[serde(default)]
+    state_since_ms: i64,
+    /// 最近一次上报的未读总数，缺失即 0。
+    #[serde(default)]
+    badge: u32,
+}
+
+// 设备状态上报：对会话哈希里的那个字段做一次读改写。与心跳、踢线同在脚本里串行，上报不会把
+// 已经移除的会话写回来，也不会盖掉并发心跳写入的 `last_seen`。只改设备状态这四个字段：不续 TTL、
+// 不动 `last_seen`，上报不算心跳。`state_since_ms` 只在应用状态真的变了才前移，取 Redis 自己的
+// 时钟：多个 Online 实例与网关的本地时钟不参与，同一条记录上的先后只有一个基准。
+//
+// 记下时返回这条会话的设备标识（调用方据此写推送闸门的设备信号），会话已不存在时返回空。
+//
+// KEYS: 1 会话哈希
+// ARGV: 1 会话字段，2 租户，3 应用状态，4 注意力，5 角标
+const REPORT_DEVICE_STATE_SCRIPT: &str = r#"
+local raw = redis.call('HGET', KEYS[1], ARGV[1])
+if not raw then return false end
+local rec = cjson.decode(raw)
+if rec.tenant_id ~= ARGV[2] then return redis.error_reply('session tenant mismatch') end
+if (rec.app_state or 'active') ~= ARGV[3] then
+  local time = redis.call('TIME')
+  rec.state_since_ms = tonumber(time[1]) * 1000 + math.floor(tonumber(time[2]) / 1000)
+end
+rec.app_state = ARGV[3]
+rec.attention = ARGV[4]
+rec.badge = tonumber(ARGV[5])
+redis.call('HSET', KEYS[1], ARGV[1], cjson.encode(rec))
+return tostring(rec.device_id)
+"#;
+
+// 推送闸门读的两种设备信号，写在会话记录所在的 Redis 里，Push Server 按同样的键读（见
+// `flare-push/server` 的 `RedisDeviceSignals`），键名与取值格式是两边共用的存储格式：
+//
+// - `push:dev:active:{tenant}:{user}:{device}`：设备最近一次以前台状态登录或上报的时刻（毫秒）。
+//   闸门在下一次碰到这台设备时发现它比自己记下的新，就把这台设备的通知槽位整体作废、退出摘要模式。
+// - `push:dev:badge:{tenant}:{user}:{device}`：`{未读总数}:{时刻}`，设备最近一次上报非前台状态时
+//   带的角标基线。闸门发现它比自己采用的新，就以它为基线重新累加。
+//
+// 时刻取 Redis 的时钟，与会话记录的 `state_since_ms` 同一个基准。
+const PUSH_DEVICE_ACTIVE_KEY_PREFIX: &str = "push:dev:active";
+const PUSH_DEVICE_BADGE_KEY_PREFIX: &str = "push:dev:badge";
+/// 设备信号保留多久。比闸门里任何状态都活得长：闸门的设备状态一天不写就过期。
+const PUSH_DEVICE_SIGNAL_TTL_MS: u64 = 2 * 24 * 60 * 60 * 1000;
+
+// KEYS: 1 信号键
+// ARGV: 1 取值前缀（角标基线为 `{未读总数}:`，前台标记为空），2 保留毫秒
+const MARK_PUSH_DEVICE_SIGNAL_SCRIPT: &str = r#"
+local time = redis.call('TIME')
+local now = tonumber(time[1]) * 1000 + math.floor(tonumber(time[2]) / 1000)
+redis.call('SET', KEYS[1], ARGV[1] .. string.format('%d', now), 'PX', ARGV[2])
+return 1
+"#;
+
+/// 推送闸门要知道的一次设备状态变化。
+enum PushDeviceSignal {
+    /// 设备以前台状态登录或上报。
+    Active,
+    /// 设备上报了非前台状态，带当时的未读总数。
+    BadgeBase(u32),
+}
+
+fn push_device_signal_key(prefix: &str, tenant_id: &str, user_id: &str, device_id: &str) -> String {
+    format!("{prefix}:{tenant_id}:{user_id}:{device_id}")
 }
 
 #[derive(Clone)]
@@ -309,6 +386,10 @@ impl RedisConversationRepository {
             last_seen: session.last_heartbeat_at().timestamp(),
             device_priority: session.device_priority().as_i32(),
             token_version: session.token_version().value(),
+            app_state: session.app_state(),
+            attention: session.attention(),
+            state_since_ms: session.state_since().timestamp_millis(),
+            badge: session.badge(),
         }
     }
 
@@ -338,6 +419,14 @@ impl RedisConversationRepository {
         })?;
 
         let identity_session_id = record.identity_session_id;
+        let created_at = Utc
+            .timestamp_millis_opt(record.created_at)
+            .single()
+            .unwrap_or(last_seen);
+        let state_since = Utc
+            .timestamp_millis_opt(record.state_since_ms)
+            .single()
+            .unwrap_or(created_at);
         Ok(Connection::reconstitute(
             conversation_id,
             user_id.clone(),
@@ -349,12 +438,50 @@ impl RedisConversationRepository {
             DevicePriority::from_i32(record.device_priority),
             TokenVersion::from(record.token_version),
             None,
-            Utc.timestamp_millis_opt(record.created_at)
-                .single()
-                .unwrap_or(last_seen),
+            created_at,
             last_seen,
         )
-        .with_identity_session_id(identity_session_id))
+        .with_identity_session_id(identity_session_id)
+        .with_device_state(
+            record.app_state,
+            record.attention,
+            state_since,
+            record.badge,
+        ))
+    }
+
+    /// 写一条推送闸门的设备信号。只是提示：写不进去不影响登录与上报本身，闸门最多晚一点才知道
+    /// 设备回过前台、或者角标基线变了，所以只记日志。
+    async fn mark_push_device_signal(
+        conn: &mut ConnectionManager,
+        tenant_id: &str,
+        user_id: &str,
+        device_id: &str,
+        signal: PushDeviceSignal,
+    ) {
+        let (prefix, value_prefix) = match signal {
+            PushDeviceSignal::Active => (PUSH_DEVICE_ACTIVE_KEY_PREFIX, String::new()),
+            PushDeviceSignal::BadgeBase(badge) => {
+                (PUSH_DEVICE_BADGE_KEY_PREFIX, format!("{badge}:"))
+            }
+        };
+        let marked: redis::RedisResult<i32> = redis::Script::new(MARK_PUSH_DEVICE_SIGNAL_SCRIPT)
+            .key(push_device_signal_key(
+                prefix, tenant_id, user_id, device_id,
+            ))
+            .arg(value_prefix)
+            .arg(PUSH_DEVICE_SIGNAL_TTL_MS)
+            .invoke_async(conn)
+            .await;
+        if let Err(error) = marked {
+            tracing::warn!(
+                %error,
+                tenant_id,
+                user_id,
+                device_id,
+                "push device signal not recorded"
+            );
+        }
     }
 
     async fn load_user_records(
@@ -479,7 +606,19 @@ impl ConversationRepository for RedisConversationRepository {
                 ))
             })?;
             match reply {
-                AdmissionReply::Evicted(evicted) => return Ok(evicted),
+                AdmissionReply::Evicted(evicted) => {
+                    if session.app_state() == DeviceAppState::Active {
+                        Self::mark_push_device_signal(
+                            &mut conn,
+                            session.tenant_id(),
+                            session.user_id().as_str(),
+                            session.device_id().as_str(),
+                            PushDeviceSignal::Active,
+                        )
+                        .await;
+                    }
+                    return Ok(evicted);
+                }
                 AdmissionReply::RetryWith { retry_with } => {
                     for gateway in retry_with {
                         if gateway != record.gateway_id && !other_gateways.contains(&gateway) {
@@ -572,7 +711,7 @@ impl ConversationRepository for RedisConversationRepository {
             }
             return Err(flare_server_core::flare_err!(
                 flare_server_core::error::ErrorCode::ServiceUnavailable,
-                "kick command pending receiver confirmation"
+                KICK_PENDING_CONFIRMATION
             ));
         }
         // Failed publication leaves the exact session available for retry. The
@@ -642,12 +781,16 @@ impl ConversationRepository for RedisConversationRepository {
             .await?;
         let mut kicked = 0u32;
         for record in records {
-            let revoked = match record.identity_session_id.as_deref() {
-                Some(sid) => session_ids.iter().any(|old| old == sid),
-                // Compatibility for a connection that predates authoritative sid propagation.
-                // Do not refresh the cutoff on a retry or infer a sid from device metadata.
-                None => record.created_at <= cutoff_ms,
-            };
+            // A connection without a sid predates authoritative sid propagation and is matched
+            // by the cutoff. Do not refresh the cutoff on a retry or infer a sid from device
+            // metadata. The rule lives on the aggregate: the domain service applies the same one
+            // to decide whose push bindings go with these sessions.
+            let revoked = Connection::identity_revocation_covers(
+                record.identity_session_id.as_deref(),
+                record.created_at,
+                session_ids,
+                cutoff_ms,
+            );
             if revoked {
                 // Security delivery requires the exact gateway receiver ACK, even
                 // without a Staff task scope. A PUBLISH count is never completion.
@@ -720,6 +863,41 @@ return 1
             ));
         }
         Ok(())
+    }
+
+    async fn report_device_state(
+        &self,
+        tenant_id: &str,
+        conversation_id: &ConnectionId,
+        user_id: &UserId,
+        update: DeviceStateUpdate,
+    ) -> Result<bool> {
+        let mut conn = self.connection().await?;
+        let device_id: Option<String> = redis::Script::new(REPORT_DEVICE_STATE_SCRIPT)
+            .key(Self::connection_key(tenant_id, user_id.as_str()))
+            .arg(conversation_id.as_str())
+            .arg(tenant_id)
+            .arg(update.app_state.as_str())
+            .arg(update.attention.as_str())
+            .arg(update.badge)
+            .invoke_async(&mut conn)
+            .await
+            .map_err(|e| {
+                flare_server_core::error::FlareError::system(format!(
+                    "device state report failed: {e}"
+                ))
+            })?;
+        let Some(device_id) = device_id else {
+            return Ok(false);
+        };
+        let signal = if update.app_state == DeviceAppState::Active {
+            PushDeviceSignal::Active
+        } else {
+            PushDeviceSignal::BadgeBase(update.badge)
+        };
+        Self::mark_push_device_signal(&mut conn, tenant_id, user_id.as_str(), &device_id, signal)
+            .await;
+        Ok(true)
     }
 
     async fn fetch_statuses(
@@ -1089,6 +1267,10 @@ mod admission_tests {
             token_version: 0,
             tenant_id: tenant.into(),
             identity_session_id: None,
+            app_state: DeviceAppState::Active,
+            attention: DeviceAttention::Unspecified,
+            state_since_ms: created_at,
+            badge: 0,
         }
     }
 
@@ -1143,6 +1325,7 @@ mod admission_tests {
                 tenant_runtime_postgres_url: None,
                 tenant_policy: Default::default(),
                 max_online_devices_per_user: 0,
+                push_proxy_url: None,
             }),
         )
     }
@@ -1158,7 +1341,260 @@ mod admission_tests {
             device_priority: DevicePriority::from_i32(2),
             token_version: TokenVersion::from(0),
             initial_quality: None,
+            app_state: DeviceAppState::Active,
+            attention: DeviceAttention::Unspecified,
         })
+    }
+
+    async fn stored(conn: &mut ConnectionManager, key: &str, field: &str) -> RedisConnectionRecord {
+        let raw: String = conn.hget(key, field).await.unwrap();
+        RedisConversationRepository::parse_record(&raw).unwrap()
+    }
+
+    async fn redis_now_ms(conn: &mut ConnectionManager) -> i64 {
+        let (seconds, micros): (i64, i64) = redis::cmd("TIME").query_async(conn).await.unwrap();
+        seconds * 1000 + micros / 1000
+    }
+
+    /// 设备状态上报只重写那条会话的应用状态、注意力与角标：`state_since_ms` 在应用状态变化时
+    /// 按 Redis 时钟前移，同一状态下不动；`last_seen`、TTL 与其余字段不变。心跳重写记录后这四个
+    /// 字段还在；会话不存在返回 `false`；同设备重连接替后新记录带自己的初始状态。
+    /// Run with `FLARE_TEST_REDIS_URL` pointing at an isolated Redis instance.
+    #[tokio::test]
+    #[ignore = "requires FLARE_TEST_REDIS_URL"]
+    async fn a_device_state_report_rewrites_only_the_device_state_of_that_session() {
+        use DeviceAppState::{Active, Deferred, Parking};
+        use DeviceAttention::{Attentive, Idle, Unspecified};
+
+        let url = std::env::var("FLARE_TEST_REDIS_URL").expect("FLARE_TEST_REDIS_URL");
+        let repository = test_repository(&url);
+        let mut conn = ConnectionManager::new(redis::Client::open(url.as_str()).unwrap())
+            .await
+            .unwrap();
+        let tenant = format!(
+            "dstate-{}",
+            &uuid::Uuid::new_v4().simple().to_string()[..12]
+        );
+        let gateway = format!("{tenant}-gw");
+        let key = RedisConversationRepository::connection_key(&tenant, "u:1");
+        let update = |app_state, attention, badge| DeviceStateUpdate {
+            app_state,
+            attention,
+            badge,
+        };
+
+        let session = connection_on(&tenant, "u:1", "phone", &gateway);
+        let field = session.id().as_str();
+        repository
+            .admit_connection(&session, "phys-1", DeviceConflictStrategy::Coexist, 0)
+            .await
+            .unwrap();
+        let admitted = stored(&mut conn, &key, field).await;
+        assert_eq!(admitted.app_state, Active);
+        assert_eq!(admitted.attention, Unspecified);
+        assert_eq!(
+            admitted.state_since_ms,
+            session.state_since().timestamp_millis()
+        );
+        assert_eq!(admitted.badge, 0);
+        let _: bool = conn.expire(&key, 30).await.unwrap();
+
+        // 同一应用状态：只改注意力与角标，不重新计时。
+        assert!(
+            repository
+                .report_device_state(
+                    &tenant,
+                    session.id(),
+                    session.user_id(),
+                    update(Active, Attentive, 4)
+                )
+                .await
+                .unwrap()
+        );
+        let same = stored(&mut conn, &key, field).await;
+        assert_eq!(
+            (same.app_state, same.attention, same.badge),
+            (Active, Attentive, 4)
+        );
+        assert_eq!(same.state_since_ms, admitted.state_since_ms);
+
+        // 应用状态变化：按 Redis 时钟前移。
+        let before = redis_now_ms(&mut conn).await;
+        assert!(
+            repository
+                .report_device_state(
+                    &tenant,
+                    session.id(),
+                    session.user_id(),
+                    update(Parking, Idle, 6)
+                )
+                .await
+                .unwrap()
+        );
+        let after = redis_now_ms(&mut conn).await;
+        let parked = stored(&mut conn, &key, field).await;
+        assert_eq!(
+            (parked.app_state, parked.attention, parked.badge),
+            (Parking, Idle, 6)
+        );
+        assert!(
+            (before..=after).contains(&parked.state_since_ms),
+            "state_since_ms {} must come from the Redis clock ({before}..={after})",
+            parked.state_since_ms
+        );
+
+        // 其余字段与 TTL 不动：上报不算心跳。
+        assert_eq!(parked.connection_id, "phys-1");
+        assert_eq!(parked.device_id, "phone");
+        assert_eq!(parked.device_platform, "ios");
+        assert_eq!(parked.gateway_id, gateway);
+        assert_eq!(parked.created_at, admitted.created_at);
+        assert_eq!(parked.last_seen, admitted.last_seen);
+        let ttl: i64 = conn.ttl(&key).await.unwrap();
+        assert!(ttl <= 30, "a state report must not refresh the session TTL");
+
+        // 心跳重写整条记录，设备状态还在；聚合读回的也是它。
+        repository
+            .touch_connection(&tenant, session.id(), session.user_id())
+            .await
+            .unwrap();
+        let touched = stored(&mut conn, &key, field).await;
+        assert_eq!(
+            (
+                touched.app_state,
+                touched.attention,
+                touched.badge,
+                touched.state_since_ms
+            ),
+            (Parking, Idle, 6, parked.state_since_ms)
+        );
+        let restored = repository
+            .get_user_connections(&tenant, session.user_id())
+            .await
+            .unwrap();
+        assert_eq!(restored.len(), 1);
+        assert_eq!(restored[0].app_state(), Parking);
+        assert_eq!(restored[0].attention(), Idle);
+        assert_eq!(restored[0].badge(), 6);
+        assert_eq!(
+            restored[0].state_since().timestamp_millis(),
+            parked.state_since_ms
+        );
+
+        // 后台、不能自己提示：脚本写进记录的取值是 `deferred`，又是一次应用状态变化；心跳重写
+        // 之后还在。
+        let before = redis_now_ms(&mut conn).await;
+        assert!(
+            repository
+                .report_device_state(
+                    &tenant,
+                    session.id(),
+                    session.user_id(),
+                    update(Deferred, Unspecified, 7)
+                )
+                .await
+                .unwrap()
+        );
+        let after = redis_now_ms(&mut conn).await;
+        let raw: String = conn.hget(&key, field).await.unwrap();
+        let json: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(json["app_state"], "deferred");
+        let deferred = stored(&mut conn, &key, field).await;
+        assert_eq!(
+            (deferred.app_state, deferred.attention, deferred.badge),
+            (Deferred, Unspecified, 7)
+        );
+        assert!((before..=after).contains(&deferred.state_since_ms));
+        repository
+            .touch_connection(&tenant, session.id(), session.user_id())
+            .await
+            .unwrap();
+        let touched = stored(&mut conn, &key, field).await;
+        assert_eq!(
+            (touched.app_state, touched.state_since_ms),
+            (Deferred, deferred.state_since_ms)
+        );
+
+        // 会话不存在：不写任何东西。
+        let missing = ConnectionId::new();
+        assert!(
+            !repository
+                .report_device_state(
+                    &tenant,
+                    &missing,
+                    session.user_id(),
+                    update(Active, Unspecified, 0)
+                )
+                .await
+                .unwrap()
+        );
+        assert!(
+            !conn
+                .hexists::<_, _, bool>(&key, missing.as_str())
+                .await
+                .unwrap()
+        );
+
+        // 同设备重连接替：旧会话已不在，新记录是新连接自己的初始状态。
+        let replacement = connection_on(&tenant, "u:1", "phone", &gateway);
+        let evicted = repository
+            .admit_connection(&replacement, "phys-2", DeviceConflictStrategy::Coexist, 0)
+            .await
+            .unwrap();
+        assert_eq!(evicted.len(), 1);
+        assert!(
+            !repository
+                .report_device_state(
+                    &tenant,
+                    session.id(),
+                    session.user_id(),
+                    update(Active, Attentive, 1)
+                )
+                .await
+                .unwrap()
+        );
+        let fresh = stored(&mut conn, &key, replacement.id().as_str()).await;
+        assert_eq!((fresh.app_state, fresh.badge), (Active, 0));
+
+        // 记录的租户与签名租户不符：拒绝，不改记录。
+        let foreign_field = ConnectionId::new();
+        let foreign = record("other-tenant", "tablet", "phys-x", 1);
+        let _: () = conn
+            .hset(
+                &key,
+                foreign_field.as_str(),
+                serde_json::to_string(&foreign).unwrap(),
+            )
+            .await
+            .unwrap();
+        assert!(
+            repository
+                .report_device_state(
+                    &tenant,
+                    &foreign_field,
+                    session.user_id(),
+                    update(Parking, Idle, 2)
+                )
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            stored(&mut conn, &key, foreign_field.as_str())
+                .await
+                .app_state,
+            Active
+        );
+
+        let _: () = redis::pipe()
+            .del(&key)
+            .ignore()
+            .del(RedisConversationRepository::tenant_sessions_key(&tenant))
+            .ignore()
+            .del(gateway_conns_key(&gateway))
+            .ignore()
+            .query_async(&mut conn)
+            .await
+            .unwrap();
     }
 
     /// 准入与断开在会话哈希的同一事务里维护 `gw:conns:{gateway_id}`：新连接进所在网关的集合，
@@ -1549,6 +1985,113 @@ mod tests {
                 .tenant_id,
             "acme"
         );
+    }
+
+    /// 设备状态在会话记录里的格式是与推送路由共用的：字段名、小写取值、毫秒时间戳；原有的
+    /// `device_id`、`device_platform` 不变。写出的记录读回来是同一个设备状态。
+    #[test]
+    fn the_session_record_carries_the_device_state_in_the_shared_format() {
+        let mut connection = Connection::create(crate::domain::aggregate::ConnectionCreateParams {
+            user_id: UserId::new("u1".to_string()).unwrap(),
+            device_id: DeviceId::new("phone".to_string()).unwrap(),
+            tenant_id: "acme".to_string(),
+            device_platform: "ios".to_string(),
+            server_id: "s".to_string(),
+            gateway_id: "g".to_string(),
+            device_priority: DevicePriority::from_i32(2),
+            token_version: TokenVersion::from(0),
+            initial_quality: None,
+            app_state: DeviceAppState::Standby,
+            attention: DeviceAttention::Attentive,
+        });
+        let connected = RedisConversationRepository::record_from_connection(&connection);
+        let json = serde_json::to_value(&connected).unwrap();
+        assert_eq!(json["app_state"], "standby");
+        assert_eq!(json["attention"], "attentive");
+        assert_eq!(
+            json["state_since_ms"],
+            connection.created_at().timestamp_millis()
+        );
+        assert_eq!(json["badge"], 0);
+
+        let parked_at = connection.created_at() + chrono::Duration::seconds(5);
+        connection.report_device_state(
+            DeviceStateUpdate {
+                app_state: DeviceAppState::Parking,
+                attention: DeviceAttention::Idle,
+                badge: 3,
+            },
+            parked_at,
+        );
+        let parked = RedisConversationRepository::record_from_connection(&connection);
+        let json = serde_json::to_value(&parked).unwrap();
+        assert_eq!(json["app_state"], "parking");
+        assert_eq!(json["attention"], "idle");
+        assert_eq!(json["state_since_ms"], parked_at.timestamp_millis());
+        assert_eq!(json["badge"], 3);
+        assert_eq!(json["device_id"], "phone");
+        assert_eq!(json["device_platform"], "ios");
+
+        let restored = RedisConversationRepository::connection_from_record(
+            connection.user_id(),
+            RedisConversationRepository::parse_record(&json.to_string()).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(restored.app_state(), DeviceAppState::Parking);
+        assert_eq!(restored.attention(), DeviceAttention::Idle);
+        assert_eq!(
+            restored.state_since().timestamp_millis(),
+            parked_at.timestamp_millis()
+        );
+        assert_eq!(restored.badge(), 3);
+
+        // 后台、不能自己提示：记录里是 `deferred`，读回来是同一个状态。
+        let deferred_at = parked_at + chrono::Duration::seconds(5);
+        connection.report_device_state(
+            DeviceStateUpdate {
+                app_state: DeviceAppState::Deferred,
+                attention: DeviceAttention::Unspecified,
+                badge: 4,
+            },
+            deferred_at,
+        );
+        let deferred = RedisConversationRepository::record_from_connection(&connection);
+        let json = serde_json::to_value(&deferred).unwrap();
+        assert_eq!(json["app_state"], "deferred");
+        assert_eq!(json["state_since_ms"], deferred_at.timestamp_millis());
+        let restored = RedisConversationRepository::connection_from_record(
+            connection.user_id(),
+            RedisConversationRepository::parse_record(&json.to_string()).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(restored.app_state(), DeviceAppState::Deferred);
+        assert!(restored.app_state().alerts_owned_by_push());
+        assert_eq!(
+            restored.state_since().timestamp_millis(),
+            deferred_at.timestamp_millis()
+        );
+        assert_eq!(restored.badge(), 4);
+    }
+
+    /// 没有设备状态字段的记录：前台、注意力未指定、`state_since_ms` 与角标为 0。
+    #[test]
+    fn a_record_without_device_state_fields_reads_as_active() {
+        let payload = r#"{"conversation_id":"c1","gateway_id":"g","server_id":"s","device_id":"d1","device_platform":"ios","connection_id":"physical-1","created_at":1,"last_seen":1,"device_priority":2,"token_version":0,"tenant_id":"acme"}"#;
+        let record = RedisConversationRepository::parse_record(payload).unwrap();
+        assert_eq!(record.app_state, DeviceAppState::Active);
+        assert_eq!(record.attention, DeviceAttention::Unspecified);
+        assert_eq!(record.state_since_ms, 0);
+        assert_eq!(record.badge, 0);
+        // 取值是固定的四个名字，别的写法不接受。
+        let deferred = payload.replacen('{', r#"{"app_state":"deferred","#, 1);
+        assert_eq!(
+            RedisConversationRepository::parse_record(&deferred)
+                .unwrap()
+                .app_state,
+            DeviceAppState::Deferred
+        );
+        let unknown = payload.replacen('{', r#"{"app_state":"background","#, 1);
+        assert!(RedisConversationRepository::parse_record(&unknown).is_err());
     }
 
     #[test]

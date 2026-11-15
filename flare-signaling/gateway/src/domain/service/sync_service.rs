@@ -94,6 +94,8 @@ fn is_pull_sync(sync: &Sync) -> bool {
             | Some(SyncPayload::Conversations(_))
             | Some(SyncPayload::ConversationParticipants(_))
             | Some(SyncPayload::ConversationUserSettings(_))
+            | Some(SyncPayload::UserNotificationSettings(_))
+            | Some(SyncPayload::GetUserNotificationSettings(_))
     )
 }
 

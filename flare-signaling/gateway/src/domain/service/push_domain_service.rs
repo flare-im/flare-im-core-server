@@ -17,6 +17,7 @@ use tracing::{info, instrument};
 
 use crate::domain::model::{ConnectionInfo, DomainPushResult};
 use crate::domain::ports::{ConnectionQuery, ConversationParticipantSource, IPushPort};
+use crate::domain::service::delivery_watch::{DeliveryItem, DeliveryWatch};
 
 const USER_PUSH_FANOUT_CONCURRENCY: usize = 64;
 
@@ -125,6 +126,8 @@ pub struct PushDomainService {
     large_group_participants_ttl: std::time::Duration,
     /// 推送投递指标。这一组以前只有声明没有写入路径，见 record_push_result 的说明。
     metrics: Arc<flare_im_service_kit::metrics::AccessGatewayMetrics>,
+    /// 送达确认跟踪：消息 / 事件帧写出之前先过它，决定哪些连接真的要写、哪些内容要等确认。
+    delivery_watch: Arc<DeliveryWatch>,
 }
 
 pub struct EventEnvelopePushRequest<'a> {
@@ -145,6 +148,7 @@ impl PushDomainService {
         conversation_subscriptions: Arc<super::ConversationSubscriptionRegistry>,
         conversation_read: Arc<dyn ConversationParticipantSource>,
         metrics: Arc<flare_im_service_kit::metrics::AccessGatewayMetrics>,
+        delivery_watch: Arc<DeliveryWatch>,
     ) -> Self {
         Self {
             push_port,
@@ -152,6 +156,7 @@ impl PushDomainService {
             conversation_subscriptions,
             conversation_read,
             metrics,
+            delivery_watch,
             participants_ttl: env_secs("GATEWAY_PARTICIPANTS_TTL_SECS", DEFAULT_PARTICIPANTS_TTL),
             large_group_participants_ttl: env_secs(
                 "GATEWAY_LARGE_GROUP_PARTICIPANTS_TTL_SECS",
@@ -329,12 +334,16 @@ impl PushDomainService {
     /// 每次成员制广播需 O(群成员数) 的权威分页读取与有界连接查询，随后按本节点在线连接扇出。
     /// 没有获授权的本地在线连接时返回 (0,0)；不能因旧订阅为空或 TTL 未到而跳过授权。
     /// 跨节点由"会话 publish 命中所有有订阅者的节点"达成（上层 MQ 主题广播，F2 接入）。
+    ///
+    /// `watch` 是这一帧里需要送达确认的内容（没有就传空）：逐连接登记后再写出，帧本身不因
+    /// 连接而异，仍然只编码一次。托管中的连接不在写出之列，也不计入成功或失败。
     pub async fn deliver_to_conversation(
         &self,
         tx: &Ctx,
         conversation_id: &str,
         payload_type: i32,
         payload: &[u8],
+        watch: &[DeliveryItem],
     ) -> Result<(i32, i32)> {
         let tenant_id = tx
             .tenant_id()
@@ -365,6 +374,17 @@ impl PushDomainService {
             tracing::info!(
                 conversation_id = %conversation_id,
                 "push: 本节点无该会话的在线订阅者，跳过投递"
+            );
+            self.metrics.record_push_result(tenant_id, 0, 0);
+            return Ok((0, 0));
+        }
+        // 写出之前先登记待确认的内容：托管中的连接被摘出（可提示的内容直接交接给推送通道），
+        // 其余连接把可提示的内容记下等客户端确认。
+        self.delivery_watch.admit(&mut connection_ids, watch);
+        if connection_ids.is_empty() {
+            tracing::debug!(
+                conversation_id = %conversation_id,
+                "push: 本节点订阅该会话的连接都已托管给推送通道，跳过写出"
             );
             self.metrics.record_push_result(tenant_id, 0, 0);
             return Ok((0, 0));
@@ -402,6 +422,7 @@ impl PushDomainService {
         conversation_id: &str,
         messages: Vec<Message>,
     ) -> Result<(i32, i32)> {
+        let watch = DeliveryItem::from_messages(&messages);
         let push = MessagePush {
             messages,
             notifications: vec![],
@@ -417,6 +438,7 @@ impl PushDomainService {
             conversation_id,
             flare_core::common::protocol::payload_command::Type::Message as i32,
             &payload,
+            &watch,
         )
         .await
     }
@@ -443,6 +465,7 @@ impl PushDomainService {
             delivery_mode,
             inline_events_truncated,
         )?;
+        let watch = DeliveryItem::from_envelope(&envelope);
         let mut payload = Vec::new();
         envelope.encode(&mut payload).map_err(|e| {
             ErrorBuilder::new(ErrorCode::InternalError, "encode EventEnvelope failed")
@@ -454,6 +477,7 @@ impl PushDomainService {
             conversation_id,
             flare_core::common::protocol::payload_command::Type::Message as i32,
             &payload,
+            &watch,
         )
         .await
     }
@@ -661,6 +685,9 @@ impl PushDomainService {
         Ok(self.filter_connections(tx, &connections, options))
     }
 
+    /// `watch` 只在载荷是消息 / 事件帧时给出（`Some`，内容是其中需要送达确认的条目）；
+    /// ACK 这类帧传 `None`，不过送达确认跟踪。
+    #[allow(clippy::too_many_arguments)]
     async fn push_encoded_payload_to_user(
         &self,
         tx: &Ctx,
@@ -669,6 +696,7 @@ impl PushDomainService {
         payload: Arc<Vec<u8>>,
         payload_type: i32,
         log_kind: &'static str,
+        watch: Option<Arc<Vec<DeliveryItem>>>,
     ) -> Result<(String, i32, i32, i32)> {
         let started = std::time::Instant::now();
         // 连接上下文的租户在认证时已绑定；缺租户即拒绝，不按租户 "0" 查连接、记指标（W12-T）。
@@ -689,14 +717,26 @@ impl PushDomainService {
             info!(user_id = %user_id, "push: user has no matching online connection");
             return Ok((user_id, 0, 0, 1));
         }
+        let mut connection_ids: Vec<String> = connections
+            .into_iter()
+            .map(|connection| connection.connection_id)
+            .collect();
+        if let Some(watch) = watch.as_deref() {
+            // 与会话级投递相同：先登记待确认的内容再写出，托管中的连接不写。
+            self.delivery_watch.admit(&mut connection_ids, watch);
+            if connection_ids.is_empty() {
+                // 这个用户在本节点的设备都已托管：提示已经交接给推送通道，不算离线待投。
+                tracing::debug!(
+                    user_id = %user_id,
+                    kind = log_kind,
+                    "push: every matching connection is parked, nothing written"
+                );
+                return Ok((user_id, 0, 0, 0));
+            }
+        }
         let (ok, fail) = self
-            .push_payload_to_connections(
-                tx,
-                &user_id,
-                &connections,
-                payload_type,
-                payload.as_slice(),
-            )
+            .push_port
+            .push_payload_to_connections(tx, &connection_ids, payload_type, payload.to_vec())
             .await?;
         self.metrics.record_push_result(&tenant_id, ok, fail);
         self.metrics
@@ -711,6 +751,7 @@ impl PushDomainService {
         Ok((user_id, ok, fail, 0))
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn push_encoded_payload_to_users(
         &self,
         tx: &Ctx,
@@ -719,11 +760,14 @@ impl PushDomainService {
         payload: Vec<u8>,
         payload_type: i32,
         log_kind: &'static str,
+        watch: Option<Vec<DeliveryItem>>,
     ) -> Result<Vec<(String, i32, i32, i32)>> {
         let payload = Arc::new(payload);
+        let watch = watch.map(Arc::new);
         let results = stream::iter(user_ids.iter().cloned().enumerate())
             .map(|(index, user_id)| {
                 let payload = Arc::clone(&payload);
+                let watch = watch.clone();
                 async move {
                     self.push_encoded_payload_to_user(
                         tx,
@@ -732,6 +776,7 @@ impl PushDomainService {
                         payload,
                         payload_type,
                         log_kind,
+                        watch,
                     )
                     .await
                     .map(|row| (index, row))
@@ -760,6 +805,7 @@ impl PushDomainService {
         messages: Vec<Message>,
         options: &PushOptions,
     ) -> Result<Vec<(String, i32, i32, i32)>> {
+        let watch = DeliveryItem::from_messages(&messages);
         let push = MessagePush {
             messages,
             notifications: vec![],
@@ -778,6 +824,7 @@ impl PushDomainService {
             payload,
             flare_core::common::protocol::payload_command::Type::Message as i32,
             "message",
+            Some(watch),
         )
         .await
     }
@@ -799,6 +846,7 @@ impl PushDomainService {
             request.delivery_mode,
             request.inline_events_truncated,
         )?;
+        let watch = DeliveryItem::from_envelope(&envelope);
         let mut payload = Vec::new();
         envelope.encode(&mut payload).map_err(|e| {
             ErrorBuilder::new(ErrorCode::InternalError, "encode EventEnvelope failed")
@@ -813,6 +861,7 @@ impl PushDomainService {
             payload,
             flare_core::common::protocol::payload_command::Type::Message as i32,
             "event_envelope",
+            Some(watch),
         )
         .await
     }
@@ -914,6 +963,7 @@ impl PushDomainService {
             ack_payload,
             flare_core::common::protocol::payload_command::Type::Ack as i32,
             "ack",
+            None,
         )
         .await
     }
@@ -972,7 +1022,13 @@ impl PushDomainService {
 mod tests {
     use super::*;
 
+    use crate::domain::model::DeviceLinkState;
+    use crate::domain::service::delivery_watch::testing::{
+        WatchFixture, detached, device, fixture,
+    };
     use async_trait::async_trait;
+    use flare_proto::common::event::Payload as EventPayload;
+    use flare_proto::common::{DeviceAppState, DeviceAttention, DeviceHandoffCause, EventType};
     use std::sync::Mutex;
 
     #[test]
@@ -1123,6 +1179,7 @@ mod tests {
             Arc::new(crate::domain::service::ConversationSubscriptionRegistry::new()),
             Arc::new(crate::infrastructure::ports::ConversationReadGrpcPool::new()),
             Arc::new(flare_im_service_kit::metrics::AccessGatewayMetrics::new()),
+            detached(),
         );
         let ctx: Ctx = Arc::new(flare_server_core::Context::root().with_tenant_id("t1"));
         let user_ids = vec!["u1".to_string()];
@@ -1189,6 +1246,7 @@ mod tests {
             Arc::new(crate::domain::service::ConversationSubscriptionRegistry::new()),
             Arc::new(crate::infrastructure::ports::ConversationReadGrpcPool::new()),
             Arc::new(flare_im_service_kit::metrics::AccessGatewayMetrics::new()),
+            detached(),
         );
         let user_ids = vec!["u1".to_string()];
         for ctx in [
@@ -1250,6 +1308,7 @@ mod tests {
             subscriptions.clone(),
             Arc::new(crate::infrastructure::ports::ConversationReadGrpcPool::new()),
             Arc::new(flare_im_service_kit::metrics::AccessGatewayMetrics::new()),
+            detached(),
         );
         let ctx: Ctx = Arc::new(flare_server_core::Context::root());
 
@@ -1580,6 +1639,7 @@ mod tests {
             Arc::new(crate::domain::service::ConversationSubscriptionRegistry::new()),
             Arc::new(crate::infrastructure::ports::ConversationReadGrpcPool::new()),
             Arc::new(flare_im_service_kit::metrics::AccessGatewayMetrics::new()),
+            detached(),
         );
         let packet = CapabilityPacket {
             capability_id: "flare.call".into(),
@@ -1636,6 +1696,7 @@ mod tests {
             Arc::new(crate::domain::service::ConversationSubscriptionRegistry::new()),
             Arc::new(crate::infrastructure::ports::ConversationReadGrpcPool::new()),
             Arc::new(flare_im_service_kit::metrics::AccessGatewayMetrics::new()),
+            detached(),
         );
         let packet = CapabilityPacket {
             capability_id: "flare.call".into(),
@@ -1672,6 +1733,8 @@ mod tests {
         connections: Arc<UserConnections>,
         subscriptions: Arc<crate::domain::service::ConversationSubscriptionRegistry>,
         push: Arc<RecordingPushPort>,
+        /// 送达确认跟踪及其记录下来的交接。
+        delivery: WatchFixture,
     }
 
     impl MemberHarness {
@@ -1681,12 +1744,14 @@ mod tests {
             let subscriptions =
                 Arc::new(crate::domain::service::ConversationSubscriptionRegistry::new());
             let push = Arc::new(RecordingPushPort::default());
+            let delivery = fixture(Default::default());
             let service = PushDomainService::new(
                 push.clone(),
                 connections.clone(),
                 subscriptions.clone(),
                 participants.clone(),
                 Arc::new(flare_im_service_kit::metrics::AccessGatewayMetrics::new()),
+                delivery.watch.clone(),
             )
             .with_participants_ttl(ttl, ttl);
             Self {
@@ -1695,6 +1760,7 @@ mod tests {
                 connections,
                 subscriptions,
                 push,
+                delivery,
             }
         }
 
@@ -1748,7 +1814,7 @@ mod tests {
             let ctx: Ctx = Arc::new(flare_server_core::Context::root().with_tenant_id(tenant_id));
             let before = self.push.deliveries.lock().expect("mutex").len();
             self.service
-                .deliver_to_conversation(&ctx, conversation_id, 1, b"payload")
+                .deliver_to_conversation(&ctx, conversation_id, 1, b"payload", &[])
                 .await
                 .expect("deliver");
             if self.push.deliveries.lock().expect("mutex").len() == before {
@@ -1857,7 +1923,7 @@ mod tests {
         let ctx = Arc::new(flare_server_core::Context::root().with_tenant_id("t1"));
         let error = h
             .service
-            .deliver_to_conversation(&ctx, "g1", 1, b"must not send")
+            .deliver_to_conversation(&ctx, "g1", 1, b"must not send", &[])
             .await
             .unwrap_err();
         assert_eq!(error.code(), Some(ErrorCode::ServiceUnavailable));
@@ -1933,7 +1999,7 @@ mod tests {
         let ctx = Arc::new(flare_server_core::Context::root().with_tenant_id("t1"));
         let error = h
             .service
-            .deliver_to_conversation(&ctx, "g1", 1, b"no send")
+            .deliver_to_conversation(&ctx, "g1", 1, b"no send", &[])
             .await
             .unwrap_err();
         assert_eq!(error.code(), Some(ErrorCode::ServiceUnavailable));
@@ -2006,5 +2072,270 @@ mod tests {
         assert_eq!(h.deliver(&inbox).await, ["c-u1"]);
         assert_eq!(h.participants.calls(), 0);
         assert_eq!(h.subscriptions.local_subscribers("t1", &inbox), ["c-u1"]);
+    }
+
+    // ── 送达确认跟踪 ──────────────────────────────────────────────────────────
+    // 消息 / 事件帧写出之前逐连接登记待确认的内容；帧本身不因连接而异，仍然一次扇出。
+
+    const PARKING: DeviceLinkState = DeviceLinkState {
+        app_state: DeviceAppState::Parking,
+        attention: DeviceAttention::Unspecified,
+    };
+    const DEFERRED: DeviceLinkState = DeviceLinkState {
+        app_state: DeviceAppState::Deferred,
+        attention: DeviceAttention::Unspecified,
+    };
+
+    fn alerting_message(conversation_id: &str, seq: u64) -> Message {
+        Message {
+            server_id: format!("m-{seq}"),
+            conversation_id: conversation_id.to_string(),
+            conversation_seq: seq,
+            ..Default::default()
+        }
+    }
+
+    fn t1() -> Ctx {
+        Arc::new(flare_server_core::Context::root().with_tenant_id("t1"))
+    }
+
+    impl MemberHarness {
+        /// 两个在线成员 a、b，各一条已登记送达确认跟踪的前台连接。
+        fn with_two_watched_members() -> Self {
+            let h = Self::new(
+                UserConnections::with(&[("a", "c-a"), ("b", "c-b")]),
+                std::time::Duration::from_secs(3600),
+            );
+            h.participants.set("g1", &["a", "b"]);
+            for (user, connection) in [("a", "c-a"), ("b", "c-b")] {
+                h.delivery
+                    .watch
+                    .register(connection, device(user), DeviceLinkState::FOREGROUND);
+            }
+            h
+        }
+
+        fn fanouts(&self) -> usize {
+            self.push.deliveries.lock().expect("deliveries mutex").len()
+        }
+    }
+
+    #[tokio::test]
+    async fn a_conversation_delivery_is_watched_on_every_connection_it_is_written_to() {
+        let h = MemberHarness::with_two_watched_members();
+
+        let result = h
+            .service
+            .push_message_to_conversation(&t1(), "g1", vec![alerting_message("g1", 7)])
+            .await
+            .expect("delivered");
+
+        assert_eq!(result, (2, 0));
+        assert_eq!(h.fanouts(), 1, "one frame, one fan-out");
+        assert_eq!(h.push.last(), ["c-a", "c-b"]);
+        for connection in ["c-a", "c-b"] {
+            assert_eq!(
+                h.delivery.watch.pending(connection),
+                [DeliveryItem::new("g1", 7, "m-7")]
+            );
+        }
+        assert!(h.delivery.handoffs.take().is_empty());
+    }
+
+    /// 托管中的连接不再收消息帧：可提示的内容交接给推送通道，其余连接照常投递；
+    /// 被摘出的连接不计成功也不计失败。
+    #[tokio::test]
+    async fn a_parked_connection_is_skipped_and_its_alert_handed_to_push() {
+        let h = MemberHarness::with_two_watched_members();
+        assert!(h.delivery.watch.set_device_state("c-b", PARKING));
+
+        let result = h
+            .service
+            .push_message_to_conversation(&t1(), "g1", vec![alerting_message("g1", 7)])
+            .await
+            .expect("delivered");
+        assert_eq!(result, (1, 0));
+        assert_eq!(h.push.last(), ["c-a"]);
+        let handoffs = h.delivery.handoffs.take();
+        assert_eq!(handoffs.len(), 1);
+        assert_eq!(handoffs[0].cause, DeviceHandoffCause::Parked as i32);
+        assert_eq!(handoffs[0].connection_id, "c-b");
+        assert_eq!(handoffs[0].user_id, "b");
+        assert_eq!(handoffs[0].pending.len(), 1);
+        assert_eq!(handoffs[0].pending[0].conversation_id, "g1");
+        assert_eq!(handoffs[0].pending[0].seq, 7);
+        assert_eq!(handoffs[0].pending[0].message_id, "m-7");
+        assert!(h.delivery.watch.pending("c-b").is_empty());
+
+        // 全部托管：什么都不写，也不是失败。
+        assert!(h.delivery.watch.set_device_state("c-a", PARKING));
+        let fanouts = h.fanouts();
+        let result = h
+            .service
+            .push_message_to_conversation(&t1(), "g1", vec![alerting_message("g1", 8)])
+            .await
+            .expect("nothing to write is not an error");
+        assert_eq!(result, (0, 0));
+        assert_eq!(h.fanouts(), fanouts);
+        assert_eq!(h.delivery.handoffs.take().len(), 2);
+    }
+
+    /// 声明了 `Deferred` 的连接照常收到帧，但不登记待确认的内容，也不交接：推送路由已经直接
+    /// 给这台设备推送。同一帧里别的连接照常登记。
+    #[tokio::test]
+    async fn a_deferred_connection_gets_the_frame_without_being_watched() {
+        let h = MemberHarness::with_two_watched_members();
+        assert!(h.delivery.watch.set_device_state("c-b", DEFERRED));
+
+        let result = h
+            .service
+            .push_message_to_conversation(&t1(), "g1", vec![alerting_message("g1", 7)])
+            .await
+            .expect("delivered");
+
+        assert_eq!(result, (2, 0));
+        assert_eq!(h.push.last(), ["c-a", "c-b"]);
+        assert_eq!(
+            h.delivery.watch.pending("c-a"),
+            [DeliveryItem::new("g1", 7, "m-7")]
+        );
+        assert!(h.delivery.watch.pending("c-b").is_empty());
+        assert!(h.delivery.handoffs.take().is_empty());
+    }
+
+    /// 事件批按其中可提示的事件登记；已读回执这类不提示的事件不登记；纯水位通知照常投递但
+    /// 不登记——客户端靠同步拉取那些消息，拉来的消息不回送达确认。
+    #[tokio::test]
+    async fn event_envelopes_are_watched_by_their_alerting_events_and_pure_pings_are_not() {
+        let h = MemberHarness::with_two_watched_members();
+        let message_event = Event {
+            conversation_id: "g1".to_string(),
+            conversation_seq: 7,
+            r#type: EventType::EventMessage as i32,
+            payload: Some(EventPayload::Message(alerting_message("g1", 7))),
+            ..Default::default()
+        };
+        let read_receipt = Event {
+            conversation_id: "g1".to_string(),
+            conversation_seq: 8,
+            r#type: EventType::EventReadReceipt as i32,
+            ..Default::default()
+        };
+
+        h.service
+            .deliver_event_envelope_to_conversation(
+                &t1(),
+                "g1",
+                vec![message_event, read_receipt.clone()],
+                "window-1",
+                0,
+                0,
+                false,
+            )
+            .await
+            .expect("delivered");
+        assert_eq!(
+            h.delivery.watch.pending("c-a"),
+            [DeliveryItem::new("g1", 7, "m-7")]
+        );
+
+        // 只有不提示的事件：照常投递，不登记。
+        h.service
+            .deliver_event_envelope_to_conversation(
+                &t1(),
+                "g1",
+                vec![read_receipt],
+                "window-2",
+                0,
+                0,
+                false,
+            )
+            .await
+            .expect("delivered");
+        assert_eq!(h.delivery.watch.pending("c-a").len(), 1);
+
+        h.service
+            .deliver_event_envelope_to_conversation(
+                &t1(),
+                "g1",
+                Vec::new(),
+                "window-3",
+                9,
+                EventEnvelopeDeliveryMode::Ping as i32,
+                false,
+            )
+            .await
+            .expect("delivered");
+        assert_eq!(
+            h.delivery.watch.pending("c-a"),
+            [DeliveryItem::new("g1", 7, "m-7")]
+        );
+        assert_eq!(h.fanouts(), 3);
+        assert!(h.delivery.handoffs.take().is_empty());
+    }
+
+    /// 按用户推送同样先登记再写；ACK 帧不是消息帧，不过送达确认跟踪，托管中的连接也照写。
+    #[tokio::test]
+    async fn per_user_pushes_are_watched_and_ack_frames_are_not_gated() {
+        let connection = |id: &str| {
+            ConnectionInfo::new(id.into(), "u1".into(), "t1".into(), format!("dev-{id}"))
+        };
+        let push = Arc::new(RecordingPushPort::default());
+        let delivery = fixture(Default::default());
+        let service = PushDomainService::new(
+            push.clone(),
+            Arc::new(TenantConnections(vec![connection("c1"), connection("c2")])),
+            Arc::new(crate::domain::service::ConversationSubscriptionRegistry::new()),
+            Arc::new(crate::infrastructure::ports::ConversationReadGrpcPool::new()),
+            Arc::new(flare_im_service_kit::metrics::AccessGatewayMetrics::new()),
+            delivery.watch.clone(),
+        );
+        delivery
+            .watch
+            .register("c1", device("u1"), DeviceLinkState::FOREGROUND);
+        delivery.watch.register("c2", device("u1"), PARKING);
+        let users = vec!["u1".to_string()];
+
+        let rows = service
+            .push_message_push_to_users(
+                &t1(),
+                &users,
+                vec![alerting_message("g1", 7)],
+                &PushOptions::default(),
+            )
+            .await
+            .expect("pushed");
+        assert_eq!(rows, vec![("u1".to_string(), 1, 0, 0)]);
+        assert_eq!(push.last(), ["c1"]);
+        assert_eq!(
+            delivery.watch.pending("c1"),
+            [DeliveryItem::new("g1", 7, "m-7")]
+        );
+        let handoffs = delivery.handoffs.take();
+        assert_eq!(handoffs.len(), 1);
+        assert_eq!(handoffs[0].cause, DeviceHandoffCause::Parked as i32);
+        assert_eq!(handoffs[0].connection_id, "c2");
+
+        service
+            .push_ack_to_users(&t1(), &users, vec![1, 2, 3], &PushOptions::default())
+            .await
+            .expect("ack pushed");
+        assert_eq!(push.last(), ["c1", "c2"]);
+        assert_eq!(delivery.watch.pending("c1").len(), 1);
+        assert!(delivery.handoffs.take().is_empty());
+
+        // 这个用户的设备全部托管：不写，提示已交接，不算离线待投。
+        assert!(delivery.watch.set_device_state("c1", PARKING));
+        let rows = service
+            .push_message_push_to_users(
+                &t1(),
+                &users,
+                vec![alerting_message("g1", 8)],
+                &PushOptions::default(),
+            )
+            .await
+            .expect("pushed");
+        assert_eq!(rows, vec![("u1".to_string(), 0, 0, 0)]);
+        assert_eq!(delivery.handoffs.take().len(), 2);
     }
 }

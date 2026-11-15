@@ -43,7 +43,9 @@ rejected. This command never imports or adopts another schema model.
 The bounded transaction uses the initializer advisory lock and locks existing
 application tables. It adds typed media ownership and purpose with the three
 checks in `upgrades/0002_application_media.sql`. Existing assets stay User-owned
-with General purpose; client metadata cannot promote them. The same transaction
+with General purpose; client metadata cannot promote them. The same file adds
+the user-level notification settings table and the participant `notify_all`
+flag with its partial index; existing participants start with it off. The same transaction
 advances the genuine initial marker to v2 and records the accepted old source,
 target source and exact forward DDL hashes in `core_initial_history`. Runtime
 can read history and cannot insert, update or delete it. The target descriptor

@@ -317,7 +317,7 @@ def execute_migration(db, sql):
 # change nothing on it), the shapes after 0008 through 0011, 0019, 0020 and 0022, and the current latest.
 # When a migration changes the shape, keep the previous latest as `v<NNNN>` so ledgered databases at that
 # version still pass the pre-check.
-REVIEWED_SHAPES = ("baseline", "v0008", "v0009", "v0010", "v0011", "v0019", "v0020", "v0022", "v0023", "v0027", "v0028", "latest")
+REVIEWED_SHAPES = ("baseline", "v0008", "v0009", "v0010", "v0011", "v0019", "v0020", "v0022", "v0023", "v0027", "v0028", "v0029", "latest")
 
 
 def assert_reviewed_baseline(actual):

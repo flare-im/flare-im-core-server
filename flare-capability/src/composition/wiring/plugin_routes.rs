@@ -34,9 +34,8 @@ pub(super) fn runtime_authorization(
         Err(_) => return Err(FlareError::system("invalid plugin invocation key encoding")),
     };
     let publisher = plugin_state_publisher(pool)?;
-    let cipher = Arc::new(
-        crate::infrastructure::config::plugin_config_key::PluginConfigCipher::from_env()?,
-    );
+    let cipher =
+        Arc::new(crate::infrastructure::config::plugin_config_key::PluginConfigCipher::from_env()?);
     Ok(match pool{Some(pool)=>routes.with_runtime_authorization(Arc::new(crate::infrastructure::persistence::postgres_plugin_authorization::PostgresPluginAuthorization::new(pool.clone()).with_cipher(cipher).with_development(crate::infrastructure::config::plugin_development::plugin_development_enabled())),signer),None=>routes}.with_state_publisher(publisher))
 }
 

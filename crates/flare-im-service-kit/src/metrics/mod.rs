@@ -29,9 +29,14 @@ use tokio::{net::TcpListener, sync::oneshot};
 
 use crate::config::ServiceMetricsSection;
 
+pub mod app_version;
 pub mod connection_builds;
 mod grpc;
 mod http;
+pub use app_version::{
+    APP_VERSION_MAX_LEN, AppVersionLabels, MAX_APP_VERSION_LABELS, OTHER_APP_VERSION_LABEL,
+    app_version_label, sanitized_app_version,
+};
 pub use connection_builds::{
     BuildDistribution, ConnectionBuildCounts, MAX_REPORTED_BUILDS, OTHER_BUILDS_LABEL,
     PlatformBuildDistribution,
@@ -534,6 +539,331 @@ impl Default for PushWorkerMetrics {
     }
 }
 
+/// Push Proxy 指标。
+///
+/// 到达回执按通道、应用版本与来路计数。应用版本按 [`app_version_label`] 记：至多 32 个
+/// `[0-9A-Za-z._+-]` 字符，每个进程最多 64 个不同取值，其余记为 `other`。到达率是它除以
+/// Push Worker 的 `flare_push_vendor_sent_total{receipt_capable="true"}`，两边用同一份规则。
+pub struct PushProxyMetrics {
+    /// 收到的到达回执，按通道（`apns`、`fcm`、`getui`）、应用版本与来路（`extension`、`app`）。
+    pub receipts_total: IntCounterVec,
+}
+
+impl PushProxyMetrics {
+    pub fn new() -> Self {
+        let receipts_total = IntCounterVec::new(
+            Opts::new(
+                "flare_push_receipts_total",
+                "Push arrival receipts reported by devices, by vendor, app version and path",
+            ),
+            &["vendor", "app_version", "path"],
+        )
+        .expect("Failed to create flare_push_receipts_total metric");
+
+        let _ = REGISTRY.register(Box::new(receipts_total.clone()));
+
+        Self { receipts_total }
+    }
+
+    /// `app_version` 是客户端报的原值，这里收成有上限的标签。
+    pub fn record_receipt(&self, vendor: &str, app_version: &str, path: &str) {
+        self.receipts_total
+            .with_label_values(&[vendor, app_version_label(app_version), path])
+            .inc();
+    }
+}
+
+impl Default for PushProxyMetrics {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Push Server 路由指标。
+///
+/// 标签都是固定的小集合（处置、交接原因），不按租户、用户、设备或会话打标签。
+pub struct PushServerMetrics {
+    /// 发出的离线任务数，按处置（`loud`、`quiet` 等）。一台设备一条任务。
+    pub offline_tasks_total: IntCounterVec,
+    /// 消费的设备交接数，按原因（`parked`、`ack_timeout`、`link_lost`、`gateway_lost`）。
+    /// 被 broker 重投的交接每处理一遍计一次。
+    pub device_handoffs_total: IntCounterVec,
+    /// 设备交接补发的离线任务数。它们同时计入 `offline_tasks_total`。
+    pub catch_up_alerts_total: IntCounter,
+    /// 读设备推送绑定失败的次数。失败时这条记录不发离线任务，在线任务不受影响。
+    pub binding_lookup_failures_total: IntCounter,
+    /// 提示决策的结果，每台候选设备一次，按决策（`drop`、`quiet`、`candidate`、`priority`、
+    /// `delay`、`badge_only`）。
+    pub notify_decisions_total: IntCounterVec,
+    /// 闸门给出的处置，按结果（`loud`、`quiet`、`defer`、`count_only`、`digest`、`tail`、
+    /// `due_defer`、`due_nothing`、`fail_open`）。
+    pub notify_gate_outcomes_total: IntCounterVec,
+    /// 闸门状态比较后写入的冲突次数。冲突后重读重算，重试用完才放行。
+    pub notify_gate_cas_conflicts_total: IntCounter,
+    /// 闸门放行（按会话第一条处理）的次数，按原因（`conflict`：冲突重试用完，`store`：状态存储
+    /// 与进程内兜底都不可用）。
+    pub notify_gate_fail_open_total: IntCounterVec,
+    /// 推送 Redis 不可用、改用进程内闸门的次数。
+    pub notify_gate_fallbacks_total: IntCounter,
+    /// 到期队列里领取的条目，按种类（`tail`、`delay`）与结果（`emitted`、`cancelled`、
+    /// `rescheduled`、`nothing`）。
+    pub notify_due_entries_total: IntCounterVec,
+    /// 对已发出通知的修正，按种类（`clear`、`recall_replace`、`badge`）。
+    pub notify_corrections_total: IntCounterVec,
+    /// 群会话的波次，按事件（`immediate`：空闲会话的消息当场枚举，`started`：间隔里开始累加，
+    /// `held`：累加进间隔的消息，`fired`：间隔结束枚举一次，`fail_open`：状态用不上、当场枚举）。
+    pub notify_waves_total: IntCounterVec,
+    /// 波次枚举出的接收者人数，按范围（`members`、`subscribers`、`everyone`）。
+    pub wave_recipients_enumerated_total: IntCounterVec,
+    /// 被点名、不等波次直接推送的成员人数。
+    pub wave_direct_mentions_total: IntCounter,
+    /// @所有人 的处理，按结果（`members`：成员不超过上限、人人按点名提示，`wave`：超过上限的全员
+    /// 波次，`throttled`：超出配额、按普通消息处理）。
+    pub all_mentions_total: IntCounterVec,
+    /// 发出的离线任务按优先级通道（`direct`、`group`、`bulk`）。它们同时计入 `offline_tasks_total`。
+    pub offline_lane_tasks_total: IntCounterVec,
+}
+
+impl PushServerMetrics {
+    pub fn new() -> Self {
+        let offline_tasks_total = IntCounterVec::new(
+            Opts::new(
+                "push_server_offline_tasks_total",
+                "Offline push tasks emitted by the push router, one per target device",
+            ),
+            &["disposition"],
+        )
+        .expect("Failed to create push_server_offline_tasks_total metric");
+        let device_handoffs_total = IntCounterVec::new(
+            Opts::new(
+                "push_server_device_handoffs_total",
+                "Device handoffs consumed by the push router",
+            ),
+            &["cause"],
+        )
+        .expect("Failed to create push_server_device_handoffs_total metric");
+        let catch_up_alerts_total = IntCounter::new(
+            "push_server_catch_up_alerts_total",
+            "Offline push tasks emitted to catch up a handed-off device",
+        )
+        .expect("Failed to create push_server_catch_up_alerts_total metric");
+        let binding_lookup_failures_total = IntCounter::new(
+            "push_server_binding_lookup_failures_total",
+            "Failed reads of the device push binding registry",
+        )
+        .expect("Failed to create push_server_binding_lookup_failures_total metric");
+        let notify_decisions_total = IntCounterVec::new(
+            Opts::new(
+                "push_server_notify_decisions_total",
+                "Alert decisions made for candidate devices, by decision",
+            ),
+            &["decision"],
+        )
+        .expect("Failed to create push_server_notify_decisions_total metric");
+        let notify_gate_outcomes_total = IntCounterVec::new(
+            Opts::new(
+                "push_server_notify_gate_outcomes_total",
+                "Anti-disturbance gate outcomes, by outcome",
+            ),
+            &["outcome"],
+        )
+        .expect("Failed to create push_server_notify_gate_outcomes_total metric");
+        let notify_gate_cas_conflicts_total = IntCounter::new(
+            "push_server_notify_gate_cas_conflicts_total",
+            "Compare-and-set conflicts while writing gate state",
+        )
+        .expect("Failed to create push_server_notify_gate_cas_conflicts_total metric");
+        let notify_gate_fail_open_total = IntCounterVec::new(
+            Opts::new(
+                "push_server_notify_gate_fail_open_total",
+                "Messages let through as a conversation's first because gate state could not be used",
+            ),
+            &["reason"],
+        )
+        .expect("Failed to create push_server_notify_gate_fail_open_total metric");
+        let notify_gate_fallbacks_total = IntCounter::new(
+            "push_server_notify_gate_fallbacks_total",
+            "Gate operations served by the in-process gate because push Redis was unavailable",
+        )
+        .expect("Failed to create push_server_notify_gate_fallbacks_total metric");
+        let notify_due_entries_total = IntCounterVec::new(
+            Opts::new(
+                "push_server_notify_due_entries_total",
+                "Due queue entries claimed by the push server, by kind and result",
+            ),
+            &["kind", "result"],
+        )
+        .expect("Failed to create push_server_notify_due_entries_total metric");
+        let notify_corrections_total = IntCounterVec::new(
+            Opts::new(
+                "push_server_notify_corrections_total",
+                "Corrections of notifications already sent, by kind",
+            ),
+            &["kind"],
+        )
+        .expect("Failed to create push_server_notify_corrections_total metric");
+        let notify_waves_total = IntCounterVec::new(
+            Opts::new(
+                "push_server_notify_waves_total",
+                "Conversation wave events of group offline push, by event",
+            ),
+            &["event"],
+        )
+        .expect("Failed to create push_server_notify_waves_total metric");
+        let wave_recipients_enumerated_total = IntCounterVec::new(
+            Opts::new(
+                "push_server_wave_recipients_enumerated_total",
+                "Recipients enumerated by conversation waves, by audience",
+            ),
+            &["audience"],
+        )
+        .expect("Failed to create push_server_wave_recipients_enumerated_total metric");
+        let wave_direct_mentions_total = IntCounter::new(
+            "push_server_wave_direct_mentions_total",
+            "Mentioned members pushed directly instead of waiting for the conversation wave",
+        )
+        .expect("Failed to create push_server_wave_direct_mentions_total metric");
+        let all_mentions_total = IntCounterVec::new(
+            Opts::new(
+                "push_server_all_mentions_total",
+                "Messages mentioning everyone in a group, by how they were pushed",
+            ),
+            &["result"],
+        )
+        .expect("Failed to create push_server_all_mentions_total metric");
+        let offline_lane_tasks_total = IntCounterVec::new(
+            Opts::new(
+                "push_server_offline_lane_tasks_total",
+                "Offline push tasks emitted by the push router, by priority lane",
+            ),
+            &["lane"],
+        )
+        .expect("Failed to create push_server_offline_lane_tasks_total metric");
+
+        let _ = REGISTRY.register(Box::new(offline_tasks_total.clone()));
+        let _ = REGISTRY.register(Box::new(device_handoffs_total.clone()));
+        let _ = REGISTRY.register(Box::new(catch_up_alerts_total.clone()));
+        let _ = REGISTRY.register(Box::new(binding_lookup_failures_total.clone()));
+        let _ = REGISTRY.register(Box::new(notify_decisions_total.clone()));
+        let _ = REGISTRY.register(Box::new(notify_gate_outcomes_total.clone()));
+        let _ = REGISTRY.register(Box::new(notify_gate_cas_conflicts_total.clone()));
+        let _ = REGISTRY.register(Box::new(notify_gate_fail_open_total.clone()));
+        let _ = REGISTRY.register(Box::new(notify_gate_fallbacks_total.clone()));
+        let _ = REGISTRY.register(Box::new(notify_due_entries_total.clone()));
+        let _ = REGISTRY.register(Box::new(notify_corrections_total.clone()));
+        let _ = REGISTRY.register(Box::new(notify_waves_total.clone()));
+        let _ = REGISTRY.register(Box::new(wave_recipients_enumerated_total.clone()));
+        let _ = REGISTRY.register(Box::new(wave_direct_mentions_total.clone()));
+        let _ = REGISTRY.register(Box::new(all_mentions_total.clone()));
+        let _ = REGISTRY.register(Box::new(offline_lane_tasks_total.clone()));
+
+        Self {
+            offline_tasks_total,
+            device_handoffs_total,
+            catch_up_alerts_total,
+            binding_lookup_failures_total,
+            notify_decisions_total,
+            notify_gate_outcomes_total,
+            notify_gate_cas_conflicts_total,
+            notify_gate_fail_open_total,
+            notify_gate_fallbacks_total,
+            notify_due_entries_total,
+            notify_corrections_total,
+            notify_waves_total,
+            wave_recipients_enumerated_total,
+            wave_direct_mentions_total,
+            all_mentions_total,
+            offline_lane_tasks_total,
+        }
+    }
+
+    pub fn record_wave(&self, event: &str) {
+        self.notify_waves_total.with_label_values(&[event]).inc();
+    }
+
+    pub fn record_wave_recipients(&self, audience: &str, count: u64) {
+        self.wave_recipients_enumerated_total
+            .with_label_values(&[audience])
+            .inc_by(count);
+    }
+
+    pub fn record_wave_direct_mentions(&self, count: u64) {
+        self.wave_direct_mentions_total.inc_by(count);
+    }
+
+    pub fn record_all_mention(&self, result: &str) {
+        self.all_mentions_total.with_label_values(&[result]).inc();
+    }
+
+    pub fn record_offline_lane(&self, lane: &str) {
+        self.offline_lane_tasks_total
+            .with_label_values(&[lane])
+            .inc();
+    }
+
+    pub fn record_offline_task(&self, disposition: &str) {
+        self.offline_tasks_total
+            .with_label_values(&[disposition])
+            .inc();
+    }
+
+    pub fn record_device_handoff(&self, cause: &str) {
+        self.device_handoffs_total.with_label_values(&[cause]).inc();
+    }
+
+    pub fn record_catch_up_alert(&self) {
+        self.catch_up_alerts_total.inc();
+    }
+
+    pub fn record_binding_lookup_failure(&self) {
+        self.binding_lookup_failures_total.inc();
+    }
+
+    pub fn record_notify_decision(&self, decision: &str) {
+        self.notify_decisions_total
+            .with_label_values(&[decision])
+            .inc();
+    }
+
+    pub fn record_gate_outcome(&self, outcome: &str) {
+        self.notify_gate_outcomes_total
+            .with_label_values(&[outcome])
+            .inc();
+    }
+
+    pub fn record_gate_cas_conflict(&self) {
+        self.notify_gate_cas_conflicts_total.inc();
+    }
+
+    pub fn record_gate_fail_open(&self, reason: &str) {
+        self.notify_gate_fail_open_total
+            .with_label_values(&[reason])
+            .inc();
+    }
+
+    pub fn record_gate_fallback(&self) {
+        self.notify_gate_fallbacks_total.inc();
+    }
+
+    pub fn record_due_entry(&self, kind: &str, result: &str) {
+        self.notify_due_entries_total
+            .with_label_values(&[kind, result])
+            .inc();
+    }
+
+    pub fn record_correction(&self, kind: &str) {
+        self.notify_corrections_total
+            .with_label_values(&[kind])
+            .inc();
+    }
+}
+
+impl Default for PushServerMetrics {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// 扇出耗时的收件人规模分档。独立成函数是为了能直接测，
 /// 不必构造整个 metrics 结构——`new()` 会往全局 REGISTRY 注册，
 /// 而只有进程内第一个实例注册得上，在测试里构造实例会把注册"抢"走、
@@ -805,6 +1135,16 @@ pub struct AccessGatewayMetrics {
     /// 已在线、之后被抬高的下限（最低构建号或封禁区间）判为必须升级而断开的连接，按原因分桶
     /// （取值同 `handshake_rejected_total` 的版本门禁原因）
     pub connections_evicted_total: IntCounterVec,
+    /// 上报给推送通道的设备交接，按原因分桶（`parked`、`ack_timeout`、`link_lost`）
+    pub device_handoffs_total: IntCounterVec,
+    /// 没能交到推送侧的设备交接，按原因分桶（`queue_full`、`retries_exhausted`、`refused`）
+    pub device_handoffs_dropped_total: IntCounterVec,
+    /// 送达确认超时次数：可提示的下行帧在期限内没有等到客户端确认
+    pub delivery_ack_timeouts_total: IntCounter,
+    /// 送达确认超时后探活失败（没有 PONG 也没有确认）而被关闭的连接数
+    pub connections_probe_closed_total: IntCounter,
+    /// 处于「立即交接」状态的连接数：帧照常写出，可提示的内容同时交给推送通道
+    pub connections_immediate_handoff: IntGauge,
     builds: Mutex<BuildState>,
 }
 
@@ -925,10 +1265,51 @@ impl AccessGatewayMetrics {
         )
         .expect("Failed to create connections_evicted_total metric");
 
+        let device_handoffs_total = IntCounterVec::new(
+            Opts::new(
+                "device_handoffs_total",
+                "Device handoffs reported to the push channel, by cause",
+            ),
+            &["cause"],
+        )
+        .expect("Failed to create device_handoffs_total metric");
+
+        let device_handoffs_dropped_total = IntCounterVec::new(
+            Opts::new(
+                "device_handoffs_dropped_total",
+                "Device handoffs that never reached the push channel, by reason",
+            ),
+            &["reason"],
+        )
+        .expect("Failed to create device_handoffs_dropped_total metric");
+
+        let delivery_ack_timeouts_total = IntCounter::new(
+            "delivery_ack_timeouts_total",
+            "Connections whose alert frames were not confirmed within the delivery ack deadline",
+        )
+        .expect("Failed to create delivery_ack_timeouts_total metric");
+
+        let connections_probe_closed_total = IntCounter::new(
+            "connections_probe_closed_total",
+            "Connections closed because the probe after a delivery ack timeout got no answer",
+        )
+        .expect("Failed to create connections_probe_closed_total metric");
+
+        let connections_immediate_handoff = IntGauge::new(
+            "connections_immediate_handoff",
+            "Connections whose alert frames are handed to the push channel as they are written",
+        )
+        .expect("Failed to create connections_immediate_handoff metric");
+
         let _ = REGISTRY.register(Box::new(connect_access_serial_total.clone()));
         let _ = REGISTRY.register(Box::new(handshake_rejected_total.clone()));
         let _ = REGISTRY.register(Box::new(connections_by_build.clone()));
         let _ = REGISTRY.register(Box::new(connections_evicted_total.clone()));
+        let _ = REGISTRY.register(Box::new(device_handoffs_total.clone()));
+        let _ = REGISTRY.register(Box::new(device_handoffs_dropped_total.clone()));
+        let _ = REGISTRY.register(Box::new(delivery_ack_timeouts_total.clone()));
+        let _ = REGISTRY.register(Box::new(connections_probe_closed_total.clone()));
+        let _ = REGISTRY.register(Box::new(connections_immediate_handoff.clone()));
 
         Self {
             connections_active,
@@ -944,6 +1325,11 @@ impl AccessGatewayMetrics {
             handshake_rejected_total,
             connections_by_build,
             connections_evicted_total,
+            device_handoffs_total,
+            device_handoffs_dropped_total,
+            delivery_ack_timeouts_total,
+            connections_probe_closed_total,
+            connections_immediate_handoff,
             builds: Mutex::new(BuildState::default()),
         }
     }
@@ -962,6 +1348,40 @@ impl AccessGatewayMetrics {
         self.connections_evicted_total
             .with_label_values(&[reason])
             .inc();
+    }
+
+    /// 记录一次上报给推送通道的设备交接。`cause` 取固定集合：`parked`（客户端托管）、
+    /// `ack_timeout`（送达确认超时，或连接处于立即交接状态）、`link_lost`（断开时仍有未确认的帧）。
+    pub fn record_device_handoff(&self, cause: &str) {
+        self.device_handoffs_total.with_label_values(&[cause]).inc();
+    }
+
+    /// 记录一次没能交到推送侧的设备交接。`reason` 取固定集合：`queue_full`（上报队列满）、
+    /// `retries_exhausted`（重试后仍失败）、`refused`（对端明确拒绝，或本端没有签名私钥）。
+    pub fn record_device_handoff_dropped(&self, reason: &str) {
+        self.device_handoffs_dropped_total
+            .with_label_values(&[reason])
+            .inc();
+    }
+
+    /// 记录一次送达确认超时。
+    pub fn record_delivery_ack_timeout(&self) {
+        self.delivery_ack_timeouts_total.inc();
+    }
+
+    /// 记录一条探活失败被关闭的连接。
+    pub fn record_connection_probe_closed(&self) {
+        self.connections_probe_closed_total.inc();
+    }
+
+    /// 一条连接进入立即交接状态；与 [`Self::immediate_handoff_left`] 成对。
+    pub fn immediate_handoff_entered(&self) {
+        self.connections_immediate_handoff.inc();
+    }
+
+    /// 一条连接离开立即交接状态（回了送达确认、设备回到前台，或连接结束）。
+    pub fn immediate_handoff_left(&self) {
+        self.connections_immediate_handoff.dec();
     }
 
     /// 一条连接上线：计入（租户，平台，构建）。`platform` 是发布清单平台段，`build` 没报时为 0。
@@ -1154,6 +1574,132 @@ mod tests {
     }
 
     #[test]
+    fn push_server_metrics_count_tasks_handoffs_and_registry_failures() {
+        let metrics = PushServerMetrics::new();
+
+        metrics.record_offline_task("loud");
+        metrics.record_offline_task("loud");
+        metrics.record_offline_task("quiet");
+        metrics.record_device_handoff("ack_timeout");
+        metrics.record_catch_up_alert();
+        metrics.record_binding_lookup_failure();
+
+        let tasks = |disposition: &str| {
+            metrics
+                .offline_tasks_total
+                .with_label_values(&[disposition])
+                .get()
+        };
+        assert_eq!(tasks("loud"), 2);
+        assert_eq!(tasks("quiet"), 1);
+        assert_eq!(
+            metrics
+                .device_handoffs_total
+                .with_label_values(&["ack_timeout"])
+                .get(),
+            1
+        );
+        assert_eq!(metrics.catch_up_alerts_total.get(), 1);
+        assert_eq!(metrics.binding_lookup_failures_total.get(), 1);
+    }
+
+    #[test]
+    fn push_server_metrics_count_gate_decisions_and_corrections() {
+        let metrics = PushServerMetrics::new();
+
+        metrics.record_notify_decision("delay");
+        metrics.record_gate_outcome("count_only");
+        metrics.record_gate_outcome("count_only");
+        metrics.record_gate_cas_conflict();
+        metrics.record_gate_fail_open("conflict");
+        metrics.record_gate_fallback();
+        metrics.record_due_entry("tail", "emitted");
+        metrics.record_correction("clear");
+
+        assert_eq!(
+            metrics
+                .notify_decisions_total
+                .with_label_values(&["delay"])
+                .get(),
+            1
+        );
+        assert_eq!(
+            metrics
+                .notify_gate_outcomes_total
+                .with_label_values(&["count_only"])
+                .get(),
+            2
+        );
+        assert_eq!(metrics.notify_gate_cas_conflicts_total.get(), 1);
+        assert_eq!(
+            metrics
+                .notify_gate_fail_open_total
+                .with_label_values(&["conflict"])
+                .get(),
+            1
+        );
+        assert_eq!(metrics.notify_gate_fallbacks_total.get(), 1);
+        assert_eq!(
+            metrics
+                .notify_due_entries_total
+                .with_label_values(&["tail", "emitted"])
+                .get(),
+            1
+        );
+        assert_eq!(
+            metrics
+                .notify_corrections_total
+                .with_label_values(&["clear"])
+                .get(),
+            1
+        );
+    }
+
+    #[test]
+    fn push_server_metrics_count_waves_mentions_and_lanes() {
+        let metrics = PushServerMetrics::new();
+
+        metrics.record_wave("immediate");
+        metrics.record_wave("fired");
+        metrics.record_wave_recipients("subscribers", 40);
+        metrics.record_wave_recipients("subscribers", 2);
+        metrics.record_wave_direct_mentions(3);
+        metrics.record_all_mention("throttled");
+        metrics.record_offline_lane("bulk");
+        metrics.record_offline_lane("bulk");
+
+        assert_eq!(
+            metrics
+                .notify_waves_total
+                .with_label_values(&["fired"])
+                .get(),
+            1
+        );
+        assert_eq!(
+            metrics
+                .wave_recipients_enumerated_total
+                .with_label_values(&["subscribers"])
+                .get(),
+            42
+        );
+        assert_eq!(metrics.wave_direct_mentions_total.get(), 3);
+        assert_eq!(
+            metrics
+                .all_mentions_total
+                .with_label_values(&["throttled"])
+                .get(),
+            1
+        );
+        assert_eq!(
+            metrics
+                .offline_lane_tasks_total
+                .with_label_values(&["bulk"])
+                .get(),
+            2
+        );
+    }
+
+    #[test]
     fn metrics_endpoint_config_normalizes_path() {
         let config = MetricsEndpointConfig::new("127.0.0.1", 9090).with_path("custom_metrics");
 
@@ -1301,6 +1847,45 @@ mod tests {
                 .get(),
             0
         );
+    }
+
+    #[test]
+    fn device_handoff_metrics_count_by_cause_and_track_the_immediate_handoff_gauge() {
+        let metrics = AccessGatewayMetrics::new();
+        metrics.record_device_handoff("ack_timeout");
+        metrics.record_device_handoff("ack_timeout");
+        metrics.record_device_handoff("parked");
+        metrics.record_device_handoff_dropped("queue_full");
+        metrics.record_delivery_ack_timeout();
+        metrics.record_connection_probe_closed();
+        assert_eq!(
+            metrics
+                .device_handoffs_total
+                .with_label_values(&["ack_timeout"])
+                .get(),
+            2
+        );
+        assert_eq!(
+            metrics
+                .device_handoffs_total
+                .with_label_values(&["link_lost"])
+                .get(),
+            0
+        );
+        assert_eq!(
+            metrics
+                .device_handoffs_dropped_total
+                .with_label_values(&["queue_full"])
+                .get(),
+            1
+        );
+        assert_eq!(metrics.delivery_ack_timeouts_total.get(), 1);
+        assert_eq!(metrics.connections_probe_closed_total.get(), 1);
+
+        metrics.immediate_handoff_entered();
+        metrics.immediate_handoff_entered();
+        metrics.immediate_handoff_left();
+        assert_eq!(metrics.connections_immediate_handoff.get(), 1);
     }
 
     #[test]

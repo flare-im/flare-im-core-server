@@ -940,7 +940,15 @@ for service in "${CORE_SERVICES[@]}"; do
             [ -n "$CORE_API_APP_CREDENTIALS" ] && env_args+=("FLARE_API_GATEWAY_AUTH_APP_CREDENTIALS=$CORE_API_APP_CREDENTIALS") ;;
     esac
     case "$service" in
-        signaling-online|signaling-route|capability|push-proxy|media|conversation|storage-reader)
+        signaling-online)
+            # 网关失联交接与服务端吊销推送绑定都要以本服务身份签名调用 push proxy；
+            # 配了 proxy 地址却没有私钥时 Online 拒绝启动，所以两者一起给。
+            env_args+=("FLARE_INTERNAL_CTX_PUBLIC_KEY=$CORE_INTERNAL_PUBLIC_KEY")
+            env_args+=("FLARE_INTERNAL_CTX_PRIVATE_KEY=$CORE_INTERNAL_PRIVATE_KEY")
+            PUSH_PROXY_PORT=${PUSH_PROXY_PORT:-$(grep -E '^[[:space:]]*port[[:space:]]*=' "$PROJECT_ROOT/config/services/push-proxy.toml" | sed -E 's/.*=[[:space:]]*([0-9]+).*/\1/' | head -1)}
+            PUSH_PROXY_PORT=${PUSH_PROXY_PORT:-50091}
+            env_args+=("SIGNALING_ONLINE_PUSH_PROXY_URL=${SIGNALING_ONLINE_PUSH_PROXY_URL:-http://127.0.0.1:${PUSH_PROXY_PORT}}") ;;
+        signaling-route|capability|push-proxy|media|conversation|storage-reader)
             env_args+=("FLARE_INTERNAL_CTX_PUBLIC_KEY=$CORE_INTERNAL_PUBLIC_KEY") ;;
         api-gateway)
             env_args+=("FLARE_INTERNAL_CTX_PRIVATE_KEY=$CORE_INTERNAL_PRIVATE_KEY") ;;

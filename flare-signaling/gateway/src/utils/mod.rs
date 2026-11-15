@@ -1,13 +1,13 @@
-//! 协议工具：解码 `PayloadCommand` 载荷、构造下行 Frame（SendAck / EventAck / DATA）。
+//! 协议工具：解码 `PayloadCommand` 载荷、构造下行 Frame（SendAck / EventAck / DATA / DEVICE_STATE_ACK）。
 
 use flare_core::common::error::{FlareError as CoreFlareError, Result as CoreResult};
 use flare_core::common::protocol::{
-    Frame, PayloadCommand, Reliability, frame_with_payload_command,
-    payload_command::Type as PayloadType,
+    Frame, PayloadCommand, Reliability, command, device_state_ack, frame_with_payload_command,
+    frame_with_system_command, payload_command::Type as PayloadType,
 };
 use flare_proto::common::{
-    Ack, CustomData, DataPacket, ErrorDetail, Event, Message, SendAccepted, SendAck, ack,
-    data_packet, send_ack,
+    Ack, CustomData, DataPacket, DeviceAppState, DeviceStateAck, DeviceStateReport, ErrorDetail,
+    Event, Message, SendAccepted, SendAck, ack, data_packet, send_ack,
 };
 use prost::Message as ProstMessage;
 
@@ -53,6 +53,29 @@ pub fn decode_data_packet(payload: &[u8]) -> Result<DataPacket, prost::DecodeErr
 /// 解码 ACK 上行载荷
 pub fn decode_ack_payload(payload: &[u8]) -> Result<Ack, prost::DecodeError> {
     Ack::decode(payload)
+}
+
+/// 解码 DEVICE_STATE 系统命令的载荷（`SystemCommand.data` 里的 `DeviceStateReport`）。
+/// 不是系统命令或载荷解不出时返回 `None`。
+pub fn decode_device_state_report(frame: &Frame) -> Option<DeviceStateReport> {
+    match frame.command.as_ref()?.r#type.as_ref()? {
+        command::Type::System(system) => DeviceStateReport::decode(system.data.as_slice()).ok(),
+        _ => None,
+    }
+}
+
+/// 设备状态已生效 → DEVICE_STATE_ACK，载荷为 `DeviceStateAck`。
+///
+/// 同一条连接上帧按写出顺序到达：客户端收到这一帧时，网关在它之前写出的帧都已经到了。
+pub fn build_device_state_ack_frame(state: DeviceAppState) -> Frame {
+    let ack = DeviceStateAck {
+        state: state as i32,
+        server_time: now_millis(),
+    };
+    frame_with_system_command(
+        device_state_ack(ack.encode_to_vec()),
+        Reliability::AtLeastOnce,
+    )
 }
 
 /// 发消息结果 → `PayloadCommand.type=ACK`，载荷为 `Ack.send`（`SendAck`）。
@@ -222,10 +245,47 @@ pub fn build_data_frame_with_payload(message_id: String, payload: Vec<u8>) -> Fr
 #[cfg(test)]
 mod tests {
     use super::*;
-    use flare_core::common::protocol::command;
+    use flare_core::common::protocol::{device_state, system_command};
     use flare_proto::common::{
-        SendAckDurability, ack::Payload as AckPayload, send_ack::Result as SendAckResult,
+        DeviceAttention, SendAckDurability, ack::Payload as AckPayload,
+        send_ack::Result as SendAckResult,
     };
+
+    #[test]
+    fn device_state_frames_round_trip() {
+        let report = DeviceStateReport {
+            state: DeviceAppState::Parking as i32,
+            attention: DeviceAttention::Idle as i32,
+            badge: 12,
+            reported_at: 1_794_000_000_000,
+        };
+        let frame = frame_with_system_command(
+            device_state(report.encode_to_vec()),
+            Reliability::AtLeastOnce,
+        );
+        assert_eq!(decode_device_state_report(&frame), Some(report));
+
+        // 载荷不是 DeviceStateReport、或根本不是系统命令：解不出。
+        let broken = frame_with_system_command(
+            device_state(vec![0xff, 0xff, 0xff]),
+            Reliability::AtLeastOnce,
+        );
+        assert_eq!(decode_device_state_report(&broken), None);
+        assert_eq!(
+            decode_device_state_report(&build_data_frame_with_payload("m1".into(), Vec::new())),
+            None
+        );
+
+        let ack = build_device_state_ack_frame(DeviceAppState::Parking);
+        let system = match ack.command.and_then(|command| command.r#type) {
+            Some(command::Type::System(system)) => system,
+            other => panic!("expected system command, got {other:?}"),
+        };
+        assert_eq!(system.r#type, system_command::Type::DeviceStateAck as i32);
+        let payload = DeviceStateAck::decode(system.data.as_slice()).expect("DeviceStateAck");
+        assert_eq!(payload.state, DeviceAppState::Parking as i32);
+        assert!(payload.server_time > 0);
+    }
 
     fn decode_data_error(frame: Frame, expected_message_id: &str) -> CustomData {
         let payload = match frame.command.and_then(|command| command.r#type) {

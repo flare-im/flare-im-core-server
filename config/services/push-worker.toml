@@ -1,4 +1,10 @@
 # Push Worker 服务配置：消费 Push Server 分流后的在线/离线推送任务。
+#
+# 每个主题一个消费者，各有自己的消费组与并发，批量通道积压不影响单聊：
+#   在线投递        push_online_topic                                     消费组 consumer_group           PUSH_WORKER_ONLINE_CONCURRENCY（128）
+#   离线·单聊通道   push_offline_topic（flare.im.push.offline）           消费组 {consumer_group}-offline       PUSH_WORKER_OFFLINE_CONCURRENCY（64）
+#   离线·群通道     PUSH_WORKER_PUSH_OFFLINE_GROUP_TOPIC（flare.im.push.offline_group）  {consumer_group}-offline-group  PUSH_WORKER_OFFLINE_GROUP_CONCURRENCY（32）
+#   离线·批量通道   PUSH_WORKER_PUSH_OFFLINE_BULK_TOPIC（flare.im.push.offline_bulk）    {consumer_group}-offline-bulk   PUSH_WORKER_OFFLINE_BULK_CONCURRENCY（16）
 
 [services.push_worker]
 jetstream = "push"
@@ -7,15 +13,83 @@ push_online_topic = "flare.im.push.online"
 push_offline_topic = "flare.im.push.offline"
 push_dlq_topic = "flare.im.push.dlq"
 offline_parking_capacity = 4096
-event_ping_debounce_window_ms = 200
 hook_config = "config/hooks.core.toml"
 # hook_config_dir = "config/hooks.d"
 metrics_enabled = true
 metrics_address = "0.0.0.0"
 metrics_port = 19186
 metrics_path = "/metrics"
+# 一台设备有多条推送绑定时（例如 Android 同时有个推与 FCM），一条任务只经其中一条发出：按这个顺序取第一条能用的，
+# 厂商熔断、限流或可重试的失败时换下一条。没列出的厂商按缺省顺序排在后面；要停用某家厂商用凭据里的 disabled_providers。
+binding_order = ["apns", "getui", "fcm"]
 
 # 离线推送 outbox（Redis Stream 持久化暂存，厂商通道接入前不丢任务）:
 #   PUSH_WORKER_OFFLINE_REDIS_URL      默认取 [redis.push] profile 或 redis://127.0.0.1:6379；设为 off 禁用
 #   PUSH_WORKER_OFFLINE_OUTBOX_STREAM  默认 flare:im:push:offline:outbox
 #   PUSH_WORKER_OFFLINE_OUTBOX_MAXLEN  默认 100000（MAXLEN ~ 近似裁剪）
+
+# 离线投递后端与凭据（只走环境变量）:
+#   PUSH_WORKER_OFFLINE_DELIVERY_BACKEND  fcm / apns / getui / mobile / disabled，开发栈另可选 outbox。
+#                                         FLARE_ENV=production 时必须显式设置且不接受 outbox，没配置就拒绝启动；
+#                                         没有移动端的部署显式写 disabled
+#   PUSH_WORKER_OFFLINE_PROVIDERS         backend=mobile 时的厂商清单，如 fcm,apns,getui
+#   PUSH_WORKER_MOBILE_APPLICATIONS_FILE  私有 0600 凭据文件，schema flare.mobile-push-applications/v2（v1 拒绝启动）；
+#   PUSH_WORKER_MOBILE_SNAPSHOT_FILE      或改用同格式的租约快照，两者只能选一个
+
+# 设备推送绑定:
+#   PUSH_WORKER_DEVICE_TOKEN_REDIS_URL  默认取 [redis.push] profile；与 Push Proxy、Push Server 指向同一登记表
+#   PUSH_WORKER_DEVICE_TOKEN_KEY_PREFIX 默认 flare:im:push:device_tokens
+#   PUSH_WORKER_BINDING_INACTIVE_DAYS  默认 60。设备这么多天没核对过的绑定视为不存在，投递时跳过并删除；
+#                                      应与 push-server 的 PUSH_SERVER_BINDING_INACTIVE_DAYS 一致
+
+# 推送决策链：每条消息在调用厂商时留一条记录（通道、结果、受理时延、应用版本），写在推送 Redis（与设备绑定登记表同一实例，[redis.push]），
+# 留 24 小时，供管理员按用户与消息查「这条为什么没提示」（admin-gateway GET /api/v1/admin/users/{user_id}/push-traces）。
+# 记录只进有界队列、后台批量写，绝不拖慢推送；队列满或 Redis 不可用时丢掉并计入 flare_push_trace_dropped_total。
+#   enabled            关掉后不写任何记录
+#   ttl_secs           记录留多久（秒）
+#   queue              队列容量
+#   batch              一批至多写多少条
+#   flush_interval_ms  第一条进队后至多等多久就写
+[services.push_worker.trace]
+enabled = true
+ttl_secs = 86400
+queue = 8192
+batch = 256
+flush_interval_ms = 100
+
+# 按厂商的治理（Push Worker 进程内）：
+#   max_concurrency   本进程同时向这家厂商发出的请求上限
+#   rate_per_sec      每个应用凭据每秒至多发多少条；burst 是令牌桶容量（缺省等于 rate_per_sec）
+#   failure_ratio     最近 window 次调用里失败占比达到它就熔断（至少 min_calls 次才下结论）；只有服务端错误与无应答算失败
+#   open_ms           熔断多久后放探测请求；half_open_probes 是同时放行的探测数，这么多次成功就恢复，一次失败重新熔断
+# 厂商回 429 或配额耗尽（照办 Retry-After）、或本地令牌桶空了，又没有别的绑定能接时，任务不重试，按设备攒成一条：
+# 厂商恢复后多个会话发一条摘要，一个会话发最新那条。攒在内存里，停机只丢攒着的提示（消息打开即同步）。
+[services.push_worker.vendors.apns]
+max_concurrency = 256
+rate_per_sec = 2000
+burst = 2000
+failure_ratio = 0.5
+window = 20
+min_calls = 10
+open_ms = 30000
+half_open_probes = 3
+
+[services.push_worker.vendors.fcm]
+max_concurrency = 256
+rate_per_sec = 1000
+burst = 1000
+failure_ratio = 0.5
+window = 20
+min_calls = 10
+open_ms = 30000
+half_open_probes = 3
+
+[services.push_worker.vendors.getui]
+max_concurrency = 64
+rate_per_sec = 300
+burst = 300
+failure_ratio = 0.5
+window = 20
+min_calls = 10
+open_ms = 30000
+half_open_probes = 3

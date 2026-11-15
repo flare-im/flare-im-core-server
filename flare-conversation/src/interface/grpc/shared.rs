@@ -72,6 +72,7 @@ pub fn proto_summary(summary: ConversationSummary) -> ProtoConversationSummary {
         last_read_seq: (summary.last_read_seq.max(0) as u64).max(visible_after_seq),
         is_muted: summary.is_muted,
         is_mention_only: Some(summary.is_mention_only),
+        notify_all: Some(summary.notify_all),
         is_pinned: summary.is_pinned,
         mute_until: None,
         is_archived: summary.is_archived,
@@ -319,6 +320,28 @@ mod tests {
         assert_eq!(named.display_name, "Alice");
     }
 
+    /// 本人的「仅 @我」与「全部消息通知」都带进摘要，两项各自独立。
+    #[test]
+    fn proto_summary_carries_the_users_notification_settings() {
+        let proto = proto_summary(ConversationSummary {
+            conversation_id: "c1".to_string(),
+            is_mention_only: false,
+            notify_all: true,
+            ..test_summary()
+        });
+        assert_eq!(proto.is_mention_only, Some(false));
+        assert_eq!(proto.notify_all, Some(true));
+
+        let proto = proto_summary(ConversationSummary {
+            conversation_id: "c1".to_string(),
+            is_mention_only: true,
+            notify_all: false,
+            ..test_summary()
+        });
+        assert_eq!(proto.is_mention_only, Some(true));
+        assert_eq!(proto.notify_all, Some(false));
+    }
+
     #[test]
     fn proto_summary_emits_last_message_preview_text() {
         let proto = proto_summary(ConversationSummary {
@@ -410,6 +433,7 @@ mod tests {
             member_preview: Vec::new(),
             is_muted: false,
             is_mention_only: false,
+            notify_all: false,
             is_pinned: false,
             is_archived: false,
             settings_version: 0,

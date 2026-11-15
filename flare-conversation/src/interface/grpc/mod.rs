@@ -2,7 +2,9 @@
 //! 不提供聚合型「Sync*」RPC；跨域同步编排由 `flare.sync.v1.SyncService` 完成。
 
 mod admin_service;
+mod internal_read_service;
 mod manage_service;
+mod notification_settings_service;
 mod read_receipt_service;
 mod read_service;
 mod roster_policy;
@@ -12,10 +14,12 @@ pub use admin_service::ConversationAdminGrpcHandler;
 
 use std::sync::Arc;
 
+use flare_grpc_proto::conversation::conversation_internal_read_service_server::ConversationInternalReadServiceServer;
 use flare_grpc_proto::conversation::conversation_read_service_server::ConversationReadServiceServer;
 use flare_grpc_proto::conversation::message_read_receipt_service_server::MessageReadReceiptServiceServer;
+use flare_grpc_proto::conversation::user_notification_settings_service_server::UserNotificationSettingsServiceServer;
 use flare_server_core::auth::SignedContextVerifier;
-use flare_server_core::{SignedFirstContextLayer, SignedFirstContextService};
+use flare_server_core::{SignedActorType, SignedFirstContextLayer, SignedFirstContextService};
 
 use crate::application::handlers::{ConversationCommandHandler, ConversationQueryHandler};
 
@@ -77,4 +81,32 @@ pub fn signed_read_receipt_service(
         .clone()
         .require_signed(true)
         .layer(MessageReadReceiptServiceServer::new(handler))
+}
+
+/// 套上身份边界的 `ConversationInternalReadService`：与 [`signed_read_service`] 共用验签器，但
+/// **一律要求签名**，并且只放行 Cell 内服务。这个服务按请求体里的 `user_id` 读别人的数据，
+/// 不能跟随 `FLARE_REQUIRE_SIGNED_READ_CTX`：开关关着时，网内进程带一个裸 `x-actor-type`
+/// 就能读任何人有哪些未读会话。没有配置公钥时所有调用都被拒。
+pub fn signed_internal_read_service(
+    handler: ConversationGrpcHandler,
+    layer: &SignedFirstContextLayer,
+) -> SignedFirstContextService<ConversationInternalReadServiceServer<ConversationGrpcHandler>> {
+    layer
+        .clone()
+        .require_signed(true)
+        .allow_actor_types([SignedActorType::Service])
+        .layer(ConversationInternalReadServiceServer::new(handler))
+}
+
+/// 套上身份边界的 `UserNotificationSettingsService`：与 [`signed_read_service`] 共用验签器，跟随
+/// `FLARE_REQUIRE_SIGNED_READ_CTX`（同步编排转发网关代签的用户上下文，与会话设置同一条路），但
+/// 只放行用户身份：读写的是调用者本人的设置，服务与管理员都没有「本人」。
+pub fn signed_notification_settings_service(
+    handler: ConversationGrpcHandler,
+    layer: &SignedFirstContextLayer,
+) -> SignedFirstContextService<UserNotificationSettingsServiceServer<ConversationGrpcHandler>> {
+    layer
+        .clone()
+        .allow_actor_types([SignedActorType::User])
+        .layer(UserNotificationSettingsServiceServer::new(handler))
 }

@@ -81,6 +81,10 @@ x-flare-service: &flare-service
     postgres: {condition: service_started}
     redis: {condition: service_started}
 
+# 设备推送绑定登记表：Push Proxy 登记、Push Server 按设备读来建离线任务、Push Worker 读来投递，
+# 三者必须是同一个库（与 config/base.toml 的 [redis.push] 相同，库 5）。三处都写明，不靠各自的缺省。
+x-device-token-redis: &device-token-redis ${REDIS_URL:-redis://${REDIS_PASSWORD:+:${REDIS_PASSWORD}@}redis:6379}/5
+
 services:
   # ── Ingress ────────────────────────────────────────────────────────────────
   api-gateway:
@@ -143,6 +147,10 @@ services:
       # 平台公钥只验 KickTenant 的调度器断言；员工经 admin-gateway 转发的 Staff 上下文用 Cell 公钥验。
       FLARE_PLATFORM_PUBLIC_KEY: ${FLARE_PLATFORM_PUBLIC_KEY:?set FLARE_PLATFORM_PUBLIC_KEY to the platform Ed25519 public key}
       FLARE_INTERNAL_CTX_PUBLIC_KEY: ${FLARE_INTERNAL_CTX_PUBLIC_KEY:?set FLARE_INTERNAL_CTX_PUBLIC_KEY to the Cell Ed25519 public key}
+      # 网关失联时被清扫的设备交接给推送、踢线与身份吊销时吊销推送绑定，都经 Push Proxy 上报，
+      # 以 Online 自己的服务身份签名：配了地址而没有私钥时拒绝启动。
+      SIGNALING_ONLINE_PUSH_PROXY_URL: http://push-proxy:50091
+      FLARE_INTERNAL_CTX_PRIVATE_KEY: ${FLARE_INTERNAL_CTX_SIGNING_KEY:?set the Cell Ed25519 private key for authenticated ingress}
     command: ["flare-signaling-online"]
 
   signaling-route:
@@ -231,6 +239,7 @@ services:
       SERVICE_ADVERTISE_HOST: push-server
       # MessagePipeline/PushProxy events have no verified broker provenance yet.
       PUSH_SERVER_EVENT_PROVENANCE_MODE: ${PUSH_SERVER_EVENT_PROVENANCE_MODE:-paused}
+      PUSH_SERVER_DEVICE_TOKEN_REDIS_URL: *device-token-redis
     command: ["flare-push-server"]
 
   push-proxy:
@@ -241,6 +250,7 @@ services:
       FLARE_INTERNAL_CTX_PUBLIC_KEY: ${FLARE_INTERNAL_CTX_PUBLIC_KEY:?set the Cell Ed25519 public key}
       # Do not acknowledge new tasks while downstream signed MQ consumers are paused.
       PUSH_PROXY_EVENT_PROVENANCE_MODE: ${PUSH_PROXY_EVENT_PROVENANCE_MODE:-paused}
+      PUSH_PROXY_DEVICE_TOKEN_REDIS_URL: *device-token-redis
     command: ["flare-push-proxy"]
 
   push-worker:
@@ -255,12 +265,11 @@ services:
       PUSH_WORKER_EVENT_PROVENANCE_MODE: ${PUSH_WORKER_EVENT_PROVENANCE_MODE:-paused}
       FLARE_ENV: ${FLARE_ENV:-development}
       PUSH_WORKER_OFFLINE_DELIVERY_BACKEND: ${PUSH_WORKER_OFFLINE_DELIVERY_BACKEND:-outbox}
-      PUSH_WORKER_FCM_SERVICE_ACCOUNT_JSON: ${PUSH_WORKER_FCM_SERVICE_ACCOUNT_JSON:-}
-      PUSH_WORKER_APNS_TEAM_ID: ${PUSH_WORKER_APNS_TEAM_ID:-}
-      PUSH_WORKER_APNS_KEY_ID: ${PUSH_WORKER_APNS_KEY_ID:-}
-      PUSH_WORKER_APNS_PRIVATE_KEY: ${PUSH_WORKER_APNS_PRIVATE_KEY:-}
-      PUSH_WORKER_APNS_TOPIC: ${PUSH_WORKER_APNS_TOPIC:-}
-      PUSH_WORKER_APNS_SANDBOX: ${PUSH_WORKER_APNS_SANDBOX:-false}
+      PUSH_WORKER_OFFLINE_PROVIDERS: ${PUSH_WORKER_OFFLINE_PROVIDERS:-}
+      # 厂商凭据只走挂进容器的私有文件（见 .env.example）；全局 PUSH_WORKER_APNS_* / _FCM_* / _GETUI_*
+      # 变量只要存在（哪怕为空）worker 就拒绝启动，这里不要再传。
+      PUSH_WORKER_MOBILE_APPLICATIONS_FILE: ${PUSH_WORKER_MOBILE_APPLICATIONS_FILE:-}
+      PUSH_WORKER_DEVICE_TOKEN_REDIS_URL: *device-token-redis
     command: ["flare-push-worker"]
 
   capability:

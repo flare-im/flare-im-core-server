@@ -112,6 +112,21 @@ pub const REGISTERED_ENV_VARS: &[EnvVarSpec] = &[
         EnvPurpose::GatewayRuntime,
     ),
     env(
+        "ACCESS_GATEWAY_DELIVERY_ACK_ACTIVE_DEADLINE_MS",
+        EnvOwner::AccessGateway,
+        EnvPurpose::RuntimeTuning,
+    ),
+    env(
+        "ACCESS_GATEWAY_DELIVERY_ACK_STANDBY_DEADLINE_MS",
+        EnvOwner::AccessGateway,
+        EnvPurpose::RuntimeTuning,
+    ),
+    env(
+        "ACCESS_GATEWAY_DELIVERY_PROBE_TIMEOUT_MS",
+        EnvOwner::AccessGateway,
+        EnvPurpose::RuntimeTuning,
+    ),
+    env(
         "ACCESS_GATEWAY_DEFAULT_SVID",
         EnvOwner::AccessGateway,
         EnvPurpose::GatewayRuntime,
@@ -408,6 +423,13 @@ pub const REGISTERED_ENV_VARS: &[EnvVarSpec] = &[
         "FLARE_PLUGIN_CARD_INGEST_URL",
         EnvOwner::Capability,
         EnvPurpose::ServiceEndpoint,
+    ),
+    // JetStream the capability service reads message events from for plugin delivery; falls back to
+    // MESSAGE_INGEST_JETSTREAM_URL and then the message-ingest JetStream profile.
+    env(
+        "FLARE_PLUGIN_EVENTS_NATS_URL",
+        EnvOwner::Capability,
+        EnvPurpose::Mq,
     ),
     env(
         "FLARE_PLUGIN_PUBLISHER_KEYS",
@@ -751,6 +773,18 @@ pub const REGISTERED_ENV_VARS: &[EnvVarSpec] = &[
     ),
     env(
         "FLARE_ADMIN_GATEWAY_GRPC_STORAGE_READER_STATIC_FALLBACK",
+        EnvOwner::AdminGateway,
+        EnvPurpose::ServiceEndpoint,
+    ),
+    // Push Proxy 的管理员入口（推送决策链）；只有 admin-gateway 读，api-gateway 拨 Push Proxy 用
+    // FLARE_API_GATEWAY_GRPC_PUSH_PROXY_URL。
+    env(
+        "FLARE_ADMIN_GATEWAY_GRPC_PUSH_PROXY_SERVICE_URL",
+        EnvOwner::AdminGateway,
+        EnvPurpose::ServiceEndpoint,
+    ),
+    env(
+        "FLARE_ADMIN_GATEWAY_GRPC_PUSH_PROXY_STATIC_FALLBACK",
         EnvOwner::AdminGateway,
         EnvPurpose::ServiceEndpoint,
     ),
@@ -1302,9 +1336,24 @@ pub const REGISTERED_ENV_VARS: &[EnvVarSpec] = &[
         EnvPurpose::Mq,
     ),
     env(
-        "PUSH_SERVER_CONVERSATION_READ_ENDPOINT",
+        "PUSH_SERVER_BINDING_INACTIVE_DAYS",
         EnvOwner::PushServer,
-        EnvPurpose::ServiceEndpoint,
+        EnvPurpose::RuntimeTuning,
+    ),
+    env(
+        "PUSH_SERVER_DEVICE_TOKEN_KEY_PREFIX",
+        EnvOwner::PushServer,
+        EnvPurpose::Redis,
+    ),
+    env(
+        "PUSH_SERVER_DEVICE_TOKEN_REDIS_URL",
+        EnvOwner::PushServer,
+        EnvPurpose::Redis,
+    ),
+    env(
+        "PUSH_SERVER_GATE_REDIS_URL",
+        EnvOwner::PushServer,
+        EnvPurpose::Redis,
     ),
     env(
         "PUSH_SERVER_OFFLINE_FANOUT_MEMBER_CAP",
@@ -1315,11 +1364,6 @@ pub const REGISTERED_ENV_VARS: &[EnvVarSpec] = &[
         "PUSH_SERVER_DEFAULT_TENANT_ID",
         EnvOwner::PushServer,
         EnvPurpose::TenantDefaults,
-    ),
-    env(
-        "PUSH_SERVER_EVENT_PING_PARTICIPANT_PAGE_SIZE",
-        EnvOwner::PushServer,
-        EnvPurpose::RuntimeTuning,
     ),
     env(
         "PUSH_SERVER_EVENT_PING_COALESCE_WINDOW_MS",
@@ -1392,6 +1436,16 @@ pub const REGISTERED_ENV_VARS: &[EnvVarSpec] = &[
         EnvPurpose::Mq,
     ),
     env(
+        "PUSH_SERVER_PUSH_OFFLINE_GROUP_TOPIC",
+        EnvOwner::PushServer,
+        EnvPurpose::Mq,
+    ),
+    env(
+        "PUSH_SERVER_PUSH_OFFLINE_BULK_TOPIC",
+        EnvOwner::PushServer,
+        EnvPurpose::Mq,
+    ),
+    env(
         "PUSH_SERVER_REDIS_URL",
         EnvOwner::PushServer,
         EnvPurpose::Redis,
@@ -1412,7 +1466,17 @@ pub const REGISTERED_ENV_VARS: &[EnvVarSpec] = &[
         EnvPurpose::Auth,
     ),
     env(
+        "PUSH_WORKER_MOBILE_SNAPSHOT_FILE",
+        EnvOwner::PushWorker,
+        EnvPurpose::Auth,
+    ),
+    env(
         "PUSH_WORKER_OFFLINE_PROVIDERS",
+        EnvOwner::PushWorker,
+        EnvPurpose::RuntimeTuning,
+    ),
+    env(
+        "PUSH_WORKER_BINDING_INACTIVE_DAYS",
         EnvOwner::PushWorker,
         EnvPurpose::RuntimeTuning,
     ),
@@ -1425,11 +1489,6 @@ pub const REGISTERED_ENV_VARS: &[EnvVarSpec] = &[
         "PUSH_WORKER_DEVICE_TOKEN_REDIS_URL",
         EnvOwner::PushWorker,
         EnvPurpose::Redis,
-    ),
-    env(
-        "PUSH_WORKER_EVENT_PING_DEBOUNCE_WINDOW_MS",
-        EnvOwner::PushWorker,
-        EnvPurpose::RuntimeTuning,
     ),
     env(
         "PUSH_WORKER_GETUI_DEFAULT_TTL_MS",
@@ -1473,6 +1532,11 @@ pub const REGISTERED_ENV_VARS: &[EnvVarSpec] = &[
     ),
     env(
         "PUSH_WORKER_METRICS_ADDRESS",
+        EnvOwner::PushWorker,
+        EnvPurpose::Observability,
+    ),
+    env(
+        "PUSH_WORKER_METRICS_ENABLED",
         EnvOwner::PushWorker,
         EnvPurpose::Observability,
     ),
@@ -1527,6 +1591,36 @@ pub const REGISTERED_ENV_VARS: &[EnvVarSpec] = &[
         EnvPurpose::Mq,
     ),
     env(
+        "PUSH_WORKER_PUSH_OFFLINE_GROUP_TOPIC",
+        EnvOwner::PushWorker,
+        EnvPurpose::Mq,
+    ),
+    env(
+        "PUSH_WORKER_PUSH_OFFLINE_BULK_TOPIC",
+        EnvOwner::PushWorker,
+        EnvPurpose::Mq,
+    ),
+    env(
+        "PUSH_WORKER_ONLINE_CONCURRENCY",
+        EnvOwner::PushWorker,
+        EnvPurpose::RuntimeTuning,
+    ),
+    env(
+        "PUSH_WORKER_OFFLINE_CONCURRENCY",
+        EnvOwner::PushWorker,
+        EnvPurpose::RuntimeTuning,
+    ),
+    env(
+        "PUSH_WORKER_OFFLINE_GROUP_CONCURRENCY",
+        EnvOwner::PushWorker,
+        EnvPurpose::RuntimeTuning,
+    ),
+    env(
+        "PUSH_WORKER_OFFLINE_BULK_CONCURRENCY",
+        EnvOwner::PushWorker,
+        EnvPurpose::RuntimeTuning,
+    ),
+    env(
         "PUSH_WORKER_PUSH_ONLINE_TOPIC",
         EnvOwner::PushWorker,
         EnvPurpose::Mq,
@@ -1570,6 +1664,11 @@ pub const REGISTERED_ENV_VARS: &[EnvVarSpec] = &[
         "SIGNALING_ONLINE_PRESENCE_PREFIX",
         EnvOwner::SignalingOnline,
         EnvPurpose::Redis,
+    ),
+    env(
+        "SIGNALING_ONLINE_PUSH_PROXY_URL",
+        EnvOwner::SignalingOnline,
+        EnvPurpose::ServiceEndpoint,
     ),
     env(
         "SIGNALING_ONLINE_REDIS_TTL",

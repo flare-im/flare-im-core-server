@@ -1,34 +1,28 @@
 //! The attested application's identity selects its own provider credentials.
+use crate::application::binding_delivery::DeviceBindingsDelivery;
 use crate::domain::offline_delivery::{DeviceTokenRepository, OfflinePushExecutor};
-use flare_im_contracts::Ctx;
+use flare_im_contracts::{Ctx, DevicePushToken};
 use flare_proto::PushTaskEnvelope;
 use flare_server_core::{ErrorCode, FlareError};
 use std::{collections::HashMap, sync::Arc};
 
 pub struct ApplicationDelivery {
-    pub applications: HashMap<String, ApplicationChannels>,
+    /// Per application: its vendor adapters behind the governed binding selection.
+    pub applications: HashMap<String, Arc<dyn DeviceBindingsDelivery>>,
     pub tokens: Arc<dyn DeviceTokenRepository>,
 }
-pub struct ApplicationChannels {
-    pub providers: Vec<&'static str>,
-    pub disabled: Vec<&'static str>,
-    pub executor: Arc<dyn OfflinePushExecutor>,
-}
-#[async_trait::async_trait]
-impl OfflinePushExecutor for ApplicationDelivery {
-    async fn deliver(&self, ctx: &Ctx, envelope: &PushTaskEnvelope) -> Result<(), FlareError> {
-        if ctx.tenant_id() != Some(envelope.tenant_id.as_str()) {
-            return Err(FlareError::localized(
-                ErrorCode::PermissionDenied,
-                "push application context mismatch",
-            ));
-        }
-        let registered = self
-            .tokens
-            .list_user_tokens(ctx, &envelope.tenant_id, &envelope.user_id)
-            .await?;
-        let Some(channels) = self.applications.get(&envelope.tenant_id) else {
-            // Web-only users with no OS registration need no vendor at all.
+
+impl ApplicationDelivery {
+    /// Deliver to the bindings the caller already listed for the task's device (listed once
+    /// per task).
+    pub async fn deliver_listed(
+        &self,
+        ctx: &Ctx,
+        envelope: &PushTaskEnvelope,
+        registered: Vec<DevicePushToken>,
+    ) -> Result<(), FlareError> {
+        let Some(device) = self.applications.get(&envelope.tenant_id) else {
+            // A device whose binding is gone by now needs no vendor at all.
             // A missing credential for an existing registration is an explicit failure.
             if registered.is_empty() {
                 return Ok(());
@@ -38,21 +32,37 @@ impl OfflinePushExecutor for ApplicationDelivery {
                 "push application credentials not configured",
             ));
         };
-        // Deliver configured channels, but never ACK a missing registered channel
-        // as if every device had been handled. Existing per-registration receipts
-        // protect already accepted devices if the operator later replays the DLQ.
-        let missing = registered.iter().any(|token| {
-            !channels.providers.contains(&token.provider.as_str())
-                && !channels.disabled.contains(&token.provider.as_str())
-        });
-        channels.executor.deliver(ctx, envelope).await?;
-        if missing {
+        if registered.is_empty() {
+            return Ok(());
+        }
+        // One binding takes the task; a registered provider without credentials is never
+        // acknowledged as if the device had been handled (see `binding_delivery`). Per-binding
+        // receipts protect an already accepted binding if the operator later replays the DLQ.
+        device.deliver_bindings(ctx, envelope, registered).await
+    }
+}
+
+#[async_trait::async_trait]
+impl OfflinePushExecutor for ApplicationDelivery {
+    async fn deliver(&self, ctx: &Ctx, envelope: &PushTaskEnvelope) -> Result<(), FlareError> {
+        if ctx.tenant_id() != Some(envelope.tenant_id.as_str()) {
             return Err(FlareError::localized(
-                ErrorCode::InvalidParameter,
-                "push application provider credentials not configured",
+                ErrorCode::PermissionDenied,
+                "push application context mismatch",
             ));
         }
-        Ok(())
+        // Only the target device's bindings matter: the task was planned for that device, and
+        // the user's other devices each get a task of their own.
+        let registered = self
+            .tokens
+            .list_device_tokens(
+                ctx,
+                &envelope.tenant_id,
+                &envelope.user_id,
+                &envelope.device_id,
+            )
+            .await?;
+        self.deliver_listed(ctx, envelope, registered).await
     }
 }
 
@@ -62,8 +72,17 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     struct Backend(Arc<AtomicUsize>);
     #[async_trait::async_trait]
-    impl OfflinePushExecutor for Backend {
-        async fn deliver(&self, _: &Ctx, _: &PushTaskEnvelope) -> Result<(), FlareError> {
+    impl DeviceBindingsDelivery for Backend {
+        async fn deliver_bindings(
+            &self,
+            _: &Ctx,
+            _: &PushTaskEnvelope,
+            bindings: Vec<DevicePushToken>,
+        ) -> Result<(), FlareError> {
+            assert!(
+                !bindings.is_empty(),
+                "a device without bindings needs no vendor"
+            );
             self.0.fetch_add(1, Ordering::SeqCst);
             Ok(())
         }
@@ -73,29 +92,29 @@ mod tests {
         let a = Arc::new(AtomicUsize::new(0));
         let b = Arc::new(AtomicUsize::new(0));
         let tokens = Arc::new(crate::infrastructure::push_test_support::Tokens::default());
+        tokens
+            .rows
+            .lock()
+            .unwrap()
+            .push(crate::infrastructure::push_test_support::token(
+                "registered-device",
+            ));
         let deliveries = ApplicationDelivery {
             applications: HashMap::from([
                 (
-                    "app-a".into(),
-                    ApplicationChannels {
-                        providers: vec!["fcm"],
-                        disabled: vec![],
-                        executor: Arc::new(Backend(a.clone())),
-                    },
+                    "app-a".to_string(),
+                    Arc::new(Backend(a.clone())) as Arc<dyn DeviceBindingsDelivery>,
                 ),
                 (
-                    "app-b".into(),
-                    ApplicationChannels {
-                        providers: vec!["apns"],
-                        disabled: vec![],
-                        executor: Arc::new(Backend(b.clone())),
-                    },
+                    "app-b".to_string(),
+                    Arc::new(Backend(b.clone())) as Arc<dyn DeviceBindingsDelivery>,
                 ),
             ]),
             tokens: tokens.clone(),
         };
         let mut envelope = PushTaskEnvelope {
             tenant_id: "app-a".into(),
+            device_id: "registered-device".into(),
             ..Default::default()
         };
         let ctx = Arc::new(Ctx::default().with_tenant_id("app-a"));
@@ -104,52 +123,33 @@ mod tests {
         assert!(deliveries.deliver(&ctx, &envelope).await.is_err());
         envelope.tenant_id = "missing".into();
         let missing = Arc::new(Ctx::default().with_tenant_id("missing"));
-        assert!(deliveries.deliver(&missing, &envelope).await.is_ok());
-        tokens
-            .rows
-            .lock()
-            .unwrap()
-            .push(crate::infrastructure::push_test_support::token(
-                "registered-device",
-            ));
+        // A registered device of an application without credentials is not "handled".
         assert!(deliveries.deliver(&missing, &envelope).await.is_err());
+        // Another device's registration is not this task's concern.
+        envelope.device_id = "other-device".into();
+        assert!(deliveries.deliver(&missing, &envelope).await.is_ok());
         assert_eq!(a.load(Ordering::SeqCst), 1);
         assert_eq!(b.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test]
-    async fn missing_registered_provider_is_not_a_silent_success() {
+    async fn a_device_without_bindings_reaches_no_vendor() {
         let calls = Arc::new(AtomicUsize::new(0));
-        let tokens = Arc::new(crate::infrastructure::push_test_support::Tokens::default());
-        tokens
-            .rows
-            .lock()
-            .unwrap()
-            .push(crate::infrastructure::push_test_support::token(
-                "fcm-device",
-            ));
         let deliveries = ApplicationDelivery {
             applications: HashMap::from([(
-                "t1".into(),
-                ApplicationChannels {
-                    providers: vec!["apns"],
-                    disabled: vec![],
-                    executor: Arc::new(Backend(calls.clone())),
-                },
+                "t1".to_string(),
+                Arc::new(Backend(calls.clone())) as Arc<dyn DeviceBindingsDelivery>,
             )]),
-            tokens,
+            tokens: Arc::new(crate::infrastructure::push_test_support::Tokens::default()),
         };
         let ctx = Arc::new(Ctx::default().with_tenant_id("t1"));
         let envelope = PushTaskEnvelope {
             tenant_id: "t1".into(),
             user_id: "u1".into(),
+            device_id: "unbound-device".into(),
             ..Default::default()
         };
-        assert!(deliveries.deliver(&ctx, &envelope).await.is_err());
-        assert_eq!(
-            calls.load(Ordering::SeqCst),
-            1,
-            "configured channels still run"
-        );
+        deliveries.deliver(&ctx, &envelope).await.unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
     }
 }

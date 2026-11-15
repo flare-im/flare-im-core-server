@@ -14,6 +14,7 @@ pub mod health;
 pub mod metrics;
 pub mod push_delivery;
 pub mod push_provenance;
+pub mod push_trace;
 pub mod redis_connection;
 pub mod roster_policy;
 pub mod runtime;

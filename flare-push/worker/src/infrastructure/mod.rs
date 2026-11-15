@@ -7,6 +7,9 @@ pub mod offline_outbox;
 pub mod push_display;
 #[cfg(test)]
 pub(crate) mod push_test_support;
+pub mod push_text;
 pub mod rpc;
 pub(crate) mod vendor_http;
 pub mod vendor_jwt;
+pub mod vendor_metrics;
+pub mod vendor_trace;

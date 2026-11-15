@@ -375,9 +375,7 @@ fn every_policy_mutation_records_an_audit_event() {
     let source = strip_comments(&fs::read_to_string(&service).expect("读取 service.rs"));
 
     // 策略变更 RPC：改变了「谁能用什么」的持久状态。
-    const MUTATIONS: &[&str] = &[
-        "async fn set_tenant_capability_switch",
-    ];
+    const MUTATIONS: &[&str] = &["async fn set_tenant_capability_switch"];
 
     let mut missing = Vec::new();
     for m in MUTATIONS {

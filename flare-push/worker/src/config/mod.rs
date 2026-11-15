@@ -1,3 +1,3 @@
 pub mod settings;
 
-pub use settings::{OfflineDeliveryBackend, PushWorkerConfig};
+pub use settings::{ConsumerConcurrency, OfflineDeliveryBackend, PushWorkerConfig};

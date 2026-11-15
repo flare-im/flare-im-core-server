@@ -1,4 +1,4 @@
-//! 消息/ACK/事件/DATA 处理：实现 ServerEventHandler，按 PayloadCommand 类型解码 flare-proto 并委托应用层。
+//! 消息/ACK/事件/DATA/设备状态处理：实现 ServerEventHandler，按命令类型解码 flare-proto 并委托应用层。
 
 use async_trait::async_trait;
 use flare_core::common::error::{FlareError as CoreFlareError, Result as CoreResult};
@@ -13,8 +13,9 @@ use crate::application::commands::{SendDataCommand, SendEventCommand, SendMessag
 use super::connection::LongConnectionHandler;
 use crate::utils::{
     SendAckFailure, build_data_error_frame, build_data_frame_with_payload,
-    build_event_ack_operation_frame, build_message_ack_frame, decode_ack_payload,
-    decode_data_packet, decode_event_payload, decode_message_payload,
+    build_device_state_ack_frame, build_event_ack_operation_frame, build_message_ack_frame,
+    decode_ack_payload, decode_data_packet, decode_device_state_report, decode_event_payload,
+    decode_message_payload,
 };
 
 fn proto_ack_error_code(code: flare_core::common::error::ErrorCode) -> i32 {
@@ -85,7 +86,8 @@ impl ServerEventHandler for LongConnectionHandler {
         self.handle_event_send(command, connection_id).await
     }
 
-    /// ACK：payload 为 Ack（PushAck/ConversationAck/ReadAck/AckBatch），上报并更新游标
+    /// ACK：payload 为 Ack（PushAck/ConversationAck/ReadAck/AckBatch）。送达确认在网关就地消化，
+    /// 其余上报路由
     #[instrument(skip(self), fields(connection_id, message_id = %command.message_id))]
     async fn handle_ack(
         &self,
@@ -131,8 +133,43 @@ impl ServerEventHandler for LongConnectionHandler {
     }
 
     async fn handle_pong(&self, _frame: &Frame, connection_id: &str) -> CoreResult<Option<Frame>> {
+        // 送达确认超时后网关会发 PING 探活：回了 PONG 的连接不再被关闭。只动内存。
+        self.connection_handler
+            .delivery_watch()
+            .on_pong(connection_id)
+            .await;
         self.spawn_refresh_session(connection_id);
         Ok(None)
+    }
+
+    /// DEVICE_STATE：载荷为 `DeviceStateReport`。记下这条连接的应用状态并立即回
+    /// DEVICE_STATE_ACK；转给 Online 在后台进行，读循环不等它。上报先于 Online 登录完成到达时
+    /// 同样生效、同样应答，登录完成后再转给 Online。
+    ///
+    /// 解不出的上报只算这一帧的协议错误：不应答，连接照常。
+    async fn handle_device_state(
+        &self,
+        frame: &Frame,
+        connection_id: &str,
+    ) -> CoreResult<Option<Frame>> {
+        let Some(report) = decode_device_state_report(frame) else {
+            debug!(connection_id = %connection_id, "undecodable DEVICE_STATE report ignored");
+            return Ok(None);
+        };
+        let Some(applied) = self
+            .connection_handler
+            .apply_device_state(connection_id, &report)
+            .await
+        else {
+            debug!(
+                connection_id = %connection_id,
+                state = report.state,
+                "DEVICE_STATE report not applied: unknown state or connection gone"
+            );
+            return Ok(None);
+        };
+        debug!(connection_id = %connection_id, state = ?applied, "device state applied");
+        Ok(Some(build_device_state_ack_frame(applied)))
     }
 
     async fn handle_custom_command(

@@ -353,6 +353,24 @@ DELETE /api/v1/devices/device-123/push-token?provider=getui
 Authorization: Bearer <token>
 ```
 
+#### Report push arrival receipts
+```http
+POST /api/v1/push/receipts
+Content-Type: application/json
+Authorization: Bearer <token>
+
+{
+  "deviceId": "device-123",
+  "appVersion": "1.4.0",
+  "receipts": [
+    {"conversationId": "c-1", "messageId": "m-9", "seq": 123, "collapseId": "c:0123456789abcdef0123456789abcdef",
+     "disposition": "loud", "provider": "apns", "path": "extension", "receivedAtMs": 1731400000000}
+  ]
+}
+```
+
+Same identity rules as the push-token routes, except that a token without a device may report too; a token bound to a device can only report for it. At most 100 receipts per call; entries of the wrong shape, or whose `provider` (`apns`, `fcm`, `getui`) or `path` (`extension`, `app`) Push Proxy does not know, are skipped. The response is `{"accepted": n}`. Receipts only feed metrics and the push decision trace; they never change delivery.
+
 Push Proxy is reached at the static gRPC address `FLARE_API_GATEWAY_GRPC_PUSH_PROXY_URL`. When it is unset, the gateway uses `http://127.0.0.1:50091`, where Push Proxy listens in the single topology (same container). Other topologies must set it. The channel connects lazily: the gateway starts without Push Proxy and these routes answer 503 until it is reachable.
 
 ### Unknown routes

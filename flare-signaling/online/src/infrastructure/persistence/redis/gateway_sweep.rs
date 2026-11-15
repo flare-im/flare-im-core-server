@@ -14,6 +14,7 @@ use redis::AsyncCommands;
 use serde::Deserialize;
 
 use crate::domain::repository::{GatewaySweepRepository, SessionOwner};
+use crate::domain::value_object::DeviceAppState;
 
 /// 清扫器单例锁。
 pub const SWEEPER_LOCK_KEY: &str = "gw:sweeper:lock";
@@ -41,13 +42,17 @@ redis.call('SREM', KEYS[3], ARGV[1])
 return 1
 "#;
 
-/// 会话记录里清扫器需要的两个字段。
+/// 会话记录里清扫器需要的字段：归属与登记时刻决定清不清，设备与应用状态用于交接上报。
 #[derive(Deserialize)]
 struct OwnerRecord {
     #[serde(default)]
     gateway_id: String,
     #[serde(default)]
     created_at: i64,
+    #[serde(default)]
+    device_id: String,
+    #[serde(default)]
+    app_state: DeviceAppState,
 }
 
 pub struct RedisGatewaySweepRepository {
@@ -158,6 +163,8 @@ impl GatewaySweepRepository for RedisGatewaySweepRepository {
             .map(|record| SessionOwner {
                 gateway_id: record.gateway_id,
                 created_at_ms: record.created_at,
+                device_id: record.device_id,
+                app_state: record.app_state,
             }))
     }
 
@@ -188,6 +195,27 @@ impl GatewaySweepRepository for RedisGatewaySweepRepository {
 mod tests {
     use super::*;
     use flare_im_service_kit::gateway::lease::connection_member;
+
+    /// 清扫器从会话记录里读应用状态：`parking` 与 `deferred` 的提示都归推送通道，清扫时不交接；
+    /// 没有这个字段的记录是前台。
+    #[test]
+    fn the_sweep_reads_push_owned_app_states_from_the_session_record() {
+        for (stored, state) in [
+            ("parking", DeviceAppState::Parking),
+            ("deferred", DeviceAppState::Deferred),
+        ] {
+            let record: OwnerRecord = serde_json::from_str(&format!(
+                r#"{{"gateway_id":"g","created_at":1,"device_id":"d","app_state":"{stored}"}}"#
+            ))
+            .unwrap();
+            assert_eq!(record.app_state, state);
+            assert!(record.app_state.alerts_owned_by_push());
+        }
+        let untouched: OwnerRecord =
+            serde_json::from_str(r#"{"gateway_id":"g","created_at":1,"device_id":"d"}"#).unwrap();
+        assert_eq!(untouched.app_state, DeviceAppState::Active);
+        assert!(!untouched.app_state.alerts_owned_by_push());
+    }
 
     /// 锁、已知网关、租约、连接索引与退役脚本按约定工作。
     /// Run with `FLARE_TEST_REDIS_URL` pointing at an isolated Redis instance.
@@ -221,7 +249,7 @@ mod tests {
             "tenant_id": tenant, "conversation_id": field, "gateway_id": gateway,
             "server_id": gateway, "device_id": "d", "device_platform": "ios",
             "connection_id": field, "created_at": 1234, "last_seen": 1,
-            "device_priority": 2, "token_version": 0
+            "device_priority": 2, "token_version": 0, "app_state": "parking"
         });
         let _: () = redis::pipe()
             .hset(&session_key, field, record.to_string())
@@ -273,6 +301,8 @@ mod tests {
             Some(SessionOwner {
                 gateway_id: gateway.clone(),
                 created_at_ms: 1234,
+                device_id: "d".to_string(),
+                app_state: DeviceAppState::Parking,
             })
         );
         assert_eq!(

@@ -11,6 +11,8 @@ use std::path::PathBuf;
 const PUSH_ROUTER: &str = "flare-push/server/src/application/handlers/push_router_handler.rs";
 const INGEST_SERVICE: &str = "flare-message-ingest/src/domain/service/message_ingest_service.rs";
 const NOTIFY_PORT: &str = "flare-push/server/src/domain/repository/notify_policy_repository.rs";
+const PUSH_HANDOFF: &str =
+    "flare-push/server/src/application/handlers/push_router_handler/handoff.rs";
 
 /// 通知偏好的查询与使用只允许出现在推送侧。
 ///
@@ -36,20 +38,44 @@ fn mute_lookup_never_leaks_into_delivery_recipient_resolution() {
     }
 }
 
-/// 过滤只作用于离线任务，且必须放行在线用户。
+/// 过滤只作用于离线任务：在线任务发给谁由一个碰不到通知偏好的函数决定。
+///
+/// 离线任务按设备发之后，「在线」与「要推送」不再是同一个用户的二选一——电脑在线的人
+/// 手机照样可能要推。所以守卫不再认一行 `if !is_online && ...`，而是认结构：在线名单
+/// 在一个独立函数里算出，它的参数与函数体里都没有偏好、提及或设备绑定。
 #[test]
 fn mute_filter_only_suppresses_offline_push() {
     let root = workspace_root();
-    let router = fs::read_to_string(root.join(PUSH_ROUTER)).expect("read push router");
+    let router =
+        production_code(&fs::read_to_string(root.join(PUSH_ROUTER)).expect("read push router"));
 
+    let online_leg = function_source(&router, "\nfn online_task_recipients(");
+    for forbidden in [
+        "preference",
+        "NotifyPreference",
+        "muted",
+        "mention",
+        "devices_to_push",
+        "BoundDevices",
+        "is_live",
+    ] {
+        assert!(
+            !online_leg.contains(forbidden),
+            "在线任务的收件人不得依赖 `{forbidden}`：\
+             免打扰、「只接收@我」、设备是否托管只能收窄推送目标，\
+             收窄在线名单会让被误判的设备当场丢掉实时消息"
+        );
+    }
     assert!(
-        router.contains("if !is_online && preference.muted"),
-        "免打扰过滤必须同时要求「离线」与「已静音」——\
-         漏掉 !is_online 会把在线用户的实时投递也一起挡掉"
+        router.contains(
+            "let online_user_ids = online_task_recipients(user_ids, reachability, online_leg);"
+        ),
+        "在线名单必须只由 online_task_recipients 给出，并且在任何推送过滤之前算出"
     );
-    assert!(
-        router.contains("if !is_online && preference.mention_only"),
-        "「只接收@我」同样必须先要求离线：它抑制的是推送，不是消息投递"
+    assert_eq!(
+        router.matches("push_suppressed_by_preference(").count(),
+        2,
+        "偏好过滤（一处定义、一处调用）只能出现在组装离线任务的地方"
     );
     assert!(
         router.contains("fn notify_preferences"),
@@ -62,28 +88,69 @@ fn mute_filter_only_suppresses_offline_push() {
 fn mute_lookup_is_fail_open_and_lazy() {
     let root = workspace_root();
     let router = fs::read_to_string(root.join(PUSH_ROUTER)).expect("read push router");
+    let handoff = fs::read_to_string(root.join(PUSH_HANDOFF)).expect("read push handoff");
     let port = fs::read_to_string(root.join(NOTIFY_PORT)).expect("read notify policy port");
 
+    let lookup = function_source(&router, "\n    async fn notify_preferences(");
     assert!(
-        router.contains("HashMap::new()"),
-        "通知偏好查询失败必须退化为空偏好表（fail-open）：\
+        lookup.contains("Err(error) =>") && lookup.contains("PreferenceLookup::Unavailable"),
+        "通知偏好查询失败必须退化为「偏好未知」（fail-open）：\
          免打扰是偏好不是安全边界，宁可多响一声也不能吞掉推送"
     );
-    // 免打扰与「只接收@我」读的是同一批参与者行；分开查会让每条消息的翻页 RPC
+    // 免打扰与「只接收@我」读的是同一批参与者行；分开查会让每条消息的 RPC
     // 按偏好种类翻倍——加第二种偏好时踩过一次，用源码断言钉住合并后的形状。
     assert_eq!(
         router.matches(".preferences_for(").count(),
         1,
         "通知偏好只允许有一处查询调用：每加一种偏好就多查一遍，成本按种类翻倍"
     );
+    // 设备交接的补提示是同一个路由器的另一个入口，必须走同一个查询入口。
+    assert!(
+        !handoff.contains(".preferences_for(") && handoff.contains(".notify_preferences("),
+        "补提示必须复用 notify_preferences，不得另起一处通知偏好查询"
+    );
     assert!(
         router.contains("if online_only {") && router.contains("let offline_candidates"),
-        "必须先算出离线候选再查询：在线用户不该触发任何通知偏好查询"
+        "必须先算出离线候选再查询：没有设备要推的用户不该触发任何通知偏好查询"
     );
     assert!(
         port.contains("fail-open") || port.contains("空集"),
-        "端口契约需写明失败时返回空集，避免实现方各自发挥"
+        "端口契约需写明调用方对查询失败 fail-open，避免实现方各自发挥"
     );
+}
+
+/// 补提示只产出离线任务，不碰在线一路。
+#[test]
+fn device_handoff_never_publishes_online_tasks() {
+    let root = workspace_root();
+    let handoff = fs::read_to_string(root.join(PUSH_HANDOFF)).expect("read push handoff");
+
+    assert!(
+        handoff.contains("publish_offline_task(") && !handoff.contains("publish_online_task("),
+        "设备交接补的是推送提示：在线投递早已由正常路由完成，再发一遍就是重复消息"
+    );
+}
+
+/// 去掉文件末尾的测试模块，只留生产代码。
+fn production_code(source: &str) -> String {
+    match source.find("\n#[cfg(test)]\nmod ") {
+        Some(end) => source[..end].to_string(),
+        None => source.to_string(),
+    }
+}
+
+/// 从 `signature` 起到这个函数体结束（与签名同缩进的右花括号）为止的源码。
+fn function_source(source: &str, signature: &str) -> String {
+    let start = source
+        .find(signature)
+        .unwrap_or_else(|| panic!("`{}` not found", signature.trim()));
+    let body = &source[start + 1..];
+    let indent = body.len() - body.trim_start_matches(' ').len();
+    let closing = format!("\n{}}}\n", " ".repeat(indent));
+    let end = body
+        .find(&closing)
+        .unwrap_or_else(|| panic!("end of `{}` not found", signature.trim()));
+    body[..end + closing.len()].to_string()
 }
 
 fn workspace_root() -> PathBuf {

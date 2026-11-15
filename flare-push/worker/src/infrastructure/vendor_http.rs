@@ -15,6 +15,15 @@ pub fn client() -> Result<reqwest::Client, FlareError> {
 pub fn failure(message: &'static str) -> FlareError {
     FlareError::localized(ErrorCode::ServiceUnavailable, message)
 }
+/// `Retry-After` of a vendor answer (seconds; read before the body is consumed).
+pub fn retry_after(response: &reqwest::Response) -> Option<Duration> {
+    crate::domain::vendor_delivery::parse_retry_after(
+        response
+            .headers()
+            .get(reqwest::header::RETRY_AFTER)
+            .and_then(|value| value.to_str().ok()),
+    )
+}
 pub async fn body(mut response: reqwest::Response) -> Result<String, FlareError> {
     let mut bytes = Vec::new();
     while let Some(chunk) = response

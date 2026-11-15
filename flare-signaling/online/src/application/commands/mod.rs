@@ -1,8 +1,8 @@
 //! 命令结构体定义（Command DTO）
 
 use flare_grpc_proto::signaling::online::{
-    HeartbeatRequest, LoginRequest, LogoutRequest, SubscribeUserPresenceRequest,
-    WatchPresenceRequest,
+    HeartbeatRequest, LoginRequest, LogoutRequest, ReportDeviceStateRequest,
+    SubscribeUserPresenceRequest, WatchPresenceRequest,
 };
 use flare_server_core::context::Context;
 
@@ -29,6 +29,15 @@ pub struct LogoutCommand {
 pub struct HeartbeatCommand {
     /// 原始请求
     pub request: HeartbeatRequest,
+    /// 上下文
+    pub ctx: Context,
+}
+
+/// 设备状态上报命令
+#[derive(Debug, Clone)]
+pub struct ReportDeviceStateCommand {
+    /// 原始请求
+    pub request: ReportDeviceStateRequest,
     /// 上下文
     pub ctx: Context,
 }

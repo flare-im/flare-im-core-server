@@ -6,6 +6,30 @@
 address = "0.0.0.0"
 port = 50091
 
+# 设备推送绑定登记表（只走环境变量）:
+#   PUSH_PROXY_DEVICE_TOKEN_REDIS_URL   默认取 [redis.push] profile 或 redis://127.0.0.1:6379，与 Push Server、
+#                                       Push Worker 的缺省相同；显式配置时三者设成同一地址
+#   PUSH_PROXY_DEVICE_TOKEN_KEY_PREFIX  默认 flare:im:push:device_tokens，与 Push Server、Push Worker 一致
+# ReportDeviceHandoff 只收网关与 Online 的已验证服务身份，RevokeDeviceBindings 只收 Online；
+# 交接发布到 flare.im.push.handoff（FLARE_PUSH 流 flare.im.push.* 内）。
+
+# 推送决策链：每条消息在设备上报到达回执时留一条记录（通道、来路、设备时钟的收到时刻、应用版本），写在推送 Redis（与设备绑定登记表同一实例，PUSH_PROXY_DEVICE_TOKEN_REDIS_URL / [redis.push]），
+# 留 24 小时，供管理员按用户与消息查「这条为什么没提示」（admin-gateway GET /api/v1/admin/users/{user_id}/push-traces）。
+# 记录只进有界队列、后台批量写，绝不拖慢推送；队列满或 Redis 不可用时丢掉并计入 flare_push_trace_dropped_total。
+#   enabled            关掉后不写任何记录
+#   ttl_secs           记录留多久（秒）
+#   queue              队列容量
+#   batch              一批至多写多少条
+#   flush_interval_ms  第一条进队后至多等多久就写
+# 管理员查询（PushAdminService.AdminQueryPushTrace）也从这里读，只认 admin-gateway 转发的 Staff 上下文
+# （FLARE_INTERNAL_CTX_PUBLIC_KEYS 或 FLARE_INTERNAL_CTX_PUBLIC_KEY 验签，权限码 core:users:read）。
+[services.push_proxy.trace]
+enabled = true
+ttl_secs = 86400
+queue = 8192
+batch = 256
+flush_interval_ms = 100
+
 # Prometheus 出口（共享运行时挂载；端口表见 deploy/prometheus.yml）。
 [services.push_proxy.metrics]
 address = "0.0.0.0"

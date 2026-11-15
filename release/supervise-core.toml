@@ -45,14 +45,26 @@ command = "/usr/local/bin/flare-signaling-online"
 inherit_env_prefixes = ["SIGNALING_ONLINE_"]
 # The Cell key set verifies user contexts and the Staff context Admin Gateway forwards
 # (kid=gateway); the platform public key verifies only the scheduler's KickTenant assertion.
+# The Cell private key signs Online's own Service identity on the device handoffs (gateway
+# lost) and push binding revocations (kicks, replaced devices, revoked identity sessions) it
+# reports to SIGNALING_ONLINE_PUSH_PROXY_URL (Push Proxy); with that URL set Online does not
+# start without the key, and without the URL it reports neither.
 inherit_env = [
   "FLARE_INTERNAL_CTX_PUBLIC_KEY", "FLARE_INTERNAL_CTX_PUBLIC_KEYS", "FLARE_PLATFORM_PUBLIC_KEY",
-  "FLARE_AUDIT_NATS_URL",
+  "FLARE_AUDIT_NATS_URL", "FLARE_INTERNAL_CTX_PRIVATE_KEY",
 ]
 required_env = ["FLARE_INTERNAL_CTX_PUBLIC_KEY"]
 tcp_health = "127.0.0.1:50061"
 [services.environment]
 SIGNALING_ONLINE_TENANT_POLICY = "strict"
+# FLARE_REGISTRY_MODE=static has no discovery: report to this container's Push
+# Proxy. A value the parent sets still wins (an empty one turns the reports off);
+# configured mode has no default, so the deployment names the Push Proxy itself.
+[[services.environment_defaults]]
+when_env = "FLARE_REGISTRY_MODE"
+equals = "static"
+[services.environment_defaults.values]
+SIGNALING_ONLINE_PUSH_PROXY_URL = "http://127.0.0.1:50091"
 
 [[services]]
 name = "signaling-route"
@@ -327,3 +339,4 @@ FLARE_ADMIN_GATEWAY_GRPC_CONVERSATION_SERVICE_URL = "http://127.0.0.1:50090"
 FLARE_ADMIN_GATEWAY_GRPC_ONLINE_SERVICE_URL = "http://127.0.0.1:50061"
 FLARE_ADMIN_GATEWAY_GRPC_STORAGE_READER_SERVICE_URL = "http://127.0.0.1:60083"
 FLARE_ADMIN_GATEWAY_GRPC_CAPABILITY_SERVICE_URL = "http://127.0.0.1:50110"
+FLARE_ADMIN_GATEWAY_GRPC_PUSH_PROXY_SERVICE_URL = "http://127.0.0.1:50091"

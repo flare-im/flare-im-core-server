@@ -4,14 +4,16 @@ use std::sync::Arc;
 
 use flare_grpc_proto::signaling::online::{
     HeartbeatResponse, LoginRequest, LoginResponse, LogoutResponse, OnlineStatus, PresenceEvent,
-    UserPresenceEvent, WatchPresenceRequest,
+    ReportDeviceStateResponse, UserPresenceEvent, WatchPresenceRequest,
 };
 use flare_server_core::context::Context;
 use flare_server_core::error::{ErrorCode, Result, map_infra_error};
 use prost_types::Timestamp;
 use tracing::{instrument, warn};
 
-use crate::application::commands::{HeartbeatCommand, LoginCommand, LogoutCommand};
+use crate::application::commands::{
+    HeartbeatCommand, LoginCommand, LogoutCommand, ReportDeviceStateCommand,
+};
 use crate::domain::repository::{PresencePublisher, SubscriptionRepository, kick_reason};
 use crate::domain::service::{OnlineStatusService, SubscriptionService};
 
@@ -129,6 +131,24 @@ where
             )
             .await
             .map_err(|e| map_infra_error(e, ErrorCode::InternalError, "Failed to heartbeat"))
+    }
+
+    /// 处理设备状态上报命令
+    #[instrument(
+        skip_all,
+        fields(conversation_id = %command.request.conversation_id, user_id = %command.request.user_id)
+    )]
+    pub async fn handle_report_device_state(
+        &self,
+        ctx: &Context,
+        command: ReportDeviceStateCommand,
+    ) -> Result<ReportDeviceStateResponse> {
+        self.online_domain_service
+            .report_device_state(ctx, &command.request)
+            .await
+            .map_err(|e| {
+                map_infra_error(e, ErrorCode::InternalError, "Failed to report device state")
+            })
     }
 
     /// 处理订阅用户状态命令

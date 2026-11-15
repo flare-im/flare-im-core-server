@@ -23,7 +23,7 @@ pub type DeviceId = String;
 pub type ConnectionId = String;
 pub type GatewayId = String;
 
-#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DevicePushToken {
     pub tenant_id: String,
     pub user_id: String,
@@ -34,6 +34,27 @@ pub struct DevicePushToken {
     /// Conditional binding identity; only a matching generation can be invalidated.
     pub registration_id: String,
     pub registered_at_ms: i64,
+    /// iOS 的 bundle id 或 Android 的 applicationId。APNs 用它作 topic。
+    #[serde(default)]
+    pub app_bundle: String,
+    /// 只用于 APNs：`sandbox` 或 `production`，空按生产环境。
+    #[serde(default)]
+    pub environment: String,
+    /// BCP 47 语言标签。
+    #[serde(default)]
+    pub locale: String,
+    /// IANA 时区。
+    #[serde(default)]
+    pub time_zone: String,
+    #[serde(default)]
+    pub app_version: String,
+    /// 已排序、去重。空表不写出：登记脚本经 cjson 重新编码记录，空数组会变成 `{}`，
+    /// 读回时就不是数组了。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub capabilities: Vec<String>,
+    /// 设备最近一次核对这条绑定的时间（Redis 的毫秒时间）。0 表示登记之后还没核对过。
+    #[serde(default)]
+    pub last_seen_ms: i64,
 }
 
 impl std::fmt::Debug for DevicePushToken {
@@ -54,6 +75,11 @@ impl DevicePushToken {
             && !self.tenant_id.trim().is_empty()
             && !self.registration_id.is_empty()
             && self.registered_at_ms > 0
+    }
+
+    /// 最近一次活跃：设备最近核对绑定的时间，没核对过就是登记时间。
+    pub fn last_active_ms(&self) -> i64 {
+        push_binding::push_binding_last_active_ms(self.registered_at_ms, self.last_seen_ms)
     }
 }
 

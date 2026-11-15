@@ -15,10 +15,11 @@ use crate::staff_context::staff_context_request;
 use flare_grpc_proto::capability::capability_admin_service_client::CapabilityAdminServiceClient;
 use flare_grpc_proto::capability::capability_service_client::CapabilityServiceClient;
 use flare_grpc_proto::capability::{
-    GenericRequest, GenericResponse, GetTenantRuntimeRequest, GetTenantRuntimeResponse, ListCapabilitiesRequest,
-    ListCapabilitiesResponse, ListRegisteredPluginsRequest, ListRegisteredPluginsResponse,
-    ListTenantCapabilitySwitchesRequest, ListTenantCapabilitySwitchesResponse,
-    SetTenantCapabilitySwitchRequest, SetTenantCapabilitySwitchResponse,
+    GenericRequest, GenericResponse, GetTenantRuntimeRequest, GetTenantRuntimeResponse,
+    ListCapabilitiesRequest, ListCapabilitiesResponse, ListRegisteredPluginsRequest,
+    ListRegisteredPluginsResponse, ListTenantCapabilitySwitchesRequest,
+    ListTenantCapabilitySwitchesResponse, SetTenantCapabilitySwitchRequest,
+    SetTenantCapabilitySwitchResponse,
 };
 
 /// Capability 下游路由（`discovery://flare-capability` 或静态 `http(s)://`）。

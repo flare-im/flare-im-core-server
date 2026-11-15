@@ -9,10 +9,11 @@ use flare_grpc_proto::push::{
     PushOptions as GrpcPushOptions,
 };
 use flare_im_contracts::Ctx;
+use flare_im_contracts::constants::topics::TOPIC_PUSH_HANDOFF;
 use flare_im_contracts::event::mq_envelope_for_main_queue_message_with_headers;
 use flare_proto::common::{
-    CustomPayload, NotificationPayload, PushEnvelope, PushOptions, PushPayloadKind, PushTargetType,
-    push_envelope,
+    CustomPayload, DeviceHandoff, NotificationPayload, PushEnvelope, PushOptions, PushPayloadKind,
+    PushTargetType, push_envelope,
 };
 use flare_server_core::context::keys;
 use flare_server_core::error::{ErrorBuilder, ErrorCode, Result};
@@ -27,8 +28,9 @@ use crate::config::PushProxyConfig;
 
 const MAX_PUSH_ENVELOPE_SIZE: usize = 10 * 1024 * 1024;
 
-/// 一条待写入 `push_request_topic` 的 MQ 记录。
-struct PushMessageRecord {
+/// 一条待写入 Broker 的记录：分区键、字节与记录头。
+#[derive(Debug)]
+struct MqRecord {
     key: String,
     payload: Vec<u8>,
     headers: HashMap<String, String>,
@@ -126,6 +128,28 @@ impl PushProxyMqPublisher {
     ) -> Result<()> {
         let envelope = Self::capability_envelope_from_request(ctx, req)?;
         self.publish_push_envelope(ctx, &envelope).await
+    }
+
+    /// 把一次设备交接写入交接 Topic，由 Push Server 据此补提示。
+    ///
+    /// 线格式是 protobuf `DeviceHandoff` 本身，不再套信封：它只有一个生产方入口和一个消费方。
+    /// 记录不带稳定的消息标识：同一次交接被上报两遍时 Push Server 会处理两遍，
+    /// 产出的离线任务由任务自身的幂等键去重。
+    #[instrument(skip(self, ctx, handoff), fields(pending = handoff.pending.len()))]
+    pub async fn publish_device_handoff(&self, ctx: &Ctx, handoff: &DeviceHandoff) -> Result<()> {
+        let record = device_handoff_record(ctx, handoff)?;
+        self.producer
+            .send(
+                ctx,
+                TOPIC_PUSH_HANDOFF,
+                Some(record.key.as_str()),
+                record.payload,
+                Some(record.headers),
+            )
+            .await
+            .map_err(|e| {
+                flare_server_core::error::FlareError::system(format!("mq publish failed: {}", e))
+            })
     }
 
     async fn publish_push_envelope(&self, ctx: &Ctx, envelope: &PushEnvelope) -> Result<()> {
@@ -254,7 +278,7 @@ impl PushProxyMqPublisher {
 ///
 /// 分区键取会话 ID（与 pipeline 的 push-only 记录一致，同会话推送保持顺序）；记录头与信封头
 /// 相同，消费端据记录头重建租户与追踪上下文。
-fn push_message_record(ctx: &Ctx, req: &PushMessageRequest) -> Result<PushMessageRecord> {
+fn push_message_record(ctx: &Ctx, req: &PushMessageRequest) -> Result<MqRecord> {
     let tenant_id = required_push_tenant(ctx)?;
     let message = req.message.as_ref().ok_or_else(|| {
         ErrorBuilder::new(ErrorCode::InvalidParameter, "push message payload missing").build_error()
@@ -294,10 +318,48 @@ fn push_message_record(ctx: &Ctx, req: &PushMessageRequest) -> Result<PushMessag
     } else {
         envelope.conversation_id.clone()
     };
-    Ok(PushMessageRecord {
+    Ok(MqRecord {
         key,
         payload,
         headers: envelope.headers,
+    })
+}
+
+/// 构造交接 Topic 上的一条记录。
+///
+/// 分区键取 user_id：同一用户各台设备的交接按到达顺序处理。记录头与其它发布相同（调用方上下文
+/// 加租户），Push Server 据记录头里的租户为记录重新背书；交接体里的租户必须就是这个租户，
+/// 否则消费端会以一个租户的身份去处理另一个租户的设备。
+fn device_handoff_record(ctx: &Ctx, handoff: &DeviceHandoff) -> Result<MqRecord> {
+    let tenant_id = required_push_tenant(ctx)?;
+    if handoff.tenant_id != tenant_id {
+        return Err(ErrorBuilder::new(
+            ErrorCode::PermissionDenied,
+            "device handoff tenant does not match the publication tenant",
+        )
+        .build_error());
+    }
+    if handoff.user_id.trim().is_empty() || handoff.device_id.trim().is_empty() {
+        return Err(ErrorBuilder::new(
+            ErrorCode::InvalidParameter,
+            "device handoff user and device required",
+        )
+        .build_error());
+    }
+
+    let mut headers = flare_server_core::utils::ctx_to_map(ctx);
+    headers.insert(keys::TENANT_ID.to_string(), tenant_id);
+    headers.insert(
+        "x-produced-at-ms".to_string(),
+        current_time_ms().to_string(),
+    );
+
+    let payload = handoff.encode_to_vec();
+    ensure_payload_size(payload.len(), "device handoff too large")?;
+    Ok(MqRecord {
+        key: handoff.user_id.clone(),
+        payload,
+        headers,
     })
 }
 
@@ -678,5 +740,75 @@ mod tests {
         }
         let explicit = Arc::new(Context::with_request_id("req-explicit").with_tenant_id("0"));
         assert_eq!(required_push_tenant(&explicit).unwrap(), "0");
+    }
+
+    fn device_handoff(tenant_id: &str) -> DeviceHandoff {
+        use flare_proto::common::{DeviceHandoffCause, DeviceHandoffItem};
+        DeviceHandoff {
+            tenant_id: tenant_id.to_string(),
+            user_id: "user-7".to_string(),
+            device_id: "phone-7".to_string(),
+            connection_id: "conn-7".to_string(),
+            gateway_id: "gw-1".to_string(),
+            cause: DeviceHandoffCause::AckTimeout as i32,
+            since: 0,
+            occurred_at: 1_760_000_000_000,
+            pending: vec![DeviceHandoffItem {
+                conversation_id: "conv-7".to_string(),
+                seq: 12,
+                message_id: "srv-12".to_string(),
+            }],
+        }
+    }
+
+    /// 交接记录按用户分区，字节就是 `DeviceHandoff`，记录头带租户：Push Server 靠记录头里的
+    /// 租户为记录背书，缺了它记录会直接进死信。
+    #[test]
+    fn device_handoff_record_is_keyed_by_user_and_carries_the_tenant_header() {
+        let ctx = Arc::new(
+            Context::with_request_id("req-7")
+                .with_trace_id("trace-7")
+                .with_tenant_id("tenant-7"),
+        );
+        let handoff = device_handoff("tenant-7");
+
+        let record = device_handoff_record(&ctx, &handoff).unwrap();
+
+        assert_eq!(record.key, "user-7");
+        assert_eq!(
+            DeviceHandoff::decode(record.payload.as_slice()).unwrap(),
+            handoff
+        );
+        for (name, value) in [
+            (keys::TENANT_ID, "tenant-7"),
+            (keys::TRACE_ID, "trace-7"),
+            (keys::REQUEST_ID, "req-7"),
+        ] {
+            assert_eq!(record.headers.get(name).map(String::as_str), Some(value));
+        }
+        assert!(record.headers.contains_key("x-produced-at-ms"));
+    }
+
+    /// 交接体的租户必须就是发布上下文的租户，用户和设备不能为空。
+    #[test]
+    fn device_handoff_record_rejects_a_foreign_tenant_and_blank_targets() {
+        let ctx = Arc::new(Context::with_request_id("req-8").with_tenant_id("tenant-7"));
+
+        let foreign = device_handoff_record(&ctx, &device_handoff("tenant-8")).unwrap_err();
+        assert_eq!(foreign.code(), Some(ErrorCode::PermissionDenied));
+
+        let mut no_user = device_handoff("tenant-7");
+        no_user.user_id = " ".to_string();
+        let mut no_device = device_handoff("tenant-7");
+        no_device.device_id.clear();
+        for handoff in [no_user, no_device] {
+            assert_eq!(
+                device_handoff_record(&ctx, &handoff).unwrap_err().code(),
+                Some(ErrorCode::InvalidParameter)
+            );
+        }
+
+        let no_tenant = Arc::new(Context::with_request_id("req-9"));
+        assert!(device_handoff_record(&no_tenant, &device_handoff("tenant-7")).is_err());
     }
 }

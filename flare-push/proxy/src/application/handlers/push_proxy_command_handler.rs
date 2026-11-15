@@ -6,6 +6,7 @@ use flare_grpc_proto::push::{
     PushCapabilityRequest, PushCustomRequest, PushMessageRequest, PushNotificationRequest,
 };
 use flare_im_contracts::Ctx;
+use flare_proto::common::DeviceHandoff;
 use flare_server_core::error::Result;
 use tracing::instrument;
 
@@ -47,5 +48,10 @@ impl PushProxyCommandHandler {
         req: &PushCapabilityRequest,
     ) -> Result<()> {
         self.publisher.publish_push_capability(ctx, req).await
+    }
+
+    #[instrument(skip(self, ctx, handoff), fields(pending = handoff.pending.len()))]
+    pub async fn enqueue_device_handoff(&self, ctx: &Ctx, handoff: &DeviceHandoff) -> Result<()> {
+        self.publisher.publish_device_handoff(ctx, handoff).await
     }
 }

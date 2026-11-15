@@ -1,6 +1,8 @@
 //! Admin Gateway 契约测试的公共夹具：网关 admin 分区签的 Staff `x-flare-ctx`，以及只监听
 //! 127.0.0.1 的替身 tonic 服务（Conversation / Online / Capability 的管理员接口）。
 //!
+//! Push Proxy 的管理员接口（推送决策链）也在同一个替身上。
+//!
 //! 替身按输入给出固定回答，并记下每次调用收到的 `x-flare-ctx`、`authorization` 与所有 `x-*`
 //! 元数据，用来断言网关只原样转发已验过的 Staff 上下文、不带任何未签名的身份头。
 //!
@@ -53,6 +55,10 @@ use flare_grpc_proto::conversation::{
     AdminGetConversationRequest, AdminGetConversationResponse, AdminListConversationsRequest,
     AdminListConversationsResponse, AdminListParticipantsRequest, AdminListParticipantsResponse,
 };
+use flare_grpc_proto::push::push_admin_service_server::{PushAdminService, PushAdminServiceServer};
+use flare_grpc_proto::push::{
+    AdminQueryPushTraceRequest, AdminQueryPushTraceResponse, PushTraceEntryView, PushTraceView,
+};
 use flare_grpc_proto::signaling::online::online_admin_service_server::{
     OnlineAdminService, OnlineAdminServiceServer,
 };
@@ -64,7 +70,7 @@ use flare_im_service_kit::audit_effects::AuditEffects;
 use flare_im_service_kit::clients::{
     AdminGrpcClients, CapabilityAdminClientWrapper, CapabilityDownstreamConfig,
     ConversationReadServiceClientWrapper, MediaServiceClientWrapper, OnlineServiceClientWrapper,
-    StorageReaderServiceClientWrapper,
+    PushAdminClientWrapper, StorageReaderServiceClientWrapper,
 };
 use flare_im_service_kit::staff_context::{
     VerifiedStaff, admin_staff_verifier_from_sources, require_staff_any,
@@ -314,6 +320,7 @@ fn device(device_id: &str) -> DeviceInfo {
         conversation_id: "conn-internal".to_string(),
         gateway_id: "gw-1".to_string(),
         server_id: "srv-1".to_string(),
+        ..Default::default()
     }
 }
 
@@ -328,6 +335,62 @@ fn devices_of(user_id: &str) -> Vec<DeviceInfo> {
 
 fn unimplemented<T>() -> Result<GrpcResponse<T>, Status> {
     Err(Status::unimplemented("not used by admin-gateway"))
+}
+
+/// Push Proxy 的管理员接口：与真实服务一样只认 `core:users:read`，租户取自签名。`u1` 有一条
+/// 消息 `m-9` 的决策链；按别的消息查是空的。
+#[tonic::async_trait]
+impl PushAdminService for Fakes {
+    async fn admin_query_push_trace(
+        &self,
+        request: GrpcRequest<AdminQueryPushTraceRequest>,
+    ) -> Result<GrpcResponse<AdminQueryPushTraceResponse>, Status> {
+        let r = request.get_ref();
+        let user_id = r.user_id.clone();
+        let summary = format!(
+            "user_id={user_id} message_id={} limit={}",
+            r.message_id.as_deref().unwrap_or("-"),
+            r.limit
+        );
+        self.recorder
+            .record("AdminQueryPushTrace", &request, summary);
+        self.gate(&request, &[USERS_READ])?;
+        if let Some(status) = downstream_failure(&user_id) {
+            return Err(status);
+        }
+        let wanted = request.get_ref().message_id.as_deref();
+        let traces = if user_id == "u1" && wanted.is_none_or(|message_id| message_id == "m-9") {
+            vec![PushTraceView {
+                trace_key: "m-9".into(),
+                conversation_id: "c1".into(),
+                first_at_ms: 1_700_000_000_000,
+                entries: vec![
+                    PushTraceEntryView {
+                        at_ms: 1_700_000_000_000,
+                        stage: "route".into(),
+                        device_id: "d1".into(),
+                        fields: std::collections::HashMap::from([
+                            ("conv".to_string(), "c1".to_string()),
+                            ("state".to_string(), "parked".to_string()),
+                            ("path".to_string(), "direct".to_string()),
+                        ]),
+                    },
+                    PushTraceEntryView {
+                        at_ms: 1_700_000_000_900,
+                        stage: "receipt".into(),
+                        device_id: "d1".into(),
+                        fields: std::collections::HashMap::from([
+                            ("conv".to_string(), "c1".to_string()),
+                            ("provider".to_string(), "apns".to_string()),
+                        ]),
+                    },
+                ],
+            }]
+        } else {
+            Vec::new()
+        };
+        Ok(GrpcResponse::new(AdminQueryPushTraceResponse { traces }))
+    }
 }
 
 #[tonic::async_trait]
@@ -394,6 +457,12 @@ impl OnlineService for Fakes {
         &self,
         _: GrpcRequest<HeartbeatRequest>,
     ) -> Result<GrpcResponse<HeartbeatResponse>, Status> {
+        unimplemented()
+    }
+    async fn report_device_state(
+        &self,
+        _: GrpcRequest<ReportDeviceStateRequest>,
+    ) -> Result<GrpcResponse<ReportDeviceStateResponse>, Status> {
         unimplemented()
     }
     async fn get_online_status(
@@ -938,7 +1007,7 @@ impl CapabilityService for Fakes {
     }
 }
 
-/// 起一个只绑 127.0.0.1 的 tonic 服务，同一端口挂五个替身服务。`verifier` 是下游持有的 Cell
+/// 起一个只绑 127.0.0.1 的 tonic 服务，同一端口挂六个替身服务。`verifier` 是下游持有的 Cell
 /// 公钥集（与网关同一份），替身用它验转发来的 Staff 上下文。
 pub async fn spawn_fakes(verifier: SignedContextVerifier) -> (std::net::SocketAddr, Recorder) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -954,6 +1023,7 @@ pub async fn spawn_fakes(verifier: SignedContextVerifier) -> (std::net::SocketAd
             .add_service(ConversationAdminServiceServer::new(fakes.clone()))
             .add_service(OnlineServiceServer::new(fakes.clone()))
             .add_service(OnlineAdminServiceServer::new(fakes.clone()))
+            .add_service(PushAdminServiceServer::new(fakes.clone()))
             .add_service(CapabilityServiceServer::new(fakes.clone()))
             .add_service(CapabilityAdminServiceServer::new(fakes))
             .serve_with_incoming(tonic::transport::server::TcpIncoming::from(listener)),
@@ -1104,9 +1174,12 @@ pub struct Harness {
     pub downstream: std::net::SocketAddr,
 }
 
-/// `channel` 接 Conversation / Online 替身，`media` 接 Media 替身，其余下游接 `unused`。
+/// `channel` 接 Conversation / Online / Push Proxy 替身，`media` 接 Media 替身，其余下游接 `unused`。
 pub fn clients(channel: Channel, media: Channel, unused: Channel) -> AdminGrpcClients {
     AdminGrpcClients {
+        push: Arc::new(tokio::sync::Mutex::new(
+            PushAdminClientWrapper::from_channel(channel.clone()),
+        )),
         media: Arc::new(tokio::sync::Mutex::new(
             MediaServiceClientWrapper::from_channel(media, None),
         )),
@@ -1162,6 +1235,7 @@ pub const OPS_ROUTES: &[(&str, &str)] = &[
     ("GET", "/api/v1/admin/conversations/c1/participants"),
     ("GET", "/api/v1/admin/users/u1/devices"),
     ("GET", "/api/v1/admin/users/u1/presence"),
+    ("GET", "/api/v1/admin/users/u1/push-traces"),
     ("POST", "/api/v1/admin/users/u1/kick"),
     ("POST", "/api/v1/admin/users/u1/devices/d1/kick"),
     ("POST", "/api/v1/admin/tenant/kick-all"),

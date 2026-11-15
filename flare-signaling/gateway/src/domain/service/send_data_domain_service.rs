@@ -9,10 +9,17 @@ use std::time::{Duration, Instant};
 use flare_core::common::ErrorCode;
 use flare_core::common::error::{FlareError, Result};
 use flare_im_contracts::Ctx;
+use flare_im_contracts::constants::sync_inbox::{
+    is_sync_inbox_conversation_id, sync_inbox_conversation_id,
+};
 use flare_proto::common::data_packet::Payload as DataPayload;
 use flare_proto::common::realtime_control_packet::Payload as RealtimePayload;
 use flare_proto::common::sync::Payload as SyncPayload;
-use flare_proto::common::{CustomData, DataPacket, RealtimeControlPacket, TypingAggregatePacket};
+use flare_proto::common::sync_res::Payload as SyncResPayload;
+use flare_proto::common::{
+    CustomData, DataPacket, RealtimeControlPacket, SyncRes, TypingAggregatePacket,
+    UserSettingsChanged,
+};
 use prost::Message;
 
 use crate::application::commands::SendDataCommand;
@@ -25,6 +32,9 @@ const TYPING_TTL_MS_ENV: &str = "FLARE_GATEWAY_TYPING_TTL_MS";
 const DEFAULT_TYPING_TTL_MS: u64 = 6000;
 const TYPING_SAMPLE_CAP: usize = 6;
 const TYPING_AGG_MAX_CONVERSATIONS: usize = 65536;
+
+/// 用户设置变更信号的 `CustomData.type`（见 sync.proto 的 `UserSettingsChanged`）。
+pub(crate) const USER_SETTINGS_CHANGED_TYPE: &str = "flare.user_settings_changed";
 
 #[derive(Default)]
 struct ConversationTypingState {
@@ -154,6 +164,7 @@ impl SendDataDomainService {
             Some(DataPayload::SyncRequest(sync)) => {
                 let sync = sync.clone();
                 let sync_payload = sync_payload_name(sync.payload.as_ref());
+                let signal_scope = settings_signal_scope(sync.payload.as_ref());
                 tracing::trace!(
                     connection_id = %cmd.connection_id,
                     sync_payload,
@@ -179,6 +190,11 @@ impl SendDataDomainService {
                     );
                 }
                 let sync_res = sync_res?;
+                if let Some(signal) =
+                    signal_scope.and_then(|scope| settings_signal(scope, &sync_res))
+                {
+                    self.announce_settings_change(tx, &cmd.connection_id, signal);
+                }
                 let out = DataPacket {
                     payload: Some(DataPayload::SyncResponse(sync_res)),
                 };
@@ -228,6 +244,11 @@ impl SendDataDomainService {
     ) {
         let conversation_id = Self::realtime_conversation_id(rc);
         if conversation_id.is_empty() {
+            return;
+        }
+        // 用户的 sync 收件箱只承载服务端发的帧（如设置变更信号），客户端发往任何收件箱的实时帧
+        // 一律丢弃：否则谁都能往别人的收件箱塞一帧冒充服务端。
+        if is_sync_inbox_conversation_id(&conversation_id) {
             return;
         }
         let Some(origin) = tx
@@ -317,6 +338,32 @@ impl SendDataDomainService {
         }
     }
 
+    /// 告诉该用户其余在线连接去重新读设置：在他自己的 sync 收件箱上发一帧
+    /// `UserSettingsChanged`（本节点直转，排除发起写入的连接；再广播给其余网关节点）。只在线、
+    /// 尽力而为，后台发送，不拖慢写入的应答；发不出去只记 trace，设置本身已经写成功。
+    fn announce_settings_change(&self, tx: &Ctx, connection_id: &str, signal: UserSettingsChanged) {
+        let Some(origin) = tx
+            .get_data::<crate::infrastructure::connection_context::AuthenticatedConnectionOrigin>(
+        ) else {
+            return;
+        };
+        if tx.user_id() != Some(origin.user_id()) || tx.tenant_id() != Some(origin.tenant_id()) {
+            return;
+        }
+        let inbox = sync_inbox_conversation_id(origin.user_id());
+        let packet = settings_changed_packet(&inbox, &signal);
+        let relay = self.relay.clone();
+        let broadcast = self.broadcast.clone();
+        let tx = tx.clone();
+        let connection_id = connection_id.to_string();
+        tokio::spawn(async move {
+            relay
+                .relay_locally(&tx, &inbox, packet.clone(), Some(connection_id.as_str()))
+                .await;
+            broadcast.broadcast(&tx, &inbox, packet).await;
+        });
+    }
+
     async fn forward_user_custom(&self, tx: &Ctx, data: &CustomData) -> Result<Option<Vec<u8>>> {
         let opt = self
             .data_port
@@ -336,6 +383,58 @@ impl SendDataDomainService {
         };
         Ok(Some(reply.encode_to_vec()))
     }
+}
+
+/// 改了需要多端收敛的设置的同步请求：用户级通知设置的写入（返回空的会话 ID），或改了
+/// `notify_all` 的会话个人设置写入（返回该会话 ID）。其余同步请求——包括只改置顶、草稿、归档的
+/// 会话设置——不发信号，返回 `None`。
+fn settings_signal_scope(payload: Option<&SyncPayload>) -> Option<String> {
+    match payload {
+        Some(SyncPayload::UserNotificationSettings(_)) => Some(String::new()),
+        Some(SyncPayload::ConversationUserSettings(req)) if req.notify_all.is_some() => {
+            Some(req.conversation_id.clone())
+        }
+        _ => None,
+    }
+}
+
+/// 由写入结果组出信号：版本取结果里的新版本，会话设置另带 `notify_all` 的新值；结果与请求
+/// 不对应、或不带设置时不发。
+fn settings_signal(scope: String, response: &SyncRes) -> Option<UserSettingsChanged> {
+    let (settings_version, notify_all) = match response.payload.as_ref()? {
+        SyncResPayload::UserNotificationSettings(res) if scope.is_empty() => {
+            (res.settings.as_ref()?.settings_version, false)
+        }
+        SyncResPayload::ConversationUserSettings(res) if !scope.is_empty() => {
+            let settings = res.settings.as_ref()?;
+            (settings.settings_version, settings.notify_all)
+        }
+        _ => return None,
+    };
+    Some(UserSettingsChanged {
+        conversation_id: scope,
+        settings_version,
+        notify_all,
+    })
+}
+
+/// 收件箱上的信号帧：`DataPacket.realtime_control`，`custom.type` 为
+/// [`USER_SETTINGS_CHANGED_TYPE`]，`custom.payload` 是 `UserSettingsChanged` 的编码。
+fn settings_changed_packet(inbox: &str, signal: &UserSettingsChanged) -> Vec<u8> {
+    DataPacket {
+        payload: Some(DataPayload::RealtimeControl(RealtimeControlPacket {
+            control_type: "custom".to_string(),
+            conversation_id: Some(inbox.to_string()),
+            correlation_id: None,
+            attributes: Default::default(),
+            payload: Some(RealtimePayload::Custom(CustomData {
+                r#type: USER_SETTINGS_CHANGED_TYPE.to_string(),
+                payload: signal.encode_to_vec(),
+                attributes: Default::default(),
+            })),
+        })),
+    }
+    .encode_to_vec()
 }
 
 /// 慢 `sync_request` 日志阈值（毫秒），env `FLARE_SYNC_SLOW_LOG_MS`，默认 100。
@@ -373,6 +472,8 @@ fn sync_payload_name(payload: Option<&SyncPayload>) -> &'static str {
         Some(SyncPayload::ConversationParticipants(_)) => "conversation_participants",
         Some(SyncPayload::ConversationUserSettings(_)) => "conversation_user_settings",
         Some(SyncPayload::EnsureConversation(_)) => "ensure_conversation",
+        Some(SyncPayload::UserNotificationSettings(_)) => "user_notification_settings",
+        Some(SyncPayload::GetUserNotificationSettings(_)) => "get_user_notification_settings",
         None => "none",
     }
 }
@@ -812,5 +913,281 @@ mod tests {
             1,
             "peers may have subscribers this node knows nothing about"
         );
+    }
+
+    /// 同步端口固定回一个结果，用来驱动「写入成功之后」的分支。
+    struct FixedSyncPort(SyncRes);
+
+    #[async_trait]
+    impl ISyncPort for FixedSyncPort {
+        async fn forward_sync(
+            &self,
+            _: &Ctx,
+            _: ClientSync,
+        ) -> flare_server_core::error::Result<SyncRes> {
+            Ok(self.0.clone())
+        }
+    }
+
+    fn service_answering(
+        registry: Arc<ConversationSubscriptionRegistry>,
+        response: SyncRes,
+    ) -> (
+        SendDataDomainService,
+        Arc<CapturingPushPort>,
+        Arc<CapturingBroadcast>,
+    ) {
+        let push = Arc::new(CapturingPushPort::default());
+        let broadcast = Arc::new(CapturingBroadcast::default());
+        let service = SendDataDomainService::new(
+            Arc::new(NoopDataPort),
+            Arc::new(SyncService::new(Arc::new(FixedSyncPort(response)))),
+            Arc::new(RealtimeControlRelay::new(registry, push.clone())),
+            broadcast.clone(),
+        );
+        (service, push, broadcast)
+    }
+
+    fn sync_request(payload: SyncPayload) -> DataPacket {
+        DataPacket {
+            payload: Some(DataPayload::SyncRequest(ClientSync {
+                device_id: "d1".to_string(),
+                payload: Some(payload),
+            })),
+        }
+    }
+
+    fn notification_settings_written(version: u64) -> SyncRes {
+        SyncRes {
+            payload: Some(SyncResPayload::UserNotificationSettings(
+                flare_proto::common::UserNotificationSettingsSyncRes {
+                    settings: Some(flare_proto::common::UserNotificationSettings {
+                        settings_version: version,
+                        ..Default::default()
+                    }),
+                },
+            )),
+        }
+    }
+
+    fn conversation_settings_written(version: u64) -> SyncRes {
+        SyncRes {
+            payload: Some(SyncResPayload::ConversationUserSettings(
+                flare_proto::common::ConversationUserSettingsSyncRes {
+                    settings: Some(flare_proto::common::ConversationUserSettings {
+                        settings_version: version,
+                        notify_all: true,
+                        ..Default::default()
+                    }),
+                },
+            )),
+        }
+    }
+
+    /// 信号在后台发：让出几次调度，等它跑完。
+    async fn settle() {
+        for _ in 0..50 {
+            tokio::task::yield_now().await;
+        }
+    }
+
+    /// 解出收件箱上的信号帧。
+    fn decode_signal(payload: &[u8]) -> (String, UserSettingsChanged) {
+        let packet = DataPacket::decode(payload).expect("decode DataPacket");
+        let Some(DataPayload::RealtimeControl(rc)) = packet.payload else {
+            panic!("expected realtime_control");
+        };
+        assert_eq!(rc.control_type, "custom");
+        let Some(RealtimePayload::Custom(custom)) = rc.payload else {
+            panic!("expected a custom payload");
+        };
+        assert_eq!(custom.r#type, USER_SETTINGS_CHANGED_TYPE);
+        let signal = UserSettingsChanged::decode(custom.payload.as_slice()).expect("decode signal");
+        (rc.conversation_id.unwrap_or_default(), signal)
+    }
+
+    /// 改了用户级通知设置：该用户其余在线连接在自己的 sync 收件箱上收到一帧信号（发起写入的连接
+    /// 与别的用户都收不到），同一帧广播给其余网关节点；写入的应答照常回给发起的连接。
+    #[tokio::test]
+    async fn a_notification_settings_write_tells_the_users_other_connections() {
+        let registry = Arc::new(ConversationSubscriptionRegistry::new());
+        registry.join("t1", "sync:alice", "conn-a");
+        registry.join("t1", "sync:alice", "conn-b");
+        registry.join("t1", "sync:bob", "conn-bob");
+        let (service, push, broadcast) =
+            service_answering(registry, notification_settings_written(6));
+        let ctx = authenticated_ctx("conn-a", "alice", "t1");
+        let cmd = SendDataCommand::new(
+            "conn-a".to_string(),
+            sync_request(SyncPayload::UserNotificationSettings(
+                flare_proto::common::UserNotificationSettingsSync {
+                    preview: Some(3),
+                    ..Default::default()
+                },
+            )),
+            0,
+        );
+
+        let reply = service.execute(&ctx, &cmd).await.expect("sync ok");
+        let reply = DataPacket::decode(reply.expect("sync reply").as_slice()).unwrap();
+        assert!(matches!(
+            reply.payload,
+            Some(DataPayload::SyncResponse(SyncRes {
+                payload: Some(SyncResPayload::UserNotificationSettings(_))
+            }))
+        ));
+        settle().await;
+
+        let calls = push.calls.lock().expect("calls mutex poisoned");
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, ["conn-b"]);
+        let (inbox, signal) = decode_signal(&calls[0].2);
+        assert_eq!(inbox, "sync:alice");
+        assert_eq!(signal.conversation_id, "");
+        assert_eq!(signal.settings_version, 6);
+        assert!(!signal.notify_all);
+
+        let broadcasts = broadcast.calls.lock().expect("broadcast mutex poisoned");
+        assert_eq!(broadcasts.len(), 1);
+        assert_eq!(broadcasts[0].0, "sync:alice");
+        assert_eq!(broadcasts[0].1, calls[0].2);
+    }
+
+    /// 会话个人设置只在改了 notify_all 时发信号；只改置顶这类写入照旧不发。
+    #[tokio::test]
+    async fn a_conversation_settings_write_signals_only_a_notify_all_change() {
+        let registry = Arc::new(ConversationSubscriptionRegistry::new());
+        registry.join("t1", "sync:alice", "conn-a");
+        registry.join("t1", "sync:alice", "conn-b");
+        let (service, push, broadcast) =
+            service_answering(registry, conversation_settings_written(9));
+        let ctx = authenticated_ctx("conn-a", "alice", "t1");
+
+        let pin_only = SendDataCommand::new(
+            "conn-a".to_string(),
+            sync_request(SyncPayload::ConversationUserSettings(
+                flare_proto::common::ConversationUserSettingsSync {
+                    conversation_id: "2G1".to_string(),
+                    is_pinned: Some(true),
+                    ..Default::default()
+                },
+            )),
+            0,
+        );
+        service.execute(&ctx, &pin_only).await.expect("sync ok");
+        settle().await;
+        assert!(push.calls.lock().expect("calls mutex poisoned").is_empty());
+        assert!(
+            broadcast
+                .calls
+                .lock()
+                .expect("broadcast mutex poisoned")
+                .is_empty()
+        );
+
+        let notify_all = SendDataCommand::new(
+            "conn-a".to_string(),
+            sync_request(SyncPayload::ConversationUserSettings(
+                flare_proto::common::ConversationUserSettingsSync {
+                    conversation_id: "2G1".to_string(),
+                    notify_all: Some(true),
+                    ..Default::default()
+                },
+            )),
+            0,
+        );
+        service.execute(&ctx, &notify_all).await.expect("sync ok");
+        settle().await;
+        let calls = push.calls.lock().expect("calls mutex poisoned");
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, ["conn-b"]);
+        let (inbox, signal) = decode_signal(&calls[0].2);
+        assert_eq!(inbox, "sync:alice");
+        assert_eq!(signal.conversation_id, "2G1");
+        assert_eq!(signal.settings_version, 9);
+        assert!(signal.notify_all);
+    }
+
+    /// 只读设置不发信号。
+    #[tokio::test]
+    async fn reading_notification_settings_signals_nothing() {
+        let registry = Arc::new(ConversationSubscriptionRegistry::new());
+        registry.join("t1", "sync:alice", "conn-b");
+        let response = SyncRes {
+            payload: Some(SyncResPayload::GetUserNotificationSettings(
+                flare_proto::common::GetUserNotificationSettingsSyncRes::default(),
+            )),
+        };
+        let (service, push, broadcast) = service_answering(registry, response);
+        let ctx = authenticated_ctx("conn-a", "alice", "t1");
+        let cmd = SendDataCommand::new(
+            "conn-a".to_string(),
+            sync_request(SyncPayload::GetUserNotificationSettings(
+                flare_proto::common::GetUserNotificationSettingsSync {},
+            )),
+            0,
+        );
+        service.execute(&ctx, &cmd).await.expect("sync ok");
+        settle().await;
+        assert!(push.calls.lock().expect("calls mutex poisoned").is_empty());
+        assert!(
+            broadcast
+                .calls
+                .lock()
+                .expect("broadcast mutex poisoned")
+                .is_empty()
+        );
+    }
+
+    /// 客户端不能往任何 sync 收件箱发实时帧（自己的也不行）：收件箱上的帧只能来自服务端。
+    #[tokio::test]
+    async fn clients_cannot_put_realtime_frames_into_a_sync_inbox() {
+        let registry = Arc::new(ConversationSubscriptionRegistry::new());
+        registry.join("t1", "sync:bob", "conn-bob");
+        registry.join("t1", "sync:alice", "conn-a2");
+        let (service, push, broadcast) = service_with(registry);
+        let ctx = authenticated_ctx("conn-a", "alice", "t1");
+        for inbox in ["sync:bob", "sync:alice"] {
+            let forged = UserSettingsChanged {
+                conversation_id: String::new(),
+                settings_version: 99,
+                notify_all: false,
+            };
+            let cmd = SendDataCommand::new(
+                "conn-a".to_string(),
+                DataPacket::decode(settings_changed_packet(inbox, &forged).as_slice()).unwrap(),
+                0,
+            );
+            service.execute(&ctx, &cmd).await.expect("ephemeral drop");
+        }
+        assert!(push.calls.lock().expect("calls mutex poisoned").is_empty());
+        assert!(
+            broadcast
+                .calls
+                .lock()
+                .expect("broadcast mutex poisoned")
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn a_signal_needs_the_matching_write_result() {
+        assert_eq!(
+            settings_signal(String::new(), &conversation_settings_written(3)),
+            None,
+            "a notification settings write answered with conversation settings"
+        );
+        assert_eq!(
+            settings_signal("2G1".to_string(), &notification_settings_written(3)),
+            None,
+            "a conversation settings write answered with notification settings"
+        );
+        let without_settings = SyncRes {
+            payload: Some(SyncResPayload::UserNotificationSettings(
+                flare_proto::common::UserNotificationSettingsSyncRes { settings: None },
+            )),
+        };
+        assert_eq!(settings_signal(String::new(), &without_settings), None);
+        assert_eq!(settings_signal(String::new(), &SyncRes::default()), None);
     }
 }

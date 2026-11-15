@@ -416,7 +416,10 @@ mod tests {
                 OnlineServiceClientWrapper::from_channel(c.clone()),
             )),
             storage_reader: Arc::new(tokio::sync::Mutex::new(
-                StorageReaderServiceClientWrapper::from_channel(c),
+                StorageReaderServiceClientWrapper::from_channel(c.clone()),
+            )),
+            push: Arc::new(tokio::sync::Mutex::new(
+                flare_im_service_kit::clients::PushAdminClientWrapper::from_channel(c),
             )),
             request_timeout: None,
         };
