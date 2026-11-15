@@ -35,11 +35,12 @@ SOCIAL_TABLES = (
     "flare_group_join_requests", "flare_group_members", "flare_groups", "flare_invite_codes",
     "flare_moment_comments", "flare_moment_feed", "flare_moment_likes", "flare_moments",
     "flare_moments_audience", "flare_moments_settings", "flare_moments_visibility_rules",
-    "flare_my_group_settings", "flare_referral_stats", "flare_refresh_tokens", "flare_reports",
+    "flare_my_group_settings", "flare_referral_stats", "flare_refresh_tokens",
+    "flare_relation_contact_codes", "flare_reports",
     "flare_role_bundle", "flare_sensitive_hits", "flare_sensitive_words", "flare_social_outbox",
     "flare_social_outbox_aggregate_seq", "flare_tenant_client_policy", "flare_tenant_counters", "flare_tenants",
     "flare_user_credentials", "flare_user_groups", "flare_user_login_keys", "flare_user_privacy",
-    "flare_user_profiles", "flare_user_qr_tokens", "flare_user_referrals", "flare_users",
+    "flare_user_profiles", "flare_user_referrals", "flare_users",
     "flare_verification_codes", "social_notification_policy",
 )
 # The Social schema's only BIGSERIAL keys; their sequences are separate pg_dump objects.
