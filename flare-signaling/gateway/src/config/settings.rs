@@ -475,7 +475,17 @@ fn resolve_auth_provider(service: &AccessGatewayServiceConfig) -> Result<AuthPro
         auth.hook_secret = non_empty(secret);
     }
 
-    if auth.mode == AuthProviderMode::HttpHook {
+    check_auth_hook(auth)
+}
+
+/// 规整并校验验证钩子配置（环境变量覆盖之后）。
+fn check_auth_hook(mut auth: AuthProviderConfig) -> Result<AuthProviderConfig> {
+    // 配置文件里写空串等于没配，与环境变量一致；core_jwt 据此决定挂不挂钩子兜底层。
+    auth.hook_url = auth.hook_url.and_then(non_empty);
+
+    // 钩子会被用到就校验它的配置：http_hook 每枚令牌都问它，core_jwt 配了 hook_url 时
+    // 本地验不过的令牌也会转问它。
+    if auth.mode == AuthProviderMode::HttpHook || auth.hook_url.is_some() {
         let hook_url = auth.hook_url.as_deref().ok_or_else(|| {
             config_error(
                 "services.access_gateway.auth.hook_url is required when auth.mode=http_hook",
@@ -530,6 +540,59 @@ fn positive_millis(raw: Option<&str>) -> Option<u64> {
 
 fn config_error(reason: impl Into<String>) -> FlareError {
     ErrorBuilder::new(ErrorCode::ConfigurationError, reason).build_error()
+}
+
+#[cfg(test)]
+mod auth_hook_tests {
+    use super::*;
+
+    fn auth(mode: AuthProviderMode, hook_url: Option<&str>) -> AuthProviderConfig {
+        AuthProviderConfig {
+            mode,
+            hook_url: hook_url.map(str::to_string),
+            ..Default::default()
+        }
+    }
+
+    /// core_jwt 配了钩子就按钩子的规矩校验；没配或写空串都按没配处理。
+    #[test]
+    fn core_jwt_hook_is_checked_only_when_configured() {
+        let checked = check_auth_hook(auth(
+            AuthProviderMode::CoreJwt,
+            Some(" http://auth-hook:8080/validate "),
+        ))
+        .unwrap();
+        assert_eq!(
+            checked.hook_url.as_deref(),
+            Some("http://auth-hook:8080/validate")
+        );
+        for hook_url in [None, Some(""), Some("   ")] {
+            let checked = check_auth_hook(auth(AuthProviderMode::CoreJwt, hook_url)).unwrap();
+            assert_eq!(checked.hook_url, None, "{hook_url:?}");
+        }
+
+        let err =
+            check_auth_hook(auth(AuthProviderMode::CoreJwt, Some("auth-hook:8080"))).unwrap_err();
+        assert!(err.reason().contains("must be http"), "{err}");
+        let mut zero_timeout = auth(AuthProviderMode::CoreJwt, Some("http://auth-hook/validate"));
+        zero_timeout.hook_timeout_ms = 0;
+        assert!(check_auth_hook(zero_timeout).is_err());
+    }
+
+    #[test]
+    fn http_hook_still_requires_a_hook_url() {
+        for hook_url in [None, Some("  ")] {
+            let err = check_auth_hook(auth(AuthProviderMode::HttpHook, hook_url)).unwrap_err();
+            assert!(err.reason().contains("required"), "{err}");
+        }
+        assert!(
+            check_auth_hook(auth(
+                AuthProviderMode::HttpHook,
+                Some("https://auth-hook/validate")
+            ))
+            .is_ok()
+        );
+    }
 }
 
 #[cfg(test)]

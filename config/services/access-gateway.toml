@@ -50,11 +50,15 @@ tenant_policy = "lenient"
 # 交接经 Push Proxy 上报（服务发现名 flare-push-proxy，static 模式回退同容器 50091），以 Cell 私钥签名。
 
 [services.access_gateway.auth]
-# 可选值: core_jwt, http_hook
+# 可选值: core_jwt, http_hook（ACCESS_GATEWAY_AUTH_MODE 覆盖）
+#   core_jwt：本地验 core JWT 与 trusted_token_issuers。配了 hook_url 时，本地验不过的令牌
+#             再转问验证钩子，本地认得的不走网络（与 API 网关一致）；不配 hook_url 只做本地校验。
+#   http_hook：每枚令牌都交给验证钩子，hook_url 必填，不需要 token_secret。
 mode = "core_jwt"
 hook_timeout_ms = 800
 hook_secret_header = "x-flare-auth-hook-secret"
-# http_hook 模式启用：
+# 验证钩子：http_hook 必填；core_jwt 下可选，作本地校验之后的兜底层。
+# 环境变量 ACCESS_GATEWAY_AUTH_HOOK_URL / _HOOK_SECRET / _HOOK_TIMEOUT_MS / _HOOK_SECRET_HEADER 覆盖。
 # hook_url = "http://flare-auth-sidecar:8080/internal/auth/validate"
 # hook_secret = "set-via-secret-manager"
 
