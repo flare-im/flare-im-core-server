@@ -236,7 +236,10 @@ impl CapabilityGrpcServer {
 
     /// The forwarded Staff context of a plugin admin call: its permission must be one of the
     /// plugin's staff codes (`plugin:<pluginId>:<permission>`); `dispatch_admin` then requires the
-    /// exact code the operation declares, which needs the tenant's manifest.
+    /// exact code the operation declares, which needs the tenant's manifest. Like every other admin
+    /// gate (`verify_staff_metadata`), it carries the one bounded `x-flare-staff-reauth` proof the
+    /// admin partition forwarded, for the plugin to check; a malformed or repeated one is
+    /// UNAUTHENTICATED.
     fn plugin_staff<T>(
         &self,
         request: &Request<T>,
@@ -259,7 +262,8 @@ impl CapabilityGrpcServer {
                 "staff permission is not a permission of this plugin",
             ));
         }
-        VerifiedStaff::from_verified(&claims, ctx)
+        VerifiedStaff::from_verified(&claims, ctx)?
+            .with_reauthentication_metadata(request.metadata())
     }
 
     fn staff<T>(&self, request: &Request<T>, permission: &str) -> Result<VerifiedStaff, Status> {
@@ -622,6 +626,10 @@ impl StaffEffectEvidence<'_> {
             .map_err(|error| error.to_string())
     }
 }
+
+#[cfg(test)]
+#[path = "plugin_admin_reauth_tests.rs"]
+mod plugin_admin_reauth_tests;
 
 #[cfg(test)]
 mod dispatch_identity_tests {

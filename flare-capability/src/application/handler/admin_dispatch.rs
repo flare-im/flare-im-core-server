@@ -483,4 +483,4 @@ fn publish_admin_result(routes: &PluginRouteBook, tenant: &str, plugin_id: &str,
 
 #[cfg(test)]
 #[path = "admin_dispatch_tests.rs"]
-mod tests;
+pub(crate) mod tests;

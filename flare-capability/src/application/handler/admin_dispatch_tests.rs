@@ -19,7 +19,7 @@ use serde_json::json;
 use std::sync::Mutex;
 
 /// Evidence that is always written and not looked at.
-struct AllowEvidence;
+pub(crate) struct AllowEvidence;
 #[async_trait::async_trait]
 impl AdminEvidence for AllowEvidence {
     async fn intent(
@@ -41,7 +41,7 @@ impl AdminEvidence for AllowEvidence {
         Ok(())
     }
 }
-static ALLOW_EVIDENCE: AllowEvidence = AllowEvidence;
+pub(crate) static ALLOW_EVIDENCE: AllowEvidence = AllowEvidence;
 
 /// Evidence rows in order (`tenant`, `aggregate id`, action); the intents' reason and audited
 /// target; `fail_intent` refuses the intent.
@@ -216,6 +216,28 @@ fn staff_attempt_scoped(
     member_organization: Option<&str>,
     target_organization: Option<&str>,
 ) -> VerifiedStaff {
+    let (metadata, verifier) = staff_context_metadata(
+        staff_id,
+        permission,
+        reason,
+        request_id,
+        member_organization,
+        target_organization,
+    );
+    flare_im_service_kit::staff_context::verify_staff_metadata(&metadata, &verifier, permission)
+        .unwrap()
+}
+
+/// The gateway-signed Staff `x-flare-ctx` of one attempt for `app-a`, as admin-gateway forwards
+/// it, and the verifier the admin RPCs check it with (Staff pinned to `kid=gateway`).
+pub(crate) fn staff_context_metadata(
+    staff_id: &str,
+    permission: &str,
+    reason: Option<&str>,
+    request_id: &str,
+    member_organization: Option<&str>,
+    target_organization: Option<&str>,
+) -> (tonic::metadata::MetadataMap, SignedContextVerifier) {
     let key = SigningKey::from_bytes(&[61; 32]);
     let signer = SignedContextSigner::from_private_key(
         key.to_pkcs8_pem(Default::default()).unwrap().as_str(),
@@ -246,20 +268,19 @@ fn staff_attempt_scoped(
     let token = signer.sign(&identity).unwrap();
     let mut metadata = tonic::metadata::MetadataMap::new();
     metadata.insert("x-flare-ctx", token.parse().unwrap());
-    flare_im_service_kit::staff_context::verify_staff_metadata(&metadata, &verifier, permission)
-        .unwrap()
+    (metadata, verifier)
 }
 
-struct Harness {
-    routes: Arc<PluginRouteBook>,
-    plugin: PluginServer,
+pub(crate) struct Harness {
+    pub(crate) routes: Arc<PluginRouteBook>,
+    pub(crate) plugin: PluginServer,
     reader: Arc<Projection>,
     verifier: PluginCallVerifier,
     bindings: Arc<MemoryBindings>,
     sink: Arc<RecordingSink>,
 }
 
-async fn harness() -> Harness {
+pub(crate) async fn harness() -> Harness {
     let plugin = PluginServer::start(Arc::new(|operation, _payload| match operation {
         "example.poll.list" => Ok(json!({"items": [{"pollId": "poll-1", "question": "Lunch?"}]})),
         "example.poll.end" => Ok(json!({
@@ -305,7 +326,7 @@ fn request(operation: &str, input: Value) -> AdminPluginRequest {
 
 /// The fixture's staff permissions: `list` and `inspect` need `read`; `end` and `remove`
 /// need `manage` and a stated reason, with the poll id as their audited target.
-const READ: &str = "plugin:example.poll:read";
+pub(crate) const READ: &str = "plugin:example.poll:read";
 const MANAGE: &str = "plugin:example.poll:manage";
 
 async fn projection_read_harness(timing: ProjectionReadTiming) -> Harness {
