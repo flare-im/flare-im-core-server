@@ -70,6 +70,13 @@ pub struct AdminMediaObject {
     pub mime_type: String,
     pub size: i64,
     pub object_key: String,
+    /// Upload time; 0 when Media did not record one.
+    pub created_at_unix_seconds: i64,
+    /// `pending`, `active` or `soft_deleted`.
+    pub status: String,
+    pub reference_count: u64,
+    /// Hex SHA-256 of the content; empty when Media did not record one.
+    pub sha256: String,
 }
 
 #[derive(Debug, serde::Serialize, utoipa::ToSchema)]
@@ -292,6 +299,10 @@ pub async fn list_objects(
                 mime_type: file.mime_type,
                 size: file.size,
                 object_key: file.object_key,
+                created_at_unix_seconds: file.created_at.map(|t| t.seconds).unwrap_or_default(),
+                status: file.status,
+                reference_count: file.reference_count,
+                sha256: file.sha256,
             })
             .collect(),
     })))

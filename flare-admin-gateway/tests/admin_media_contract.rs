@@ -348,13 +348,27 @@ async fn list_objects_shape_and_request() {
     assert_eq!(keys(data), sorted(&["files", "has_more", "next_cursor"]));
     let files = data["files"].as_array().unwrap();
     assert_eq!(files.len(), 2);
-    // 只给五个字段：签名 URL、CDN 地址、租户、桶与扩展元数据都不出网关。
+    // 签名 URL、CDN 地址、租户、桶与扩展元数据都不出网关。
     assert_eq!(
         keys(&files[0]),
-        sorted(&["file_id", "file_name", "mime_type", "size", "object_key"])
+        sorted(&[
+            "file_id",
+            "file_name",
+            "mime_type",
+            "size",
+            "object_key",
+            "created_at_unix_seconds",
+            "status",
+            "reference_count",
+            "sha256",
+        ])
     );
     assert_eq!(files[0]["file_id"], "f-1");
     assert_eq!(files[0]["size"], 2048);
+    assert_eq!(files[0]["created_at_unix_seconds"], 1_700_000_000);
+    assert_eq!(files[0]["status"], "active");
+    assert_eq!(files[0]["reference_count"], 1);
+    assert_eq!(files[0]["sha256"], "ab".repeat(32));
     assert_eq!(files[0]["object_key"], format!("{TENANT}/2026/f-1.png"));
     assert!(!body.to_string().contains("X-Amz-Signature"), "{body}");
     let calls = h.media.calls();
