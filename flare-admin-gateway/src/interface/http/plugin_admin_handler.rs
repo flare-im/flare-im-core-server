@@ -8,7 +8,8 @@
 //! with the operator's stated reason in the same signed context. Capability checks that the
 //! operation is an admin operation of that mode declaring exactly this permission, that an
 //! operation declaring `requiresReason` comes with the reason, signs a staff ticket and calls the
-//! plugin. A plugin rejection is a 200 with `success: false` and its `error_code`.
+//! plugin. A plugin rejection is a 200 with `success: false`, its `error_code` and, when it wrote
+//! one, its `error_message` unchanged.
 //!
 //! A dispatch passes the console's `idempotency-key` on to Capability, which derives the command
 //! id of the staff member's intent from it: a retry of one action after an unknown outcome is a
@@ -60,6 +61,9 @@ pub struct AdminPluginCallHttp {
     pub data: Value,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error_code: Option<String>,
+    /// The plugin's own text of the rejection, passed on as it wrote it (at most 1024 bytes).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_message: Option<String>,
 }
 
 /// Capability's answer (`PayloadJson`).
@@ -73,6 +77,23 @@ struct CapabilityAnswer {
     data: Value,
     #[serde(default)]
     error_code: Option<String>,
+    #[serde(default)]
+    error_message: Option<String>,
+}
+
+impl CapabilityAnswer {
+    fn into_http(self, tenant_id: String) -> AdminPluginCallHttp {
+        AdminPluginCallHttp {
+            tenant_id,
+            plugin_id: self.plugin_id,
+            operation: self.operation,
+            request_id: self.request_id,
+            success: self.success,
+            data: self.data,
+            error_code: self.error_code,
+            error_message: self.error_message,
+        }
+    }
 }
 
 fn bad_request(reason: &'static str, message: &str) -> HttpApiError {
@@ -155,15 +176,7 @@ async fn call(
                 ErrorBuilder::new(ErrorCode::HttpInternalServerError, failure_reason).build_error(),
             )
         })?;
-    Ok(AdminPluginCallHttp {
-        tenant_id,
-        plugin_id: answer.plugin_id,
-        operation: answer.operation,
-        request_id: answer.request_id,
-        success: answer.success,
-        data: answer.data,
-        error_code: answer.error_code,
-    })
+    Ok(answer.into_http(tenant_id))
 }
 
 #[utoipa::path(
@@ -337,5 +350,29 @@ mod tests {
             serde_json::from_slice::<Value>(&body).unwrap()["idempotencyKey"],
             "close-7"
         );
+    }
+
+    #[test]
+    fn the_gateway_answers_the_plugin_message_with_its_code() {
+        let message = r#"{"zh-CN":"x"}"#;
+        let answer = |message: Option<&str>| {
+            let mut answer = serde_json::json!({
+                "pluginId": "flare.poll", "operation": "flare.poll.admin.close",
+                "requestId": "r1", "success": false, "data": {"errorCode": "POLL_CLOSED"},
+                "errorCode": "POLL_CLOSED",
+            });
+            if let Some(message) = message {
+                answer["errorMessage"] = message.into();
+            }
+            let answer: CapabilityAnswer = serde_json::from_value(answer).unwrap();
+            serde_json::to_value(answer.into_http("app-a".into())).unwrap()
+        };
+        let body = answer(Some(message));
+        assert_eq!(body["error_code"], "POLL_CLOSED");
+        assert_eq!(body["error_message"], message);
+        // Without a message the body is what it was before.
+        let body = answer(None);
+        assert_eq!(body["error_code"], "POLL_CLOSED");
+        assert!(body.get("error_message").is_none());
     }
 }

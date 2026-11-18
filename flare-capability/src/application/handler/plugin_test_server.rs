@@ -1,7 +1,8 @@
 //! A plugin endpoint for handler tests: records every call (operation, ticket, payload) and answers
 //! with `respond(operation, payload)`. An error `grpc:<code>` or `grpc:<code>:<reason>` (code
 //! `permission_denied`, `unauthenticated`, `failed_precondition`, `unavailable`) answers that gRPC
-//! status instead of `ok: false`, with `reason` as its `ErrorDetail.reason`.
+//! status instead of `ok: false`, with `reason` as its `ErrorDetail.reason`. Any other error
+//! `<code>` or `<code>\n<message>` answers `ok: false` with that `error_code` and `error_message`.
 use flare_grpc_proto::capability::{
     GenericRequest, GenericResponse,
     extension_plugin_server::{ExtensionPlugin, ExtensionPluginServer},
@@ -67,10 +68,14 @@ impl ExtensionPlugin for Endpoint {
             payload: payload.clone(),
             metadata: body.metadata.clone(),
         });
-        let (ok, data, error_code) = match (self.respond)(&body.operation, &payload) {
-            Ok(data) => (true, data, String::new()),
+        let answer = (self.respond)(&body.operation, &payload);
+        let (ok, data, error_code, error_message) = match answer {
+            Ok(data) => (true, data, String::new(), String::new()),
             Err(code) if code.starts_with("grpc:") => return Err(scripted_status(&code[5..])),
-            Err(code) => (false, Value::Null, code),
+            Err(code) => {
+                let (code, message) = code.split_once('\n').unwrap_or((code.as_str(), ""));
+                (false, Value::Null, code.to_owned(), message.to_owned())
+            }
         };
         Ok(Response::new(GenericResponse {
             ok,
@@ -80,7 +85,7 @@ impl ExtensionPlugin for Endpoint {
                 value: serde_json::to_vec(&data).unwrap(),
             }),
             error_code,
-            error_message: String::new(),
+            error_message,
         }))
     }
 }

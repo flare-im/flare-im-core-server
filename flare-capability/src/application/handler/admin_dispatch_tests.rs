@@ -583,6 +583,42 @@ async fn staff_reads_and_acts_through_a_staff_ticket_without_a_conversation() {
 }
 
 #[tokio::test]
+async fn an_admin_refusal_carries_the_plugin_message() {
+    let plugin = PluginServer::start(Arc::new(|operation, _| match operation {
+        "example.poll.remove" => Err("POLL_NOT_FOUND\n{\"zh-CN\":\"x\"}".into()),
+        _ => Ok(json!({"items": []})),
+    }))
+    .await;
+    let h = harness().await;
+    *h.reader.0.lock().unwrap() = Some(poll_snapshot(plugin.authority.clone()));
+    let removed = dispatch_admin(
+        &staff(MANAGE),
+        &h.routes,
+        AdminCall::Dispatch,
+        request("example.poll.remove", json!({"pollId": "poll-1"})),
+        Duration::from_secs(2),
+        &ALLOW_EVIDENCE,
+    )
+    .await
+    .unwrap();
+    assert!(!removed.success);
+    assert_eq!(removed.error_code.as_deref(), Some("POLL_NOT_FOUND"));
+    assert_eq!(removed.error_message.as_deref(), Some(r#"{"zh-CN":"x"}"#));
+    let listed = dispatch_admin(
+        &staff(READ),
+        &h.routes,
+        AdminCall::Query,
+        request("example.poll.list", json!({})),
+        Duration::from_secs(2),
+        &ALLOW_EVIDENCE,
+    )
+    .await
+    .unwrap();
+    assert!(listed.success);
+    assert_eq!(listed.error_message, None);
+}
+
+#[tokio::test]
 async fn an_admin_action_result_publishes_its_shared_state_tenant_wide() {
     let h = harness().await;
     h.bindings

@@ -1832,4 +1832,37 @@ mod plugin_state_and_catalog {
             assert_eq!(result.data["errorCode"], expected, "{answer}");
         }
     }
+
+    /// A plugin's `error_message` comes back as written when it is 1 to 1024 bytes; its code
+    /// keeps the code rules.
+    #[tokio::test]
+    async fn a_rejection_brings_back_the_plugins_message_as_written() {
+        let written = r#"{"zh-CN":"x"}"#;
+        let (longest, too_long) = ("x".repeat(1024), "x".repeat(1025));
+        for (answer, code, message) in [
+            (format!("POLL_CLOSED\n{written}"), "POLL_CLOSED", Some(written)),
+            (format!("PLUGIN_DISABLED\n{written}"), "PLUGIN_REJECTED", Some(written)),
+            (format!("POLL_CLOSED\n{longest}"), "POLL_CLOSED", Some(longest.as_str())),
+            (format!("POLL_CLOSED\n{too_long}"), "POLL_CLOSED", None),
+            ("POLL_CLOSED\n".to_owned(), "POLL_CLOSED", None),
+            ("POLL_CLOSED".to_owned(), "POLL_CLOSED", None),
+            // A refusing gRPC status carries no plugin text.
+            (
+                "grpc:failed_precondition:POLL_CLOSED".to_owned(),
+                "POLL_CLOSED",
+                None,
+            ),
+        ] {
+            let h = harness_answering(Arc::new(move |_, _| Err(answer.clone()))).await;
+            let result = dispatch(
+                &h,
+                &poll_command("example.poll.create", json!({"question": "Lunch?"})),
+            )
+            .await
+            .unwrap();
+            assert!(!result.success, "{code}");
+            assert_eq!(result.data["errorCode"], code);
+            assert_eq!(result.data["errorMessage"].as_str(), message, "{code}");
+        }
+    }
 }

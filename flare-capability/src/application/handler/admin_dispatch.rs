@@ -183,7 +183,7 @@ pub fn admin_evidence_action(call: AdminCall, outcome: Option<AdminOutcome>) -> 
     }
 }
 
-/// `{"pluginId", "operation", "requestId", "success", "data", "errorCode"?}`.
+/// `{"pluginId", "operation", "requestId", "success", "data", "errorCode"?, "errorMessage"?}`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AdminPluginResult {
@@ -194,6 +194,9 @@ pub struct AdminPluginResult {
     pub data: Value,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error_code: Option<String>,
+    /// The plugin's own text of a rejection, as it wrote it (`data.errorMessage`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_message: Option<String>,
     /// The audited target the operation declares (`admin.operations[].auditTarget`, read from the
     /// input): for Core's audit record only, never part of the answer.
     #[serde(skip)]
@@ -423,15 +426,12 @@ pub async fn dispatch_admin(
     {
         publish_admin_result(routes, tenant, &projected.grant.plugin_id, &result.data);
     }
-    let error_code = (!result.success)
-        .then(|| {
-            result
-                .data
-                .get("errorCode")
-                .and_then(Value::as_str)
-                .map(str::to_owned)
-        })
-        .flatten();
+    let refusal = |key: &str| {
+        (!result.success)
+            .then(|| result.data[key].as_str().map(str::to_owned))
+            .flatten()
+    };
+    let (error_code, error_message) = (refusal("errorCode"), refusal("errorMessage"));
     Ok(AdminPluginResult {
         plugin_id: result.plugin_id,
         operation: result.capability_id,
@@ -439,6 +439,7 @@ pub async fn dispatch_admin(
         success: result.success,
         data: result.data,
         error_code,
+        error_message,
         audit_target,
     })
 }

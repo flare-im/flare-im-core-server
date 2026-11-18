@@ -654,7 +654,7 @@ pub(crate) async fn call_plugin(
     Ok(match call_plugin_answer(call, timeout).await? {
         PluginAnswer::Answered(result) => result,
         PluginAnswer::Refused { reason, .. } => {
-            rejection(&request_id, &plugin_id, &operation, &reason)
+            rejection(&request_id, &plugin_id, &operation, &reason, "")
         }
     })
 }
@@ -760,6 +760,7 @@ pub(crate) async fn call_plugin_answer(
             call.plugin_id,
             call.operation,
             &response.error_code,
+            &response.error_message,
         )));
     }
 
@@ -789,19 +790,26 @@ pub(crate) fn plugin_error_code(error_code: &str) -> &str {
 }
 
 /// A rejection the plugin answered: `success: false` and its `errorCode` as
-/// [`plugin_error_code`] keeps it. The API gateway answers it 422 with that code.
+/// [`plugin_error_code`] keeps it, with the plugin's `errorMessage` as written when it is 1 to
+/// 1024 bytes (Core does not read it; a longer one is dropped). The API gateway answers it 422
+/// with that code.
 fn rejection(
     request_id: &str,
     plugin_id: &str,
     operation: &str,
     error_code: &str,
+    error_message: &str,
 ) -> CapabilityDispatchResult {
+    let mut data = serde_json::json!({ "errorCode": plugin_error_code(error_code) });
+    if (1..=1024).contains(&error_message.len()) {
+        data["errorMessage"] = Value::String(error_message.to_owned());
+    }
     CapabilityDispatchResult {
         request_id: request_id.to_string(),
         plugin_id: plugin_id.to_string(),
         capability_id: operation.to_string(),
         success: false,
-        data: serde_json::json!({ "errorCode": plugin_error_code(error_code) }),
+        data,
         error: Some("plugin command rejected".into()),
     }
 }
