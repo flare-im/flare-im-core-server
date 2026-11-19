@@ -1833,8 +1833,24 @@ mod plugin_state_and_catalog {
         }
     }
 
-    /// A plugin's `error_message` comes back as written when it is 1 to 1024 bytes; its code
-    /// keeps the code rules.
+    /// The plugin call staff make: no user.
+    fn admin_call<'a>(h: &'a Harness, user_id: Option<&'a str>) -> PluginCall<'a> {
+        PluginCall {
+            grpc_authority: &h.plugin.authority,
+            plugin_id: "example.poll",
+            operation: "example.poll.create",
+            tenant_id: "app-a",
+            user_id,
+            request_id: "r1",
+            trace_id: "",
+            payload: &Value::Null,
+            ticket: "ticket",
+            reauthentication_proof: None,
+        }
+    }
+
+    /// A plugin's `error_message` comes back as written when it is 1 to 1024 bytes on an admin
+    /// call; its code keeps the code rules.
     #[tokio::test]
     async fn a_rejection_brings_back_the_plugins_message_as_written() {
         let written = r#"{"zh-CN":"x"}"#;
@@ -1854,15 +1870,39 @@ mod plugin_state_and_catalog {
             ),
         ] {
             let h = harness_answering(Arc::new(move |_, _| Err(answer.clone()))).await;
-            let result = dispatch(
-                &h,
-                &poll_command("example.poll.create", json!({"question": "Lunch?"})),
-            )
-            .await
-            .unwrap();
+            let result = call_plugin(admin_call(&h, None), Duration::from_secs(2))
+                .await
+                .unwrap();
             assert!(!result.success, "{code}");
             assert_eq!(result.data["errorCode"], code);
             assert_eq!(result.data["errorMessage"].as_str(), message, "{code}");
         }
+    }
+
+    /// Only staff read a plugin's explanation: a member's dispatch, and any call with a user,
+    /// brings back the code alone.
+    #[tokio::test]
+    async fn a_members_rejection_carries_no_plugin_message() {
+        let written = r#"{"zh-CN":"x"}"#;
+        let h =
+            harness_answering(Arc::new(move |_, _| Err(format!("POLL_CLOSED\n{written}")))).await;
+        let member = dispatch(
+            &h,
+            &poll_command("example.poll.create", json!({"question": "Lunch?"})),
+        )
+        .await
+        .unwrap();
+        let with_user = call_plugin(admin_call(&h, Some("u1")), Duration::from_secs(2))
+            .await
+            .unwrap();
+        for result in [member, with_user] {
+            assert!(!result.success);
+            assert_eq!(result.data["errorCode"], "POLL_CLOSED");
+            assert!(result.data.get("errorMessage").is_none());
+        }
+        let staff = call_plugin(admin_call(&h, None), Duration::from_secs(2))
+            .await
+            .unwrap();
+        assert_eq!(staff.data["errorMessage"], written);
     }
 }

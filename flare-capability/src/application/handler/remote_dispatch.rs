@@ -755,12 +755,18 @@ pub(crate) async fn call_plugin_answer(
         ));
     }
     if !response.ok {
+        // Only staff read a plugin's explanation; a member's dispatch answers the code alone.
+        let message = if call.user_id.is_none() {
+            response.error_message.as_str()
+        } else {
+            ""
+        };
         return Ok(PluginAnswer::Answered(rejection(
             call.request_id,
             call.plugin_id,
             call.operation,
             &response.error_code,
-            &response.error_message,
+            message,
         )));
     }
 
@@ -791,8 +797,8 @@ pub(crate) fn plugin_error_code(error_code: &str) -> &str {
 
 /// A rejection the plugin answered: `success: false` and its `errorCode` as
 /// [`plugin_error_code`] keeps it, with the plugin's `errorMessage` as written when it is 1 to
-/// 1024 bytes (Core does not read it; a longer one is dropped). The API gateway answers it 422
-/// with that code.
+/// 1024 bytes (Core does not read it; a longer one is dropped). Only an admin call (no user)
+/// passes one. The API gateway answers it 422 with that code.
 fn rejection(
     request_id: &str,
     plugin_id: &str,
