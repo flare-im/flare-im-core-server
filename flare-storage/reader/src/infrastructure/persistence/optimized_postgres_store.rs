@@ -313,7 +313,7 @@ impl OptimizedPostgresMessageStorageImpl {
 
 /// 消息行投影（m 别名 + 可见性遮蔽 + reactions/pins），`{uid}` 为可见性视角参数占位。
 /// 单会话（$5）与批量窗口（$3）共享一份，防止三处漂移。
-const MESSAGE_ROW_PROJECTION_WITH_VISIBILITY: &str = r#"                    m.tenant_id, m.server_id, m.conversation_id,
+const MESSAGE_ROW_PROJECTION_WITH_VISIBILITY: &str = r#"                    m.tenant_id, m.server_id, m.conversation_id, GREATEST(COALESCE((m.extra->'serverEdit'->>'eventSeq')::bigint, 0), COALESCE((SELECT MAX(h.seq) FROM message_operation_history h WHERE h.tenant_id=m.tenant_id AND h.conversation_id=m.conversation_id AND h.message_id=m.server_id AND h.operation_type='EVENT_MESSAGE_EDIT'), 0)) AS last_edit_seq,
                     CASE WHEN EXISTS (
                         SELECT 1 FROM message_visibility mv
                         WHERE mv.tenant_id = m.tenant_id AND mv.message_id = m.server_id
@@ -548,7 +548,7 @@ impl MessageStorage for OptimizedPostgresMessageStorageImpl {
             sqlx::query(
                 r#"
                 SELECT
-                    m.tenant_id, m.server_id, m.conversation_id,
+                    m.tenant_id, m.server_id, m.conversation_id, GREATEST(COALESCE((m.extra->'serverEdit'->>'eventSeq')::bigint, 0), COALESCE((SELECT MAX(h.seq) FROM message_operation_history h WHERE h.tenant_id=m.tenant_id AND h.conversation_id=m.conversation_id AND h.message_id=m.server_id AND h.operation_type='EVENT_MESSAGE_EDIT'), 0)) AS last_edit_seq,
                     CASE WHEN EXISTS (
                         SELECT 1 FROM message_visibility mv
                         WHERE mv.tenant_id = m.tenant_id AND mv.message_id = m.server_id
@@ -659,7 +659,7 @@ impl MessageStorage for OptimizedPostgresMessageStorageImpl {
             sqlx::query(
                 r#"
                 SELECT
-                    tenant_id, server_id, conversation_id, client_msg_id, sender_id, sender_name, sender_avatar,
+                    tenant_id, server_id, conversation_id, GREATEST(COALESCE((messages.extra->'serverEdit'->>'eventSeq')::bigint, 0), COALESCE((SELECT MAX(h.seq) FROM message_operation_history h WHERE h.tenant_id=messages.tenant_id AND h.conversation_id=messages.conversation_id AND h.message_id=messages.server_id AND h.operation_type='EVENT_MESSAGE_EDIT'), 0)) AS last_edit_seq, client_msg_id, sender_id, sender_name, sender_avatar,
                     channel_id, thread_id, source, seq, timestamp, conversation_type, message_type, content,
                     status, offline_push_info, extra, extensions, created_at, persisted_at, delivered_at,
                     COALESCE((
@@ -852,7 +852,7 @@ impl MessageStorage for OptimizedPostgresMessageStorageImpl {
         } else {
             let sql = format!(
                 r#"
-                SELECT tenant_id, server_id, conversation_id, client_msg_id, sender_id, sender_name, sender_avatar,
+                SELECT tenant_id, server_id, conversation_id, GREATEST(COALESCE((messages.extra->'serverEdit'->>'eventSeq')::bigint, 0), COALESCE((SELECT MAX(h.seq) FROM message_operation_history h WHERE h.tenant_id=messages.tenant_id AND h.conversation_id=messages.conversation_id AND h.message_id=messages.server_id AND h.operation_type='EVENT_MESSAGE_EDIT'), 0)) AS last_edit_seq, client_msg_id, sender_id, sender_name, sender_avatar,
                     channel_id, thread_id, source, seq, timestamp, conversation_type, message_type, content,
                     status, offline_push_info, extra, extensions, created_at, persisted_at, delivered_at,
                     COALESCE((
@@ -1052,7 +1052,7 @@ impl MessageStorage for OptimizedPostgresMessageStorageImpl {
         let row = sqlx::query(
             r#"
             SELECT
-                tenant_id, server_id, conversation_id, client_msg_id, sender_id, sender_name, sender_avatar,
+                tenant_id, server_id, conversation_id, GREATEST(COALESCE((messages.extra->'serverEdit'->>'eventSeq')::bigint, 0), COALESCE((SELECT MAX(h.seq) FROM message_operation_history h WHERE h.tenant_id=messages.tenant_id AND h.conversation_id=messages.conversation_id AND h.message_id=messages.server_id AND h.operation_type='EVENT_MESSAGE_EDIT'), 0)) AS last_edit_seq, client_msg_id, sender_id, sender_name, sender_avatar,
                 channel_id, thread_id, source, seq, timestamp, conversation_type, message_type, content,
                 status, offline_push_info, extra, extensions, created_at, persisted_at, delivered_at,
                 COALESCE((
@@ -1362,7 +1362,7 @@ impl MessageStorage for OptimizedPostgresMessageStorageImpl {
         let mut query = sqlx::QueryBuilder::new(
             r#"
             SELECT
-                tenant_id, server_id, conversation_id, client_msg_id, sender_id, sender_name, sender_avatar,
+                tenant_id, server_id, conversation_id, GREATEST(COALESCE((messages.extra->'serverEdit'->>'eventSeq')::bigint, 0), COALESCE((SELECT MAX(h.seq) FROM message_operation_history h WHERE h.tenant_id=messages.tenant_id AND h.conversation_id=messages.conversation_id AND h.message_id=messages.server_id AND h.operation_type='EVENT_MESSAGE_EDIT'), 0)) AS last_edit_seq, client_msg_id, sender_id, sender_name, sender_avatar,
                 channel_id, thread_id, source, seq, timestamp, conversation_type, message_type, content,
                 status, offline_push_info, extra, extensions, created_at, persisted_at, delivered_at,
                 COALESCE((
@@ -2318,7 +2318,7 @@ impl MessageStorage for OptimizedPostgresMessageStorageImpl {
             let rows = sqlx::query(
                 r#"
                 SELECT
-                    tenant_id, server_id, conversation_id, client_msg_id, sender_id, sender_name, sender_avatar,
+                    tenant_id, server_id, conversation_id, GREATEST(COALESCE((messages.extra->'serverEdit'->>'eventSeq')::bigint, 0), COALESCE((SELECT MAX(h.seq) FROM message_operation_history h WHERE h.tenant_id=messages.tenant_id AND h.conversation_id=messages.conversation_id AND h.message_id=messages.server_id AND h.operation_type='EVENT_MESSAGE_EDIT'), 0)) AS last_edit_seq, client_msg_id, sender_id, sender_name, sender_avatar,
                     channel_id, thread_id, source, seq, timestamp, conversation_type, message_type, content,
                     status, offline_push_info, extra, extensions, created_at, persisted_at, delivered_at,
                     COALESCE((

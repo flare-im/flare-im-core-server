@@ -2,7 +2,7 @@
 
 English · [中文](README.zh-CN.md)
 
-> **Status**: The core path uses PostgreSQL / TimescaleDB as the sole persistent database; Redis only carries the hot cache, WAL, short-lived state, and idempotency assistance.
+> **Status**: The core path uses PostgreSQL / TimescaleDB as the sole persistent database; Redis only carries the hot cache, WAL, short-lived state.
 
 `flare-storage` contains two core services:
 
@@ -14,7 +14,7 @@ English · [中文](README.zh-CN.md)
 - Does not use MongoDB to store message bodies or real-time data.
 - Does not perform cross-database synchronous dual-writing of the same message data.
 - PostgreSQL / TimescaleDB is the sole persistent database family for messages, events, the ledger, and audit queries.
-- Redis is only used for the hot cache, the send/write WAL, the idempotency window, presence/short-lived state, and read-path acceleration.
+- Redis is only used for the hot cache, the send/write WAL, presence/short-lived state, and read-path acceleration.
 - MQ is the asynchronous boundary of the write path; when the writer fails to consume, it goes into retry / DLQ, rather than making the access layer synchronously wait for database success.
 
 ## Writer
@@ -22,7 +22,7 @@ English · [中文](README.zh-CN.md)
 Responsibilities of `flare-storage/writer`:
 
 - Consume storage topics such as `flare.im.message.storage` and `flare.im.message.events`.
-- Use the Redis idempotency window and the PostgreSQL `message_write_ledger` to ensure re-entrancy on duplicate delivery.
+- Use PostgreSQL `message_idempotency_ledger` and `message_write_ledger` for duplicate delivery; retry the durable event stream before ACK. Redis reservations never prove completion.
 - Write messages into `messages`, and write operation/sync events into `events`.
 - Maintain the hot cache and write-stage state.
 - Publish ACK or failure status, for client ack/sync convergence and operational troubleshooting.
@@ -68,7 +68,6 @@ Common Writer environment variables:
 - `STORAGE_MESSAGE_DLQ_TOPIC`
 - `STORAGE_REDIS_URL`
 - `STORAGE_REDIS_HOT_TTL_SECONDS`
-- `STORAGE_REDIS_IDEMPOTENCY_TTL_SECONDS`
 - `STORAGE_POSTGRES_URL`
 - `STORAGE_POSTGRES_MAX_CONNECTIONS`
 - `STORAGE_POSTGRES_MIN_CONNECTIONS`

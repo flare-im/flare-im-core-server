@@ -45,7 +45,7 @@ pub async fn get_file_url(
 
     let grpc_res = clients
         .bounded(async {
-            let mut media_client = clients.media.lock().await;
+            let mut media_client = clients.media.lock().await.clone();
             media_client.get_file_url(&caller, req.into()).await
         })
         .await
@@ -84,7 +84,7 @@ pub async fn get_file_info(
 
     let grpc_res = clients
         .bounded(async {
-            let mut media_client = clients.media.lock().await;
+            let mut media_client = clients.media.lock().await.clone();
             media_client.get_file_info(&caller, req).await
         })
         .await
@@ -116,7 +116,7 @@ pub async fn serve_file(
 
     let grpc_res = clients
         .bounded(async {
-            let mut media_client = clients.media.lock().await;
+            let mut media_client = clients.media.lock().await.clone();
             media_client
                 .get_file_info(
                     &caller,
@@ -154,7 +154,7 @@ pub async fn serve_file(
     if !info.bucket.trim().is_empty() {
         let url_res = clients
             .bounded(async {
-                let mut media_client = clients.media.lock().await;
+                let mut media_client = clients.media.lock().await.clone();
                 media_client
                     .get_file_url(
                         &caller,
@@ -193,7 +193,7 @@ pub async fn serve_file(
     // 不会被 GRPC_REQUEST_TIMEOUT_SECS 截断。
     let stream = clients
         .bounded(async {
-            let mut media_client = clients.media.lock().await;
+            let mut media_client = clients.media.lock().await.clone();
             media_client
                 .download_file(
                     &caller,
@@ -281,7 +281,7 @@ pub async fn delete_file(
 
     let grpc_res = clients
         .bounded(async {
-            let mut media_client = clients.media.lock().await;
+            let mut media_client = clients.media.lock().await.clone();
             media_client.delete_file(&caller, req).await
         })
         .await

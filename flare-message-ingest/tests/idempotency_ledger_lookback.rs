@@ -99,17 +99,22 @@ impl IngestIdempotencyStore for MemoryIdempotency {
 /// 账本的内存替身：记下每次读取，`fail` 打开时读取报错。
 #[derive(Default)]
 struct MemoryLedger {
-    rows: Mutex<HashMap<(String, String, String), LedgerRecord>>,
+    rows: Mutex<HashMap<(String, String, String, String), LedgerRecord>>,
     lookups: AtomicUsize,
     fail: AtomicBool,
 }
 
 impl MemoryLedger {
     fn insert(&self, client_msg_id: &str, record: LedgerRecord) {
-        self.rows
-            .lock()
-            .unwrap()
-            .insert((TENANT.into(), SENDER.into(), client_msg_id.into()), record);
+        self.rows.lock().unwrap().insert(
+            (
+                TENANT.into(),
+                SENDER.into(),
+                record.conversation_id.clone(),
+                client_msg_id.into(),
+            ),
+            record,
+        );
     }
 
     fn lookups(&self) -> usize {
@@ -123,6 +128,7 @@ impl IdempotencyLedger for MemoryLedger {
         &self,
         tenant_id: &str,
         sender_id: &str,
+        conversation_id: &str,
         client_msg_id: &str,
     ) -> Result<Option<LedgerRecord>> {
         self.lookups.fetch_add(1, Ordering::SeqCst);
@@ -133,7 +139,12 @@ impl IdempotencyLedger for MemoryLedger {
             .rows
             .lock()
             .unwrap()
-            .get(&(tenant_id.into(), sender_id.into(), client_msg_id.into()))
+            .get(&(
+                tenant_id.into(),
+                sender_id.into(),
+                conversation_id.into(),
+                client_msg_id.into(),
+            ))
             .cloned())
     }
 }
@@ -273,8 +284,8 @@ async fn spawn_fake_redis() -> String {
                         pending.drain(..consumed);
                         let reply = match name.as_str() {
                             "INCR" => "+QUEUED\r\n".to_string(),
-                            "EXEC" => {
-                                format!("*1\r\n:{}\r\n", seq.fetch_add(1, Ordering::SeqCst) + 1)
+                            "EVALSHA" | "EVAL" => {
+                                format!(":{}\r\n", seq.fetch_add(1, Ordering::SeqCst) + 1)
                             }
                             "PING" => "+PONG\r\n".to_string(),
                             _ => "+OK\r\n".to_string(),
@@ -532,4 +543,21 @@ async fn an_unreadable_ledger_asks_the_client_to_retry_and_releases_the_reservat
         .expect("the retry replays the first result");
     assert_eq!(outcome.message_id, "srv-original");
     assert!(h.producer.published().is_empty());
+}
+
+#[tokio::test]
+async fn a_reused_client_id_replays_its_own_conversation_receipt_after_redis_loss() {
+    let h = harness().await;
+    h.ledger.insert("shared", original("2-other"));
+    let mut own = original(GROUP);
+    own.server_id = "own-receipt".into();
+    h.ledger.insert("shared", own);
+    let outcome = h
+        .handler
+        .handle_send_message(&user_ctx(), text("shared", now_ms() - 2 * HOUR_MS))
+        .await
+        .unwrap();
+    assert_eq!(outcome.message_id, "own-receipt");
+    assert!(h.producer.published().is_empty());
+    assert_eq!(h.ledger.lookups(), 1);
 }

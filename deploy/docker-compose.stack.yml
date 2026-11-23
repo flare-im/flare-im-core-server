@@ -54,8 +54,8 @@ x-flare-service: &flare-service
     # 转义），所以留了直接覆盖的口子：在 .env 里设 DATABASE_URL 就整条照用。
     # deploy/up.sh 会在走便捷路径时校验密码是否 URL 安全，早报错好过连不上瞎猜。
     DATABASE_URL: ${DATABASE_URL:-postgres://${POSTGRES_USER:-flare}:${POSTGRES_PASSWORD:-flare123}@postgres:5432/${POSTGRES_DB:-flare2}}
-    # REDIS_PASSWORD 留空就是无密码（本地默认）；设了则连接串带上它。
-    REDIS_URL: ${REDIS_URL:-redis://${REDIS_PASSWORD:+:${REDIS_PASSWORD}@}redis:6379}
+    # deploy/compose.py encodes the client URI and keeps REDIS_PASSWORD raw for Dragonfly.
+    REDIS_URL: ${REDIS_URL:?Use deploy/compose.py or set a percent-encoded REDIS_URL}
     NATS_URL: nats://nats:4222
     #
     # 上面三个只有 flare-capability 读（DATABASE_URL）。**其余 14 个服务的中间件地址
@@ -66,7 +66,7 @@ x-flare-service: &flare-service
     # 现在 base.toml 用 ${VAR:-本机默认值} 写中间件地址：不设就是本机那套（开发行为
     # 一字不变），容器里由下面这几个变量覆盖成服务名。
     FLARE_POSTGRES_URL: ${DATABASE_URL:-postgres://${POSTGRES_USER:-flare}:${POSTGRES_PASSWORD:-flare123}@postgres:5432/${POSTGRES_DB:-flare2}}
-    FLARE_REDIS_URL_BASE: ${REDIS_URL:-redis://${REDIS_PASSWORD:+:${REDIS_PASSWORD}@}redis:6379}
+    FLARE_REDIS_URL_BASE: ${REDIS_URL:?Use deploy/compose.py or set a percent-encoded REDIS_URL}
     FLARE_MQ_DEFAULT_BACKEND: ${FLARE_MQ_DEFAULT_BACKEND:-nats}
     FLARE_NATS_URL: nats://nats:4222
     FLARE_KAFKA_BROKERS: kafka:9092
@@ -83,7 +83,7 @@ x-flare-service: &flare-service
 
 # 设备推送绑定登记表：Push Proxy 登记、Push Server 按设备读来建离线任务、Push Worker 读来投递，
 # 三者必须是同一个库（与 config/base.toml 的 [redis.push] 相同，库 5）。三处都写明，不靠各自的缺省。
-x-device-token-redis: &device-token-redis ${REDIS_URL:-redis://${REDIS_PASSWORD:+:${REDIS_PASSWORD}@}redis:6379}/5
+x-device-token-redis: &device-token-redis ${REDIS_URL:?Use deploy/compose.py or set a percent-encoded REDIS_URL}/5
 
 services:
   # ── Ingress ────────────────────────────────────────────────────────────────

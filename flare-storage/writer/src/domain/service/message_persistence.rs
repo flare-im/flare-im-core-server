@@ -21,25 +21,23 @@ use crate::domain::events::{AckEvent, AckStatus};
 use crate::domain::model::{Event, EventPayload, EventType, PersistenceResult, PreparedMessage};
 use crate::domain::repository::{
     AckPublisher, ArchiveOutcome, ArchiveStoreRepository, EventStreamRepository,
-    HotCacheRepository, MessageIdempotencyRepository, MessageWriteLedgerRepository,
-    MessageWriteStage, PluginEntityBindingRepository, WalCleanupRepository,
+    HotCacheRepository, MessageWriteLedgerRepository, MessageWriteStage,
+    PluginEntityBindingRepository, WalCleanupRepository,
 };
 
 /// 消息持久化领域服务
 ///
-/// 只做：幂等 → 热缓存(可选) → 归档(PostgreSQL) → WAL 清理(可选) → ACK 发布(可选)
+/// 只做：归档账本 → 事件流 → 热缓存(可选) → ACK → WAL 清理(可选)
 ///
 /// 使用泛型参数而非 trait objects，符合 Rust 2024 规范
-pub struct MessagePersistenceDomainService<I, H, A, E, W, P>
+pub struct MessagePersistenceDomainService<H, A, E, W, P>
 where
-    I: MessageIdempotencyRepository + Send + Sync,
     H: HotCacheRepository + Send + Sync,
     A: ArchiveStoreRepository + Send + Sync,
     E: EventStreamRepository + Send + Sync,
     W: WalCleanupRepository + Send + Sync,
     P: AckPublisher + Send + Sync,
 {
-    idempotency_repo: Option<Arc<I>>,
     hot_cache_repo: Option<Arc<H>>,
     archive_repo: Option<Arc<A>>,
     event_stream_repo: Option<Arc<E>>,
@@ -53,26 +51,8 @@ where
     plugin_entity_bindings: Option<Arc<dyn PluginEntityBindingRepository>>,
 }
 
-#[derive(Debug, Clone)]
-enum IdempotencyReservation {
-    None,
-    ServerMessageId(String),
-    ClientMessageId {
-        client_msg_id: String,
-        sender_id: Option<String>,
-        conversation_id: Option<String>,
-    },
-}
-
-#[derive(Debug, Clone)]
-struct IdempotencyDecision {
-    is_new: bool,
-    reservation: IdempotencyReservation,
-}
-
-impl<I, H, A, E, W, P> MessagePersistenceDomainService<I, H, A, E, W, P>
+impl<H, A, E, W, P> MessagePersistenceDomainService<H, A, E, W, P>
 where
-    I: MessageIdempotencyRepository + Send + Sync,
     H: HotCacheRepository + Send + Sync,
     A: ArchiveStoreRepository + Send + Sync,
     E: EventStreamRepository + Send + Sync,
@@ -80,7 +60,6 @@ where
     P: AckPublisher + Send + Sync,
 {
     pub fn new(
-        idempotency_repo: Option<Arc<I>>,
         hot_cache_repo: Option<Arc<H>>,
         archive_repo: Option<Arc<A>>,
         event_stream_repo: Option<Arc<E>>,
@@ -88,7 +67,6 @@ where
         ack_publisher: Option<Arc<P>>,
     ) -> Self {
         Self {
-            idempotency_repo,
             hot_cache_repo,
             archive_repo,
             event_stream_repo,
@@ -244,129 +222,6 @@ where
         })
     }
 
-    /// 幂等性检查（client_msg_id 优先，否则 server_id）
-    #[instrument(skip(self, ctx, prepared), fields(message_id = %prepared.message_id))]
-    pub async fn check_idempotency(&self, ctx: &Ctx, prepared: &PreparedMessage) -> Result<bool> {
-        Ok(self.reserve_idempotency(ctx, prepared).await?.is_new)
-    }
-
-    async fn reserve_idempotency(
-        &self,
-        ctx: &Ctx,
-        prepared: &PreparedMessage,
-    ) -> Result<IdempotencyDecision> {
-        match &self.idempotency_repo {
-            Some(repo) => {
-                if !prepared.message.client_msg_id.is_empty() {
-                    match repo
-                        .is_new_by_client_msg_id(
-                            ctx,
-                            &prepared.message.client_msg_id,
-                            Some(&prepared.message.sender_id),
-                            Some(&prepared.conversation_id),
-                        )
-                        .await
-                    {
-                        Ok(true) => Ok(IdempotencyDecision {
-                            is_new: true,
-                            reservation: IdempotencyReservation::ClientMessageId {
-                                client_msg_id: prepared.message.client_msg_id.clone(),
-                                sender_id: (!prepared.message.sender_id.is_empty())
-                                    .then(|| prepared.message.sender_id.clone()),
-                                conversation_id: (!prepared.conversation_id.is_empty())
-                                    .then(|| prepared.conversation_id.clone()),
-                            },
-                        }),
-                        Ok(false) => Ok(IdempotencyDecision {
-                            is_new: false,
-                            reservation: IdempotencyReservation::None,
-                        }),
-                        Err(e) => {
-                            warn!(error = ?e, "idempotency by client_msg_id failed, fallback to message_id");
-                            match repo.is_new(ctx, &prepared.message_id).await {
-                                Ok(true) => Ok(IdempotencyDecision {
-                                    is_new: true,
-                                    reservation: IdempotencyReservation::ServerMessageId(
-                                        prepared.message_id.clone(),
-                                    ),
-                                }),
-                                Ok(false) => Ok(IdempotencyDecision {
-                                    is_new: false,
-                                    reservation: IdempotencyReservation::None,
-                                }),
-                                Err(e) => Err(map_infra_error(
-                                    e,
-                                    ErrorCode::DatabaseError,
-                                    "Failed to check idempotency",
-                                )),
-                            }
-                        }
-                    }
-                } else {
-                    match repo.is_new(ctx, &prepared.message_id).await {
-                        Ok(true) => Ok(IdempotencyDecision {
-                            is_new: true,
-                            reservation: IdempotencyReservation::ServerMessageId(
-                                prepared.message_id.clone(),
-                            ),
-                        }),
-                        Ok(false) => Ok(IdempotencyDecision {
-                            is_new: false,
-                            reservation: IdempotencyReservation::None,
-                        }),
-                        Err(e) => Err(map_infra_error(
-                            e,
-                            ErrorCode::DatabaseError,
-                            "Failed to check idempotency",
-                        )),
-                    }
-                }
-            }
-            None => Ok(IdempotencyDecision {
-                is_new: true,
-                reservation: IdempotencyReservation::None,
-            }),
-        }
-    }
-
-    async fn release_idempotency_reservation(
-        &self,
-        ctx: &Ctx,
-        reservation: &IdempotencyReservation,
-    ) {
-        let Some(repo) = &self.idempotency_repo else {
-            return;
-        };
-
-        let release_result = match reservation {
-            IdempotencyReservation::None => Ok(()),
-            IdempotencyReservation::ServerMessageId(message_id) => {
-                repo.release(ctx, message_id).await
-            }
-            IdempotencyReservation::ClientMessageId {
-                client_msg_id,
-                sender_id,
-                conversation_id,
-            } => {
-                repo.release_by_client_msg_id(
-                    ctx,
-                    client_msg_id,
-                    sender_id.as_deref(),
-                    conversation_id.as_deref(),
-                )
-                .await
-            }
-        };
-
-        if let Err(e) = release_result {
-            warn!(
-                error = ?e,
-                reservation = ?reservation,
-                "Failed to release idempotency reservation after durable write failure"
-            );
-        }
-    }
-
     fn ledger_tenant_id(prepared: &PreparedMessage) -> Result<String> {
         prepared_tenant_id(&prepared.message)
     }
@@ -461,79 +316,47 @@ where
                 metrics.record_storage_persist("idempotency_ledger", "duplicate_skipped");
             }
         }
-        if outcome.reused_client_msg_ids > 0 {
-            warn!(
-                count = outcome.reused_client_msg_ids,
-                "client_msg_id reused by the same sender in another conversation; stored as new messages"
-            );
-            if let Some(metrics) = &self.metrics {
-                metrics
-                    .storage_persist_total
-                    .with_label_values(&["idempotency_ledger", "client_msg_id_reused"])
-                    .inc_by(outcome.reused_client_msg_ids as u64);
+    }
+
+    fn durable_messages(
+        &self,
+        prepared: &[PreparedMessage],
+        outcome: &ArchiveOutcome,
+    ) -> Result<Vec<crate::domain::model::Message>> {
+        let mut messages = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        // shortcut: usage is an in-process counter; durable exactly-once billing needs a ledger consumer.
+        for prepared in prepared {
+            if outcome.is_duplicate(&prepared.message_id) {
+                continue;
             }
+            let tenant_id = Self::ledger_tenant_id(prepared)?;
+            if !seen.insert((tenant_id.clone(), prepared.message_id.clone())) {
+                continue;
+            }
+            if !outcome.was_archived(&prepared.message_id) {
+                self.usage.messages_persisted(&tenant_id, 1);
+            }
+            messages.push(prepared.message.clone());
         }
+        Ok(messages)
     }
 
     /// 持久化单条：归档 + 事件流(供 Sync) + 热缓存投影(可选)
     ///
-    /// 发送幂等账本判为重复的消息（结论里 `is_duplicate`）没有写入，也不进事件流与热缓存：它是已落库
-    /// 那条的又一次发送，Sync 不能再给出第二条。
+    /// 重试必须补齐事件流后才能确认；归档账本负责防止第二次插入。
     #[instrument(skip(self, ctx, prepared), fields(message_id = %prepared.message_id))]
     pub async fn persist_message(
         &self,
         ctx: &Ctx,
         prepared: PreparedMessage,
     ) -> Result<ArchiveOutcome> {
-        let mut outcome = ArchiveOutcome::default();
-        if let Some(repo) = &self.archive_repo {
-            outcome = repo
-                .archive_messages(ctx, std::slice::from_ref(&prepared.message))
-                .await
-                .map_err(|e| {
-                    map_infra_error(e, ErrorCode::DatabaseError, "Failed to store archive")
-                })?;
-            self.observe_ledger_outcome(std::slice::from_ref(&prepared), &outcome);
-            if outcome.is_duplicate(&prepared.message_id) {
-                return Ok(outcome);
-            }
-            self.register_plugin_entity_bindings(ctx, std::slice::from_ref(&prepared.message))
-                .await;
-        }
-        let repo = self.event_stream_repo.as_ref().ok_or_else(|| {
-            flare_err!(
-                ErrorCode::InternalError,
-                "Event stream repository not configured"
-            )
-        })?;
-        let event = build_event_message(&prepared.message)?;
-        repo.append_event_to_stream(ctx, &event)
-            .await
-            .map_err(|e| {
-                map_infra_error(
-                    e,
-                    ErrorCode::DatabaseError,
-                    "Failed to append message event to durable event stream",
-                )
-            })?;
-        // 热缓存只是投影：写失败只记 WARN 与计数（`storage_writer_persist_total{path="hot_cache",
-        // result="error"}`），不影响确认；Redis 不可达时连接上限让这一步在几秒内结束。
-        if let Some(repo) = &self.hot_cache_repo
-            && let Err(e) = repo.store_hot(ctx, &prepared.message).await
-        {
-            self.record_hot_cache_failure();
-            warn!(
-                error = ?e,
-                message_id = %prepared.message_id,
-                "Hot cache projection failed after durable message write"
-            );
-        }
-        Ok(outcome)
+        Box::pin(self.persist_batch(ctx, vec![prepared])).await
     }
 
     /// 批量持久化
     ///
-    /// 发送幂等账本判为重复的消息不写入、不进事件流与热缓存；同批其余消息照常持久化。
+    /// 同一 server_id 的重投补齐事件流；账本确认的另一条发送不产生第二条事件。
     #[instrument(skip(self, ctx, prepared), fields(batch_size = prepared.len()))]
     pub async fn persist_batch(
         &self,
@@ -551,17 +374,24 @@ where
         }
         let mut messages: Vec<crate::domain::model::Message> =
             prepared.iter().map(|p| p.message.clone()).collect();
+        let mut seen = std::collections::HashSet::new();
+        messages.retain(|message| {
+            seen.insert((
+                message.extra.get("tenant_id").cloned(),
+                message.server_id.clone(),
+            ))
+        });
         if let Some(repo) = &self.archive_repo {
             outcome = repo.archive_messages(ctx, &messages).await.map_err(|e| {
                 map_infra_error(e, ErrorCode::DatabaseError, "Failed to store archive batch")
             })?;
             self.observe_ledger_outcome(&prepared, &outcome);
-            messages.retain(|message| !outcome.is_duplicate(&message.server_id));
-            if messages.is_empty() {
-                return Ok(outcome);
-            }
-            self.register_plugin_entity_bindings(ctx, &messages).await;
         }
+        messages = self.durable_messages(&prepared, &outcome)?;
+        if messages.is_empty() {
+            return Ok(outcome);
+        }
+        self.register_plugin_entity_bindings(ctx, &messages).await;
         let repo = self.event_stream_repo.as_ref().ok_or_else(|| {
             flare_err!(
                 ErrorCode::InternalError,
@@ -667,42 +497,12 @@ where
         prepared: PreparedMessage,
     ) -> Result<PersistenceResult> {
         let tenant_id = Self::ledger_tenant_id(&prepared)?;
-        let idempotency = self.reserve_idempotency(ctx, &prepared).await?;
-        if !idempotency.is_new {
-            let result = PersistenceResult {
-                message_id: prepared.message_id.clone(),
-                conversation_id: prepared.conversation_id.clone(),
-                timeline: prepared.timeline.clone(),
-                deduplicated: true,
-            };
-            self.publish_ack_and_record(ctx, &tenant_id, &result)
-                .await?;
-            return Ok(result);
-        }
-
         let message_id = prepared.message_id.clone();
         let conversation_id = prepared.conversation_id.clone();
         let timeline = prepared.timeline.clone();
 
-        let outcome = match self.persist_message(ctx, prepared).await {
-            Ok(outcome) => outcome,
-            Err(err) => {
-                self.release_idempotency_reservation(ctx, &idempotency.reservation)
-                    .await;
-                return Err(err);
-            }
-        };
-        // 账本判为重复：没有写入，按去重回 ACK、不计用量；发送侧 WAL 照常清理，免得重放再送来一次。
-        let deduplicated = outcome.is_duplicate(&message_id);
-        if !deduplicated {
-            self.record_write_stage_best_effort(
-                ctx,
-                &tenant_id,
-                &message_id,
-                MessageWriteStage::StoragePersisted,
-            );
-            self.usage.messages_persisted(&tenant_id, 1);
-        }
+        let outcome = self.persist_message(ctx, prepared).await?;
+        let deduplicated = outcome.is_duplicate(&message_id) || outcome.was_archived(&message_id);
 
         let result = PersistenceResult {
             message_id,
@@ -747,70 +547,27 @@ where
             return Ok(vec![]);
         }
 
-        let mut new_messages = Vec::new();
-        let mut results = Vec::new();
-
-        for msg in prepared {
-            let tenant_id = Self::ledger_tenant_id(&msg)?;
-            let idempotency = self.reserve_idempotency(ctx, &msg).await?;
-            if idempotency.is_new {
-                new_messages.push((msg, idempotency.reservation, tenant_id));
-            } else {
-                let result = PersistenceResult {
-                    message_id: msg.message_id.clone(),
-                    conversation_id: msg.conversation_id.clone(),
-                    timeline: msg.timeline.clone(),
-                    deduplicated: true,
-                };
-                self.publish_ack_and_record(ctx, &tenant_id, &result)
-                    .await?;
-                results.push(result);
-            }
-        }
-
-        if new_messages.is_empty() {
-            return Ok(results);
-        }
-
-        let messages_to_persist: Vec<PreparedMessage> = new_messages
-            .iter()
-            .map(|(message, _, _)| message.clone())
-            .collect();
-        let outcome = match self.persist_batch(ctx, messages_to_persist).await {
-            Ok(outcome) => outcome,
-            Err(err) => {
-                for (_, reservation, _) in &new_messages {
-                    self.release_idempotency_reservation(ctx, reservation).await;
-                }
-                return Err(err);
-            }
-        };
-        // 整批已落库：先把每条都记为已持久化并计入用量，再逐条 ACK。ACK 中途失败会提前
-        // 返回，而后面几条的幂等占位已经生效，重投时走去重分支不会再计，所以计数不能放在
-        // ACK 循环里。账本判为重复的那几条没有写入：不记、不计，按去重回 ACK。
-        for (msg, _, tenant_id) in &new_messages {
-            if outcome.is_duplicate(&msg.message_id) {
-                continue;
-            }
-            self.record_write_stage_best_effort(
-                ctx,
-                tenant_id,
-                &msg.message_id,
-                MessageWriteStage::StoragePersisted,
-            );
-            self.usage.messages_persisted(tenant_id, 1);
-        }
-        for (msg, _, tenant_id) in &new_messages {
+        // PostgreSQL 的事务账本是唯一的完成依据；Redis 占位不参与成功判定。
+        let messages: Vec<_> = prepared
+            .into_iter()
+            .map(|msg| Self::ledger_tenant_id(&msg).map(|tenant| (msg, tenant)))
+            .collect::<Result<_>>()?;
+        let outcome = self
+            .persist_batch(ctx, messages.iter().map(|(msg, _)| msg.clone()).collect())
+            .await?;
+        let mut results = Vec::with_capacity(messages.len());
+        for (msg, tenant_id) in &messages {
             let result = PersistenceResult {
                 message_id: msg.message_id.clone(),
                 conversation_id: msg.conversation_id.clone(),
                 timeline: msg.timeline.clone(),
-                deduplicated: outcome.is_duplicate(&msg.message_id),
+                deduplicated: outcome.is_duplicate(&msg.message_id)
+                    || outcome.was_archived(&msg.message_id),
             };
             self.publish_ack_and_record(ctx, tenant_id, &result).await?;
             results.push(result);
         }
-        for (msg, _, tenant_id) in &new_messages {
+        for (msg, tenant_id) in &messages {
             match self.cleanup_wal(ctx, &msg.message_id).await? {
                 Some(true) => {
                     self.record_write_stage_best_effort(
@@ -894,14 +651,13 @@ mod tests {
     use crate::domain::events::AckEvent;
     use crate::domain::repository::{
         AckPublisher, ArchiveStoreRepository, EventStreamRepository, HotCacheRepository,
-        MessageIdempotencyRepository, MessageWriteLedgerRepository, MessageWriteStage,
-        WalCleanupRepository,
+        MessageWriteLedgerRepository, MessageWriteStage, WalCleanupRepository,
     };
     use flare_im_contracts::message::Message;
     use flare_im_contracts::utils::{Context, TimelineMetadata};
     use flare_server_core::error::Result as AnyhowResult;
     use std::sync::Mutex;
-    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     struct NoopRepository;
 
@@ -940,43 +696,6 @@ mod tests {
                     });
                 Ok(())
             })
-        }
-    }
-
-    impl MessageIdempotencyRepository for NoopRepository {
-        async fn is_new(&self, _ctx: &Ctx, _message_id: &str) -> AnyhowResult<bool> {
-            Ok(true)
-        }
-    }
-
-    /// 一次幂等写入的捕获记录：(key, client_msg_id, device_id)。
-    type IdempotencyObservation = (String, Option<String>, Option<String>);
-
-    struct CapturingClientIdempotencyRepository {
-        observed: Arc<Mutex<Vec<IdempotencyObservation>>>,
-    }
-
-    impl MessageIdempotencyRepository for CapturingClientIdempotencyRepository {
-        async fn is_new(&self, _ctx: &Ctx, _message_id: &str) -> AnyhowResult<bool> {
-            Ok(true)
-        }
-
-        async fn is_new_by_client_msg_id(
-            &self,
-            _ctx: &Ctx,
-            client_msg_id: &str,
-            sender_id: Option<&str>,
-            conversation_id: Option<&str>,
-        ) -> AnyhowResult<bool> {
-            self.observed
-                .lock()
-                .expect("observed idempotency lock")
-                .push((
-                    client_msg_id.to_string(),
-                    sender_id.map(ToString::to_string),
-                    conversation_id.map(ToString::to_string),
-                ));
-            Ok(true)
         }
     }
 
@@ -1046,49 +765,39 @@ mod tests {
         }
     }
 
-    /// 按 message_id 逐条占位：同一条第二次进来就是去重命中。
-    struct PerMessageIdempotencyRepository {
-        reserved: Arc<Mutex<std::collections::HashSet<String>>>,
+    #[derive(Default)]
+    struct DurableArchiveRepository {
+        stored: Mutex<std::collections::HashMap<String, Message>>,
+        fail_once_on: Mutex<Option<String>>,
     }
-
-    impl MessageIdempotencyRepository for PerMessageIdempotencyRepository {
-        async fn is_new(&self, _ctx: &Ctx, message_id: &str) -> AnyhowResult<bool> {
-            Ok(self
-                .reserved
-                .lock()
-                .expect("reserved idempotency lock")
-                .insert(message_id.to_string()))
+    impl ArchiveStoreRepository for DurableArchiveRepository {
+        async fn store_archive(&self, ctx: &Ctx, message: &Message) -> AnyhowResult<()> {
+            self.archive_messages(ctx, std::slice::from_ref(message))
+                .await
+                .map(|_| ())
         }
-
-        async fn release(&self, _ctx: &Ctx, message_id: &str) -> AnyhowResult<()> {
-            self.reserved
-                .lock()
-                .expect("reserved idempotency lock")
-                .remove(message_id);
-            Ok(())
-        }
-    }
-
-    struct ReservingIdempotencyRepository {
-        reserved: Arc<AtomicBool>,
-    }
-
-    impl MessageIdempotencyRepository for ReservingIdempotencyRepository {
-        async fn is_new(&self, _ctx: &Ctx, _message_id: &str) -> AnyhowResult<bool> {
-            Ok(!self.reserved.swap(true, Ordering::SeqCst))
-        }
-
-        async fn release(&self, _ctx: &Ctx, _message_id: &str) -> AnyhowResult<()> {
-            self.reserved.store(false, Ordering::SeqCst);
-            Ok(())
-        }
-    }
-
-    struct DuplicateIdempotencyRepository;
-
-    impl MessageIdempotencyRepository for DuplicateIdempotencyRepository {
-        async fn is_new(&self, _ctx: &Ctx, _message_id: &str) -> AnyhowResult<bool> {
-            Ok(false)
+        async fn archive_messages(
+            &self,
+            _ctx: &Ctx,
+            messages: &[Message],
+        ) -> AnyhowResult<ArchiveOutcome> {
+            let mut stored = self.stored.lock().unwrap();
+            let mut outcome = ArchiveOutcome::default();
+            for message in messages {
+                let mut failure = self.fail_once_on.lock().unwrap();
+                if failure.as_deref() == Some(message.server_id.as_str()) {
+                    failure.take();
+                    return Err(flare_server_core::error::FlareError::system(
+                        "partial archive failure",
+                    ));
+                }
+                if stored.contains_key(&message.server_id) {
+                    outcome.already_archived.push(message.server_id.clone());
+                } else {
+                    stored.insert(message.server_id.clone(), message.clone());
+                }
+            }
+            Ok(outcome)
         }
     }
 
@@ -1230,7 +939,6 @@ mod tests {
     type TestPersistenceService = MessagePersistenceDomainService<
         NoopRepository,
         NoopRepository,
-        NoopRepository,
         FailingEventStreamRepository,
         NoopRepository,
         NoopRepository,
@@ -1238,7 +946,6 @@ mod tests {
 
     fn service_with_failing_event_stream() -> TestPersistenceService {
         MessagePersistenceDomainService::new(
-            None,
             None,
             None,
             Some(Arc::new(FailingEventStreamRepository)),
@@ -1356,7 +1063,7 @@ mod tests {
 
         assert!(
             err.to_string()
-                .contains("Failed to append message event to durable event stream"),
+                .contains("Failed to append message events to durable event stream"),
             "unexpected error: {err}"
         );
     }
@@ -1366,13 +1073,11 @@ mod tests {
         let archive_writes = Arc::new(AtomicUsize::new(0));
         let service: MessagePersistenceDomainService<
             NoopRepository,
-            NoopRepository,
             CountingArchiveRepository,
             CountingEventStreamRepository,
             NoopRepository,
             NoopRepository,
         > = MessagePersistenceDomainService::new(
-            None,
             None,
             Some(Arc::new(CountingArchiveRepository {
                 writes: archive_writes.clone(),
@@ -1400,13 +1105,11 @@ mod tests {
         let archive_writes = Arc::new(AtomicUsize::new(0));
         let service: MessagePersistenceDomainService<
             NoopRepository,
-            NoopRepository,
             CountingArchiveRepository,
             CountingEventStreamRepository,
             NoopRepository,
             NoopRepository,
         > = MessagePersistenceDomainService::new(
-            None,
             None,
             Some(Arc::new(CountingArchiveRepository {
                 writes: archive_writes.clone(),
@@ -1440,14 +1143,12 @@ mod tests {
         let archive_writes = Arc::new(AtomicUsize::new(0));
         let stream_writes = Arc::new(AtomicUsize::new(0));
         let service: MessagePersistenceDomainService<
-            NoopRepository,
             FailingHotCacheRepository,
             CountingArchiveRepository,
             CountingEventStreamRepository,
             NoopRepository,
             NoopRepository,
         > = MessagePersistenceDomainService::new(
-            None,
             Some(Arc::new(FailingHotCacheRepository)),
             Some(Arc::new(CountingArchiveRepository {
                 writes: archive_writes.clone(),
@@ -1497,14 +1198,12 @@ mod tests {
         let before = failures();
         let stream_writes = Arc::new(AtomicUsize::new(0));
         let service: MessagePersistenceDomainService<
-            NoopRepository,
             RedisHotCacheRepository,
             NoopRepository,
             CountingEventStreamRepository,
             NoopRepository,
             NoopRepository,
         > = MessagePersistenceDomainService::new(
-            None,
             Some(Arc::new(RedisHotCacheRepository::from_parts(redis, 60, 10))),
             Some(Arc::new(NoopRepository)),
             Some(Arc::new(CountingEventStreamRepository {
@@ -1531,14 +1230,12 @@ mod tests {
     async fn persist_message_does_not_write_hot_cache_when_archive_write_fails() {
         let cache_writes = Arc::new(AtomicUsize::new(0));
         let service: MessagePersistenceDomainService<
-            NoopRepository,
             CountingHotCacheRepository,
             FailingArchiveRepository,
             CountingEventStreamRepository,
             NoopRepository,
             NoopRepository,
         > = MessagePersistenceDomainService::new(
-            None,
             Some(Arc::new(CountingHotCacheRepository {
                 writes: cache_writes.clone(),
             })),
@@ -1569,14 +1266,12 @@ mod tests {
         let archive_writes = Arc::new(AtomicUsize::new(0));
         let stream_writes = Arc::new(AtomicUsize::new(0));
         let service: MessagePersistenceDomainService<
-            NoopRepository,
             FailingHotCacheRepository,
             CountingArchiveRepository,
             CountingEventStreamRepository,
             NoopRepository,
             NoopRepository,
         > = MessagePersistenceDomainService::new(
-            None,
             Some(Arc::new(FailingHotCacheRepository)),
             Some(Arc::new(CountingArchiveRepository {
                 writes: archive_writes.clone(),
@@ -1611,13 +1306,11 @@ mod tests {
         let single_writes = Arc::new(AtomicUsize::new(0));
         let service: MessagePersistenceDomainService<
             NoopRepository,
-            NoopRepository,
             CountingArchiveRepository,
             BatchCountingEventStreamRepository,
             NoopRepository,
             NoopRepository,
         > = MessagePersistenceDomainService::new(
-            None,
             None,
             Some(Arc::new(CountingArchiveRepository {
                 writes: archive_writes.clone(),
@@ -1654,25 +1347,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn ensure_consistency_releases_idempotency_reservation_after_durable_write_failure() {
-        let reserved = Arc::new(AtomicBool::new(false));
-        let archive_writes = Arc::new(AtomicUsize::new(0));
+    async fn ensure_consistency_retries_event_stream_after_archive_commit() {
         let stream_attempts = Arc::new(AtomicUsize::new(0));
         let service: MessagePersistenceDomainService<
-            ReservingIdempotencyRepository,
             NoopRepository,
-            CountingArchiveRepository,
+            DurableArchiveRepository,
             FailOnceEventStreamRepository,
             NoopRepository,
             NoopRepository,
         > = MessagePersistenceDomainService::new(
-            Some(Arc::new(ReservingIdempotencyRepository {
-                reserved: reserved.clone(),
-            })),
             None,
-            Some(Arc::new(CountingArchiveRepository {
-                writes: archive_writes.clone(),
-            })),
+            Some(Arc::new(DurableArchiveRepository::default())),
             Some(Arc::new(FailOnceEventStreamRepository {
                 attempts: stream_attempts.clone(),
             })),
@@ -1697,8 +1382,8 @@ mod tests {
             .ensure_consistency(&ctx, prepared_message("message-a", 1))
             .await
             .expect_err("first attempt should fail at durable event stream append");
-        // Usage counts committed messages only.
-        assert!(persisted().is_empty());
+        // Archive commit is durable even when the subsequent event stream write fails.
+        assert_eq!(persisted(), [("tenant-a".to_string(), 1)]);
 
         let retry = service
             .ensure_consistency(&ctx, prepared_message("message-a", 1))
@@ -1706,13 +1391,8 @@ mod tests {
             .expect("retry after a failed durable write must be allowed");
 
         assert!(
-            !retry.deduplicated,
-            "retry after a failed durable write must not be reported as duplicate"
-        );
-        assert_eq!(
-            archive_writes.load(Ordering::SeqCst),
-            2,
-            "retry must re-enter durable archive path"
+            retry.deduplicated,
+            "archive retry is marked duplicate only after completing the event stream"
         );
         assert_eq!(
             stream_attempts.load(Ordering::SeqCst),
@@ -1722,27 +1402,22 @@ mod tests {
         assert_eq!(persisted(), [("tenant-a".to_string(), 1)]);
     }
 
-    /// 批量路径：整批落库后第二条 ACK 失败，第三条已经占位，重投时走去重分支。用量仍按
+    /// 批量路径：整批落库后第二条 ACK 失败，第三条已经归档，重投时由账本确认。用量仍按
     /// 落库条数计，重投不再重复计。
     #[tokio::test]
     async fn ensure_batch_consistency_counts_every_persisted_message_when_an_ack_fails() {
-        let reserved = Arc::new(Mutex::new(std::collections::HashSet::new()));
         let ack_attempts = Arc::new(AtomicUsize::new(0));
         let batch_calls = Arc::new(AtomicUsize::new(0));
         let event_count = Arc::new(AtomicUsize::new(0));
         let service: MessagePersistenceDomainService<
-            PerMessageIdempotencyRepository,
             NoopRepository,
-            NoopRepository,
+            DurableArchiveRepository,
             BatchCountingEventStreamRepository,
             NoopRepository,
             FailNthAckPublisher,
         > = MessagePersistenceDomainService::new(
-            Some(Arc::new(PerMessageIdempotencyRepository {
-                reserved: reserved.clone(),
-            })),
             None,
-            Some(Arc::new(NoopRepository)),
+            Some(Arc::new(DurableArchiveRepository::default())),
             Some(Arc::new(BatchCountingEventStreamRepository {
                 batch_calls: batch_calls.clone(),
                 event_count: event_count.clone(),
@@ -1791,54 +1466,10 @@ mod tests {
         assert!(redelivered.iter().all(|result| result.deduplicated));
         assert_eq!(
             batch_calls.load(Ordering::SeqCst),
-            1,
-            "nothing is rewritten"
+            2,
+            "retry re-enters the idempotent event stream"
         );
         assert_eq!(persisted(), [("tenant-a".to_string(), 3)]);
-    }
-
-    #[tokio::test]
-    async fn ensure_consistency_scopes_client_idempotency_by_conversation() {
-        let observed = Arc::new(Mutex::new(Vec::new()));
-        let stream_writes = Arc::new(AtomicUsize::new(0));
-        let service: MessagePersistenceDomainService<
-            CapturingClientIdempotencyRepository,
-            NoopRepository,
-            NoopRepository,
-            CountingEventStreamRepository,
-            NoopRepository,
-            NoopRepository,
-        > = MessagePersistenceDomainService::new(
-            Some(Arc::new(CapturingClientIdempotencyRepository {
-                observed: observed.clone(),
-            })),
-            None,
-            Some(Arc::new(NoopRepository)),
-            Some(Arc::new(CountingEventStreamRepository {
-                writes: stream_writes,
-            })),
-            None,
-            Some(Arc::new(NoopRepository)),
-        );
-        let mut prepared = prepared_message("message-a", 1);
-        prepared.message.client_msg_id = "client-a".to_string();
-
-        service
-            .ensure_consistency(&test_ctx(), prepared)
-            .await
-            .expect("message should persist");
-
-        assert_eq!(
-            observed
-                .lock()
-                .expect("observed idempotency lock")
-                .as_slice(),
-            &[(
-                "client-a".to_string(),
-                Some("sender-a".to_string()),
-                Some("conversation-a".to_string()),
-            )]
-        );
     }
 
     #[tokio::test]
@@ -1848,13 +1479,11 @@ mod tests {
         let stages = Arc::new(Mutex::new(Vec::new()));
         let service: MessagePersistenceDomainService<
             NoopRepository,
-            NoopRepository,
             CountingArchiveRepository,
             CountingEventStreamRepository,
             NoopRepository,
             NoopRepository,
         > = MessagePersistenceDomainService::new(
-            None,
             None,
             Some(Arc::new(CountingArchiveRepository {
                 writes: archive_writes,
@@ -1883,41 +1512,13 @@ mod tests {
 
     #[tokio::test]
     async fn ensure_consistency_publishes_ack_for_duplicate_message() {
-        let duplicate_acks = Arc::new(AtomicUsize::new(0));
-        let service: MessagePersistenceDomainService<
-            DuplicateIdempotencyRepository,
-            NoopRepository,
-            NoopRepository,
-            CountingEventStreamRepository,
-            NoopRepository,
-            CountingAckPublisher,
-        > = MessagePersistenceDomainService::new(
-            Some(Arc::new(DuplicateIdempotencyRepository)),
-            None,
-            None,
-            None,
-            None,
-            Some(Arc::new(CountingAckPublisher {
-                duplicate_acks: duplicate_acks.clone(),
-            })),
-        )
-        .with_usage(flare_im_usage::UsageRecorder::unpublished(
-            "storage-writer-test",
-        ));
-
+        let service = ledger_fixture("message-duplicate").service;
         let result = service
-            .ensure_consistency(&test_ctx(), prepared_message("message-a", 1))
+            .ensure_consistency(&test_ctx(), prepared_message("message-duplicate", 1))
             .await
-            .expect("duplicate message should still produce a result");
-
+            .unwrap();
         assert!(result.deduplicated);
-        // A redelivered duplicate was counted when it was first persisted.
         assert!(service.usage.live().is_empty());
-        assert_eq!(
-            duplicate_acks.load(Ordering::SeqCst),
-            1,
-            "duplicate messages must still publish duplicate ACKs"
-        );
     }
 
     #[tokio::test]
@@ -1926,13 +1527,11 @@ mod tests {
         let stream_writes = Arc::new(AtomicUsize::new(0));
         let service: MessagePersistenceDomainService<
             NoopRepository,
-            NoopRepository,
             CountingArchiveRepository,
             CountingEventStreamRepository,
             NoopRepository,
             NoopRepository,
         > = MessagePersistenceDomainService::new(
-            None,
             None,
             Some(Arc::new(CountingArchiveRepository {
                 writes: archive_writes.clone(),
@@ -1959,23 +1558,17 @@ mod tests {
 
     #[tokio::test]
     async fn ensure_consistency_returns_error_when_ack_publish_fails_and_retries_duplicate_ack() {
-        let reserved = Arc::new(AtomicBool::new(false));
-        let archive_writes = Arc::new(AtomicUsize::new(0));
         let stream_writes = Arc::new(AtomicUsize::new(0));
         let ack_attempts = Arc::new(AtomicUsize::new(0));
         let service: MessagePersistenceDomainService<
-            ReservingIdempotencyRepository,
             NoopRepository,
-            CountingArchiveRepository,
+            DurableArchiveRepository,
             CountingEventStreamRepository,
             NoopRepository,
             FailOnceAckPublisher,
         > = MessagePersistenceDomainService::new(
-            Some(Arc::new(ReservingIdempotencyRepository { reserved })),
             None,
-            Some(Arc::new(CountingArchiveRepository {
-                writes: archive_writes.clone(),
-            })),
+            Some(Arc::new(DurableArchiveRepository::default())),
             Some(Arc::new(CountingEventStreamRepository {
                 writes: stream_writes.clone(),
             })),
@@ -1998,14 +1591,9 @@ mod tests {
 
         assert!(retry.deduplicated);
         assert_eq!(
-            archive_writes.load(Ordering::SeqCst),
-            1,
-            "ACK retry must not re-enter archive path"
-        );
-        assert_eq!(
             stream_writes.load(Ordering::SeqCst),
-            1,
-            "ACK retry must not re-enter event stream path"
+            2,
+            "ACK retry safely re-enters the event stream"
         );
         assert_eq!(ack_attempts.load(Ordering::SeqCst), 2);
     }
@@ -2016,13 +1604,11 @@ mod tests {
         let stages = Arc::new(Mutex::new(Vec::new()));
         let service: MessagePersistenceDomainService<
             NoopRepository,
-            NoopRepository,
             CountingArchiveRepository,
             CountingEventStreamRepository,
             NoopRepository,
             FailOnceAckPublisher,
         > = MessagePersistenceDomainService::new(
-            None,
             None,
             Some(Arc::new(CountingArchiveRepository {
                 writes: Arc::new(AtomicUsize::new(0)),
@@ -2074,6 +1660,10 @@ mod tests {
     }
 
     impl ArchiveStoreRepository for LedgerArchiveRepository {
+        async fn get_message(&self, _ctx: &Ctx, id: &str) -> AnyhowResult<Option<Message>> {
+            Ok(Some(prepared_message(id, 1).message))
+        }
+
         async fn store_archive(&self, _ctx: &Ctx, message: &Message) -> AnyhowResult<()> {
             self.stored
                 .lock()
@@ -2105,7 +1695,6 @@ mod tests {
     }
 
     type LedgerTestService = MessagePersistenceDomainService<
-        NoopRepository,
         CountingHotCacheRepository,
         LedgerArchiveRepository,
         BatchCountingEventStreamRepository,
@@ -2131,7 +1720,6 @@ mod tests {
         let duplicate_acks = Arc::new(AtomicUsize::new(0));
         let metrics = Arc::new(StorageWriterMetrics::new());
         let service = MessagePersistenceDomainService::new(
-            None,
             Some(Arc::new(CountingHotCacheRepository {
                 writes: hot_writes.clone(),
             })),
@@ -2181,8 +1769,7 @@ mod tests {
             .get()
     }
 
-    /// 批量里有一条被账本判为重复：它不写入、不进事件流与热缓存、按去重回 ACK、不计用量；同批其余消息
-    /// 照常持久化，整批不失败。
+    /// 重复发送不插入第二条归档或事件，也不再计入用量。
     #[tokio::test]
     async fn a_ledger_duplicate_in_a_batch_is_skipped_without_failing_the_others() {
         let fixture = ledger_fixture("message-dup");
@@ -2227,9 +1814,9 @@ mod tests {
         assert_eq!(duplicates_skipped(&fixture.metrics) - before, 1);
     }
 
-    /// 单条路径：账本判为重复的消息不进事件流（Sync 不会再给出第二条），按去重回 ACK。
+    /// 重复发送只有取得持久化账本结论后才确认，Sync 不会出现第二条发送。
     #[tokio::test]
-    async fn a_single_ledger_duplicate_is_acknowledged_as_duplicate_and_not_streamed() {
+    async fn a_single_ledger_duplicate_is_acknowledged_without_a_second_event() {
         let fixture = ledger_fixture("message-dup");
 
         let result = fixture
@@ -2253,6 +1840,137 @@ mod tests {
             .await
             .expect("the next message persists");
         assert!(!next.deduplicated);
-        assert_eq!(fixture.single_events.load(Ordering::SeqCst), 1);
+        assert_eq!(fixture.event_count.load(Ordering::SeqCst), 1);
+    }
+    struct PausedEventStream {
+        calls: AtomicUsize,
+        entered: tokio::sync::Notify,
+    }
+    impl EventStreamRepository for PausedEventStream {
+        async fn append_event_to_stream(&self, _ctx: &Ctx, _event: &Event) -> AnyhowResult<()> {
+            if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                self.entered.notify_one();
+                std::future::pending::<()>().await;
+            }
+            Ok(())
+        }
+        async fn match_stored_event(
+            &self,
+            _ctx: &Ctx,
+            _event: &Event,
+        ) -> AnyhowResult<crate::domain::repository::StoredEventMatch> {
+            Ok(crate::domain::repository::StoredEventMatch::Absent)
+        }
+    }
+
+    #[tokio::test]
+    async fn cancellation_before_event_commit_has_no_ack_and_retries_the_archive() {
+        let events = Arc::new(PausedEventStream {
+            calls: AtomicUsize::new(0),
+            entered: tokio::sync::Notify::new(),
+        });
+        let acknowledgements = Arc::new(AtomicUsize::new(0));
+        let service = Arc::new(MessagePersistenceDomainService::<
+            NoopRepository,
+            _,
+            _,
+            NoopRepository,
+            _,
+        >::new(
+            None,
+            Some(Arc::new(DurableArchiveRepository::default())),
+            Some(events.clone()),
+            None,
+            Some(Arc::new(FailNthAckPublisher {
+                attempts: acknowledgements.clone(),
+                fail_at: usize::MAX,
+            })),
+        ));
+        let task_service = service.clone();
+        let task = tokio::spawn(async move {
+            task_service
+                .ensure_consistency(&test_ctx(), prepared_message("cancelled", 1))
+                .await
+        });
+        events.entered.notified().await;
+        assert_eq!(acknowledgements.load(Ordering::SeqCst), 0);
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
+        let retry = service
+            .ensure_consistency(&test_ctx(), prepared_message("cancelled", 1))
+            .await
+            .unwrap();
+        assert!(retry.deduplicated);
+        assert_eq!(events.calls.load(Ordering::SeqCst), 2);
+        assert_eq!(acknowledgements.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn repeated_messages_in_a_failing_batch_never_publish_an_early_ack() {
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let service = MessagePersistenceDomainService::<
+            NoopRepository,
+            _,
+            CountingEventStreamRepository,
+            NoopRepository,
+            _,
+        >::new(
+            None,
+            Some(Arc::new(FailingArchiveRepository)),
+            None,
+            None,
+            Some(Arc::new(FailNthAckPublisher {
+                attempts: attempts.clone(),
+                fail_at: usize::MAX,
+            })),
+        );
+        assert!(
+            service
+                .ensure_batch_consistency(
+                    &test_ctx(),
+                    vec![prepared_message("same", 1), prepared_message("same", 1)]
+                )
+                .await
+                .is_err()
+        );
+        assert_eq!(attempts.load(Ordering::SeqCst), 0);
+    }
+    #[tokio::test]
+    async fn partial_batch_failure_retries_every_message_before_acknowledging() {
+        let archive = Arc::new(DurableArchiveRepository::default());
+        *archive.fail_once_on.lock().unwrap() = Some("second".into());
+        let acknowledgements = Arc::new(AtomicUsize::new(0));
+        let events = Arc::new(AtomicUsize::new(0));
+        let service =
+            MessagePersistenceDomainService::<NoopRepository, _, _, NoopRepository, _>::new(
+                None,
+                Some(archive.clone()),
+                Some(Arc::new(CountingEventStreamRepository {
+                    writes: events.clone(),
+                })),
+                None,
+                Some(Arc::new(FailNthAckPublisher {
+                    attempts: acknowledgements.clone(),
+                    fail_at: usize::MAX,
+                })),
+            );
+        let batch = || vec![prepared_message("first", 1), prepared_message("second", 2)];
+        assert!(
+            service
+                .ensure_batch_consistency(&test_ctx(), batch())
+                .await
+                .is_err()
+        );
+        assert_eq!(archive.stored.lock().unwrap().len(), 1);
+        assert_eq!(acknowledgements.load(Ordering::SeqCst), 0);
+        let results = service
+            .ensure_batch_consistency(&test_ctx(), batch())
+            .await
+            .unwrap();
+        assert_eq!(archive.stored.lock().unwrap().len(), 2);
+        assert!(results[0].deduplicated);
+        assert!(!results[1].deduplicated);
+        assert_eq!(events.load(Ordering::SeqCst), 2);
+        assert_eq!(acknowledgements.load(Ordering::SeqCst), 2);
     }
 }

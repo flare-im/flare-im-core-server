@@ -39,5 +39,8 @@ if [ "${START_SOCIAL_HOOK_CHECK:-1}" != "0" ]; then
 fi
 
 export FLARE_HOOKS_PROFILE=social
+# A Social group's roster is disclosed only through flare-group's roster policy (as the deploy templates wire
+# it); unset, Conversation hides every Social group's members from plugins and other non-service readers.
+export CONVERSATION_ROSTER_POLICY_GRPC_URL="${CONVERSATION_ROSTER_POLICY_GRPC_URL:-http://127.0.0.1:50203}"
 # 通过 bash 解释执行，避免部分环境下直接 ./start_server.sh 被 SIGKILL(9)
 bash "$SCRIPT_DIR/start_server.sh" "$@"

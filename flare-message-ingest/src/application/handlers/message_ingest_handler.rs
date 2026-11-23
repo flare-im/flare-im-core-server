@@ -537,7 +537,12 @@ impl MessageIngestHandler {
         let tenant_id = flare_im_contracts::utils::normalize_tenant_id(tenant_id);
         let found = tokio::time::timeout(
             LEDGER_LOOKUP_TIMEOUT,
-            ledger.find(&tenant_id, &message.sender_id, &message.client_msg_id),
+            ledger.find(
+                &tenant_id,
+                &message.sender_id,
+                &message.conversation_id,
+                &message.client_msg_id,
+            ),
         )
         .await
         .unwrap_or_else(|_| {

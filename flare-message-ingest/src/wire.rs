@@ -135,30 +135,19 @@ async fn initialize_with_config(
             "FLARE_INTERNAL_CTX_PRIVATE_KEY is missing: seq floor reads forward the inbound signature or go unsigned"
         );
     }
-    let seq_floor_provider =
-        match flare_im_service_kit::discovery::connect_grpc_channel_lazy_from_app_config(
-            app_config,
-            STORAGE_READER,
-            STORAGE_READER,
-            flare_im_service_kit::discovery::default_static_grpc_fallback(STORAGE_READER),
-        ) {
-            Ok(channel) => {
-                let provider: Arc<dyn crate::domain::repository::SeqFloorProvider> = Arc::new(
-                crate::infrastructure::persistence::storage_seq_floor_provider::StorageSeqFloorProvider::from_channel(
-                    channel,
-                )
-                .with_service_signer(floor_signer, MESSAGE_INGEST),
-            );
-                Some(provider)
-            }
-            Err(e) => {
-                tracing::warn!(
-                    error = %e,
-                    "storage-reader lazy channel unavailable; seq floor self-heal disabled (plain INCR)"
-                );
-                None
-            }
-        };
+    let floor_channel = flare_im_service_kit::discovery::connect_grpc_channel_lazy_from_app_config(
+        app_config,
+        STORAGE_READER,
+        STORAGE_READER,
+        flare_im_service_kit::discovery::default_static_grpc_fallback(STORAGE_READER),
+    )
+    .map_err(|e| {
+        flare_server_core::error::FlareError::system(format!("sequence floor reader: {e}"))
+    })?;
+    let sequence_allocator = sequence_allocator.with_floor_provider(Arc::new(
+        flare_im_service_kit::sequence_floor::StorageSeqFloorProvider::from_channel(floor_channel)
+            .with_service_signer(floor_signer, MESSAGE_INGEST),
+    ));
 
     let message_ingest_service = Arc::new(MessageIngestService::new(
         push_repository,
@@ -166,10 +155,7 @@ async fn initialize_with_config(
         wal_repository.clone(),
         Arc::new(sequence_allocator),
         config.defaults(),
-        MessageIngestServiceOptions {
-            seq_floor_provider,
-            ..MessageIngestServiceOptions::new()
-        },
+        MessageIngestServiceOptions::new(),
     ));
 
     let wal_replay_handler = Arc::new(

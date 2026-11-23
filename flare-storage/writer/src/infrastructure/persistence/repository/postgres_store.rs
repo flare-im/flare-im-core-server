@@ -46,6 +46,7 @@ struct MessageRow {
     message_type: i32,
     content: Option<Vec<u8>>,
     status: i32,
+    last_edit_seq: i64,
     burn_enabled: bool,
     burn_after_read_seconds: Option<i64>,
     burn_status: i32,
@@ -207,7 +208,7 @@ impl PostgresMessageStore {
 
         let row = sqlx::query_as::<_, MessageRow>(
             r#"
-            SELECT tenant_id, server_id, conversation_id, client_msg_id, sender_id, sender_name, sender_avatar,
+            SELECT tenant_id, server_id, conversation_id, GREATEST(COALESCE((messages.extra->'serverEdit'->>'eventSeq')::bigint, 0), COALESCE((SELECT MAX(h.seq) FROM message_operation_history h WHERE h.tenant_id=messages.tenant_id AND h.conversation_id=messages.conversation_id AND h.message_id=messages.server_id AND h.operation_type='EVENT_MESSAGE_EDIT'), 0)) AS last_edit_seq, client_msg_id, sender_id, sender_name, sender_avatar,
                 channel_id, thread_id, source, seq, timestamp, conversation_type, message_type, content,
                 status, burn_enabled, burn_after_read_seconds, burn_status, first_read_at, burn_at,
                 burned_at, offline_push_info, extra, extensions, created_at, persisted_at, delivered_at
@@ -290,6 +291,7 @@ impl PostgresMessageStore {
             .collect();
         extra.insert("tenant_id".to_string(), row.tenant_id.clone());
 
+        let reaction_states = flare_im_contracts::message::reaction_states_from_extra(&extra_value);
         let msg = Message {
             server_id: row.server_id,
             conversation_id: row.conversation_id,
@@ -307,6 +309,8 @@ impl PostgresMessageStore {
             thread_id: row.thread_id,
             content,
             status: row.status,
+            last_edit_seq: u64::try_from(row.last_edit_seq).unwrap_or_default(),
+            reaction_states,
             retention_policy: None,
             retention_state: legacy_retention_state(
                 row.burn_status,
@@ -518,7 +522,6 @@ const LEDGER_DURABILITY: i16 = flare_proto::common::SendAckDurability::Persisted
 /// 先 `INSERT … ON CONFLICT DO NOTHING` 认领；没认领到的键另起一条语句读出占用者（READ COMMITTED 下，
 /// 冲突等待期间别的事务提交的行要到新语句才看得见；同一批里先认领的行本事务也看得见）：
 /// - 占用者就是这条消息（重投；或写入台账里已没有它而账本还在）：照常写入；
-/// - 占用者在另一会话：重发不会换会话，这是 `client_msg_id` 被复用，照常写入，账本仍指向先到的那条；
 /// - 占用者是同一会话的另一条消息：同一次发送的第二条，不写入。
 async fn claim_send_idempotency(
     conn: &mut sqlx::PgConnection,
@@ -553,7 +556,7 @@ async fn claim_send_idempotency(
                    conversation_seq, position
                )
          ORDER BY position
-        ON CONFLICT (tenant_id, sender_id, client_msg_id) DO NOTHING
+        ON CONFLICT (tenant_id, sender_id, conversation_id, client_msg_id) DO NOTHING
         RETURNING server_id
         "#,
     )
@@ -586,10 +589,11 @@ async fn claim_send_idempotency(
         SELECT ledger.tenant_id, ledger.sender_id, ledger.client_msg_id,
                ledger.conversation_id, ledger.server_id
           FROM message_idempotency_ledger AS ledger
-          JOIN UNNEST($1::text[], $2::text[], $3::text[]) AS claim(tenant_id, sender_id, client_msg_id)
+          JOIN UNNEST($1::text[], $2::text[], $3::text[], $4::text[]) AS claim(tenant_id, sender_id, client_msg_id, conversation_id)
             ON ledger.tenant_id = claim.tenant_id
            AND ledger.sender_id = claim.sender_id
            AND ledger.client_msg_id = claim.client_msg_id
+           AND ledger.conversation_id = claim.conversation_id
         "#,
     )
     .bind(
@@ -610,6 +614,7 @@ async fn claim_send_idempotency(
             .map(|claim| claim.client_msg_id.clone())
             .collect::<Vec<_>>(),
     )
+    .bind(unclaimed.iter().map(|claim| claim.conversation_id.clone()).collect::<Vec<_>>())
     .fetch_all(&mut *conn)
     .await
     .map_err(|err| {
@@ -617,13 +622,13 @@ async fn claim_send_idempotency(
             "read message idempotency ledger occupants failed: {err}"
         ))
     })?;
-    let occupants: HashMap<(String, String, String), (String, String)> = occupants
+    let occupants: HashMap<(String, String, String, String), String> = occupants
         .into_iter()
         .map(
             |(tenant_id, sender_id, client_msg_id, conversation_id, server_id)| {
                 (
-                    (tenant_id, sender_id, client_msg_id),
-                    (conversation_id, server_id),
+                    (tenant_id, sender_id, conversation_id, client_msg_id),
+                    server_id,
                 )
             },
         )
@@ -633,17 +638,14 @@ async fn claim_send_idempotency(
         let key = (
             claim.tenant_id.clone(),
             claim.sender_id.clone(),
+            claim.conversation_id.clone(),
             claim.client_msg_id.clone(),
         );
         // 读不到占用者：认领与读取之间已被保留期清理删掉，按新消息写入。
-        let Some((conversation_id, server_id)) = occupants.get(&key) else {
+        let Some(server_id) = occupants.get(&key) else {
             continue;
         };
         if *server_id == claim.server_id {
-            continue;
-        }
-        if *conversation_id != claim.conversation_id {
-            outcome.reused_client_msg_ids += 1;
             continue;
         }
         outcome.duplicates.push(LedgerDuplicate {
@@ -657,7 +659,7 @@ async fn claim_send_idempotency(
 /// 删一批过期账本行：先锁定至多 `$2` 行再按主键删，多个 Writer 实例同时清理时互相跳过已锁的行。
 const DELETE_EXPIRED_LEDGER_SQL: &str = r#"
 WITH batch AS MATERIALIZED (
-    SELECT tenant_id, sender_id, client_msg_id
+    SELECT tenant_id, sender_id, conversation_id, client_msg_id
       FROM message_idempotency_ledger
      WHERE created_at < $1
      ORDER BY created_at
@@ -668,7 +670,8 @@ DELETE FROM message_idempotency_ledger AS ledger
  USING batch
  WHERE ledger.tenant_id = batch.tenant_id
    AND ledger.sender_id = batch.sender_id
-   AND ledger.client_msg_id = batch.client_msg_id
+   AND ledger.conversation_id = batch.conversation_id
+    AND ledger.client_msg_id = batch.client_msg_id
 "#;
 
 impl crate::domain::repository::IdempotencyLedgerRetention for PostgresMessageStore {
@@ -733,7 +736,7 @@ impl PostgresMessageStore {
         )
         .into_iter()
         .collect();
-        let outcome = claim_send_idempotency(&mut tx, &claims).await?;
+        let mut outcome = claim_send_idempotency(&mut tx, &claims).await?;
         if outcome.is_duplicate(&proto_msg.server_id) {
             // 什么也没写：先到的那条已经入账。
             tx.commit().await?;
@@ -770,6 +773,7 @@ impl PostgresMessageStore {
         })?;
 
         if ledger_result.rows_affected() == 0 {
+            outcome.already_archived.push(proto_msg.server_id.clone());
             tx.commit().await?;
             tracing::trace!(
                 tenant_id = %tenant_id,
@@ -912,6 +916,7 @@ impl ArchiveStoreRepository for PostgresMessageStore {
         tenant_id: &str,
         message_id: &str,
         new_content: &[u8],
+        event_seq: u64,
         editor_id: &str,
         reason: Option<&str>,
         content_text_for_extra: Option<&str>,
@@ -922,6 +927,7 @@ impl ArchiveStoreRepository for PostgresMessageStore {
                 tenant_id,
                 message_id,
                 new_content,
+                event_seq,
                 editor_id,
                 reason,
                 content_text_for_extra,
@@ -1193,10 +1199,11 @@ impl ArchiveStoreRepository for PostgresMessageStore {
         emoji: &str,
         user_id: &str,
         add: bool,
+        event_seq: u64,
     ) -> Result<()> {
         let _ = ctx; // 上下文用于日志追踪
         self.operation_store
-            .upsert_message_reaction(tenant_id, message_id, emoji, user_id, add)
+            .upsert_message_reaction(tenant_id, message_id, emoji, user_id, add, event_seq)
             .await
     }
 
@@ -1521,7 +1528,7 @@ impl PostgresMessageStore {
                 }
             };
 
-            let outcome = match claim_send_idempotency(&mut tx, &claims).await {
+            let mut outcome = match claim_send_idempotency(&mut tx, &claims).await {
                 Ok(outcome) => outcome,
                 Err(e) => {
                     last_error = Some(e);
@@ -1599,7 +1606,15 @@ impl PostgresMessageStore {
                 }
             };
 
-            if inserted_ledger_rows.is_empty() {
+            let inserted_keys: HashSet<(String, String)> =
+                inserted_ledger_rows.into_iter().collect();
+            outcome.already_archived.extend(
+                candidates
+                    .iter()
+                    .filter(|row| !inserted_keys.contains(&(row.0.clone(), row.1.clone())))
+                    .map(|row| row.1.clone()),
+            );
+            if inserted_keys.is_empty() {
                 tx.commit().await?;
                 tracing::trace!(
                     batch_size = messages.len(),
@@ -1608,8 +1623,6 @@ impl PostgresMessageStore {
                 return Ok(outcome);
             }
 
-            let inserted_keys: HashSet<(String, String)> =
-                inserted_ledger_rows.into_iter().collect();
             let rows_to_insert: Vec<_> = candidates
                 .iter()
                 .copied()

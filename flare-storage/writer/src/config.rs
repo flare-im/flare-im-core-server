@@ -41,8 +41,7 @@ pub struct StorageWriterConfig {
     pub redis_url: Option<String>,
     pub redis_hot_ttl_seconds: u64,
     pub redis_hot_tail_limit: usize,
-    pub redis_idempotency_ttl_seconds: u64,
-    /// 进程共享的 Redis 连接的建连、应答与重试上限（热缓存、去重、WAL 清理共用）。
+    /// 进程共享的 Redis 连接的建连、应答与重试上限（热缓存、WAL 清理共用）。
     pub redis_limits: RedisConnectionLimits,
     pub wal_hash_key: Option<String>,
     pub postgres_url: Option<String>,
@@ -199,11 +198,6 @@ impl StorageWriterConfig {
             .unwrap_or(50)
             .max(1);
 
-        let redis_idempotency_ttl_seconds = env::var("STORAGE_REDIS_IDEMPOTENCY_TTL_SECONDS")
-            .ok()
-            .and_then(|v| v.parse::<u64>().ok())
-            .unwrap_or(24 * 3600);
-
         // Redis 不可达时一次调用在几秒内失败，不卡住消费者；取值无效时启动即失败。
         let redis_limits = RedisConnectionLimits::from_env_values(
             (
@@ -312,7 +306,6 @@ impl StorageWriterConfig {
             redis_url,
             redis_hot_ttl_seconds,
             redis_hot_tail_limit,
-            redis_idempotency_ttl_seconds,
             redis_limits,
             wal_hash_key,
             postgres_url,

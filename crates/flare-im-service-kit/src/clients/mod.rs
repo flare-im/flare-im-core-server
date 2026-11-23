@@ -141,8 +141,7 @@ impl GrpcClients {
 
     /// 按 [`Self::request_timeout`] 限时执行一次下游调用。
     ///
-    /// 客户端放在互斥锁后面、调用期间一直持锁，所以把取锁也放进 `call`：限的是从开始等锁到
-    /// 拿到应答的整段时间，排在慢调用后面的请求同样按时返回，而不是逐个等满超时。
+    /// 调用方只在克隆客户端时短暂持锁；整个 RPC（含连接与重试）共用一次超时预算。
     pub async fn bounded<T, E, F>(&self, call: F) -> std::result::Result<T, E>
     where
         F: std::future::Future<Output = std::result::Result<T, E>>,

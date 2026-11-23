@@ -17,7 +17,7 @@ reviewed. Neither initializer command uses or creates a SQLx migration ledger.
 Set `CORE_INITIAL_DATABASE_URL` privately and set `CORE_INITIAL_DATABASE` to the
 same explicit database name. Passwords and connection URLs must stay out of
 logs. Then run the normal `flare-core-initialize` binary with no argument for a
-fresh, empty v3 database. Schema, system seeds, the v3 `core_initial_schema`
+fresh, empty v4 database. Schema, system seeds, the v4 `core_initial_schema`
 marker and a `core_initial_history` fresh transition commit in one transaction.
 Replay verifies the full current source shape, authority and history without
 resetting configuration or data. Unrelated nonempty databases are rejected.
@@ -27,9 +27,10 @@ resetting configuration or data. Unrelated nonempty databases are rejected.
 Stop or quiesce writers, capture the normal reviewed backup, and run the same
 operator binary with the explicit `upgrade` argument and the exact database
 owner connection. This accepts only the released initial models archived under
-`versions/v1` and `versions/v2`, whose schema-plus-NUL-plus-seeds SHA-256 are
-`0ef150419f08a05d966226025d426e7cb2cf6013d976565f0002e9b733275093` (v1) and
-`3e882365f055b204d38c8667bed194ee8393d7cf25dfe670fc7401fdba808f4f` (v2).
+`versions/v1`, `versions/v2` and `versions/v3`, whose schema-plus-NUL-plus-seeds SHA-256 are
+`0ef150419f08a05d966226025d426e7cb2cf6013d976565f0002e9b733275093` (v1),
+`3e882365f055b204d38c8667bed194ee8393d7cf25dfe670fc7401fdba808f4f` (v2) and
+`90acd60d209939d9973e484dae2d132fba692ee51f5e92bd44fa09e2e7c06afd` (v3).
 The actual catalog must also exactly match a source-generated descriptor in
 `upgrades/v1-pg16-ts*.json` or `upgrades/v2-pg16-ts*.json`: relations, columns, indexes, constraints, triggers,
 functions, schema/role/database ownership and ACLs, and Timescale settings.
@@ -50,12 +51,19 @@ history row, whether it came from that step or from a fresh v2 initialization.
 `upgrades/0003_plugin_web_bundles.sql` then creates the empty `plugin_web_bundles`
 table of the fresh v3 schema, adds the user-level notification settings table and
 the participant `notify_all` flag with its partial index (existing participants
-start with it off), and widens the history checks to the v3 transition.
+start with it off), and widens the history checks to the v3 transition. Every path
+then matches the released v3 descriptor and history before
+`upgrades/0004_conversation_send_idempotency.sql` keys the send idempotency ledger
+per conversation (`tenant_id, sender_id, conversation_id, client_msg_id`, the
+Storage Writer's `ON CONFLICT` target, as migration 0032), recovers the receipts of
+the last 7 days of messages and widens the history checks to the v4 transition.
 Each step advances the genuine initial marker and records the accepted old
 source, target source and exact forward DDL hashes in `core_initial_history`, so
-a v1 database ends with two rows and a v2 database gains one. Runtime can read
+a v1 database ends with three rows and a v2 or v3 database gains one per step. Runtime can read
 history and cannot insert, update or delete it. The target descriptor must match
-the fresh v3 descriptor in `upgrades/v3-pg16-ts*.json` before commit. Failure rolls back DDL, marker
+the fresh v4 descriptor in `upgrades/v4-pg16-ts*.json` before commit. The v4 step
+changes the ledger's key, so it ships together with the Storage Writer that claims
+receipts per conversation. Failure rolls back DDL, marker
 and history together; an identical completed repeat verifies provenance and
 returns `changed:false` without rewriting its timestamp.
 
@@ -76,4 +84,6 @@ the same generator reproduces the committed descriptors byte for byte; every
 upgrade path must produce the same catalog as the fresh model. The v3
 descriptors were made this way on PostgreSQL 16.15 with TimescaleDB 2.29.1 and
 2.30.0: the fresh model, v1 through v2 to v3 and fresh v2 to v3 all give the
-same 1485 objects.
+same 1485 objects. The v4 descriptors were generated the same way (PostgreSQL 16.15,
+TimescaleDB 2.29.1 and 2.30.0) after the generator reproduced both v3 descriptors byte
+for byte; fresh v4 and fresh v3 to v4 give the same 1485 objects.

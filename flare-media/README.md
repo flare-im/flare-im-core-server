@@ -30,7 +30,7 @@ A user accessing a media resource in a message follows this flow:
    - Call the Media service's `GetFileUrl` interface to obtain a temporary signed link.
    - Or directly use the `cdn_url` field pre-populated in the message.
 4. **Resource download**: download or play the media resource via the obtained URL.
-5. **Permission verification**: before accessing the resource, the service verifies whether the user has permission to access it (based on the message's access permissions).
+5. **Permission verification**: Media verifies the signed application and actor. Presentation reads follow the application-wide policy below; a message reference does not restrict User reads to its participants.
 
 ### Resource lifecycle management
 The lifecycle of media resources in the message system is uniformly managed by the Media service:
@@ -52,9 +52,10 @@ To ensure effective resource management and avoid accidental deletion, the syste
 To ensure the security of resource access, the system provides the following security mechanisms:
 
 1. **Temporary access token**: the link obtained via `GetFileUrl` contains a time-limited temporary access token.
-2. **Access permission control**: only the sender and recipient of a message can access the related resource.
-3. **Anti-hotlinking mechanism**: prevents illegal access to resources through Referer checks and signature verification.
-4. **HTTPS encrypted transport**: all resource access is transmitted over HTTPS encryption.
+2. **Presentation reads**: any authenticated IM User in the same application may read file metadata, bytes and URLs, including files marked `Private`; owner grants and message membership are not required. Cross-application reads are refused.
+3. **Source processing and management**: source-processing reads require the owner, public access or an explicit User read grant. Staff message inspection requires `core:messages:read` and a verified visible message reference. Administrative operations require their specific Staff permissions; Service identities use their explicit capability scopes. Neither presentation access nor a read grant authorizes updates or deletion; ordinary mutations remain bound to the owner.
+4. **Anti-hotlinking mechanism**: prevents illegal access to resources through Referer checks and signature verification.
+5. **HTTPS encrypted transport**: all resource access is transmitted over HTTPS encryption.
 
 ## Configuration
 

@@ -50,13 +50,16 @@ services:
     ulimits:
       memlock: -1
     # 列表形式确保每个 flag 是独立 exec arg。maxmemory 6G;快照落同一挂载卷。
-    # 如需认证:追加一行 - "--requirepass=你的密码"。
+    # 空密码保持本地无认证模式；健康检查从环境读取同一密码。
     command:
+      - "--requirepass=${REDIS_PASSWORD:-}"
       - "--logtostderr"
       - "--maxmemory=6gb"
       - "--dir=/data"
       - "--dbfilename=dump"
       - "--snapshot_cron=*/5 * * * *"
+    environment:
+      REDISCLI_AUTH: ${REDIS_PASSWORD:-}
     healthcheck:
       test: ["CMD-SHELL", "redis-cli -p 6379 ping | grep -q PONG"]
       interval: 10s

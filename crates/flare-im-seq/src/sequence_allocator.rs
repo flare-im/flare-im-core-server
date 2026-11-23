@@ -1,3 +1,4 @@
+use flare_server_core::context::Ctx;
 /// 会话序列号分配器（Session Sequence Allocator）
 ///
 /// # 核心职责
@@ -26,10 +27,10 @@
 /// let allocator = SequenceAllocator::new(redis_client, 100);
 ///
 /// // 单次分配
-/// let seq = allocator.allocate_seq("session-123", "tenant-a").await?;
+/// let seq = allocator.allocate_seq(&ctx, "session-123", "tenant-a").await?;
 ///
 /// // 显式批量分配（仅用于调用方能立即按顺序提交整批操作的场景）
-/// let seqs = allocator.allocate_batch("session-456", "tenant-b").await?;
+/// let seqs = allocator.allocate_batch(&ctx, "session-456", "tenant-b").await?;
 /// ```
 ///
 /// # 参考资料
@@ -37,10 +38,17 @@
 /// - 微信 MsgService 序列号设计：https://cloud.tencent.com/developer/article/1006035
 /// - Telegram Sequence Number：https://core.telegram.org/mtproto/description#message-identifier-msg-id
 use flare_server_core::error::AnyhowContext;
-use flare_server_core::error::Result;
+use flare_server_core::error::{ErrorCode, FlareError, Result};
 use redis::aio::ConnectionManager;
 use std::sync::Arc;
 use tracing::debug;
+
+use crate::SeqFloorProvider;
+
+// A missing key must stay missing until its durable floor has been read.
+const ALLOCATE_SEQ_LUA: &str = r"if redis.call('EXISTS', KEYS[1]) == 0 then return false end
+return redis.call('INCRBY', KEYS[1], ARGV[1])";
+const FLOOR_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
 
 /// "带下限"分配的原子 Lua 脚本（与 [`SequenceAllocator::seq_after_floor`] 语义一一对应）。
 ///
@@ -49,45 +57,9 @@ use tracing::debug;
 const FLOOR_SEQ_LUA: &str = r"local cur = tonumber(redis.call('GET', KEYS[1]) or '0')
 local floor = tonumber(ARGV[1])
 if cur < floor then cur = floor end
-cur = cur + 1
+cur = cur + tonumber(ARGV[2])
 redis.call('SET', KEYS[1], cur)
 return cur";
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct SequenceRange {
-    next: u64,
-    end: u64,
-}
-
-impl SequenceRange {
-    pub(crate) fn new(start: u64, end: u64) -> Self {
-        Self { next: start, end }
-    }
-
-    pub(crate) fn take_next(&mut self) -> Option<u64> {
-        if self.next > self.end {
-            return None;
-        }
-
-        let seq = self.next;
-        self.next = self.next.saturating_add(1);
-        Some(seq)
-    }
-
-    #[cfg(test)]
-    fn is_exhausted(&self) -> bool {
-        self.next > self.end
-    }
-
-    #[cfg(test)]
-    fn remaining(&self) -> u64 {
-        if self.is_exhausted() {
-            0
-        } else {
-            self.end - self.next + 1
-        }
-    }
-}
 
 /// 会话序列号分配器
 ///
@@ -106,6 +78,7 @@ pub struct SequenceAllocator {
     ///
     /// 普通持久消息/事件必须走 `allocate_seq` 单次 INCR，避免跨服务本地号段缓存破坏会话内严格顺序。
     batch_size: u64,
+    floor_provider: Option<Arc<dyn SeqFloorProvider>>,
 }
 
 impl SequenceAllocator {
@@ -132,13 +105,13 @@ impl SequenceAllocator {
             _redis_client: redis_client, // 添加下划线前缀表示保留但暂时未使用
             connection_manager,
             batch_size: batch_size.max(1),
+            floor_provider: None,
         })
     }
 
-    fn build_allocate_seq_pipeline(key: &str) -> redis::Pipeline {
-        let mut pipe = redis::pipe();
-        pipe.atomic().cmd("INCR").arg(key);
-        pipe
+    pub fn with_floor_provider(mut self, provider: Arc<dyn SeqFloorProvider>) -> Self {
+        self.floor_provider = Some(provider);
+        self
     }
 
     /// 计算"带下限(floor)"的下一个序列号：`max(当前高水位, floor) + 1`。
@@ -167,19 +140,13 @@ impl SequenceAllocator {
         redis::Script::new(FLOOR_SEQ_LUA)
     }
 
-    fn build_allocate_batch_pipeline(key: &str, batch_size: u64) -> redis::Pipeline {
-        let mut pipe = redis::pipe();
-        pipe.atomic().cmd("INCRBY").arg(key).arg(batch_size);
-        pipe
-    }
-
     /// 为持久会话操作分配 session_seq（严格同步模式）
     ///
     /// # 核心逻辑
     ///
     /// 1. 构建 Redis key：`seq:{tenant_id}:{conversation_id}`
-    /// 2. 执行 `INCR key` 原子递增
-    /// 3. 返回递增后的序列号
+    /// 2. 原子检查计数器并递增；缺失时先读取持久化水位再初始化
+    /// 3. 水位读取失败或缺少 provider 时返回错误，不创建低位计数器
     ///
     /// # 性能
     ///
@@ -200,12 +167,16 @@ impl SequenceAllocator {
     /// # 示例
     ///
     /// ```rust,ignore
-    /// let seq = allocator.allocate_seq("session-123", "tenant-a").await?;
+    /// let seq = allocator.allocate_seq(&ctx, "session-123", "tenant-a").await?;
     /// println!("Allocated seq: {}", seq); // 输出：Allocated seq: 42
     /// ```
-    pub async fn allocate_seq(&self, conversation_id: &str, tenant_id: &str) -> Result<u64> {
-        let key = self.build_redis_key(tenant_id, conversation_id);
-        self.allocate_single_seq(&key, conversation_id, tenant_id)
+    pub async fn allocate_seq(
+        &self,
+        ctx: &Ctx,
+        conversation_id: &str,
+        tenant_id: &str,
+    ) -> Result<u64> {
+        self.allocate_count(ctx, conversation_id, tenant_id, 1)
             .await
     }
 
@@ -213,10 +184,8 @@ impl SequenceAllocator {
     ///
     /// # 背景
     ///
-    /// `allocate_seq` 依赖 Redis 计数器作为唯一高水位。一旦 Redis 被 flush / 实例重启 /
-    /// key 丢失，缺失 key 的 `INCR` 会从 1 重新计数，而持久化历史（Postgres）仍保留旧的
-    /// 更高 seq —— 新消息因此拿到 **低于历史** 的 seq，客户端按 seq 升序渲染时会把新消息
-    /// 插到历史中间。本方法以持久化 max_seq 作下限，用原子 Lua `max(GET,floor)+1` 消除回退。
+    /// 初始化缺失计数器时，以持久化 max_seq 作下限，原子计算 `max(GET,floor)+1`。
+    /// 并发读到旧 floor 的初始化请求也不能回退已恢复的计数器。
     ///
     /// # 参数
     ///
@@ -233,16 +202,23 @@ impl SequenceAllocator {
         tenant_id: &str,
         floor: u64,
     ) -> Result<u64> {
-        // floor 为 0 时没有回退风险，走更轻量的单次 INCR 快路径。
-        if floor == 0 {
-            return self.allocate_seq(conversation_id, tenant_id).await;
-        }
+        self.allocate_floor_count(conversation_id, tenant_id, floor, 1)
+            .await
+    }
 
+    async fn allocate_floor_count(
+        &self,
+        conversation_id: &str,
+        tenant_id: &str,
+        floor: u64,
+        count: u64,
+    ) -> Result<u64> {
         let key = self.build_redis_key(tenant_id, conversation_id);
         let mut conn = self.connection_manager.clone();
         let seq: u64 = Self::floor_seq_script()
             .key(&key)
             .arg(floor)
+            .arg(count)
             .invoke_async(&mut conn)
             .await
             .context("Failed to allocate floor-guarded sequence in Redis")?;
@@ -258,29 +234,40 @@ impl SequenceAllocator {
         Ok(seq)
     }
 
-    async fn allocate_single_seq(
+    async fn allocate_count(
         &self,
-        key: &str,
+        ctx: &Ctx,
         conversation_id: &str,
         tenant_id: &str,
+        count: u64,
     ) -> Result<u64> {
-        // 获取 Redis 连接
+        let key = self.build_redis_key(tenant_id, conversation_id);
         let mut conn = self.connection_manager.clone();
-
-        // 执行原子递增。持久会话的 seq 是同步和排序高水位，不能设置 TTL。
-        let (seq,): (u64,) = Self::build_allocate_seq_pipeline(key)
-            .query_async(&mut conn)
+        let seq: Option<u64> = redis::Script::new(ALLOCATE_SEQ_LUA)
+            .key(&key)
+            .arg(count)
+            .invoke_async(&mut conn)
             .await
             .context("Failed to allocate sequence in Redis")?;
 
-        debug!(
-            conversation_id = %conversation_id,
-            tenant_id = %tenant_id,
-            seq = seq,
-            "Allocated session sequence"
-        );
-
-        Ok(seq)
+        if let Some(seq) = seq {
+            return Ok(seq);
+        }
+        let unavailable = || {
+            FlareError::localized(
+                ErrorCode::ServiceUnavailable,
+                "conversation sequence floor unavailable; retry allocation",
+            )
+        };
+        let provider = self.floor_provider.as_ref().ok_or_else(unavailable)?;
+        let floor = tokio::time::timeout(
+            FLOOR_READ_TIMEOUT,
+            provider.persisted_max_seq(ctx, tenant_id, conversation_id),
+        )
+        .await
+        .map_err(|_| unavailable())??;
+        self.allocate_floor_count(conversation_id, tenant_id, floor, count)
+            .await
     }
 
     /// 显式批量模式（批量获取 seq，减少 Redis 调用）
@@ -319,7 +306,7 @@ impl SequenceAllocator {
     /// # 示例
     ///
     /// ```rust,ignore
-    /// let seqs = allocator.allocate_batch("session-456", "tenant-b").await?;
+    /// let seqs = allocator.allocate_batch(&ctx, "session-456", "tenant-b").await?;
     /// println!("Allocated batch: {:?}", seqs); // [100, 101, ..., 199]
     ///
     /// for seq in seqs {
@@ -327,43 +314,17 @@ impl SequenceAllocator {
     /// send_to_jetstream(message);
     /// }
     /// ```
-    pub async fn allocate_batch(&self, conversation_id: &str, tenant_id: &str) -> Result<Vec<u64>> {
-        let key = self.build_redis_key(tenant_id, conversation_id);
-        let range = self
-            .allocate_batch_range(&key, conversation_id, tenant_id)
-            .await?;
-
-        // 返回区间 [start_seq, end_seq]
-        Ok((range.next..=range.end).collect())
-    }
-
-    async fn allocate_batch_range(
+    pub async fn allocate_batch(
         &self,
-        key: &str,
+        ctx: &Ctx,
         conversation_id: &str,
         tenant_id: &str,
-    ) -> Result<SequenceRange> {
-        let mut conn = self.connection_manager.clone();
-
-        // 一次性递增 batch_size（如 100）。持久会话的 seq 高水位不能设置 TTL。
-        let (end_seq,): (u64,) = Self::build_allocate_batch_pipeline(key, self.batch_size)
-            .query_async(&mut conn)
-            .await
-            .with_context(|| "Failed to allocate batch sequence in Redis")?;
-
-        // 计算起始序列号
+    ) -> Result<Vec<u64>> {
+        let end_seq = self
+            .allocate_count(ctx, conversation_id, tenant_id, self.batch_size)
+            .await?;
         let start_seq = end_seq.saturating_sub(self.batch_size) + 1;
-
-        debug!(
-            conversation_id = %conversation_id,
-            tenant_id = %tenant_id,
-            start_seq = start_seq,
-            end_seq = end_seq,
-            batch_size = self.batch_size,
-            "Allocated batch sequence"
-        );
-
-        Ok(SequenceRange::new(start_seq, end_seq))
+        Ok((start_seq..=end_seq).collect())
     }
 
     /// 构建 Redis key（格式：seq:{tenant_id}:{conversation_id}）
@@ -413,57 +374,6 @@ impl SequenceAllocator {
 mod tests {
     use super::*;
 
-    fn packed_contains(packed: &[u8], needle: &[u8]) -> bool {
-        packed.windows(needle.len()).any(|window| window == needle)
-    }
-
-    #[test]
-    fn sequence_range_allocates_until_exhausted() {
-        let mut range = SequenceRange::new(10, 12);
-
-        assert_eq!(range.remaining(), 3);
-        assert_eq!(range.take_next(), Some(10));
-        assert_eq!(range.take_next(), Some(11));
-        assert_eq!(range.remaining(), 1);
-        assert_eq!(range.take_next(), Some(12));
-        assert_eq!(range.take_next(), None);
-        assert!(range.is_exhausted());
-    }
-
-    #[test]
-    fn empty_sequence_range_is_exhausted() {
-        let mut range = SequenceRange::new(20, 19);
-
-        assert_eq!(range.remaining(), 0);
-        assert_eq!(range.take_next(), None);
-        assert!(range.is_exhausted());
-    }
-
-    #[test]
-    fn allocate_seq_pipeline_keeps_persistent_high_water() {
-        let packed = SequenceAllocator::build_allocate_seq_pipeline("seq:tenant:conversation")
-            .get_packed_pipeline();
-
-        assert!(packed_contains(&packed, b"INCR"));
-        assert!(
-            !packed_contains(&packed, b"EXPIRE"),
-            "persistent conversation sequence keys must not expire"
-        );
-    }
-
-    #[test]
-    fn allocate_batch_pipeline_keeps_persistent_high_water() {
-        let packed =
-            SequenceAllocator::build_allocate_batch_pipeline("seq:tenant:conversation", 100)
-                .get_packed_pipeline();
-
-        assert!(packed_contains(&packed, b"INCRBY"));
-        assert!(
-            !packed_contains(&packed, b"EXPIRE"),
-            "persistent conversation sequence keys must not expire"
-        );
-    }
-
     #[test]
     fn seq_after_floor_never_regresses_below_floor() {
         // 冷 key（Redis 被 flush）后高水位=5，但持久化 max_seq=76 → 必须救回到 77。
@@ -498,7 +408,7 @@ mod tests {
         assert!(FLOOR_SEQ_LUA.contains("redis.call('GET', KEYS[1])"));
         assert!(FLOOR_SEQ_LUA.contains("tonumber(ARGV[1])"));
         assert!(FLOOR_SEQ_LUA.contains("if cur < floor then cur = floor end"));
-        assert!(FLOOR_SEQ_LUA.contains("cur = cur + 1"));
+        assert!(FLOOR_SEQ_LUA.contains("cur = cur + tonumber(ARGV[2])"));
         assert!(FLOOR_SEQ_LUA.contains("redis.call('SET', KEYS[1], cur)"));
         assert!(
             !FLOOR_SEQ_LUA.to_uppercase().contains("EXPIRE"),
@@ -518,18 +428,34 @@ mod tests {
 
         let conversation_id = "test-session-1";
         let tenant_id = "test-tenant";
+        allocator
+            .allocate_seq_with_floor(conversation_id, tenant_id, 0)
+            .await
+            .unwrap();
 
         // 分配 3 次，验证递增
         let seq1 = allocator
-            .allocate_seq(conversation_id, tenant_id)
+            .allocate_seq(
+                &Arc::new(flare_server_core::context::Context::root()),
+                conversation_id,
+                tenant_id,
+            )
             .await
             .unwrap();
         let seq2 = allocator
-            .allocate_seq(conversation_id, tenant_id)
+            .allocate_seq(
+                &Arc::new(flare_server_core::context::Context::root()),
+                conversation_id,
+                tenant_id,
+            )
             .await
             .unwrap();
         let seq3 = allocator
-            .allocate_seq(conversation_id, tenant_id)
+            .allocate_seq(
+                &Arc::new(flare_server_core::context::Context::root()),
+                conversation_id,
+                tenant_id,
+            )
             .await
             .unwrap();
 
@@ -550,9 +476,17 @@ mod tests {
 
         let conversation_id = "test-session-2";
         let tenant_id = "test-tenant";
+        allocator
+            .allocate_seq_with_floor(conversation_id, tenant_id, 0)
+            .await
+            .unwrap();
 
         let seqs = allocator
-            .allocate_batch(conversation_id, tenant_id)
+            .allocate_batch(
+                &Arc::new(flare_server_core::context::Context::root()),
+                conversation_id,
+                tenant_id,
+            )
             .await
             .unwrap();
 

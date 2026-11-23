@@ -151,7 +151,7 @@ pub async fn get_message_read_summaries(
     };
     let response = clients
         .bounded(async {
-            let mut client = clients.conversation_read.lock().await;
+            let mut client = clients.conversation_read.lock().await.clone();
             client
                 .get_message_read_summaries_with_ctx(&ctx, token.as_deref(), grpc_req)
                 .await
@@ -212,7 +212,7 @@ pub async fn list_message_readers(
     };
     let response = clients
         .bounded(async {
-            let mut client = clients.conversation_read.lock().await;
+            let mut client = clients.conversation_read.lock().await.clone();
             client
                 .list_message_readers_with_ctx(&ctx, token.as_deref(), grpc_req)
                 .await

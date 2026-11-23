@@ -4,21 +4,28 @@ use flare_server_core::error::{FlareError, Result};
 use sha2::{Digest, Sha256};
 use sqlx::PgConnection;
 /// The version a fresh initialization creates and every upgrade ends at.
-pub const CURRENT_VERSION: i16 = 3;
+pub const CURRENT_VERSION: i16 = 4;
 pub const V1_SQL: &str = include_str!("../../../initial/versions/v1/schema.sql");
 pub const V1_SEEDS: &str = include_str!("../../../initial/versions/v1/seeds.sql");
 pub const V1_DIGEST: &str = "0ef150419f08a05d966226025d426e7cb2cf6013d976565f0002e9b733275093";
 pub const V2_SQL: &str = include_str!("../../../initial/versions/v2/schema.sql");
 pub const V2_SEEDS: &str = include_str!("../../../initial/versions/v2/seeds.sql");
 pub const V2_DIGEST: &str = "3e882365f055b204d38c8667bed194ee8393d7cf25dfe670fc7401fdba808f4f";
+pub const V3_SQL: &str = include_str!("../../../initial/versions/v3/schema.sql");
+pub const V3_SEEDS: &str = include_str!("../../../initial/versions/v3/seeds.sql");
+pub const V3_DIGEST: &str = "90acd60d209939d9973e484dae2d132fba692ee51f5e92bd44fa09e2e7c06afd";
 /// Accepted v1 -> v2 forward DDL (released with v2; never edited).
 pub const V2_UPGRADE_SQL: &str =
     include_str!("../../../initial/upgrades/0002_application_media.sql");
-/// Accepted v2 -> v3 forward DDL.
+/// Accepted v2 -> v3 forward DDL (released with v3; never edited).
 pub const V3_UPGRADE_SQL: &str =
     include_str!("../../../initial/upgrades/0003_plugin_web_bundles.sql");
+/// Accepted v3 -> v4 forward DDL.
+pub const V4_UPGRADE_SQL: &str =
+    include_str!("../../../initial/upgrades/0004_conversation_send_idempotency.sql");
 pub const V2_TRANSITION: &str = "application-media-v2";
 pub const V3_TRANSITION: &str = "plugin-web-bundles-v3";
+pub const V4_TRANSITION: &str = "conversation-send-idempotency-v4";
 const CATALOG: &str = include_str!("../../../initial/upgrades/catalog.sql");
 const ROLES: &str = include_str!("../../../initial/roles.sql");
 const DATABASE: &str = include_str!("../../../initial/database.sql");
@@ -38,9 +45,12 @@ pub fn v1_digest() -> String {
 pub fn v2_digest() -> String {
     bundle_digest(V2_SQL, V2_SEEDS)
 }
-/// Sources each reviewed descriptor was generated from. The released v1 and v2
-/// descriptors name the v2 tree as `initial/schema.sql`, now archived under
-/// `versions/v2`; the v3 descriptors name the current tree.
+pub fn v3_digest() -> String {
+    bundle_digest(V3_SQL, V3_SEEDS)
+}
+/// Sources each reviewed descriptor was generated from. Each released descriptor
+/// names its own tree as `initial/schema.sql`, archived since under
+/// `versions/v<N>`; the v4 descriptors name the current tree.
 fn descriptor_sources(version: i16) -> Vec<(&'static str, &'static str)> {
     let mut sources = vec![
         ("initial/versions/v1/schema.sql", V1_SQL),
@@ -62,13 +72,28 @@ fn descriptor_sources(version: i16) -> Vec<(&'static str, &'static str)> {
         sources.extend([
             ("initial/versions/v2/schema.sql", V2_SQL),
             ("initial/versions/v2/seeds.sql", V2_SEEDS),
-            ("initial/schema.sql", SQL),
-            ("initial/seeds.sql", SEEDS),
             (
                 "initial/upgrades/0003_plugin_web_bundles.sql",
                 V3_UPGRADE_SQL,
             ),
         ]);
+        if version < 4 {
+            sources.extend([
+                ("initial/schema.sql", V3_SQL),
+                ("initial/seeds.sql", V3_SEEDS),
+            ]);
+        } else {
+            sources.extend([
+                ("initial/versions/v3/schema.sql", V3_SQL),
+                ("initial/versions/v3/seeds.sql", V3_SEEDS),
+                ("initial/schema.sql", SQL),
+                ("initial/seeds.sql", SEEDS),
+                (
+                    "initial/upgrades/0004_conversation_send_idempotency.sql",
+                    V4_UPGRADE_SQL,
+                ),
+            ]);
+        }
     }
     sources
 }
@@ -80,6 +105,10 @@ pub async fn begin_checks(connection: &mut PgConnection) -> Result<()> {
     ensure(
         v2_digest() == V2_DIGEST,
         "Core accepted v2 source digest differs",
+    )?;
+    ensure(
+        v3_digest() == V3_DIGEST,
+        "Core accepted v3 source digest differs",
     )?;
     sqlx::raw_sql("SET LOCAL search_path=pg_catalog,public,pg_temp; SET LOCAL lock_timeout='2s'; SET LOCAL statement_timeout='30s'; SELECT pg_advisory_xact_lock(5065494824365673545);")
         .execute(&mut *connection).await.map_err(|_|FlareError::system("Core initializer is busy"))?;
@@ -120,6 +149,8 @@ pub async fn shape(connection: &mut PgConnection, version: i16) -> Result<()> {
         (2, "2.30.0") => include_str!("../../../initial/upgrades/v2-pg16-ts2.30.0.json"),
         (3, "2.29.1") => include_str!("../../../initial/upgrades/v3-pg16-ts2.29.1.json"),
         (3, "2.30.0") => include_str!("../../../initial/upgrades/v3-pg16-ts2.30.0.json"),
+        (4, "2.29.1") => include_str!("../../../initial/upgrades/v4-pg16-ts2.29.1.json"),
+        (4, "2.30.0") => include_str!("../../../initial/upgrades/v4-pg16-ts2.30.0.json"),
         _ => {
             return Err(FlareError::system(
                 "Core initial descriptor environment is not reviewed",
@@ -141,6 +172,7 @@ pub async fn shape(connection: &mut PgConnection, version: i16) -> Result<()> {
     let bundle = match version {
         1 => V1_DIGEST.to_owned(),
         2 => V2_DIGEST.to_owned(),
+        3 => V3_DIGEST.to_owned(),
         _ => digest(),
     };
     ensure(
@@ -199,16 +231,55 @@ pub async fn verify_v2(connection: &mut PgConnection) -> Result<()> {
         "Core initial v2 history provenance differs",
     )
 }
+/// The genuine v3 rows: a fresh v3 initialization, or a genuine v2 and the accepted
+/// v2 -> v3 upgrade.
+fn genuine_v3(rows: &[HistoryRow]) -> bool {
+    let fresh = |row: &HistoryRow| {
+        let (to, from, old, target, transition, ddl) = row;
+        *to == 3
+            && *from == 0
+            && old.is_none()
+            && *target == V3_DIGEST
+            && transition == "fresh"
+            && *ddl == V3_DIGEST
+    };
+    let upgraded = |row: &HistoryRow| {
+        let (to, from, old, target, transition, ddl) = row;
+        *to == 3
+            && *from == 2
+            && old.as_deref() == Some(V2_DIGEST)
+            && *target == V3_DIGEST
+            && transition == V3_TRANSITION
+            && *ddl == sha(V3_UPGRADE_SQL)
+    };
+    match rows {
+        [only] => fresh(only),
+        [v2, v3] => genuine_v2(v2) && upgraded(v3),
+        _ => false,
+    }
+}
+/// A released v3 database: marker, full descriptor and its genuine history.
+pub async fn verify_v3(connection: &mut PgConnection) -> Result<()> {
+    ensure(
+        marker(connection).await? == (3, V3_DIGEST.to_owned()),
+        "Core initial upgrade baseline is not accepted",
+    )?;
+    shape(connection, 3).await?;
+    ensure(
+        genuine_v3(&history(connection).await?),
+        "Core initial v3 history provenance differs",
+    )
+}
 pub async fn verify_current(connection: &mut PgConnection) -> Result<()> {
     ensure(
         marker(connection).await? == (CURRENT_VERSION, digest()),
-        "Core initial version differs; accepted v1 or v2 requires the explicit upgrade command",
+        "Core initial version differs; accepted v1, v2 or v3 requires the explicit upgrade command",
     )?;
     shape(connection, CURRENT_VERSION).await?;
     let rows = history(connection).await?;
     let fresh = |row: &HistoryRow| {
         let (to, from, old, target, transition, ddl) = row;
-        *to == 3
+        *to == 4
             && *from == 0
             && old.is_none()
             && *target == digest()
@@ -217,17 +288,17 @@ pub async fn verify_current(connection: &mut PgConnection) -> Result<()> {
     };
     let upgraded = |row: &HistoryRow| {
         let (to, from, old, target, transition, ddl) = row;
-        *to == 3
-            && *from == 2
-            && old.as_deref() == Some(V2_DIGEST)
+        *to == 4
+            && *from == 3
+            && old.as_deref() == Some(V3_DIGEST)
             && *target == digest()
-            && transition == V3_TRANSITION
-            && *ddl == sha(V3_UPGRADE_SQL)
+            && transition == V4_TRANSITION
+            && *ddl == sha(V4_UPGRADE_SQL)
     };
     ensure(
         match rows.as_slice() {
             [only] => fresh(only),
-            [v2, v3] => genuine_v2(v2) && upgraded(v3),
+            [earlier @ .., v4] => genuine_v3(earlier) && upgraded(v4),
             _ => false,
         },
         "Core initial history provenance differs",

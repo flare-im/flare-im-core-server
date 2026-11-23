@@ -224,7 +224,7 @@ pub async fn get_user_presence(
     };
     let resp = clients
         .bounded(async {
-            let mut client = clients.online.lock().await;
+            let mut client = clients.online.lock().await.clone();
             client
                 .get_user_presence_with_ctx(&ctx, &token, grpc_req)
                 .await
@@ -270,7 +270,7 @@ pub async fn list_user_devices(
 
     let resp = clients
         .bounded(async {
-            let mut client = clients.online.lock().await;
+            let mut client = clients.online.lock().await.clone();
             client
                 .list_user_devices_with_ctx(
                     &ctx,
@@ -322,7 +322,7 @@ pub async fn get_device(
 
     let resp = clients
         .bounded(async {
-            let mut client = clients.online.lock().await;
+            let mut client = clients.online.lock().await.clone();
             client
                 .get_device_with_ctx(
                     &ctx,
@@ -383,7 +383,7 @@ pub async fn batch_get_user_presence(
     let grpc_req = BatchGetUserPresenceRequest { user_ids: ids };
     let resp = clients
         .bounded(async {
-            let mut client = clients.online.lock().await;
+            let mut client = clients.online.lock().await.clone();
             client
                 .batch_get_user_presence_with_ctx(&ctx, &token, grpc_req)
                 .await
@@ -444,7 +444,7 @@ pub async fn logout_presence(
     };
     let resp = clients
         .bounded(async {
-            let mut client = clients.online.lock().await;
+            let mut client = clients.online.lock().await.clone();
             client.logout_with_ctx(&ctx, &token, grpc_req).await
         })
         .await
@@ -497,7 +497,7 @@ pub async fn kick_device(
 
     let resp = clients
         .bounded(async {
-            let mut client = clients.online.lock().await;
+            let mut client = clients.online.lock().await.clone();
             client
                 .self_kick_device_with_ctx(
                     &ctx,

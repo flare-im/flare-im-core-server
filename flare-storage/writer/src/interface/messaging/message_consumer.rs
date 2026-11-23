@@ -25,8 +25,6 @@ use crate::application::handlers::MessagePersistenceCommandHandler;
 use crate::domain::model::TenantContext;
 
 // 类型别名，简化泛型参数
-type IdempotencyRepo =
-    crate::infrastructure::persistence::repository::redis_idempotency::RedisIdempotencyRepository;
 type HotCacheRepo =
     crate::infrastructure::persistence::repository::redis_cache::RedisHotCacheRepository;
 type ArchiveRepo =
@@ -38,7 +36,6 @@ type WalCleanupRepo =
 type AckPub = crate::infrastructure::messaging::ack_publisher::MqAckPublisher;
 
 type MessagePersistenceHandler = MessagePersistenceCommandHandler<
-    IdempotencyRepo,
     HotCacheRepo,
     ArchiveRepo,
     EventStreamRepo,
@@ -414,7 +411,7 @@ mod tests {
     use crate::domain::model::{Event, Message as DomainMessage};
     use crate::domain::repository::{
         AckPublisher, ArchiveStoreRepository, EventStreamRepository, HotCacheRepository,
-        MessageIdempotencyRepository, WalCleanupRepository,
+        WalCleanupRepository,
     };
     use crate::domain::service::MessagePersistenceDomainService;
     use flare_im_contracts::context_to_mq_metadata;
@@ -475,12 +472,6 @@ mod tests {
 
     struct Noop;
 
-    impl MessageIdempotencyRepository for Noop {
-        async fn is_new(&self, _ctx: &Ctx, _message_id: &str) -> FlareResult<bool> {
-            Ok(true)
-        }
-    }
-
     impl HotCacheRepository for Noop {
         async fn store_hot(&self, _ctx: &Ctx, _message: &DomainMessage) -> FlareResult<()> {
             Ok(())
@@ -499,12 +490,10 @@ mod tests {
         }
     }
 
-    type RecordingService =
-        MessagePersistenceDomainService<Noop, Noop, Recorder, Recorder, Noop, Noop>;
+    type RecordingService = MessagePersistenceDomainService<Noop, Recorder, Recorder, Noop, Noop>;
 
     fn recording_service(recorder: &Recorder) -> RecordingService {
         MessagePersistenceDomainService::new(
-            None,
             None,
             Some(Arc::new(recorder.clone())),
             Some(Arc::new(recorder.clone())),
@@ -627,13 +616,12 @@ mod tests {
 
     fn persistence_handler_without_backends() -> Arc<MessagePersistenceHandler> {
         let service = MessagePersistenceDomainService::<
-            IdempotencyRepo,
             HotCacheRepo,
             ArchiveRepo,
             EventStreamRepo,
             WalCleanupRepo,
             AckPub,
-        >::new(None, None, None, None, None, None);
+        >::new(None, None, None, None, None);
         Arc::new(MessagePersistenceCommandHandler::new(
             Arc::new(service),
             Arc::new(flare_im_service_kit::metrics::StorageWriterMetrics::new()),

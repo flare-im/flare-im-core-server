@@ -18,6 +18,7 @@ pub mod push_trace;
 pub mod redis_connection;
 pub mod roster_policy;
 pub mod runtime;
+pub mod sequence_floor;
 pub mod service_helper;
 pub mod signed_read;
 pub mod staff_context;

@@ -33,7 +33,7 @@ fn unimplemented_archive_method(method: &str) -> FlareError {
 }
 
 /// 发送幂等账本判为重复、因而没有写入的一条消息：同一发送者、同一 `client_msg_id`、同一会话里已经有
-/// 另一条消息（`original_server_id`）入账。Redis 去重窗口之外的重发、或 Redis 丢了去重键，才会走到这里。
+/// 另一条消息（`original_server_id`）入账。所有发送重试都由这份持久化账本判定。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LedgerDuplicate {
     pub server_id: String,
@@ -45,9 +45,8 @@ pub struct LedgerDuplicate {
 pub struct ArchiveOutcome {
     /// 判为重复、没有写入的消息。
     pub duplicates: Vec<LedgerDuplicate>,
-    /// `client_msg_id` 已被同一发送者在另一会话占用的消息条数。这不是同一次发送的重发（重发不会换会话），
-    /// 照常写入，账本仍指向先到的那条。
-    pub reused_client_msg_ids: usize,
+    /// 同一 server_id 已归档；仍需补齐事件流，不能再次计入归档用量。
+    pub already_archived: Vec<String>,
 }
 
 impl ArchiveOutcome {
@@ -57,9 +56,13 @@ impl ArchiveOutcome {
             .any(|duplicate| duplicate.server_id == server_id)
     }
 
+    pub fn was_archived(&self, server_id: &str) -> bool {
+        self.already_archived.iter().any(|id| id == server_id)
+    }
+
     pub fn merge(&mut self, other: ArchiveOutcome) {
+        self.already_archived.extend(other.already_archived);
         self.duplicates.extend(other.duplicates);
-        self.reused_client_msg_ids += other.reused_client_msg_ids;
     }
 }
 
@@ -70,7 +73,7 @@ pub trait ArchiveStoreRepository: Send + Sync {
     /// 归档一批消息并报告发送幂等账本的结论。持久化服务的单条与批量路径都走这里。
     ///
     /// 默认实现没有账本：逐条写入、不报告重复。`PostgresMessageStore` 在写消息的同一事务里认领
-    /// `(tenant_id, sender_id, client_msg_id)`，判为重复的消息不写入，其余照常写入。
+    /// `(tenant_id, sender_id, conversation_id, client_msg_id)`，判为重复的消息不写入，其余照常写入。
     async fn archive_messages(&self, ctx: &Ctx, messages: &[Message]) -> Result<ArchiveOutcome> {
         self.store_archive_batch(ctx, messages).await?;
         Ok(ArchiveOutcome::default())
@@ -104,6 +107,7 @@ pub trait ArchiveStoreRepository: Send + Sync {
         tenant_id: &str,
         message_id: &str,
         new_content: &[u8],
+        event_seq: u64,
         editor_id: &str,
         reason: Option<&str>,
         content_text_for_extra: Option<&str>,
@@ -113,6 +117,7 @@ pub trait ArchiveStoreRepository: Send + Sync {
             tenant_id,
             message_id,
             new_content,
+            event_seq,
             editor_id,
             reason,
             content_text_for_extra,
@@ -222,8 +227,9 @@ pub trait ArchiveStoreRepository: Send + Sync {
         emoji: &str,
         user_id: &str,
         add: bool,
+        event_seq: u64,
     ) -> Result<()> {
-        let _ = (ctx, tenant_id, message_id, emoji, user_id, add);
+        let _ = (ctx, tenant_id, message_id, emoji, user_id, add, event_seq);
         Err(unimplemented_archive_method("upsert_message_reaction"))
     }
 

@@ -1,7 +1,9 @@
 use flare_core::common::conversation::{
     generate_group_conversation_id, is_group_chat_conversation,
 };
-use flare_im_service_kit::roster_policy::{check_channels, trusted_internal_reader};
+use flare_im_service_kit::roster_policy::{
+    RosterVisibility, check_channels, trusted_internal_reader,
+};
 use flare_server_core::{context::Context, error::grpc::IntoGrpc};
 use tonic::Status;
 
@@ -14,6 +16,22 @@ use crate::domain::model::{
 // about another group's channel does not authorize this conversation.
 fn canonical_group_route(conversation_id: &str, channel_id: &str) -> bool {
     !channel_id.is_empty() && generate_group_conversation_id(channel_id) == conversation_id
+}
+
+// Fail closed: a failed check discloses no roster. Say so once per failure, with the
+// status code and the number of channels only (no ids, no provider text).
+fn visibility_or_closed(
+    checked: Result<RosterVisibility, Status>,
+    channels: usize,
+) -> RosterVisibility {
+    checked.unwrap_or_else(|status| {
+        tracing::warn!(
+            code = ?status.code(),
+            channels,
+            "conversation roster policy check failed; hiding these group rosters"
+        );
+        RosterVisibility::default()
+    })
 }
 
 impl ConversationGrpcHandler {
@@ -36,13 +54,15 @@ impl ConversationGrpcHandler {
         if !canonical_group_route(conversation_id, &channel_id) {
             return Ok(false);
         }
-        let visibility = check_channels(
-            self.roster_policy_endpoint.as_deref(),
-            ctx,
-            std::slice::from_ref(&channel_id),
-        )
-        .await
-        .unwrap_or_default();
+        let visibility = visibility_or_closed(
+            check_channels(
+                self.roster_policy_endpoint.as_deref(),
+                ctx,
+                std::slice::from_ref(&channel_id),
+            )
+            .await,
+            1,
+        );
         Ok(visibility.allows_full_roster(&channel_id, explicitly_external))
     }
 
@@ -78,9 +98,10 @@ impl ConversationGrpcHandler {
         ids.dedup();
         // Summaries remain available when the policy provider is unreachable.
         // Only an explicit unmanaged answer permits local roster disclosure.
-        let visibility = check_channels(self.roster_policy_endpoint.as_deref(), ctx, &ids)
-            .await
-            .unwrap_or_default();
+        let visibility = visibility_or_closed(
+            check_channels(self.roster_policy_endpoint.as_deref(), ctx, &ids).await,
+            ids.len(),
+        );
         for row in rows.iter_mut().filter(|row| {
             needs_policy_check(row) && (!row.member_preview.is_empty() || system_message(row))
         }) {
@@ -107,5 +128,12 @@ mod tests {
         assert!(canonical_group_route(&conversation_id, "route"));
         assert!(!canonical_group_route(&conversation_id, "other"));
         assert!(!canonical_group_route(&conversation_id, ""));
+    }
+
+    #[test]
+    fn a_failed_policy_check_discloses_no_roster() {
+        let closed = visibility_or_closed(Err(Status::unavailable("provider down")), 2);
+        assert!(!closed.allows_full_roster("route", false));
+        assert!(!closed.allows_full_roster("route", true));
     }
 }

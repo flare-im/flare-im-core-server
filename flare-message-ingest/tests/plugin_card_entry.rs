@@ -223,8 +223,8 @@ async fn spawn_fake_redis() -> String {
                         pending.drain(..consumed);
                         let reply = match name.as_str() {
                             "INCR" => "+QUEUED\r\n".to_string(),
-                            "EXEC" => {
-                                format!("*1\r\n:{}\r\n", seq.fetch_add(1, Ordering::SeqCst) + 1)
+                            "EVALSHA" | "EVAL" => {
+                                format!(":{}\r\n", seq.fetch_add(1, Ordering::SeqCst) + 1)
                             }
                             "PING" => "+PONG\r\n".to_string(),
                             _ => "+OK\r\n".to_string(),

@@ -15,8 +15,8 @@ use std::time::Duration;
 use ed25519_dalek::SigningKey;
 use ed25519_dalek::pkcs8::{EncodePrivateKey, EncodePublicKey};
 use flare_im_contracts::Ctx;
-use flare_message_ingest::domain::repository::SeqFloorProvider;
-use flare_message_ingest::infrastructure::persistence::storage_seq_floor_provider::StorageSeqFloorProvider;
+use flare_im_seq::SeqFloorProvider;
+use flare_im_service_kit::sequence_floor::StorageSeqFloorProvider;
 use flare_server_core::error::ErrorCode;
 use flare_server_core::grpc::middleware::signed_context::verify_signed_context_metadata;
 use flare_server_core::{
@@ -111,8 +111,15 @@ async fn a_floor_read_for_the_derived_tenant_passes_the_signed_reader_boundary()
         .expect_err("the store behind the boundary is unreachable");
     assert_eq!(err.code(), Some(ErrorCode::ServiceUnavailable), "{err}");
 
-    // 没有私钥：别的租户的签名不再转发，要求签名的 Reader 拒绝未签名的读（未迁移的部署，退化为普通
-    // INCR）；同租户照旧转发入站签名，通过边界。
+    // 没有私钥：别的租户的签名不再转发，要求签名的 Reader 拒绝未签名的读（未迁移的部署，序号分配失败）；同租户照旧转发入站签名，通过边界。
+    let event_provider = StorageSeqFloorProvider::from_channel(channel.clone())
+        .with_service_signer(Some(signer.clone()), "flare-orchestrator");
+    let err = event_provider
+        .persisted_max_seq(&ctx, "tenant-b", "conv-floor")
+        .await
+        .expect_err("the store behind the boundary is unreachable");
+    assert_eq!(err.code(), Some(ErrorCode::ServiceUnavailable), "{err}");
+
     let unsigned = StorageSeqFloorProvider::from_channel(channel);
     let err = unsigned
         .persisted_max_seq(&ctx, "tenant-b", "conv-floor")

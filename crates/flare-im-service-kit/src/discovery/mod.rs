@@ -34,16 +34,17 @@ pub use flare_server_core::discovery::{
 };
 
 pub use channel_resolve::{
-    DISCOVERY_CHANNEL_TIMEOUT, DISCOVERY_ROUTE_PREFIX, STATIC_ACCESS_GATEWAY_GRPC_URI,
-    StaticChannelPolicy, connect_grpc_channel_with_fallback,
+    DISCOVERY_CHANNEL_TIMEOUT, DISCOVERY_ROUTE_PREFIX, ROUTE_FORGET_INTERVAL,
+    STATIC_ACCESS_GATEWAY_GRPC_URI, StaticChannelPolicy, connect_grpc_channel_with_fallback,
     connect_grpc_channel_with_fallback as connect_grpc_channel_resilient, connect_static_channel,
     connect_static_channel_lazy, connect_static_channel_lazy_with,
     connect_static_channel_lazy_with_policy, default_static_grpc_fallback,
-    discovery_route_authority, get_discovered_channel_with_timeout, invalidate_discovered_service,
-    invalidate_static_channel, invalidate_static_channel_on_transport_failure,
-    is_discovery_route_authority, is_static_channel_cached, is_transport_failure,
-    resolve_discovered_service_channel, resolve_grpc_channel, resolve_grpc_channel_with_policy,
-    service_name_from_discovery_route, static_grpc_endpoint,
+    discovery_route_authority, forget_route_after_failure, get_discovered_channel_with_timeout,
+    invalidate_discovered_service, invalidate_static_channel,
+    invalidate_static_channel_on_transport_failure, is_discovery_route_authority,
+    is_static_channel_cached, is_transport_failure, resolve_discovered_service_channel,
+    resolve_grpc_channel, resolve_grpc_channel_with_policy, service_name_from_discovery_route,
+    static_grpc_endpoint,
 };
 pub use grpc_connect::{
     build_gateway_router_from_app_config, connect_grpc_channel_from_app_config,

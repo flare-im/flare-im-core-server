@@ -5,7 +5,7 @@ pub mod model;
 pub mod repository;
 pub mod service;
 
-pub use enums::{MessageFsmState, PersistenceMode};
+pub use enums::PersistenceMode;
 pub use model::ConversationType;
 pub use model::message_submission::MessageSubmission;
 pub use repository::{PushRepository, RecipientRepository};

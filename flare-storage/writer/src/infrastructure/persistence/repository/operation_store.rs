@@ -207,16 +207,26 @@ impl OperationStore {
         tenant_id: &str,
         message_id: &str,
         new_content: &[u8],
+        event_seq: u64,
         editor_id: &str,
         reason: Option<&str>,
         content_text_for_extra: Option<&str>,
     ) -> Result<()> {
+        let event_seq = i64::try_from(event_seq)
+            .ok()
+            .filter(|seq| *seq > 0)
+            .ok_or_else(|| {
+                flare_server_core::flare_err!(
+                    flare_server_core::error::ErrorCode::InvalidParameter,
+                    "edit event requires a positive signed 64-bit sequence"
+                )
+            })?;
         let mut tx = self.pool.begin().await?;
 
         let row = sqlx::query(
             r#"
-            SELECT content, extra, server_id FROM messages
-            WHERE tenant_id = $2 AND (server_id = $1 OR client_msg_id = $1)
+            SELECT extra, server_id, conversation_id FROM messages
+            WHERE tenant_id = $2 AND server_id = $1 FOR UPDATE
             "#,
         )
         .bind(message_id)
@@ -225,7 +235,21 @@ impl OperationStore {
         .await?;
 
         let (mut extra, real_server_id) = match row {
-            Some(r) => (r.get::<Value, _>("extra"), r.get::<String, _>("server_id")),
+            Some(r) => {
+                let extra = r.get::<Value, _>("extra");
+                let recorded_seq = extra
+                    .get("serverEdit")
+                    .and_then(|edit| edit.get("eventSeq"))
+                    .and_then(Value::as_i64)
+                    .unwrap_or(0);
+                let historical_seq = sqlx::query_scalar::<_, i64>("SELECT COALESCE(MAX(seq), 0) FROM message_operation_history WHERE tenant_id=$1 AND conversation_id=$2 AND message_id=$3 AND operation_type='EVENT_MESSAGE_EDIT'")
+                    .bind(tenant_id).bind(r.get::<String, _>("conversation_id")).bind(message_id).fetch_one(&mut *tx).await?;
+                let last_edit_seq = recorded_seq.max(historical_seq);
+                if event_seq <= last_edit_seq {
+                    return Ok(());
+                }
+                (extra, r.get::<String, _>("server_id"))
+            }
             None => {
                 tx.rollback().await?;
                 return Err(flare_server_core::error::FlareError::system(format!(
@@ -254,6 +278,11 @@ impl OperationStore {
         let final_edit_version = next_version_row.unwrap_or(1).max(1);
 
         if let Value::Object(ref mut map) = extra {
+            // Attributes on ingress are strings; only the server can write this typed object.
+            map.insert(
+                "serverEdit".into(),
+                serde_json::json!({"eventSeq": event_seq}),
+            );
             if let Some(text) = content_text_for_extra {
                 map.insert("contentText".to_string(), Value::String(text.to_string()));
             }
@@ -358,8 +387,45 @@ impl OperationStore {
         emoji: &str,
         user_id: &str,
         add: bool,
+        event_seq: u64,
     ) -> Result<()> {
+        if event_seq == 0 || event_seq > i64::MAX as u64 {
+            return Err(flare_server_core::flare_err!(
+                flare_server_core::error::ErrorCode::InvalidParameter,
+                "reaction requires a positive signed 64-bit sequence"
+            ));
+        }
         let mut tx = self.pool.begin().await?;
+        // The message lock also serializes first reactions, when no reaction row exists yet.
+        let row = sqlx::query(
+            "SELECT extra FROM messages WHERE tenant_id=$1 AND server_id=$2 FOR UPDATE",
+        )
+        .bind(tenant_id)
+        .bind(message_id)
+        .fetch_optional(&mut *tx)
+        .await?
+        .ok_or_else(|| {
+            flare_server_core::flare_err!(
+                flare_server_core::error::ErrorCode::DatabaseError,
+                "reaction target has not been archived"
+            )
+        })?;
+        let mut extra = row
+            .get::<Option<Value>, _>("extra")
+            .unwrap_or_else(|| json!({}));
+        let mut states = flare_im_contracts::message::reaction_states_from_extra(&extra);
+        if states.iter().any(|state| {
+            state.user_id == user_id && state.emoji == emoji && state.event_seq >= event_seq
+        }) {
+            return Ok(());
+        }
+        states.retain(|state| state.user_id != user_id || state.emoji != emoji);
+        states.push(flare_proto::common::MessageReactionState {
+            user_id: user_id.into(),
+            emoji: emoji.into(),
+            event_seq,
+            active: add,
+        });
 
         // FOR UPDATE：同一表情的两次变更（含同一事件的并发重投）串行，后一次看到前一次的结果，
         // 不会各自从同一个旧值算起、重复减计数。
@@ -411,6 +477,16 @@ impl OperationStore {
             .await?;
         }
 
+        if !extra.is_object() {
+            extra = json!({});
+        }
+        extra["serverReactions"] = Value::Array(states.iter().map(|state| json!({"userId": state.user_id, "emoji": state.emoji, "eventSeq": state.event_seq, "active": state.active})).collect());
+        sqlx::query("UPDATE messages SET extra=$3 WHERE tenant_id=$1 AND server_id=$2")
+            .bind(tenant_id)
+            .bind(message_id)
+            .bind(extra)
+            .execute(&mut *tx)
+            .await?;
         tx.commit().await?;
         Ok(())
     }

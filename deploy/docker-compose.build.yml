@@ -1,7 +1,7 @@
 # 本地构建覆盖层 —— 没有预构建镜像时用这个。
 #
 #   cp deploy/.env.example deploy/.env      # 至少填上 FLARE_TOKEN_SECRET
-#   docker compose -f deploy/docker-compose.yml \
+#   python3 deploy/compose.py --env-file deploy/.env -f deploy/docker-compose.yml \
 #                  -f deploy/docker-compose.nats.yml \
 #                  -f deploy/docker-compose.stack.yml \
 #                  -f deploy/docker-compose.build.yml up -d

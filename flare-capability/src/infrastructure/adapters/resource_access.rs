@@ -48,6 +48,25 @@ pub struct GrpcResourceAccess {
 fn denied<T>(_: T) -> CapabilityError {
     CapabilityError::PolicyDenied("resource unavailable or access denied".into())
 }
+fn dependency_unavailable<T>(_: T) -> CapabilityError {
+    tracing::warn!(stage = "channel", "plugin resource dependency unavailable");
+    CapabilityError::System("resource dependency unavailable".into())
+}
+/// A transient dependency failure is still fail-closed, but must not tell a
+/// member they left the conversation. Never expose the upstream status text.
+fn resource_status(operation: &'static str, status: tonic::Status) -> CapabilityError {
+    match status.code() {
+        tonic::Code::DeadlineExceeded => {
+            tracing::warn!(operation, code = ?status.code(), "plugin resource dependency unavailable");
+            CapabilityError::Timeout("resource dependency deadline exceeded".into())
+        }
+        tonic::Code::Unavailable | tonic::Code::ResourceExhausted => {
+            tracing::warn!(operation, code = ?status.code(), "plugin resource dependency unavailable");
+            CapabilityError::System("resource dependency unavailable".into())
+        }
+        _ => denied(()),
+    }
+}
 /// Actor id of the reads Capability makes as itself (no user), e.g. for a plugin runtime credential.
 pub const CAPABILITY_SERVICE_ACTOR: &str = "flare-capability";
 
@@ -121,7 +140,7 @@ impl GrpcResourceAccess {
                     )?,
                 )
                 .await
-                .map_err(denied)?
+                .map_err(|status| resource_status("conversation_participants", status))?
                 .into_inner();
             if page.conversation_id != conversation_id
                 || page.participants.len() > MAX_PARTICIPANTS_PAGE as usize
@@ -150,7 +169,7 @@ impl ResourceAccessBackend for GrpcResourceAccess {
     async fn read(&self, actor: &ResourceActor, request: &ResourceRequest) -> Result<Value> {
         let channel = resolve_plugin_channel(&self.conversation_authority)
             .await
-            .map_err(denied)?;
+            .map_err(dependency_unavailable)?;
         let mut im = ConversationReadServiceClient::new(channel)
             .max_decoding_message_size(IM_RESPONSE_BYTES);
         // Existing public query checks active membership and history bounds.
@@ -162,7 +181,7 @@ impl ResourceAccessBackend for GrpcResourceAccess {
                 },
             )?)
             .await
-            .map_err(denied)?
+            .map_err(|status| resource_status("conversation_detail", status))?
             .into_inner()
             .detail
             .ok_or_else(|| denied(()))?;
@@ -208,7 +227,7 @@ impl ResourceAccessBackend for GrpcResourceAccess {
                         )?,
                     )
                     .await
-                    .map_err(denied)?
+                    .map_err(|status| resource_status("conversation_participants", status))?
                     .into_inner();
                 if page.conversation_id != actor.conversation_id
                     || page.participants.len() > *limit as usize
@@ -262,7 +281,9 @@ impl ResourceAccessBackend for GrpcResourceAccess {
                     .social_group_authority
                     .as_ref()
                     .ok_or_else(|| denied(()))?;
-                let channel = resolve_plugin_channel(authority).await.map_err(denied)?;
+                let channel = resolve_plugin_channel(authority)
+                    .await
+                    .map_err(dependency_unavailable)?;
                 let payload = serde_json::to_vec(&GroupMemberLookup {
                     group_id: detail.channel_id.clone(),
                     user_id: user_id.clone(),
@@ -284,7 +305,7 @@ impl ResourceAccessBackend for GrpcResourceAccess {
                         },
                     )?)
                     .await
-                    .map_err(denied)?
+                    .map_err(|status| resource_status("social_group_member", status))?
                     .into_inner();
                 if !response.ok || response.request_id != actor.request_id {
                     return Err(denied(()));
@@ -309,7 +330,7 @@ impl ResourceAccessBackend for GrpcResourceAccess {
     ) -> Result<std::collections::BTreeSet<String>> {
         let channel = resolve_plugin_channel(&self.conversation_authority)
             .await
-            .map_err(denied)?;
+            .map_err(dependency_unavailable)?;
         let mut im = ConversationReadServiceClient::new(channel)
             .max_decoding_message_size(IM_RESPONSE_BYTES);
         let identity = SignedContextIdentity::new(

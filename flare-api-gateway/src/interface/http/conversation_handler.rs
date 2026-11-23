@@ -257,7 +257,7 @@ pub async fn list_conversations(
     };
     let grpc_res = clients
         .bounded(async {
-            let mut read_client = clients.conversation_read.lock().await;
+            let mut read_client = clients.conversation_read.lock().await.clone();
             read_client
                 .list_conversations_with_ctx(&ctx, token.as_deref(), grpc_req)
                 .await
@@ -322,7 +322,7 @@ pub async fn list_conversation_participants(
     };
     let grpc_res = clients
         .bounded(async {
-            let mut read_client = clients.conversation_read.lock().await;
+            let mut read_client = clients.conversation_read.lock().await.clone();
             read_client
                 .list_conversation_participants_with_ctx(&ctx, token.as_deref(), grpc_req)
                 .await
@@ -395,7 +395,7 @@ pub async fn manage_participants(
     };
     let grpc_res = clients
         .bounded(async {
-            let mut manage_client = clients.conversation_manage.lock().await;
+            let mut manage_client = clients.conversation_manage.lock().await.clone();
             manage_client
                 .manage_participants_with_ctx(&ctx, grpc_req)
                 .await

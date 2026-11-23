@@ -38,7 +38,7 @@ pub async fn create_reference(
 
     let grpc_res = clients
         .bounded(async {
-            let mut media_client = clients.media.lock().await;
+            let mut media_client = clients.media.lock().await.clone();
             media_client.create_reference(&caller, req).await
         })
         .await
@@ -74,7 +74,7 @@ pub async fn delete_reference(
 
     let grpc_res = clients
         .bounded(async {
-            let mut media_client = clients.media.lock().await;
+            let mut media_client = clients.media.lock().await.clone();
             media_client.delete_reference(&caller, req).await
         })
         .await
@@ -119,7 +119,7 @@ pub async fn list_references(
     };
     let grpc_res = clients
         .bounded(async {
-            let mut media_client = clients.media.lock().await;
+            let mut media_client = clients.media.lock().await.clone();
             media_client.list_references(&caller, grpc_req).await
         })
         .await

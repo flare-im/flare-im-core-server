@@ -41,12 +41,12 @@ use flare_server_core::error::{ErrorCode, Result};
 
 /// 事件领域服务
 pub trait SequenceAllocatorPort: Send + Sync {
-    async fn allocate_seq(&self, conversation_id: &str, tenant_id: &str) -> Result<u64>;
+    async fn allocate_seq(&self, ctx: &Ctx, conversation_id: &str, tenant_id: &str) -> Result<u64>;
 }
 
 impl SequenceAllocatorPort for SequenceAllocator {
-    async fn allocate_seq(&self, conversation_id: &str, tenant_id: &str) -> Result<u64> {
-        SequenceAllocator::allocate_seq(self, conversation_id, tenant_id).await
+    async fn allocate_seq(&self, ctx: &Ctx, conversation_id: &str, tenant_id: &str) -> Result<u64> {
+        SequenceAllocator::allocate_seq(self, ctx, conversation_id, tenant_id).await
     }
 }
 
@@ -319,17 +319,8 @@ where
     ) -> Result<Event> {
         let session_seq = self
             .sequence_allocator
-            .allocate_seq(&event.conversation_id, tenant_id)
-            .await
-            .map_err(|e| {
-                flare_err!(
-                    ErrorCode::InternalError,
-                    &format!(
-                        "allocate seq failed for conversation_id={}: {}",
-                        event.conversation_id, e
-                    )
-                )
-            })?;
+            .allocate_seq(ctx, &event.conversation_id, tenant_id)
+            .await?;
 
         tracing::trace!(
             conversation_id = %event.conversation_id,

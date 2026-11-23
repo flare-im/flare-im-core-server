@@ -44,6 +44,7 @@ impl IdempotencyLedger for PostgresIdempotencyLedger {
         &self,
         tenant_id: &str,
         sender_id: &str,
+        conversation_id: &str,
         client_msg_id: &str,
     ) -> Result<Option<LedgerRecord>> {
         let row: Option<(String, String, i64, i16)> = sqlx::query_as(
@@ -52,11 +53,13 @@ impl IdempotencyLedger for PostgresIdempotencyLedger {
               FROM message_idempotency_ledger
              WHERE tenant_id = $1
                AND sender_id = $2
-               AND client_msg_id = $3
+               AND conversation_id = $3
+                AND client_msg_id = $4
             "#,
         )
         .bind(tenant_id)
         .bind(sender_id)
+        .bind(conversation_id)
         .bind(client_msg_id)
         .fetch_optional(&self.pool)
         .await

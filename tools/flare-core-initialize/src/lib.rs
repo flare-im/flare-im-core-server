@@ -89,7 +89,7 @@ mod tests {
         assert!(SQL.contains("CREATE TABLE online_kick_commands"));
         assert!(SQL.contains("sample_weight integer NOT NULL DEFAULT 1"));
         assert!(SQL.contains("CREATE TABLE IF NOT EXISTS plugin_web_bundles"));
-        assert!(SQL.contains("CHECK(version=3)"));
+        assert!(SQL.contains("CHECK(version=4)"));
         assert_eq!(digest().len(), 64);
     }
     #[tokio::test]

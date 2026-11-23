@@ -209,6 +209,8 @@ async fn send_message_with_id(
             })),
         }),
         status: MessageStatus::Created as i32,
+        last_edit_seq: 0,
+        reaction_states: Vec::new(),
         retention_policy: None,
         retention_state: None,
         offline_push_info: None,
@@ -224,7 +226,7 @@ async fn send_message_with_id(
 
     let grpc_res = clients
         .bounded(async {
-            let mut message_client = clients.message_ingest_send.lock().await;
+            let mut message_client = clients.message_ingest_send.lock().await.clone();
             message_client
                 .send_message_with_signed_context(grpc_req, &signed_token)
                 .await
@@ -425,7 +427,7 @@ pub async fn execute_custom_event(
 
     clients
         .bounded(async {
-            let mut event_client = clients.message_event.lock().await;
+            let mut event_client = clients.message_event.lock().await.clone();
             event_client
                 .execute_event_with_ctx(&ctx, &token, grpc_req)
                 .await
@@ -477,7 +479,7 @@ pub async fn recall_message(
     };
     let grpc_res = clients
         .bounded(async {
-            let mut action_client = clients.message_action.lock().await;
+            let mut action_client = clients.message_action.lock().await.clone();
             action_client
                 .recall_message_with_ctx(&ctx, &token, grpc_req)
                 .await

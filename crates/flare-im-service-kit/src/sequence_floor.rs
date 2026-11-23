@@ -16,7 +16,7 @@ use flare_server_core::error::{FlareError, Result};
 use flare_server_core::grpc::middleware::signed_context::VerifiedContext;
 use tonic::transport::Channel;
 
-use crate::domain::repository::SeqFloorProvider;
+use flare_im_seq::SeqFloorProvider;
 
 /// storage-reader 支撑的会话持久化 max_seq 提供者。
 #[derive(Clone)]
@@ -74,7 +74,7 @@ impl StorageSeqFloorProvider {
     ) -> Result<tonic::Request<GetConversationMessageHeadRequest>> {
         let payload = GetConversationMessageHeadRequest { conversation_id };
         if let Some((signer, actor_id)) = self.service_signer.as_ref() {
-            let token = flare_im_service_kit::signed_read::sign_service_read(
+            let token = crate::signed_read::sign_service_read(
                 signer,
                 actor_id,
                 tenant_id,

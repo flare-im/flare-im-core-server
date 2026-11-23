@@ -432,6 +432,9 @@ impl PostgresBaseStorage {
         let plugin_shared_state: Option<Value> = row.try_get("plugin_shared_state").ok().flatten();
         let is_pinned: bool = row.try_get("is_pinned").unwrap_or(false);
 
+        let reaction_states = flare_im_contracts::message::reaction_states_from_extra(
+            extra.as_ref().unwrap_or(&Value::Null),
+        );
         let mut extra_map = HashMap::new();
         if let Some(extra_value) = extra
             && let Ok(extra_obj) = from_value::<HashMap<String, Value>>(extra_value)
@@ -440,6 +443,7 @@ impl PostgresBaseStorage {
                 extra_map.insert(k, v.to_string().trim_matches('"').to_string());
             }
         }
+        extra_map.remove("serverReactions");
         if let Some(rx) = reactions_json
             && !rx.is_null()
         {
@@ -545,6 +549,9 @@ impl PostgresBaseStorage {
             thread_id,
             content,
             status,
+            last_edit_seq: u64::try_from(row.try_get::<i64, _>("last_edit_seq")?)
+                .unwrap_or_default(),
+            reaction_states,
             retention_policy: None,
             retention_state,
             offline_push_info: offline_push_proto,

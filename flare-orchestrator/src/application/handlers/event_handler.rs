@@ -403,7 +403,12 @@ mod read_ack_admission_tests {
     }
 
     impl SequenceAllocatorPort for CountingSequenceAllocator {
-        async fn allocate_seq(&self, _conversation_id: &str, _tenant_id: &str) -> Result<u64> {
+        async fn allocate_seq(
+            &self,
+            _ctx: &Ctx,
+            _conversation_id: &str,
+            _tenant_id: &str,
+        ) -> Result<u64> {
             Ok(self.allocated.fetch_add(1, Ordering::SeqCst) + 1)
         }
     }

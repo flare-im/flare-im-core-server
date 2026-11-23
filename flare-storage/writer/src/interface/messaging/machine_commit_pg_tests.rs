@@ -176,6 +176,64 @@ async fn machine_archive_and_source_evidence_commit_once_or_roll_back_together()
         std::panic::resume_unwind(error.into_panic());
     }
 }
+/// The archive's send receipt (`ON CONFLICT (tenant_id, sender_id, conversation_id,
+/// client_msg_id)`) needs the ledger key the Core initializer creates: a database it built
+/// takes a reused client id in another conversation and absorbs a replay.
+#[tokio::test]
+#[ignore = "requires an empty owned actual TimescaleDB Core initial fixture (FLARE_CORE_INITIAL_WRITER_TEST_URL)"]
+async fn archive_claims_conversation_scoped_receipts_in_an_initializer_built_database() {
+    let url = std::env::var("FLARE_CORE_INITIAL_WRITER_TEST_URL")
+        .expect("owned TimescaleDB fixture required");
+    let options = PgConnectOptions::from_str(&url).unwrap();
+    let mut owner = <sqlx::PgConnection as sqlx::Connection>::connect_with(
+        &options.clone().username("core_initialize"),
+    )
+    .await
+    .unwrap();
+    assert!(flare_core_initialize::initialize(&mut owner).await.unwrap());
+    sqlx::Connection::close(owner).await.unwrap();
+    let pool = PgPool::connect_with(options.username("core_runtime"))
+        .await
+        .unwrap();
+    let store = ArchiveRepo::from_pool(pool.clone());
+    let (signer, verifier, ctx) = keys();
+    let mut first = message("first-conversation");
+    first.client_msg_id = "cli-reused".into();
+    let mut second = message("second-conversation");
+    second.client_msg_id = "cli-reused".into();
+    second.conversation_id = "group:group-b".into();
+    second.channel_id = "group-b".into();
+    for m in [&first, &second, &first] {
+        let token = signer.stamp(&ctx, m).unwrap();
+        let decoded =
+            MessageCreatedHandler::decode_store_message(&queued(m, &token), Some(&verifier))
+                .unwrap()
+                .unwrap();
+        let domain = flare_im_contracts::message::message_from_proto(m);
+        store.store_archive(&decoded.ctx, &domain).await.unwrap();
+    }
+    let stored: Vec<(String, String)> = sqlx::query_as(
+        "SELECT conversation_id, server_id FROM message_idempotency_ledger ORDER BY conversation_id",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        stored,
+        [
+            ("group:group-a".to_owned(), "first-conversation".to_owned()),
+            ("group:group-b".to_owned(), "second-conversation".to_owned())
+        ]
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM messages")
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+        2
+    );
+    pool.close().await;
+}
 async fn check_archive(pool: PgPool) {
     let schema = include_str!("../../../../../migrations/0001_baseline.sql");
     let start = schema.find("CREATE TABLE messages (").unwrap();
@@ -192,6 +250,18 @@ async fn check_archive(pool: PgPool) {
         .unwrap();
     sqlx::raw_sql(include_str!(
         "../../../../../migrations/0012_20261015_core_audit_outbox.sql"
+    ))
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::raw_sql(include_str!(
+        "../../../../../migrations/0020_20261104_message_idempotency_ledger.sql"
+    ))
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::raw_sql(include_str!(
+        "../../../../../migrations/0032_20261118_conversation_send_idempotency.sql"
     ))
     .execute(&pool)
     .await

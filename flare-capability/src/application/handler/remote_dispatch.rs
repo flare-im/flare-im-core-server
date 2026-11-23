@@ -697,7 +697,10 @@ pub(crate) async fn call_plugin_answer(
         build_request_payload(call.payload).map_err(|e| CapabilityError::System(e.to_string()))?;
     let channel = resolve_plugin_channel(call.grpc_authority)
         .await
-        .map_err(CapabilityError::System)?;
+        .map_err(|error| {
+            tracing::warn!(stage = "channel", "plugin invocation transport unavailable");
+            CapabilityError::System(error)
+        })?;
     let mut client = ExtensionPluginClient::new(channel);
 
     let mut metadata = std::collections::HashMap::new();
@@ -830,6 +833,27 @@ fn rejection(
 /// the outcome unknown too.
 fn plugin_status_outcome(call: &PluginCall<'_>, status: Status) -> Result<PluginAnswer> {
     use tonic::Code;
+    if !matches!(
+        status.code(),
+        Code::InvalidArgument
+            | Code::FailedPrecondition
+            | Code::NotFound
+            | Code::AlreadyExists
+            | Code::PermissionDenied
+            | Code::Unauthenticated
+            | Code::Unimplemented
+    ) {
+        // Fixed categories only: upstream status text may contain credentials or
+        // driver details. Preserve the original outcome without logging it.
+        let category = match status.message() {
+            "plugin projection not current" => "projection",
+            "plugin draining" => "draining",
+            "plugin outcome unknown" => "plugin_outcome",
+            message if message.contains("Service was not ready") => "channel_not_ready",
+            _ => "transport_or_upstream",
+        };
+        tracing::warn!(stage = "rpc", plugin_id = call.plugin_id, operation = call.operation, code = ?status.code(), category, "plugin invocation transport unavailable");
+    }
     match status.code() {
         Code::Unavailable => Err(CapabilityError::Timeout(format!(
             "plugin {} is not ready for this call yet",

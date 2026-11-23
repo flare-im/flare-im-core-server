@@ -7,3 +7,6 @@ mod model;
 
 pub use convert::{message_from_proto, message_into_proto, message_to_proto};
 pub use model::{Attachment, Message, RetentionTransitionError};
+
+mod reaction;
+pub use reaction::reaction_states_from_extra;

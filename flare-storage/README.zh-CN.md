@@ -2,7 +2,7 @@
 
 [English](README.md) · 中文
 
-> **状态**: 核心链路以 PostgreSQL / TimescaleDB 为唯一持久化数据库，Redis 仅承载热缓存、WAL、短期状态和幂等辅助。
+> **状态**: 核心链路以 PostgreSQL / TimescaleDB 为唯一持久化数据库，Redis 仅承载热缓存、WAL和短期状态。
 
 `flare-storage` 包含两个核心服务：
 
@@ -14,7 +14,7 @@
 - 不使用 MongoDB 存储消息体或实时数据。
 - 不做同一份消息数据的跨数据库同步双写。
 - PostgreSQL / TimescaleDB 是消息、事件、ledger、审计查询的唯一持久化数据库族。
-- Redis 只用于热缓存、发送/写入 WAL、幂等窗口、在线/短期状态和读路径加速。
+- Redis 只用于热缓存、发送/写入 WAL、在线/短期状态和读路径加速。
 - MQ 是写路径异步边界；writer 消费失败进入 retry / DLQ，而不是让接入层同步等待数据库成功。
 
 ## Writer
@@ -22,7 +22,7 @@
 `flare-storage/writer` 的职责：
 
 - 消费 `flare.im.message.storage` 和 `flare.im.message.events` 等存储 topic。
-- 使用 Redis 幂等窗口和 PostgreSQL `message_write_ledger` 保证重复投递可重入。
+- 使用 PostgreSQL `message_idempotency_ledger` 和 `message_write_ledger` 保证重复投递可重入；事件流写成功后才回 ACK，Redis 占位不作为完成凭据。
 - 将消息写入 `messages`，将操作/同步事件写入 `events`。
 - 维护热缓存和写入阶段状态。
 - 发布 ACK 或失败状态，供客户端 ack/sync 收敛和运维排障。
@@ -68,7 +68,6 @@ Writer 常用环境变量：
 - `STORAGE_MESSAGE_DLQ_TOPIC`
 - `STORAGE_REDIS_URL`
 - `STORAGE_REDIS_HOT_TTL_SECONDS`
-- `STORAGE_REDIS_IDEMPOTENCY_TTL_SECONDS`
 - `STORAGE_POSTGRES_URL`
 - `STORAGE_POSTGRES_MAX_CONNECTIONS`
 - `STORAGE_POSTGRES_MIN_CONNECTIONS`

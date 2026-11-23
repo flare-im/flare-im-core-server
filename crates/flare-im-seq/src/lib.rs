@@ -1,10 +1,8 @@
 //! Conversation sequence allocation for Flare IM write paths.
 
-mod leased_allocator;
+mod floor_provider;
 mod sequence_allocator;
 
-pub use leased_allocator::{
-    LeaseOutcome, LeasedSegmentAllocator, MonotonicClock, RedisSeqLeaseBackend, SeqAllocation,
-    SeqLeaseBackend, SystemClock,
-};
 pub use sequence_allocator::SequenceAllocator;
+
+pub use floor_provider::SeqFloorProvider;

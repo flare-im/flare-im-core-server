@@ -8,7 +8,7 @@ async fn main() -> Result<()> {
     let args: Vec<_> = std::env::args().skip(1).collect();
     if args == ["--help"] {
         println!(
-            "flare-core-initialize [upgrade]\nRequires CORE_INITIAL_DATABASE_URL and CORE_INITIAL_DATABASE. No argument initializes a fresh empty owned v3 database; upgrade accepts only the archived initial v1 or v2 model. Isolated database-owner core_initialize login required; no SQLx adoption/import/backfill."
+            "flare-core-initialize [upgrade]\nRequires CORE_INITIAL_DATABASE_URL and CORE_INITIAL_DATABASE. No argument initializes a fresh empty owned v4 database; upgrade accepts only the archived initial v1, v2 or v3 model. Isolated database-owner core_initialize login required; no SQLx adoption/import/backfill."
         );
         return Ok(());
     }

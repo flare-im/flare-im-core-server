@@ -9,10 +9,10 @@ use std::time::Duration;
 use tonic::{Request, Response, Status};
 
 pub(crate) fn configured(address: &str, port: u16) -> FlareAppConfig {
-    configured_ports(address, [port; 9])
+    configured_ports(address, [port; 10])
 }
 
-fn configured_ports(address: &str, ports: [u16; 9]) -> FlareAppConfig {
+fn configured_ports(address: &str, ports: [u16; 10]) -> FlareAppConfig {
     let mut config = String::from(
         "[service]\nname = \"static-grpc-test\"\nversion = \"0\"\n[server]\naddress = \"127.0.0.1\"\nport = 1\n",
     );
@@ -26,6 +26,7 @@ fn configured_ports(address: &str, ports: [u16; 9]) -> FlareAppConfig {
         "message_orchestrator",
         "media",
         "capability",
+        "push_proxy",
     ]
     .into_iter()
     .zip(ports)
@@ -40,7 +41,7 @@ fn configured_ports(address: &str, ports: [u16; 9]) -> FlareAppConfig {
 #[test]
 fn shared_static_maps_canonical_dependencies_and_refuses_unknown_aliases() {
     let ports = [
-        41231, 41232, 41233, 41234, 41235, 41236, 41237, 41238, 41239,
+        41231, 41232, 41233, 41234, 41235, 41236, 41237, 41238, 41239, 41240,
     ];
     let app = configured_ports("127.0.0.1", ports);
     for (dependency, port) in [
@@ -53,6 +54,7 @@ fn shared_static_maps_canonical_dependencies_and_refuses_unknown_aliases() {
         ORCHESTRATOR,
         MEDIA,
         CAPABILITY,
+        PUSH_PROXY,
     ]
     .into_iter()
     .zip(ports)

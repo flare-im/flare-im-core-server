@@ -1133,6 +1133,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "flare-im-seq"
+version = "1.0.3"
+dependencies = [
+ "flare-server-core",
+ "redis",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "flare-im-service-kit"
 version = "1.0.3"
 dependencies = [
@@ -1149,6 +1159,7 @@ dependencies = [
  "flare-core-runtime",
  "flare-grpc-proto",
  "flare-im-contracts",
+ "flare-im-seq",
  "flare-plugin-protocol",
  "flare-proto",
  "flare-server-core",

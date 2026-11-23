@@ -11,12 +11,15 @@ use crate::domain::model::message_kind::MessageProfile;
 /// `pluginSharedStateVersion`, `pluginSharedEntity`) and the unbound-copy mark Storage Reader sets
 /// (`pluginCardUnbound`). Removed from the attributes and extensions of every submitted message: a
 /// preset version would hold back every later state of the card, and only Core says which card is
-/// bound to its entity.
+/// bound to its entity. The server edit clock is reserved here as well.
 pub const SERVER_OWNED_ATTRIBUTES: &[&str] = &[
     "pluginSharedStateJson",
     "pluginSharedStateVersion",
     "pluginSharedEntity",
     "pluginCardUnbound",
+    "lastEditEventSeq",
+    "serverEdit",
+    "serverReactions",
 ];
 
 #[derive(Clone, Debug)]
@@ -96,6 +99,8 @@ impl MessageSubmission {
         // pre-allocation stages; `MessageIngestService::allocate_seq_for_submission` assigns the
         // durable conversation sequence after ensure/decorate succeeds.
         request.conversation_seq = 0;
+        request.last_edit_seq = 0;
+        request.reaction_states.clear();
         request.message_seq = None;
 
         let _profile = MessageProfile::ensure(&mut request);
@@ -218,6 +223,25 @@ mod tests {
                 conversation_id: "conv-1".to_string(),
                 sender_id: "user-1".to_string(),
                 conversation_seq: 99,
+                last_edit_seq: 999,
+                reaction_states: vec![flare_proto::common::MessageReactionState {
+                    user_id: "fake".into(),
+                    emoji: "👍".into(),
+                    event_seq: 999,
+                    active: true,
+                }],
+                attributes: [
+                    ("lastEditEventSeq".into(), "999".into()),
+                    ("serverEdit".into(), "{\"eventSeq\":999}".into()),
+                    ("serverReactions".into(), "[]".into()),
+                ]
+                .into(),
+                extensions: [
+                    ("lastEditEventSeq".into(), b"999".to_vec()),
+                    ("serverEdit".into(), b"{\"eventSeq\":999}".to_vec()),
+                    ("serverReactions".into(), b"[]".to_vec()),
+                ]
+                .into(),
                 message_seq: Some(88),
                 ..Default::default()
             },
@@ -230,5 +254,11 @@ mod tests {
             "prepare must leave conversation_seq unassigned until server allocation"
         );
         assert_eq!(submission.message.message_seq, None);
+        assert_eq!(submission.message.last_edit_seq, 0);
+        assert!(submission.message.reaction_states.is_empty());
+        for key in ["lastEditEventSeq", "serverEdit", "serverReactions"] {
+            assert!(!submission.message.attributes.contains_key(key));
+            assert!(!submission.message.extensions.contains_key(key));
+        }
     }
 }

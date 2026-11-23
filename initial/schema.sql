@@ -1285,7 +1285,7 @@ CREATE TABLE online_kick_commands (
 );
 CREATE INDEX online_kick_due ON online_kick_commands(next_at) WHERE completed_at IS NULL;
 
--- Send idempotency ledger: (tenant_id, sender_id, client_msg_id) is unique beyond the Redis dedup
+-- Send idempotency ledger: (tenant_id, sender_id, conversation_id, client_msg_id) is unique beyond the Redis dedup
 -- window. Storage Writer claims it in the message's own transaction; Ingest reads it only for a resend
 -- whose client creation time is older than that window. Not a hypertable (its unique constraints must
 -- contain the time column); hash partitions on (tenant_id, sender_id) keep the key globally unique.
@@ -1299,7 +1299,7 @@ CREATE TABLE message_idempotency_ledger (
  conversation_seq BIGINT NOT NULL,
  durability SMALLINT NOT NULL,
  created_at TIMESTAMPTZ NOT NULL,
- PRIMARY KEY (tenant_id, sender_id, client_msg_id)
+ PRIMARY KEY (tenant_id, sender_id, conversation_id, client_msg_id)
 ) PARTITION BY HASH (tenant_id, sender_id);
 CREATE TABLE message_idempotency_ledger_p00 PARTITION OF message_idempotency_ledger FOR VALUES WITH (MODULUS 32, REMAINDER 0);
 CREATE TABLE message_idempotency_ledger_p01 PARTITION OF message_idempotency_ledger FOR VALUES WITH (MODULUS 32, REMAINDER 1);
@@ -1357,19 +1357,22 @@ CREATE TABLE tenant_notice_outbox (
 CREATE INDEX idx_tenant_notice_outbox_due ON tenant_notice_outbox(next_attempt_at);
 
 CREATE TABLE core_initial_history (
-    to_version smallint PRIMARY KEY CHECK (to_version IN (2, 3)),
-    from_version smallint NOT NULL CHECK (from_version IN (0, 1, 2)),
+    to_version smallint PRIMARY KEY CHECK (to_version IN (2, 3, 4)),
+    from_version smallint NOT NULL CHECK (from_version IN (0, 1, 2, 3)),
     from_sha256 text CHECK (from_sha256 ~ '^[0-9a-f]{64}$'),
     to_sha256 text NOT NULL CHECK (to_sha256 ~ '^[0-9a-f]{64}$'),
-    transition text NOT NULL CHECK (transition IN ('fresh', 'application-media-v2', 'plugin-web-bundles-v3')),
+    transition text NOT NULL CHECK (transition IN ('fresh', 'application-media-v2', 'plugin-web-bundles-v3',
+                                                   'conversation-send-idempotency-v4')),
     ddl_sha256 text NOT NULL CHECK (ddl_sha256 ~ '^[0-9a-f]{64}$'),
     applied_at timestamptz NOT NULL DEFAULT clock_timestamp(),
     CHECK ((from_version = 0 AND from_sha256 IS NULL AND transition = 'fresh')
         OR (from_version = 1 AND to_version = 2 AND from_sha256 IS NOT NULL AND transition = 'application-media-v2')
-        OR (from_version = 2 AND to_version = 3 AND from_sha256 IS NOT NULL AND transition = 'plugin-web-bundles-v3'))
+        OR (from_version = 2 AND to_version = 3 AND from_sha256 IS NOT NULL AND transition = 'plugin-web-bundles-v3')
+        OR (from_version = 3 AND to_version = 4 AND from_sha256 IS NOT NULL
+            AND transition = 'conversation-send-idempotency-v4'))
 );
 CREATE TABLE core_initial_schema (
- version smallint PRIMARY KEY CHECK(version=3),
+ version smallint PRIMARY KEY CHECK(version=4),
  schema_sha256 text NOT NULL CHECK(schema_sha256 ~ '^[0-9a-f]{64}$'),
  initialized_at timestamptz NOT NULL DEFAULT clock_timestamp()
 );

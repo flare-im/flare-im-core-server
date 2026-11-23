@@ -202,6 +202,12 @@ pub async fn initialize(
         }
     };
     let roster_policy_endpoint = flare_im_service_kit::roster_policy::endpoint_from_env();
+    if roster_policy_endpoint.is_none() {
+        tracing::warn!(
+            "{} is unset; rosters of externally managed (Social) groups stay hidden",
+            flare_im_service_kit::roster_policy::ENDPOINT_ENV
+        );
+    }
     let grpc_handler = ConversationGrpcHandler::new(command_handler, query_handler)
         .with_purge_verifier(purge_verifier)
         .with_roster_policy_endpoint(roster_policy_endpoint);

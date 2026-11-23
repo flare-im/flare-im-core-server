@@ -24,7 +24,7 @@ cp deploy/.env.example deploy/.env
 # 以及三项 Ed25519 密钥 FLARE_INTERNAL_CTX_SIGNING_KEY / FLARE_INTERNAL_CTX_PUBLIC_KEY /
 # FLARE_PLATFORM_PUBLIC_KEY，生成方法写在 .env.example 里
 
-docker compose --env-file deploy/.env \
+python3 deploy/compose.py --env-file deploy/.env \
   -f deploy/docker-compose.yml \
   -f deploy/docker-compose.nats.yml \
   -f deploy/docker-compose.stack.yml \
@@ -80,8 +80,11 @@ RUSTFS_ACCESS_KEY / RUSTFS_SECRET_KEY
 GRAFANA_ADMIN_USER / GRAFANA_ADMIN_PASSWORD
 ```
 
-密码里带 `@ : /` 或空格时 compose 拼不出合法 URL（它不做百分号转义），
-这时直接给整条 `DATABASE_URL=` / `REDIS_URL=`。
+`deploy/compose.py` 从 Compose 解析后的配置读取原始 Redis 密码，自动编码客户端 URI；Dragonfly 仍使用原始密码。整套服务的启动、配置检查和日志命令统一经此入口，参数与 `docker compose` 相同；显式设置的 `REDIS_URL` 保持优先。直接使用 Docker Compose 时必须提供已编码的 `REDIS_URL`。
+
+多个 `--env-file` 按命令顺序叠加，后面的文件覆盖前面的文件；shell 环境变量仍优先于文件。
+
+PostgreSQL 密码带 URL 保留字符时仍需显式提供编码后的 `DATABASE_URL`。
 
 ### 检查服务状态
 
@@ -95,7 +98,7 @@ curl -s http://localhost:28500/v1/agent/services | jq 'keys'   # 看注册了哪
 
 ```bash
 docker compose logs -f postgres
-docker compose -f docker-compose.yml -f docker-compose.stack.yml logs -f api-gateway
+python3 compose.py -f docker-compose.yml -f docker-compose.stack.yml logs -f api-gateway
 ```
 
 ## 包含的服务

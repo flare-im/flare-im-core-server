@@ -14,22 +14,20 @@ use crate::domain::service::MessagePersistenceDomainService;
 /// 普通消息持久化命令处理器（编排层）
 ///
 /// 使用泛型参数而非 trait objects，符合 Rust 2024 规范
-pub struct MessagePersistenceCommandHandler<I, H, A, E, W, P>
+pub struct MessagePersistenceCommandHandler<H, A, E, W, P>
 where
-    I: crate::domain::repository::MessageIdempotencyRepository + Send + Sync,
     H: crate::domain::repository::HotCacheRepository + Send + Sync,
     A: crate::domain::repository::ArchiveStoreRepository + Send + Sync,
     E: crate::domain::repository::EventStreamRepository + Send + Sync,
     W: crate::domain::repository::WalCleanupRepository + Send + Sync,
     P: crate::domain::repository::AckPublisher + Send + Sync,
 {
-    domain_service: Arc<MessagePersistenceDomainService<I, H, A, E, W, P>>,
+    domain_service: Arc<MessagePersistenceDomainService<H, A, E, W, P>>,
     metrics: Arc<StorageWriterMetrics>,
 }
 
-impl<I, H, A, E, W, P> MessagePersistenceCommandHandler<I, H, A, E, W, P>
+impl<H, A, E, W, P> MessagePersistenceCommandHandler<H, A, E, W, P>
 where
-    I: crate::domain::repository::MessageIdempotencyRepository + Send + Sync,
     H: crate::domain::repository::HotCacheRepository + Send + Sync,
     A: crate::domain::repository::ArchiveStoreRepository + Send + Sync,
     E: crate::domain::repository::EventStreamRepository + Send + Sync,
@@ -37,7 +35,7 @@ where
     P: crate::domain::repository::AckPublisher + Send + Sync,
 {
     pub fn new(
-        domain_service: Arc<MessagePersistenceDomainService<I, H, A, E, W, P>>,
+        domain_service: Arc<MessagePersistenceDomainService<H, A, E, W, P>>,
         metrics: Arc<StorageWriterMetrics>,
     ) -> Self {
         Self {
@@ -222,38 +220,13 @@ mod tests {
     use crate::domain::model::{Event, TenantContext};
     use crate::domain::repository::{
         AckPublisher, ArchiveStoreRepository, EventStreamRepository, HotCacheRepository,
-        MessageIdempotencyRepository, WalCleanupRepository,
+        WalCleanupRepository,
     };
     use flare_im_contracts::message::Message;
     use flare_im_contracts::utils::Context;
     use flare_server_core::error::Result as AnyhowResult;
     use std::collections::HashMap;
-    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-
-    struct FailingIdempotencyRepository;
-
-    impl MessageIdempotencyRepository for FailingIdempotencyRepository {
-        async fn is_new(&self, _ctx: &Ctx, _message_id: &str) -> AnyhowResult<bool> {
-            Err(flare_server_core::error::FlareError::system(
-                "idempotency store unavailable".to_string(),
-            ))
-        }
-    }
-
-    struct ReservingIdempotencyRepository {
-        reserved: Arc<AtomicBool>,
-    }
-
-    impl MessageIdempotencyRepository for ReservingIdempotencyRepository {
-        async fn is_new(&self, _ctx: &Ctx, _message_id: &str) -> AnyhowResult<bool> {
-            Ok(!self.reserved.swap(true, Ordering::SeqCst))
-        }
-
-        async fn release(&self, _ctx: &Ctx, _message_id: &str) -> AnyhowResult<()> {
-            self.reserved.store(false, Ordering::SeqCst);
-            Ok(())
-        }
-    }
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     struct NoopHotCacheRepository;
 
@@ -331,7 +304,6 @@ mod tests {
     }
 
     type TestDomainService = MessagePersistenceDomainService<
-        FailingIdempotencyRepository,
         NoopHotCacheRepository,
         CountingArchiveRepository,
         NoopEventStreamRepository,
@@ -340,7 +312,6 @@ mod tests {
     >;
 
     type TestCommandHandler = MessagePersistenceCommandHandler<
-        FailingIdempotencyRepository,
         NoopHotCacheRepository,
         CountingArchiveRepository,
         NoopEventStreamRepository,
@@ -377,10 +348,9 @@ mod tests {
         }
     }
 
-    fn handler_with_failing_idempotency(writes: Arc<AtomicUsize>) -> TestCommandHandler {
+    fn handler_without_event_stream(writes: Arc<AtomicUsize>) -> TestCommandHandler {
         let domain_service: Arc<TestDomainService> =
             Arc::new(MessagePersistenceDomainService::new(
-                Some(Arc::new(FailingIdempotencyRepository)),
                 None,
                 Some(Arc::new(CountingArchiveRepository { writes })),
                 None,
@@ -391,7 +361,6 @@ mod tests {
     }
 
     type RetryDomainService = MessagePersistenceDomainService<
-        ReservingIdempotencyRepository,
         NoopHotCacheRepository,
         CountingArchiveRepository,
         FailOnceEventStreamRepository,
@@ -400,7 +369,6 @@ mod tests {
     >;
 
     type RetryCommandHandler = MessagePersistenceCommandHandler<
-        ReservingIdempotencyRepository,
         NoopHotCacheRepository,
         CountingArchiveRepository,
         FailOnceEventStreamRepository,
@@ -408,14 +376,12 @@ mod tests {
         NoopAckPublisher,
     >;
 
-    fn handler_with_reservation_and_fail_once_event_stream(
-        reserved: Arc<AtomicBool>,
+    fn handler_with_fail_once_event_stream(
         archive_writes: Arc<AtomicUsize>,
         stream_attempts: Arc<AtomicUsize>,
     ) -> RetryCommandHandler {
         let domain_service: Arc<RetryDomainService> =
             Arc::new(MessagePersistenceDomainService::new(
-                Some(Arc::new(ReservingIdempotencyRepository { reserved })),
                 None,
                 Some(Arc::new(CountingArchiveRepository {
                     writes: archive_writes,
@@ -430,36 +396,33 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn handle_batch_returns_error_and_skips_writes_when_idempotency_check_fails() {
+    async fn handle_batch_requires_durable_event_stream() {
         let writes = Arc::new(AtomicUsize::new(0));
-        let handler = handler_with_failing_idempotency(writes.clone());
+        let handler = handler_without_event_stream(writes.clone());
 
         let err = handler
             .handle_batch(&test_ctx(), vec![test_command("message-a")])
             .await
-            .expect_err("batch idempotency failures must fail closed");
+            .expect_err("missing durable event stream must fail closed");
 
         assert!(
-            err.to_string().contains("Failed to check idempotency"),
+            err.to_string()
+                .contains("Event stream repository not configured"),
             "unexpected error: {err}"
         );
         assert_eq!(
             writes.load(Ordering::SeqCst),
-            0,
-            "idempotency failures must not continue into archive writes"
+            1,
+            "archive precedes the event stream"
         );
     }
 
     #[tokio::test]
-    async fn handle_releases_idempotency_reservation_after_durable_write_failure() {
-        let reserved = Arc::new(AtomicBool::new(false));
+    async fn handle_retries_after_durable_event_stream_failure() {
         let archive_writes = Arc::new(AtomicUsize::new(0));
         let stream_attempts = Arc::new(AtomicUsize::new(0));
-        let handler = handler_with_reservation_and_fail_once_event_stream(
-            reserved,
-            archive_writes.clone(),
-            stream_attempts.clone(),
-        );
+        let handler =
+            handler_with_fail_once_event_stream(archive_writes.clone(), stream_attempts.clone());
         let ctx = test_ctx();
 
         handler

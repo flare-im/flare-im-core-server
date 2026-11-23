@@ -1840,11 +1840,6 @@ pub const REGISTERED_ENV_VARS: &[EnvVarSpec] = &[
         EnvPurpose::Redis,
     ),
     env(
-        "STORAGE_REDIS_IDEMPOTENCY_TTL_SECONDS",
-        EnvOwner::Storage,
-        EnvPurpose::Redis,
-    ),
-    env(
         "STORAGE_REDIS_MESSAGE_CACHE_TTL_SECONDS",
         EnvOwner::Storage,
         EnvPurpose::Redis,

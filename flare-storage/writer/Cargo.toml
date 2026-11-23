@@ -43,6 +43,8 @@ base64 = { workspace = true }
 ed25519-dalek = { version = "2", features = ["pkcs8", "pem"] }
 # 只用于 tests/event_codec_contract.rs：Writer 编码、Reader 解码的往返契约。
 flare-storage-reader = { path = "../reader" }
+# 只用于初始化器建出的库上跑归档写入（machine_commit_pg_tests.rs）。
+flare-core-initialize = { path = "../../tools/flare-core-initialize" }
 tokio-stream = { workspace = true }
 uuid = { workspace = true }
 chrono = { workspace = true }

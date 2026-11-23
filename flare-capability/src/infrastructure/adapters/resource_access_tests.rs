@@ -32,6 +32,7 @@ struct OwnerFixture {
     /// every participant whatever the key says.
     lookup: AtomicBool,
     participant_calls: Mutex<Vec<ListConversationParticipantsRequest>>,
+    read_fault: Mutex<Option<tonic::Code>>,
 }
 /// `u1` (the caller, owner), `u2`, `u3`, then 1 200 members with 128-byte ids.
 fn roster() -> Vec<(String, String)> {
@@ -90,6 +91,9 @@ impl conversation_read_service_server::ConversationReadService for OwnerFixture 
     ) -> std::result::Result<Response<GetConversationDetailResponse>, Status> {
         self.actor(&request);
         assert_eq!(request.get_ref().conversation_id, "conversation-1");
+        if let Some(code) = *self.read_fault.lock().unwrap() {
+            return Err(Status::new(code, "private upstream details"));
+        }
         if !self.member.load(Ordering::SeqCst) {
             return Err(Status::permission_denied("removed member"));
         }
@@ -243,6 +247,7 @@ async fn harness() -> Harness {
         hidden: vec!["u3".to_string()],
         lookup: AtomicBool::new(true),
         participant_calls: Mutex::new(Vec::new()),
+        read_fault: Mutex::new(None),
     });
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let authority = format!("http://{}", listener.local_addr().unwrap());
@@ -280,6 +285,48 @@ async fn harness() -> Harness {
         stop,
         server,
     }
+}
+#[tokio::test]
+async fn transient_resource_read_failures_are_not_reported_as_membership_refusals() {
+    let harness = harness().await;
+    for code in [
+        tonic::Code::Unavailable,
+        tonic::Code::DeadlineExceeded,
+        tonic::Code::ResourceExhausted,
+    ] {
+        *harness.owner.read_fault.lock().unwrap() = Some(code);
+        let error = harness
+            .adapter
+            .read(&harness.actor, &ResourceRequest::ConversationRead {})
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(
+                error,
+                CapabilityError::System(_) | CapabilityError::Timeout(_)
+            ),
+            "transient {code:?} must remain unavailable, never a membership refusal"
+        );
+        assert!(!error.to_string().contains("private upstream details"));
+    }
+    for code in [
+        tonic::Code::PermissionDenied,
+        tonic::Code::NotFound,
+        tonic::Code::Unauthenticated,
+    ] {
+        *harness.owner.read_fault.lock().unwrap() = Some(code);
+        let error = harness
+            .adapter
+            .read(&harness.actor, &ResourceRequest::ConversationRead {})
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(error, CapabilityError::PolicyDenied(_)),
+            "refusal {code:?} stays denied"
+        );
+        assert!(!error.to_string().contains("private upstream details"));
+    }
+    harness.finish().await;
 }
 #[tokio::test]
 async fn resource_wire_uses_user_context_derived_group_and_whitelisted_views() {

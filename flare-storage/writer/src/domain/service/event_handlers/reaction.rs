@@ -28,6 +28,7 @@ where
             reaction.emoji.as_str(),
             reaction.user_id.as_str(),
             add,
+            event.seq,
         )
         .await
         .map_err(|e| map_infra_error(e, ErrorCode::DatabaseError, "Database operation failed"))?;

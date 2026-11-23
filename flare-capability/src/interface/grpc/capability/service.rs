@@ -410,6 +410,15 @@ impl CapabilityService for CapabilityGrpcServer {
             Ok(Ok(v)) => v,
             Ok(Err(e)) => {
                 self.metrics.dispatch_err.fetch_add(1, Ordering::Relaxed);
+                let kind = match &e {
+                    crate::domain::capability::CapabilityError::Timeout(_) => "timeout",
+                    crate::domain::capability::CapabilityError::System(_) => "system",
+                    crate::domain::capability::CapabilityError::Flare(_) => "infrastructure",
+                    _ => "refused",
+                };
+                if kind != "refused" {
+                    tracing::warn!(kind, "capability dispatch outcome unknown");
+                }
                 return Err(capability_error_to_status(e));
             }
             Err(_) => {

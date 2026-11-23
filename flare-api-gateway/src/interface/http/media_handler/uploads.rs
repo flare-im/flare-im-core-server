@@ -45,7 +45,7 @@ pub async fn generate_upload_url(
 
     let grpc_res = clients
         .bounded(async {
-            let mut media_client = clients.media.lock().await;
+            let mut media_client = clients.media.lock().await.clone();
             media_client.generate_upload_url(&caller, req).await
         })
         .await
@@ -101,7 +101,7 @@ pub async fn upload_file(
 
     let grpc_res = clients
         .bounded(async {
-            let mut media_client = clients.media.lock().await;
+            let mut media_client = clients.media.lock().await.clone();
             media_client.upload_file(&caller, chunks).await
         })
         .await
@@ -141,7 +141,7 @@ pub async fn initiate_multipart_upload(
     };
     let grpc_res = clients
         .bounded(async {
-            let mut media_client = clients.media.lock().await;
+            let mut media_client = clients.media.lock().await.clone();
             media_client
                 .initiate_multipart_upload(&caller, grpc_req)
                 .await
@@ -191,7 +191,7 @@ pub async fn upload_multipart_chunk(
     };
     let grpc_res = clients
         .bounded(async {
-            let mut media_client = clients.media.lock().await;
+            let mut media_client = clients.media.lock().await.clone();
             media_client.upload_multipart_chunk(&caller, grpc_req).await
         })
         .await
@@ -228,7 +228,7 @@ pub async fn complete_multipart_upload(
 
     let grpc_res = clients
         .bounded(async {
-            let mut media_client = clients.media.lock().await;
+            let mut media_client = clients.media.lock().await.clone();
             media_client
                 .complete_multipart_upload(
                     &caller,
@@ -272,7 +272,7 @@ pub async fn abort_multipart_upload(
 
     let grpc_res = clients
         .bounded(async {
-            let mut media_client = clients.media.lock().await;
+            let mut media_client = clients.media.lock().await.clone();
             media_client
                 .abort_multipart_upload(
                     &caller,
@@ -321,7 +321,7 @@ pub async fn initiate_direct_upload(
     };
     let grpc_res = clients
         .bounded(async {
-            let mut media_client = clients.media.lock().await;
+            let mut media_client = clients.media.lock().await.clone();
             media_client.initiate_direct_upload(&caller, grpc_req).await
         })
         .await
@@ -357,7 +357,7 @@ pub async fn get_direct_upload_status(
     debug!(trace_id = %ctx.trace_id(), upload_id = %req.upload_id, "Getting direct upload status");
     let grpc_res = clients
         .bounded(async {
-            let mut media_client = clients.media.lock().await;
+            let mut media_client = clients.media.lock().await.clone();
             media_client
                 .get_direct_upload_status(
                     &caller,
@@ -400,7 +400,7 @@ pub async fn presign_direct_upload_parts(
     debug!(trace_id = %ctx.trace_id(), upload_id = %req.upload_id, "Presigning direct upload parts");
     let grpc_res = clients
         .bounded(async {
-            let mut media_client = clients.media.lock().await;
+            let mut media_client = clients.media.lock().await.clone();
             media_client
                 .presign_direct_upload_parts(
                     &caller,
@@ -455,7 +455,7 @@ pub async fn commit_direct_upload_parts(
         .collect();
     let grpc_res = clients
         .bounded(async {
-            let mut media_client = clients.media.lock().await;
+            let mut media_client = clients.media.lock().await.clone();
             media_client
                 .commit_direct_upload_parts(
                     &caller,
@@ -499,7 +499,7 @@ pub async fn complete_direct_upload(
     debug!(trace_id = %ctx.trace_id(), upload_id = %req.upload_id, "Completing direct upload");
     let grpc_res = clients
         .bounded(async {
-            let mut media_client = clients.media.lock().await;
+            let mut media_client = clients.media.lock().await.clone();
             media_client
                 .complete_direct_upload(
                     &caller,
@@ -542,7 +542,7 @@ pub async fn abort_direct_upload(
     debug!(trace_id = %ctx.trace_id(), upload_id = %req.upload_id, "Aborting direct upload");
     let grpc_res = clients
         .bounded(async {
-            let mut media_client = clients.media.lock().await;
+            let mut media_client = clients.media.lock().await.clone();
             media_client
                 .abort_direct_upload(
                     &caller,

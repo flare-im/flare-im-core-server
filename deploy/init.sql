@@ -298,7 +298,7 @@ CREATE INDEX IF NOT EXISTS idx_message_write_ledger_failed_updated
     ON message_write_ledger(tenant_id, updated_at DESC)
     WHERE failed_at IS NOT NULL;
 
--- 发送幂等账本（migration 0020）：(tenant_id, sender_id, client_msg_id) 唯一，Storage Writer 与消息同一事务
+-- 发送幂等账本（migration 0020）：(tenant_id, sender_id, conversation_id, client_msg_id) 唯一，Storage Writer 与消息同一事务
 -- 认领，Ingest 只为客户端创建时间早于 Redis 去重窗口的重发回查。不放进 Timescale 超表（超表唯一约束必须含
 -- 时间列）；按 (tenant_id, sender_id) 哈希分区，分区键在主键内，唯一性全局成立。保留 7 天，按 created_at 分批删。
 DROP TABLE IF EXISTS message_idempotency_ledger CASCADE;
@@ -311,9 +311,9 @@ CREATE TABLE message_idempotency_ledger (
     conversation_seq BIGINT NOT NULL,
     durability SMALLINT NOT NULL,
     created_at TIMESTAMPTZ NOT NULL,
-    PRIMARY KEY (tenant_id, sender_id, client_msg_id)
+    PRIMARY KEY (tenant_id, sender_id, conversation_id, client_msg_id)
 ) PARTITION BY HASH (tenant_id, sender_id);
-COMMENT ON TABLE message_idempotency_ledger IS '发送幂等账本：(tenant_id, sender_id, client_msg_id) 唯一，覆盖 Redis 去重窗口之外的重发；保留 7 天';
+COMMENT ON TABLE message_idempotency_ledger IS '发送幂等账本：(tenant_id, sender_id, conversation_id, client_msg_id) 唯一，覆盖 Redis 去重窗口之外的重发；保留 7 天';
 COMMENT ON COLUMN message_idempotency_ledger.server_id IS '首个占用该 client_msg_id 的消息';
 COMMENT ON COLUMN message_idempotency_ledger.durability IS 'SendAckDurability 枚举值；写入时消息已落库，记 PERSISTED';
 COMMENT ON COLUMN message_idempotency_ledger.created_at IS '入账时间，按它清理过期行';

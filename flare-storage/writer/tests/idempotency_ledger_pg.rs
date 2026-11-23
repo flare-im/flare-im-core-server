@@ -1,5 +1,5 @@
 //! 发送幂等账本的真库用例：`PostgresMessageStore` 在写消息的同一事务里认领
-//! `(tenant_id, sender_id, client_msg_id)`，以及按保留期分批删除。
+//! `(tenant_id, sender_id, conversation_id, client_msg_id)`，以及按保留期分批删除。
 //!
 //! - 单条路径：同一会话里带同一 client_msg_id 的第二条消息判为重复，不写消息行、不写写入台账；首条的重投
 //!   不算重复；同一发送者在另一会话复用 client_msg_id 照常写入；
@@ -81,6 +81,26 @@ async fn create_schema(pool: &PgPool) {
     .execute(pool)
     .await
     .expect("migration 0020 applies");
+    sqlx::raw_sql("INSERT INTO message_idempotency_ledger VALUES ('migration-tenant', 'alice', 'shared', 'a', 'kept-receipt', 1, 4, now());
+        INSERT INTO messages (tenant_id, server_id, conversation_id, client_msg_id, sender_id, source, seq, timestamp, conversation_type, message_type, status, created_at)
+        VALUES ('migration-tenant', 'first-b', 'b', 'shared', 'alice', 1, 2, now(), 2, 1, 2, now() - interval '1 minute'),
+               ('migration-tenant', 'retry-b', 'b', 'shared', 'alice', 1, 3, now(), 2, 1, 2, now());")
+        .execute(pool).await.unwrap();
+    sqlx::raw_sql(include_str!(
+        "../../../migrations/0032_20261118_conversation_send_idempotency.sql"
+    ))
+    .execute(pool)
+    .await
+    .expect("migration 0032 applies");
+    let receipts: Vec<(String, String)> = sqlx::query_as("SELECT conversation_id, server_id FROM message_idempotency_ledger WHERE tenant_id = 'migration-tenant' ORDER BY conversation_id")
+        .fetch_all(pool).await.unwrap();
+    assert_eq!(
+        receipts,
+        [
+            ("a".into(), "kept-receipt".into()),
+            ("b".into(), "first-b".into())
+        ]
+    );
 }
 
 fn ctx() -> Ctx {
@@ -120,12 +140,13 @@ async fn stored(pool: &PgPool, table: &str, server_id: &str) -> bool {
         > 0
 }
 
-async fn ledger_owner(pool: &PgPool, client_msg_id: &str) -> Option<String> {
+async fn ledger_owner(pool: &PgPool, conversation_id: &str, client_msg_id: &str) -> Option<String> {
     sqlx::query_scalar(
         "SELECT server_id FROM message_idempotency_ledger \
-         WHERE tenant_id = $1 AND sender_id = 'alice' AND client_msg_id = $2",
+         WHERE tenant_id = $1 AND sender_id = 'alice' AND conversation_id = $2 AND client_msg_id = $3",
     )
     .bind(TENANT)
+    .bind(conversation_id)
     .bind(client_msg_id)
     .fetch_optional(pool)
     .await
@@ -153,7 +174,10 @@ async fn check(pool: PgPool) {
         .expect("first send");
     assert_eq!(first, ArchiveOutcome::default());
     assert!(stored(&pool, "messages", "srv-1").await);
-    assert_eq!(ledger_owner(&pool, "cli-1").await.as_deref(), Some("srv-1"));
+    assert_eq!(
+        ledger_owner(&pool, "conv-a", "cli-1").await.as_deref(),
+        Some("srv-1")
+    );
 
     // 同一会话、同一 client_msg_id 的第二条：判为重复，消息行与写入台账都不写。
     let resend = store
@@ -169,17 +193,56 @@ async fn check(pool: PgPool) {
         .archive_messages(&ctx, &[message("srv-1", "conv-a", "cli-1", 1)])
         .await
         .expect("redelivery");
-    assert_eq!(redelivered, ArchiveOutcome::default());
+    assert!(redelivered.duplicates.is_empty());
+    assert_eq!(redelivered.already_archived, ["srv-1"]);
 
-    // 另一会话复用同一 client_msg_id：照常写入，账本仍指向首条。
+    // 另一会话拥有独立回执，之后的重发也必须去重。
     let reused = store
         .archive_messages(&ctx, &[message("srv-3", "conv-b", "cli-1", 1)])
         .await
         .expect("reuse in another conversation");
     assert!(reused.duplicates.is_empty());
-    assert_eq!(reused.reused_client_msg_ids, 1);
     assert!(stored(&pool, "messages", "srv-3").await);
-    assert_eq!(ledger_owner(&pool, "cli-1").await.as_deref(), Some("srv-1"));
+    assert_eq!(
+        ledger_owner(&pool, "conv-a", "cli-1").await.as_deref(),
+        Some("srv-1")
+    );
+
+    assert_eq!(
+        ledger_owner(&pool, "conv-b", "cli-1").await.as_deref(),
+        Some("srv-3")
+    );
+    let retry_b = store
+        .archive_messages(&ctx, &[message("srv-b-retry", "conv-b", "cli-1", 2)])
+        .await
+        .unwrap();
+    assert_eq!(retry_b.duplicates, [duplicate("srv-b-retry", "srv-3")]);
+    assert!(!stored(&pool, "messages", "srv-b-retry").await);
+
+    let mut cross_batch: Vec<_> = (0..10)
+        .map(|i| {
+            message(
+                &format!("cross-{i}"),
+                "conv-a",
+                &format!("cross-client-{i}"),
+                100 + i,
+            )
+        })
+        .collect();
+    cross_batch.push(message("cross-first", "conv-b", "cross-client-0", 100));
+    cross_batch.push(message("cross-retry", "conv-b", "cross-client-0", 101));
+    let batch_outcome = store.archive_messages(&ctx, &cross_batch).await.unwrap();
+    assert_eq!(
+        batch_outcome.duplicates,
+        [duplicate("cross-retry", "cross-first")]
+    );
+    assert_eq!(
+        ledger_owner(&pool, "conv-b", "cross-client-0")
+            .await
+            .as_deref(),
+        Some("cross-first")
+    );
+    assert!(!stored(&pool, "messages", "cross-retry").await);
 
     // 没有 client_msg_id 的消息不入账，照常写入。
     let anonymous = store
@@ -220,15 +283,24 @@ async fn check(pool: PgPool) {
     assert!(!stored(&pool, "messages", "srv-b12").await);
     assert!(!stored(&pool, "message_write_ledger", "srv-b12").await);
     assert_eq!(
-        ledger_owner(&pool, "cli-pair").await.as_deref(),
+        ledger_owner(&pool, "conv-a", "cli-pair").await.as_deref(),
         Some("srv-b11")
     );
+
+    let retried_batch = store
+        .archive_messages(&ctx, &batch)
+        .await
+        .expect("batch redelivery");
+    assert_eq!(retried_batch.already_archived.len(), 11);
+    assert!(retried_batch.was_archived("srv-b0"));
+    assert!(retried_batch.was_archived("srv-b11"));
+    assert!(!retried_batch.was_archived("srv-b12"));
 
     // 保留期：入账 8 天前的行过期，删除至多 limit 行，新行保留。
     sqlx::query(
         "INSERT INTO message_idempotency_ledger \
          (tenant_id, sender_id, client_msg_id, conversation_id, server_id, conversation_seq, durability, created_at) \
-         SELECT $1, 'old-sender', 'cli-old-' || n, 'conv-old', 'srv-old-' || n, n, 4, now() - interval '8 days' \
+         SELECT $1, 'old-sender', 'cli-old', 'conv-old-' || n, 'srv-old-' || n, n, 4, now() - interval '8 days' \
          FROM generate_series(1, 3) AS n",
     )
     .bind(TENANT)
@@ -248,5 +320,8 @@ async fn check(pool: PgPool) {
         .await
         .unwrap();
     assert_eq!(total_before - total_after, 3);
-    assert_eq!(ledger_owner(&pool, "cli-1").await.as_deref(), Some("srv-1"));
+    assert_eq!(
+        ledger_owner(&pool, "conv-a", "cli-1").await.as_deref(),
+        Some("srv-1")
+    );
 }

@@ -26,6 +26,8 @@ pub fn message_from_proto(p: &flare_proto::common::Message) -> Message {
         thread_id: p.thread_id.clone(),
         content: p.content.clone(),
         status: p.status,
+        last_edit_seq: p.last_edit_seq,
+        reaction_states: p.reaction_states.clone(),
         retention_policy: p.retention_policy.clone(),
         retention_state: p.retention_state.clone(),
         offline_push_info: p.offline_push_info.clone(),
@@ -57,6 +59,8 @@ pub fn message_into_proto(m: Message) -> flare_proto::common::Message {
         thread_id: m.thread_id,
         content: m.content,
         status: m.status,
+        last_edit_seq: m.last_edit_seq,
+        reaction_states: m.reaction_states,
         retention_policy: m.retention_policy,
         retention_state: m.retention_state,
         offline_push_info: m.offline_push_info,
@@ -88,10 +92,41 @@ pub fn message_to_proto(m: &Message) -> flare_proto::common::Message {
         thread_id: m.thread_id.clone(),
         content: m.content.clone(),
         status: m.status,
+        last_edit_seq: m.last_edit_seq,
+        reaction_states: m.reaction_states.clone(),
         retention_policy: m.retention_policy.clone(),
         retention_state: m.retention_state.clone(),
         offline_push_info: m.offline_push_info.clone(),
         attributes: m.extra.clone(),
         extensions: m.extensions.clone(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn authoritative_edit_and_reaction_versions_survive_message_boundaries() {
+        let wire = flare_proto::common::Message {
+            last_edit_seq: 42,
+            reaction_states: vec![flare_proto::common::MessageReactionState {
+                user_id: "u".into(),
+                emoji: "👍".into(),
+                event_seq: 20,
+                active: false,
+            }],
+            ..Default::default()
+        };
+        let domain = message_from_proto(&wire);
+        assert_eq!(domain.last_edit_seq, 42);
+        assert_eq!(message_to_proto(&domain).last_edit_seq, 42);
+        assert_eq!(domain.reaction_states, wire.reaction_states);
+        assert_eq!(
+            message_to_proto(&domain).reaction_states,
+            wire.reaction_states
+        );
+        let owned = message_into_proto(domain);
+        assert_eq!(owned.last_edit_seq, 42);
+        assert_eq!(owned.reaction_states, wire.reaction_states);
     }
 }

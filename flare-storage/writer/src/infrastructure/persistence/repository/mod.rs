@@ -5,5 +5,4 @@ pub mod operation_store;
 pub mod plugin_entity_bindings;
 pub mod postgres_store;
 pub mod redis_cache;
-pub mod redis_idempotency;
 pub mod redis_wal_cleanup;

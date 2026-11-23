@@ -60,6 +60,10 @@ pub const DISCOVERY_CHANNEL_TIMEOUT: Duration = Duration::from_secs(10);
 static DISCOVERY_CLIENT_CACHE: Lazy<DashMap<String, Arc<Mutex<ServiceClient>>>> =
     Lazy::new(DashMap::new);
 static STATIC_CHANNEL_CACHE: Lazy<DashMap<String, CachedStaticChannel>> = Lazy::new(DashMap::new);
+/// When each route was last dropped by [`forget_route_after_failure`].
+static ROUTE_FORGOTTEN_AT: Lazy<DashMap<String, std::time::Instant>> = Lazy::new(DashMap::new);
+/// 同一路由两次丢弃之间至少隔这么久：故障期间每个调用都失败，不必每次都重建通道或发现客户端。
+pub const ROUTE_FORGET_INTERVAL: Duration = Duration::from_secs(1);
 
 /// 缓存里的静态通道，连同建它的那个运行时上的一个标记任务。
 ///
@@ -255,6 +259,35 @@ pub fn invalidate_static_channel_on_transport_failure(
     }
     invalidate_static_channel(grpc_authority);
     true
+}
+
+/// 经 `grpc_authority` 的调用没有以对端的回答结束（传输层失败，或调用方自己的超时在它报错前就
+/// 取消了它）后调用：丢弃该路由缓存的静态通道或 `discovery://` 发现客户端，下一次
+/// [`resolve_grpc_channel`] 重新解析、新建连接。
+///
+/// 对端重启后，发现客户端里连接失败的实例被剔除、同一实例键又不会重新插入，取通道就一直等可用实例；
+/// 调用方（例如 PreSend Hook，1 s）的超时比 [`DISCOVERY_CHANNEL_TIMEOUT`] 短，那里的清理永远轮不到，
+/// 之后每次调用都超时。同一路由每 [`ROUTE_FORGET_INTERVAL`] 至多丢弃一次。返回是否丢弃了。
+pub fn forget_route_after_failure(grpc_authority: &str) -> bool {
+    let now = std::time::Instant::now();
+    let mut due = true;
+    ROUTE_FORGOTTEN_AT
+        .entry(grpc_authority.to_owned())
+        .and_modify(|at| {
+            if now.duration_since(*at) < ROUTE_FORGET_INTERVAL {
+                due = false;
+            } else {
+                *at = now;
+            }
+        })
+        .or_insert(now);
+    if due {
+        match service_name_from_discovery_route(grpc_authority) {
+            Some(service) => invalidate_discovered_service(service),
+            None => invalidate_static_channel(grpc_authority),
+        }
+    }
+    due
 }
 
 async fn resolve_discovery_channel(service_name: &str) -> Result<Channel, String> {
@@ -454,6 +487,65 @@ mod static_route_tests {
             .expect("the server answers through the address's channel");
             assert_eq!(answer.into_inner().request_id, "r1");
         });
+    }
+
+    /// A peer that stopped answering (here: it accepts and never speaks HTTP/2) leaves its cached
+    /// channel hanging. After the caller's timeout cancels a call and forgets the route, the next
+    /// resolve builds a new channel that reaches the restarted peer on the same address, and a
+    /// second failure within the interval does not rebuild again.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_dead_channel_is_replaced_after_a_cancelled_call() {
+        use flare_grpc_proto::capability::GenericRequest;
+        use flare_grpc_proto::capability::hook_plugin_client::HookPluginClient;
+        use flare_grpc_proto::capability::hook_plugin_server::HookPluginServer;
+
+        let dead = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = dead.local_addr().unwrap();
+        let authority = format!("http://{address}");
+        let held = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let holding = Arc::clone(&held);
+        let acceptor = tokio::spawn(async move {
+            while let Ok((socket, _)) = dead.accept().await {
+                holding.lock().unwrap().push(socket);
+            }
+        });
+        let call = |channel: Channel| async move {
+            tokio::time::timeout(
+                Duration::from_millis(500),
+                HookPluginClient::new(channel).call(GenericRequest {
+                    request_id: "r1".into(),
+                    ..Default::default()
+                }),
+            )
+            .await
+        };
+        let stale = resolve_grpc_channel(&authority).await.unwrap();
+        assert!(
+            !matches!(call(stale).await, Ok(Ok(_))),
+            "the dead peer never answers"
+        );
+        assert!(forget_route_after_failure(&authority));
+        assert!(!is_static_channel_cached(&authority));
+        assert!(!forget_route_after_failure(&authority), "bounded");
+
+        // The peer restarts on the same address; the old connection stays open and silent.
+        acceptor.abort();
+        let _ = acceptor.await;
+        let restarted = tokio::net::TcpListener::bind(address).await.unwrap();
+        tokio::spawn(
+            tonic::transport::Server::builder()
+                .add_service(HookPluginServer::new(Echo))
+                .serve_with_incoming(tonic::transport::server::TcpIncoming::from(restarted)),
+        );
+        let answer = call(resolve_grpc_channel(&authority).await.unwrap())
+            .await
+            .expect("the new channel answers in time")
+            .expect("the restarted peer answers");
+        assert_eq!(answer.into_inner().request_id, "r1");
+        assert!(
+            !held.lock().unwrap().is_empty(),
+            "the dead connection is still open"
+        );
     }
 
     #[test]

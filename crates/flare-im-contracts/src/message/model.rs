@@ -57,6 +57,8 @@ pub struct Message {
     pub thread_id: Option<String>,
     pub content: Option<MessageContent>,
     pub status: i32,
+    pub last_edit_seq: u64,
+    pub reaction_states: Vec<flare_proto::common::MessageReactionState>,
     pub retention_policy: Option<MessageRetentionPolicy>,
     pub retention_state: Option<MessageRetentionState>,
     pub offline_push_info: Option<OfflinePushInfo>,

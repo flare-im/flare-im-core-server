@@ -72,7 +72,7 @@ pub async fn process_image(
 
     let grpc_res = clients
         .bounded(async {
-            let mut media_client = clients.media.lock().await;
+            let mut media_client = clients.media.lock().await.clone();
             media_client.process_image(&caller, grpc_req).await
         })
         .await
@@ -152,7 +152,7 @@ pub async fn process_video(
 
     let grpc_res = clients
         .bounded(async {
-            let mut media_client = clients.media.lock().await;
+            let mut media_client = clients.media.lock().await.clone();
             media_client.process_video(&caller, grpc_req).await
         })
         .await

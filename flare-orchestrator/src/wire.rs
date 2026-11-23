@@ -140,7 +140,7 @@ pub async fn initialize(
     }
     let message_targets: Arc<dyn crate::domain::repository::MessageTargetRepository> = Arc::new(
         crate::infrastructure::external::StorageReaderMessageTargets::new(
-            storage_reader_channel,
+            storage_reader_channel.clone(),
             read_signer.clone(),
         ),
     );
@@ -156,8 +156,10 @@ pub async fn initialize(
             )),
         );
     let conversation_repository = Arc::new(
-        ConversationClient::new(conversation_channel)
-            .with_service_read_signer(read_signer, flare_im_contracts::service_names::ORCHESTRATOR),
+        ConversationClient::new(conversation_channel).with_service_read_signer(
+            read_signer.clone(),
+            flare_im_contracts::service_names::ORCHESTRATOR,
+        ),
     );
 
     let recipient_repository: Arc<dyn crate::domain::repository::RecipientRepository> = Arc::new(
@@ -168,7 +170,13 @@ pub async fn initialize(
         .await
         .map_err(|e| {
             flare_server_core::error::FlareError::system(format!("sequence allocator: {}", e))
-        })?;
+        })?
+        .with_floor_provider(Arc::new(
+            flare_im_service_kit::sequence_floor::StorageSeqFloorProvider::from_channel(
+                storage_reader_channel,
+            )
+            .with_service_signer(read_signer, flare_im_contracts::service_names::ORCHESTRATOR),
+        ));
 
     // Client read acks that do not raise the reader's watermark are dropped before they
     // get a seq; see EventDomainService::admit_event.

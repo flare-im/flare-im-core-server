@@ -14,7 +14,7 @@ use crate::ServiceClient;
 use crate::config::{FlareAppConfig, ServiceRuntimeConfig};
 use crate::gateway::{GatewayRouter, GatewayRouterConfig};
 use crate::service_names::{
-    CAPABILITY, CONVERSATION, MEDIA, MESSAGE_INGEST, ORCHESTRATOR, SIGNALING_ONLINE,
+    CAPABILITY, CONVERSATION, MEDIA, MESSAGE_INGEST, ORCHESTRATOR, PUSH_PROXY, SIGNALING_ONLINE,
     SIGNALING_ROUTE, STORAGE_READER, SYNC_ORCHESTRATOR,
 };
 use flare_server_core::error::{ErrorBuilder, ErrorCode};
@@ -79,6 +79,10 @@ pub fn static_grpc_endpoint_from_app_config(
         CAPABILITY => (
             app.services.capability.as_ref().map(|s| &s.runtime),
             "CAPABILITY",
+        ),
+        PUSH_PROXY => (
+            app.services.push_proxy.as_ref().map(|s| &s.runtime),
+            "PUSH_PROXY",
         ),
         _ => {
             return Err(ErrorBuilder::new(

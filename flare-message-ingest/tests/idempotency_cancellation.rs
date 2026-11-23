@@ -238,13 +238,13 @@ async fn spawn_fake_redis(exec_hangs: Arc<AtomicBool>) -> String {
                         pending.drain(..consumed);
                         let reply = match name.as_str() {
                             "INCR" => "+QUEUED\r\n".to_string(),
-                            "EXEC" => {
+                            "EVALSHA" | "EVAL" => {
                                 // 挂起期间不应答；同一连接上的应答有序，放开后再补上。
                                 while exec_hangs.load(Ordering::SeqCst) {
                                     tokio::time::sleep(Duration::from_millis(10)).await;
                                 }
                                 let next = seq.fetch_add(1, Ordering::SeqCst) + 1;
-                                format!("*1\r\n:{next}\r\n")
+                                format!(":{next}\r\n")
                             }
                             "PING" => "+PONG\r\n".to_string(),
                             _ => "+OK\r\n".to_string(),

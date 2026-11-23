@@ -14,7 +14,7 @@ use flare_server_core::grpc::middleware::signed_context::VerifiedContext;
 use prost::Message;
 use tonic::transport::Channel;
 
-use crate::discovery::{invalidate_static_channel_on_transport_failure, resolve_grpc_channel};
+use crate::discovery::{forget_route_after_failure, is_transport_failure, resolve_grpc_channel};
 
 use super::super::types::{MessageDraft, PreSendDecision, PreSendHook, pre_send_rejection};
 
@@ -99,6 +99,7 @@ pub(in crate::hooks) async fn test_pre_send(
     ctx: &Ctx,
     draft: &MessageDraft,
 ) -> std::result::Result<ProtoPreSendHookResponse, tonic::Status> {
+    let mut route = ForgetRouteUnlessAnswered::new(endpoint);
     let channel = hook_plugin_channel(endpoint)
         .await
         .map_err(|_| tonic::Status::unavailable("hook gRPC channel resolve failed"))?;
@@ -121,8 +122,9 @@ pub(in crate::hooks) async fn test_pre_send(
             request_id: ctx.request_id().to_string(),
         }))
         .await
-        .inspect_err(|status| forget_channel_on_transport_failure(endpoint, status))?
+        .inspect_err(|status| route.answered = !is_transport_failure(status))?
         .into_inner();
+    route.answered = true;
     if !envelope.ok {
         return Err(tonic::Status::internal("hook answered an error envelope"));
     }
@@ -139,15 +141,31 @@ impl Default for GrpcHookFactory {
     }
 }
 
-/// 调用失败出在传输层（连不上、连接被断、HTTP/2 ping 超时）时丢弃缓存的静态通道，下一次
-/// 调用重新解析地址、新建连接；对端回的业务状态不动缓存。
-fn forget_channel_on_transport_failure(endpoint: &str, status: &tonic::Status) {
-    if invalidate_static_channel_on_transport_failure(endpoint, status) {
-        tracing::debug!(
+/// 一次调用没有以对端的回答结束时（传输层失败：连不上、连接被断、HTTP/2 ping 超时；或者运行时的
+/// 超时在它报错前就把它取消了）丢弃该路由缓存的静态通道或发现客户端，下一次调用重新解析、新建
+/// 连接；对端回的业务状态不动缓存。Hook 服务重启后，失效的旧通道不会再交给之后的每次发送。
+struct ForgetRouteUnlessAnswered<'a> {
+    endpoint: &'a str,
+    answered: bool,
+}
+
+impl<'a> ForgetRouteUnlessAnswered<'a> {
+    fn new(endpoint: &'a str) -> Self {
+        Self {
             endpoint,
-            code = ?status.code(),
-            "hook channel dropped after transport failure"
-        );
+            answered: false,
+        }
+    }
+}
+
+impl Drop for ForgetRouteUnlessAnswered<'_> {
+    fn drop(&mut self) {
+        if !self.answered && forget_route_after_failure(self.endpoint) {
+            tracing::warn!(
+                endpoint = self.endpoint,
+                "hook call failed or was cancelled; its channel will be rebuilt"
+            );
+        }
     }
 }
 
@@ -190,6 +208,8 @@ struct GrpcPreSendHook {
 #[async_trait]
 impl PreSendHook for GrpcPreSendHook {
     async fn handle(&self, ctx: &Ctx, draft: &mut MessageDraft) -> PreSendDecision {
+        // Dropped unanswered when the runtime's timeout cancels this call.
+        let mut route = ForgetRouteUnlessAnswered::new(&self.grpc_endpoint);
         let channel = match hook_plugin_channel(&self.grpc_endpoint).await {
             Ok(ch) => ch,
             Err(err) => return PreSendDecision::Reject { error: err },
@@ -209,6 +229,9 @@ impl PreSendHook for GrpcPreSendHook {
             &self.static_metadata,
         )
         .await;
+        route.answered = response
+            .as_ref()
+            .map_or_else(|status| !is_transport_failure(status), |_| true);
         match response {
             Ok(inner) => {
                 if !inner.allow {
@@ -222,7 +245,6 @@ impl PreSendHook for GrpcPreSendHook {
                 PreSendDecision::Continue
             }
             Err(status) => {
-                forget_channel_on_transport_failure(&self.grpc_endpoint, &status);
                 let err = ErrorBuilder::new(ErrorCode::ServiceUnavailable, "pre-send hook failed")
                     .details(status.to_string())
                     .build_error();
@@ -311,6 +333,29 @@ fn apply_draft(target: &mut MessageDraft, source: ProtoHookMessageDraft) {
 
 #[cfg(test)]
 mod tests {
+    /// A call the hook timeout cancels never reports its failure; dropping it unanswered still
+    /// drops the cached channel, and an answered call keeps it.
+    #[tokio::test]
+    async fn an_unanswered_hook_call_drops_its_cached_channel() {
+        use crate::discovery::is_static_channel_cached;
+        let endpoint = "http://127.0.0.1:59874";
+        super::resolve_grpc_channel(endpoint).await.unwrap();
+        let mut answered = super::ForgetRouteUnlessAnswered::new(endpoint);
+        answered.answered = true;
+        drop(answered);
+        assert!(is_static_channel_cached(endpoint));
+        let cancelled = async {
+            let _route = super::ForgetRouteUnlessAnswered::new(endpoint);
+            std::future::pending::<()>().await
+        };
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(10), cancelled)
+                .await
+                .is_err()
+        );
+        assert!(!is_static_channel_cached(endpoint));
+    }
+
     /// `allow=false` 是策略拒绝：带进程内标记，错误码、原因与说明（客户端看到的）同以前；
     /// 调用失败（扩展不可用）不带标记。
     #[test]

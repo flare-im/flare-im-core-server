@@ -8832,7 +8832,7 @@
     {
       "deferrable": false,
       "deferred": false,
-      "definition": "PRIMARY KEY (tenant_id, sender_id, client_msg_id)",
+      "definition": "PRIMARY KEY (tenant_id, sender_id, conversation_id, client_msg_id)",
       "kind": "constraint",
       "name": "message_idempotency_ledger_p00_pkey",
       "table": "message_idempotency_ledger_p00",
@@ -8842,7 +8842,7 @@
     {
       "deferrable": false,
       "deferred": false,
-      "definition": "PRIMARY KEY (tenant_id, sender_id, client_msg_id)",
+      "definition": "PRIMARY KEY (tenant_id, sender_id, conversation_id, client_msg_id)",
       "kind": "constraint",
       "name": "message_idempotency_ledger_p01_pkey",
       "table": "message_idempotency_ledger_p01",
@@ -8852,7 +8852,7 @@
     {
       "deferrable": false,
       "deferred": false,
-      "definition": "PRIMARY KEY (tenant_id, sender_id, client_msg_id)",
+      "definition": "PRIMARY KEY (tenant_id, sender_id, conversation_id, client_msg_id)",
       "kind": "constraint",
       "name": "message_idempotency_ledger_p02_pkey",
       "table": "message_idempotency_ledger_p02",
@@ -8862,7 +8862,7 @@
     {
       "deferrable": false,
       "deferred": false,
-      "definition": "PRIMARY KEY (tenant_id, sender_id, client_msg_id)",
+      "definition": "PRIMARY KEY (tenant_id, sender_id, conversation_id, client_msg_id)",
       "kind": "constraint",
       "name": "message_idempotency_ledger_p03_pkey",
       "table": "message_idempotency_ledger_p03",
@@ -8872,7 +8872,7 @@
     {
       "deferrable": false,
       "deferred": false,
-      "definition": "PRIMARY KEY (tenant_id, sender_id, client_msg_id)",
+      "definition": "PRIMARY KEY (tenant_id, sender_id, conversation_id, client_msg_id)",
       "kind": "constraint",
       "name": "message_idempotency_ledger_p04_pkey",
       "table": "message_idempotency_ledger_p04",
@@ -8882,7 +8882,7 @@
     {
       "deferrable": false,
       "deferred": false,
-      "definition": "PRIMARY KEY (tenant_id, sender_id, client_msg_id)",
+      "definition": "PRIMARY KEY (tenant_id, sender_id, conversation_id, client_msg_id)",
       "kind": "constraint",
       "name": "message_idempotency_ledger_p05_pkey",
       "table": "message_idempotency_ledger_p05",
@@ -8892,7 +8892,7 @@
     {
       "deferrable": false,
       "deferred": false,
-      "definition": "PRIMARY KEY (tenant_id, sender_id, client_msg_id)",
+      "definition": "PRIMARY KEY (tenant_id, sender_id, conversation_id, client_msg_id)",
       "kind": "constraint",
       "name": "message_idempotency_ledger_p06_pkey",
       "table": "message_idempotency_ledger_p06",
@@ -8902,7 +8902,7 @@
     {
       "deferrable": false,
       "deferred": false,
-      "definition": "PRIMARY KEY (tenant_id, sender_id, client_msg_id)",
+      "definition": "PRIMARY KEY (tenant_id, sender_id, conversation_id, client_msg_id)",
       "kind": "constraint",
       "name": "message_idempotency_ledger_p07_pkey",
       "table": "message_idempotency_ledger_p07",
@@ -8912,7 +8912,7 @@
     {
       "deferrable": false,
       "deferred": false,
-      "definition": "PRIMARY KEY (tenant_id, sender_id, client_msg_id)",
+      "definition": "PRIMARY KEY (tenant_id, sender_id, conversation_id, client_msg_id)",
       "kind": "constraint",
       "name": "message_idempotency_ledger_p08_pkey",
       "table": "message_idempotency_ledger_p08",
@@ -8922,7 +8922,7 @@
     {
       "deferrable": false,
       "deferred": false,
-      "definition": "PRIMARY KEY (tenant_id, sender_id, client_msg_id)",
+      "definition": "PRIMARY KEY (tenant_id, sender_id, conversation_id, client_msg_id)",
       "kind": "constraint",
       "name": "message_idempotency_ledger_p09_pkey",
       "table": "message_idempotency_ledger_p09",
@@ -8932,7 +8932,7 @@
     {
       "deferrable": false,
       "deferred": false,
-      "definition": "PRIMARY KEY (tenant_id, sender_id, client_msg_id)",
+      "definition": "PRIMARY KEY (tenant_id, sender_id, conversation_id, client_msg_id)",
       "kind": "constraint",
       "name": "message_idempotency_ledger_p10_pkey",
       "table": "message_idempotency_ledger_p10",
@@ -8942,7 +8942,7 @@
     {
       "deferrable": false,
       "deferred": false,
-      "definition": "PRIMARY KEY (tenant_id, sender_id, client_msg_id)",
+      "definition": "PRIMARY KEY (tenant_id, sender_id, conversation_id, client_msg_id)",
       "kind": "constraint",
       "name": "message_idempotency_ledger_p11_pkey",
       "table": "message_idempotency_ledger_p11",
@@ -8952,7 +8952,7 @@
     {
       "deferrable": false,
       "deferred": false,
-      "definition": "PRIMARY KEY (tenant_id, sender_id, client_msg_id)",
+      "definition": "PRIMARY KEY (tenant_id, sender_id, conversation_id, client_msg_id)",
       "kind": "constraint",
       "name": "message_idempotency_ledger_p12_pkey",
       "table": "message_idempotency_ledger_p12",
@@ -8962,7 +8962,7 @@
     {
       "deferrable": false,
       "deferred": false,
-      "definition": "PRIMARY KEY (tenant_id, sender_id, client_msg_id)",
+      "definition": "PRIMARY KEY (tenant_id, sender_id, conversation_id, client_msg_id)",
       "kind": "constraint",
       "name": "message_idempotency_ledger_p13_pkey",
       "table": "message_idempotency_ledger_p13",
@@ -8972,7 +8972,7 @@
     {
       "deferrable": false,
       "deferred": false,
-      "definition": "PRIMARY KEY (tenant_id, sender_id, client_msg_id)",
+      "definition": "PRIMARY KEY (tenant_id, sender_id, conversation_id, client_msg_id)",
       "kind": "constraint",
       "name": "message_idempotency_ledger_p14_pkey",
       "table": "message_idempotency_ledger_p14",
@@ -8982,7 +8982,7 @@
     {
       "deferrable": false,
       "deferred": false,
-      "definition": "PRIMARY KEY (tenant_id, sender_id, client_msg_id)",
+      "definition": "PRIMARY KEY (tenant_id, sender_id, conversation_id, client_msg_id)",
       "kind": "constraint",
       "name": "message_idempotency_ledger_p15_pkey",
       "table": "message_idempotency_ledger_p15",
@@ -8992,7 +8992,7 @@
     {
       "deferrable": false,
       "deferred": false,
-      "definition": "PRIMARY KEY (tenant_id, sender_id, client_msg_id)",
+      "definition": "PRIMARY KEY (tenant_id, sender_id, conversation_id, client_msg_id)",
       "kind": "constraint",
       "name": "message_idempotency_ledger_p16_pkey",
       "table": "message_idempotency_ledger_p16",
@@ -9002,7 +9002,7 @@
     {
       "deferrable": false,
       "deferred": false,
-      "definition": "PRIMARY KEY (tenant_id, sender_id, client_msg_id)",
+      "definition": "PRIMARY KEY (tenant_id, sender_id, conversation_id, client_msg_id)",
       "kind": "constraint",
       "name": "message_idempotency_ledger_p17_pkey",
       "table": "message_idempotency_ledger_p17",
@@ -9012,7 +9012,7 @@
     {
       "deferrable": false,
       "deferred": false,
-      "definition": "PRIMARY KEY (tenant_id, sender_id, client_msg_id)",
+      "definition": "PRIMARY KEY (tenant_id, sender_id, conversation_id, client_msg_id)",
       "kind": "constraint",
       "name": "message_idempotency_ledger_p18_pkey",
       "table": "message_idempotency_ledger_p18",
@@ -9022,7 +9022,7 @@
     {
       "deferrable": false,
       "deferred": false,
-      "definition": "PRIMARY KEY (tenant_id, sender_id, client_msg_id)",
+      "definition": "PRIMARY KEY (tenant_id, sender_id, conversation_id, client_msg_id)",
       "kind": "constraint",
       "name": "message_idempotency_ledger_p19_pkey",
       "table": "message_idempotency_ledger_p19",
@@ -9032,7 +9032,7 @@
     {
       "deferrable": false,
       "deferred": false,
-      "definition": "PRIMARY KEY (tenant_id, sender_id, client_msg_id)",
+      "definition": "PRIMARY KEY (tenant_id, sender_id, conversation_id, client_msg_id)",
       "kind": "constraint",
       "name": "message_idempotency_ledger_p20_pkey",
       "table": "message_idempotency_ledger_p20",
@@ -9042,7 +9042,7 @@
     {
       "deferrable": false,
       "deferred": false,
-      "definition": "PRIMARY KEY (tenant_id, sender_id, client_msg_id)",
+      "definition": "PRIMARY KEY (tenant_id, sender_id, conversation_id, client_msg_id)",
       "kind": "constraint",
       "name": "message_idempotency_ledger_p21_pkey",
       "table": "message_idempotency_ledger_p21",
@@ -9052,7 +9052,7 @@
     {
       "deferrable": false,
       "deferred": false,
-      "definition": "PRIMARY KEY (tenant_id, sender_id, client_msg_id)",
+      "definition": "PRIMARY KEY (tenant_id, sender_id, conversation_id, client_msg_id)",
       "kind": "constraint",
       "name": "message_idempotency_ledger_p22_pkey",
       "table": "message_idempotency_ledger_p22",
@@ -9062,7 +9062,7 @@
     {
       "deferrable": false,
       "deferred": false,
-      "definition": "PRIMARY KEY (tenant_id, sender_id, client_msg_id)",
+      "definition": "PRIMARY KEY (tenant_id, sender_id, conversation_id, client_msg_id)",
       "kind": "constraint",
       "name": "message_idempotency_ledger_p23_pkey",
       "table": "message_idempotency_ledger_p23",
@@ -9072,7 +9072,7 @@
     {
       "deferrable": false,
       "deferred": false,
-      "definition": "PRIMARY KEY (tenant_id, sender_id, client_msg_id)",
+      "definition": "PRIMARY KEY (tenant_id, sender_id, conversation_id, client_msg_id)",
       "kind": "constraint",
       "name": "message_idempotency_ledger_p24_pkey",
       "table": "message_idempotency_ledger_p24",
@@ -9082,7 +9082,7 @@
     {
       "deferrable": false,
       "deferred": false,
-      "definition": "PRIMARY KEY (tenant_id, sender_id, client_msg_id)",
+      "definition": "PRIMARY KEY (tenant_id, sender_id, conversation_id, client_msg_id)",
       "kind": "constraint",
       "name": "message_idempotency_ledger_p25_pkey",
       "table": "message_idempotency_ledger_p25",
@@ -9092,7 +9092,7 @@
     {
       "deferrable": false,
       "deferred": false,
-      "definition": "PRIMARY KEY (tenant_id, sender_id, client_msg_id)",
+      "definition": "PRIMARY KEY (tenant_id, sender_id, conversation_id, client_msg_id)",
       "kind": "constraint",
       "name": "message_idempotency_ledger_p26_pkey",
       "table": "message_idempotency_ledger_p26",
@@ -9102,7 +9102,7 @@
     {
       "deferrable": false,
       "deferred": false,
-      "definition": "PRIMARY KEY (tenant_id, sender_id, client_msg_id)",
+      "definition": "PRIMARY KEY (tenant_id, sender_id, conversation_id, client_msg_id)",
       "kind": "constraint",
       "name": "message_idempotency_ledger_p27_pkey",
       "table": "message_idempotency_ledger_p27",
@@ -9112,7 +9112,7 @@
     {
       "deferrable": false,
       "deferred": false,
-      "definition": "PRIMARY KEY (tenant_id, sender_id, client_msg_id)",
+      "definition": "PRIMARY KEY (tenant_id, sender_id, conversation_id, client_msg_id)",
       "kind": "constraint",
       "name": "message_idempotency_ledger_p28_pkey",
       "table": "message_idempotency_ledger_p28",
@@ -9122,7 +9122,7 @@
     {
       "deferrable": false,
       "deferred": false,
-      "definition": "PRIMARY KEY (tenant_id, sender_id, client_msg_id)",
+      "definition": "PRIMARY KEY (tenant_id, sender_id, conversation_id, client_msg_id)",
       "kind": "constraint",
       "name": "message_idempotency_ledger_p29_pkey",
       "table": "message_idempotency_ledger_p29",
@@ -9132,7 +9132,7 @@
     {
       "deferrable": false,
       "deferred": false,
-      "definition": "PRIMARY KEY (tenant_id, sender_id, client_msg_id)",
+      "definition": "PRIMARY KEY (tenant_id, sender_id, conversation_id, client_msg_id)",
       "kind": "constraint",
       "name": "message_idempotency_ledger_p30_pkey",
       "table": "message_idempotency_ledger_p30",
@@ -9142,7 +9142,7 @@
     {
       "deferrable": false,
       "deferred": false,
-      "definition": "PRIMARY KEY (tenant_id, sender_id, client_msg_id)",
+      "definition": "PRIMARY KEY (tenant_id, sender_id, conversation_id, client_msg_id)",
       "kind": "constraint",
       "name": "message_idempotency_ledger_p31_pkey",
       "table": "message_idempotency_ledger_p31",
@@ -9152,7 +9152,7 @@
     {
       "deferrable": false,
       "deferred": false,
-      "definition": "PRIMARY KEY (tenant_id, sender_id, client_msg_id)",
+      "definition": "PRIMARY KEY (tenant_id, sender_id, conversation_id, client_msg_id)",
       "kind": "constraint",
       "name": "message_idempotency_ledger_pkey",
       "table": "message_idempotency_ledger",
@@ -11313,7 +11313,7 @@
     },
     {
       "clustered": false,
-      "definition": "CREATE UNIQUE INDEX message_idempotency_ledger_p00_pkey ON public.message_idempotency_ledger_p00 USING btree (tenant_id, sender_id, client_msg_id)",
+      "definition": "CREATE UNIQUE INDEX message_idempotency_ledger_p00_pkey ON public.message_idempotency_ledger_p00 USING btree (tenant_id, sender_id, conversation_id, client_msg_id)",
       "kind": "index",
       "name": "message_idempotency_ledger_p00_pkey",
       "ready": true,
@@ -11333,7 +11333,7 @@
     },
     {
       "clustered": false,
-      "definition": "CREATE UNIQUE INDEX message_idempotency_ledger_p01_pkey ON public.message_idempotency_ledger_p01 USING btree (tenant_id, sender_id, client_msg_id)",
+      "definition": "CREATE UNIQUE INDEX message_idempotency_ledger_p01_pkey ON public.message_idempotency_ledger_p01 USING btree (tenant_id, sender_id, conversation_id, client_msg_id)",
       "kind": "index",
       "name": "message_idempotency_ledger_p01_pkey",
       "ready": true,
@@ -11353,7 +11353,7 @@
     },
     {
       "clustered": false,
-      "definition": "CREATE UNIQUE INDEX message_idempotency_ledger_p02_pkey ON public.message_idempotency_ledger_p02 USING btree (tenant_id, sender_id, client_msg_id)",
+      "definition": "CREATE UNIQUE INDEX message_idempotency_ledger_p02_pkey ON public.message_idempotency_ledger_p02 USING btree (tenant_id, sender_id, conversation_id, client_msg_id)",
       "kind": "index",
       "name": "message_idempotency_ledger_p02_pkey",
       "ready": true,
@@ -11373,7 +11373,7 @@
     },
     {
       "clustered": false,
-      "definition": "CREATE UNIQUE INDEX message_idempotency_ledger_p03_pkey ON public.message_idempotency_ledger_p03 USING btree (tenant_id, sender_id, client_msg_id)",
+      "definition": "CREATE UNIQUE INDEX message_idempotency_ledger_p03_pkey ON public.message_idempotency_ledger_p03 USING btree (tenant_id, sender_id, conversation_id, client_msg_id)",
       "kind": "index",
       "name": "message_idempotency_ledger_p03_pkey",
       "ready": true,
@@ -11393,7 +11393,7 @@
     },
     {
       "clustered": false,
-      "definition": "CREATE UNIQUE INDEX message_idempotency_ledger_p04_pkey ON public.message_idempotency_ledger_p04 USING btree (tenant_id, sender_id, client_msg_id)",
+      "definition": "CREATE UNIQUE INDEX message_idempotency_ledger_p04_pkey ON public.message_idempotency_ledger_p04 USING btree (tenant_id, sender_id, conversation_id, client_msg_id)",
       "kind": "index",
       "name": "message_idempotency_ledger_p04_pkey",
       "ready": true,
@@ -11413,7 +11413,7 @@
     },
     {
       "clustered": false,
-      "definition": "CREATE UNIQUE INDEX message_idempotency_ledger_p05_pkey ON public.message_idempotency_ledger_p05 USING btree (tenant_id, sender_id, client_msg_id)",
+      "definition": "CREATE UNIQUE INDEX message_idempotency_ledger_p05_pkey ON public.message_idempotency_ledger_p05 USING btree (tenant_id, sender_id, conversation_id, client_msg_id)",
       "kind": "index",
       "name": "message_idempotency_ledger_p05_pkey",
       "ready": true,
@@ -11433,7 +11433,7 @@
     },
     {
       "clustered": false,
-      "definition": "CREATE UNIQUE INDEX message_idempotency_ledger_p06_pkey ON public.message_idempotency_ledger_p06 USING btree (tenant_id, sender_id, client_msg_id)",
+      "definition": "CREATE UNIQUE INDEX message_idempotency_ledger_p06_pkey ON public.message_idempotency_ledger_p06 USING btree (tenant_id, sender_id, conversation_id, client_msg_id)",
       "kind": "index",
       "name": "message_idempotency_ledger_p06_pkey",
       "ready": true,
@@ -11453,7 +11453,7 @@
     },
     {
       "clustered": false,
-      "definition": "CREATE UNIQUE INDEX message_idempotency_ledger_p07_pkey ON public.message_idempotency_ledger_p07 USING btree (tenant_id, sender_id, client_msg_id)",
+      "definition": "CREATE UNIQUE INDEX message_idempotency_ledger_p07_pkey ON public.message_idempotency_ledger_p07 USING btree (tenant_id, sender_id, conversation_id, client_msg_id)",
       "kind": "index",
       "name": "message_idempotency_ledger_p07_pkey",
       "ready": true,
@@ -11473,7 +11473,7 @@
     },
     {
       "clustered": false,
-      "definition": "CREATE UNIQUE INDEX message_idempotency_ledger_p08_pkey ON public.message_idempotency_ledger_p08 USING btree (tenant_id, sender_id, client_msg_id)",
+      "definition": "CREATE UNIQUE INDEX message_idempotency_ledger_p08_pkey ON public.message_idempotency_ledger_p08 USING btree (tenant_id, sender_id, conversation_id, client_msg_id)",
       "kind": "index",
       "name": "message_idempotency_ledger_p08_pkey",
       "ready": true,
@@ -11493,7 +11493,7 @@
     },
     {
       "clustered": false,
-      "definition": "CREATE UNIQUE INDEX message_idempotency_ledger_p09_pkey ON public.message_idempotency_ledger_p09 USING btree (tenant_id, sender_id, client_msg_id)",
+      "definition": "CREATE UNIQUE INDEX message_idempotency_ledger_p09_pkey ON public.message_idempotency_ledger_p09 USING btree (tenant_id, sender_id, conversation_id, client_msg_id)",
       "kind": "index",
       "name": "message_idempotency_ledger_p09_pkey",
       "ready": true,
@@ -11513,7 +11513,7 @@
     },
     {
       "clustered": false,
-      "definition": "CREATE UNIQUE INDEX message_idempotency_ledger_p10_pkey ON public.message_idempotency_ledger_p10 USING btree (tenant_id, sender_id, client_msg_id)",
+      "definition": "CREATE UNIQUE INDEX message_idempotency_ledger_p10_pkey ON public.message_idempotency_ledger_p10 USING btree (tenant_id, sender_id, conversation_id, client_msg_id)",
       "kind": "index",
       "name": "message_idempotency_ledger_p10_pkey",
       "ready": true,
@@ -11533,7 +11533,7 @@
     },
     {
       "clustered": false,
-      "definition": "CREATE UNIQUE INDEX message_idempotency_ledger_p11_pkey ON public.message_idempotency_ledger_p11 USING btree (tenant_id, sender_id, client_msg_id)",
+      "definition": "CREATE UNIQUE INDEX message_idempotency_ledger_p11_pkey ON public.message_idempotency_ledger_p11 USING btree (tenant_id, sender_id, conversation_id, client_msg_id)",
       "kind": "index",
       "name": "message_idempotency_ledger_p11_pkey",
       "ready": true,
@@ -11553,7 +11553,7 @@
     },
     {
       "clustered": false,
-      "definition": "CREATE UNIQUE INDEX message_idempotency_ledger_p12_pkey ON public.message_idempotency_ledger_p12 USING btree (tenant_id, sender_id, client_msg_id)",
+      "definition": "CREATE UNIQUE INDEX message_idempotency_ledger_p12_pkey ON public.message_idempotency_ledger_p12 USING btree (tenant_id, sender_id, conversation_id, client_msg_id)",
       "kind": "index",
       "name": "message_idempotency_ledger_p12_pkey",
       "ready": true,
@@ -11573,7 +11573,7 @@
     },
     {
       "clustered": false,
-      "definition": "CREATE UNIQUE INDEX message_idempotency_ledger_p13_pkey ON public.message_idempotency_ledger_p13 USING btree (tenant_id, sender_id, client_msg_id)",
+      "definition": "CREATE UNIQUE INDEX message_idempotency_ledger_p13_pkey ON public.message_idempotency_ledger_p13 USING btree (tenant_id, sender_id, conversation_id, client_msg_id)",
       "kind": "index",
       "name": "message_idempotency_ledger_p13_pkey",
       "ready": true,
@@ -11593,7 +11593,7 @@
     },
     {
       "clustered": false,
-      "definition": "CREATE UNIQUE INDEX message_idempotency_ledger_p14_pkey ON public.message_idempotency_ledger_p14 USING btree (tenant_id, sender_id, client_msg_id)",
+      "definition": "CREATE UNIQUE INDEX message_idempotency_ledger_p14_pkey ON public.message_idempotency_ledger_p14 USING btree (tenant_id, sender_id, conversation_id, client_msg_id)",
       "kind": "index",
       "name": "message_idempotency_ledger_p14_pkey",
       "ready": true,
@@ -11613,7 +11613,7 @@
     },
     {
       "clustered": false,
-      "definition": "CREATE UNIQUE INDEX message_idempotency_ledger_p15_pkey ON public.message_idempotency_ledger_p15 USING btree (tenant_id, sender_id, client_msg_id)",
+      "definition": "CREATE UNIQUE INDEX message_idempotency_ledger_p15_pkey ON public.message_idempotency_ledger_p15 USING btree (tenant_id, sender_id, conversation_id, client_msg_id)",
       "kind": "index",
       "name": "message_idempotency_ledger_p15_pkey",
       "ready": true,
@@ -11633,7 +11633,7 @@
     },
     {
       "clustered": false,
-      "definition": "CREATE UNIQUE INDEX message_idempotency_ledger_p16_pkey ON public.message_idempotency_ledger_p16 USING btree (tenant_id, sender_id, client_msg_id)",
+      "definition": "CREATE UNIQUE INDEX message_idempotency_ledger_p16_pkey ON public.message_idempotency_ledger_p16 USING btree (tenant_id, sender_id, conversation_id, client_msg_id)",
       "kind": "index",
       "name": "message_idempotency_ledger_p16_pkey",
       "ready": true,
@@ -11653,7 +11653,7 @@
     },
     {
       "clustered": false,
-      "definition": "CREATE UNIQUE INDEX message_idempotency_ledger_p17_pkey ON public.message_idempotency_ledger_p17 USING btree (tenant_id, sender_id, client_msg_id)",
+      "definition": "CREATE UNIQUE INDEX message_idempotency_ledger_p17_pkey ON public.message_idempotency_ledger_p17 USING btree (tenant_id, sender_id, conversation_id, client_msg_id)",
       "kind": "index",
       "name": "message_idempotency_ledger_p17_pkey",
       "ready": true,
@@ -11673,7 +11673,7 @@
     },
     {
       "clustered": false,
-      "definition": "CREATE UNIQUE INDEX message_idempotency_ledger_p18_pkey ON public.message_idempotency_ledger_p18 USING btree (tenant_id, sender_id, client_msg_id)",
+      "definition": "CREATE UNIQUE INDEX message_idempotency_ledger_p18_pkey ON public.message_idempotency_ledger_p18 USING btree (tenant_id, sender_id, conversation_id, client_msg_id)",
       "kind": "index",
       "name": "message_idempotency_ledger_p18_pkey",
       "ready": true,
@@ -11693,7 +11693,7 @@
     },
     {
       "clustered": false,
-      "definition": "CREATE UNIQUE INDEX message_idempotency_ledger_p19_pkey ON public.message_idempotency_ledger_p19 USING btree (tenant_id, sender_id, client_msg_id)",
+      "definition": "CREATE UNIQUE INDEX message_idempotency_ledger_p19_pkey ON public.message_idempotency_ledger_p19 USING btree (tenant_id, sender_id, conversation_id, client_msg_id)",
       "kind": "index",
       "name": "message_idempotency_ledger_p19_pkey",
       "ready": true,
@@ -11713,7 +11713,7 @@
     },
     {
       "clustered": false,
-      "definition": "CREATE UNIQUE INDEX message_idempotency_ledger_p20_pkey ON public.message_idempotency_ledger_p20 USING btree (tenant_id, sender_id, client_msg_id)",
+      "definition": "CREATE UNIQUE INDEX message_idempotency_ledger_p20_pkey ON public.message_idempotency_ledger_p20 USING btree (tenant_id, sender_id, conversation_id, client_msg_id)",
       "kind": "index",
       "name": "message_idempotency_ledger_p20_pkey",
       "ready": true,
@@ -11733,7 +11733,7 @@
     },
     {
       "clustered": false,
-      "definition": "CREATE UNIQUE INDEX message_idempotency_ledger_p21_pkey ON public.message_idempotency_ledger_p21 USING btree (tenant_id, sender_id, client_msg_id)",
+      "definition": "CREATE UNIQUE INDEX message_idempotency_ledger_p21_pkey ON public.message_idempotency_ledger_p21 USING btree (tenant_id, sender_id, conversation_id, client_msg_id)",
       "kind": "index",
       "name": "message_idempotency_ledger_p21_pkey",
       "ready": true,
@@ -11753,7 +11753,7 @@
     },
     {
       "clustered": false,
-      "definition": "CREATE UNIQUE INDEX message_idempotency_ledger_p22_pkey ON public.message_idempotency_ledger_p22 USING btree (tenant_id, sender_id, client_msg_id)",
+      "definition": "CREATE UNIQUE INDEX message_idempotency_ledger_p22_pkey ON public.message_idempotency_ledger_p22 USING btree (tenant_id, sender_id, conversation_id, client_msg_id)",
       "kind": "index",
       "name": "message_idempotency_ledger_p22_pkey",
       "ready": true,
@@ -11773,7 +11773,7 @@
     },
     {
       "clustered": false,
-      "definition": "CREATE UNIQUE INDEX message_idempotency_ledger_p23_pkey ON public.message_idempotency_ledger_p23 USING btree (tenant_id, sender_id, client_msg_id)",
+      "definition": "CREATE UNIQUE INDEX message_idempotency_ledger_p23_pkey ON public.message_idempotency_ledger_p23 USING btree (tenant_id, sender_id, conversation_id, client_msg_id)",
       "kind": "index",
       "name": "message_idempotency_ledger_p23_pkey",
       "ready": true,
@@ -11793,7 +11793,7 @@
     },
     {
       "clustered": false,
-      "definition": "CREATE UNIQUE INDEX message_idempotency_ledger_p24_pkey ON public.message_idempotency_ledger_p24 USING btree (tenant_id, sender_id, client_msg_id)",
+      "definition": "CREATE UNIQUE INDEX message_idempotency_ledger_p24_pkey ON public.message_idempotency_ledger_p24 USING btree (tenant_id, sender_id, conversation_id, client_msg_id)",
       "kind": "index",
       "name": "message_idempotency_ledger_p24_pkey",
       "ready": true,
@@ -11813,7 +11813,7 @@
     },
     {
       "clustered": false,
-      "definition": "CREATE UNIQUE INDEX message_idempotency_ledger_p25_pkey ON public.message_idempotency_ledger_p25 USING btree (tenant_id, sender_id, client_msg_id)",
+      "definition": "CREATE UNIQUE INDEX message_idempotency_ledger_p25_pkey ON public.message_idempotency_ledger_p25 USING btree (tenant_id, sender_id, conversation_id, client_msg_id)",
       "kind": "index",
       "name": "message_idempotency_ledger_p25_pkey",
       "ready": true,
@@ -11833,7 +11833,7 @@
     },
     {
       "clustered": false,
-      "definition": "CREATE UNIQUE INDEX message_idempotency_ledger_p26_pkey ON public.message_idempotency_ledger_p26 USING btree (tenant_id, sender_id, client_msg_id)",
+      "definition": "CREATE UNIQUE INDEX message_idempotency_ledger_p26_pkey ON public.message_idempotency_ledger_p26 USING btree (tenant_id, sender_id, conversation_id, client_msg_id)",
       "kind": "index",
       "name": "message_idempotency_ledger_p26_pkey",
       "ready": true,
@@ -11853,7 +11853,7 @@
     },
     {
       "clustered": false,
-      "definition": "CREATE UNIQUE INDEX message_idempotency_ledger_p27_pkey ON public.message_idempotency_ledger_p27 USING btree (tenant_id, sender_id, client_msg_id)",
+      "definition": "CREATE UNIQUE INDEX message_idempotency_ledger_p27_pkey ON public.message_idempotency_ledger_p27 USING btree (tenant_id, sender_id, conversation_id, client_msg_id)",
       "kind": "index",
       "name": "message_idempotency_ledger_p27_pkey",
       "ready": true,
@@ -11873,7 +11873,7 @@
     },
     {
       "clustered": false,
-      "definition": "CREATE UNIQUE INDEX message_idempotency_ledger_p28_pkey ON public.message_idempotency_ledger_p28 USING btree (tenant_id, sender_id, client_msg_id)",
+      "definition": "CREATE UNIQUE INDEX message_idempotency_ledger_p28_pkey ON public.message_idempotency_ledger_p28 USING btree (tenant_id, sender_id, conversation_id, client_msg_id)",
       "kind": "index",
       "name": "message_idempotency_ledger_p28_pkey",
       "ready": true,
@@ -11893,7 +11893,7 @@
     },
     {
       "clustered": false,
-      "definition": "CREATE UNIQUE INDEX message_idempotency_ledger_p29_pkey ON public.message_idempotency_ledger_p29 USING btree (tenant_id, sender_id, client_msg_id)",
+      "definition": "CREATE UNIQUE INDEX message_idempotency_ledger_p29_pkey ON public.message_idempotency_ledger_p29 USING btree (tenant_id, sender_id, conversation_id, client_msg_id)",
       "kind": "index",
       "name": "message_idempotency_ledger_p29_pkey",
       "ready": true,
@@ -11913,7 +11913,7 @@
     },
     {
       "clustered": false,
-      "definition": "CREATE UNIQUE INDEX message_idempotency_ledger_p30_pkey ON public.message_idempotency_ledger_p30 USING btree (tenant_id, sender_id, client_msg_id)",
+      "definition": "CREATE UNIQUE INDEX message_idempotency_ledger_p30_pkey ON public.message_idempotency_ledger_p30 USING btree (tenant_id, sender_id, conversation_id, client_msg_id)",
       "kind": "index",
       "name": "message_idempotency_ledger_p30_pkey",
       "ready": true,
@@ -11933,7 +11933,7 @@
     },
     {
       "clustered": false,
-      "definition": "CREATE UNIQUE INDEX message_idempotency_ledger_p31_pkey ON public.message_idempotency_ledger_p31 USING btree (tenant_id, sender_id, client_msg_id)",
+      "definition": "CREATE UNIQUE INDEX message_idempotency_ledger_p31_pkey ON public.message_idempotency_ledger_p31 USING btree (tenant_id, sender_id, conversation_id, client_msg_id)",
       "kind": "index",
       "name": "message_idempotency_ledger_p31_pkey",
       "ready": true,
@@ -11943,7 +11943,7 @@
     },
     {
       "clustered": false,
-      "definition": "CREATE UNIQUE INDEX message_idempotency_ledger_pkey ON ONLY public.message_idempotency_ledger USING btree (tenant_id, sender_id, client_msg_id)",
+      "definition": "CREATE UNIQUE INDEX message_idempotency_ledger_pkey ON ONLY public.message_idempotency_ledger USING btree (tenant_id, sender_id, conversation_id, client_msg_id)",
       "kind": "index",
       "name": "message_idempotency_ledger_pkey",
       "ready": true,

@@ -7,7 +7,7 @@
 # 这个仓已经吃过同类的亏：docker-compose.stack.yml 默认指向一个**从未发布过**的镜像，
 # 里面积了库名写错、中间件地址硬编码等好几处，直到真去跑才暴露。
 #
-# 判据四条：
+# 判据五条：
 #   1. 文档里点名的每个 compose 文件都存在；
 #   2. 文档里给出的每种叠加组合，填齐 compose 的必填变量（`${VAR:?}`）后
 #      `docker compose config` 都能通过；
@@ -15,6 +15,7 @@
 #      默认签名密钥等于默认漏洞，退化成有默认值时没人会发现；
 #   4. compose 的每个必填变量都写在 deploy/.env.example 里且留空：照模板填的人要知道有它，
 #      模板也不能替他给出一把公开的密钥。
+#   5. 实际渲染文档启动入口，并验证多环境文件的合并与覆盖。
 #
 # 用法：./scripts/check_deploy_docs.sh
 set -uo pipefail
@@ -29,7 +30,8 @@ note_ok() { printf "${GREEN}✓${NC} %s\n" "$1"; }
 
 # compose 里写成 ${VAR:?...} 的变量没有默认值，不设就拒绝渲染。
 required_vars() {
-  grep -ohE '\$\{[A-Z_][A-Z0-9_]*:\?' "$@" 2>/dev/null | sed -E 's/^\$\{//; s/:\?$//' | sort -u
+  # REDIS_URL is derived by compose.py, rather than supplied as a secret.
+  grep -ohE '\$\{[A-Z_][A-Z0-9_]*:\?' "$@" 2>/dev/null | sed -E 's/^\$\{//; s/:\?$//; /^REDIS_URL$/d' | sort -u
 }
 
 # 给这些 compose 文件的必填变量填占位值（VAR=placeholder，一行一个），
@@ -87,11 +89,11 @@ check_combo() {
     prev="$a"
   done
   while IFS= read -r a; do fill+=("$a"); done < <(placeholders_for "" "${files[@]}")
-  if env ${fill[@]+"${fill[@]}"} docker compose "$@" config >/dev/null 2>&1; then
+  if env ${fill[@]+"${fill[@]}"} python3 deploy/compose.py --env-file /dev/null "$@" config >/dev/null 2>&1; then
     note_ok "$label"
   else
     note_fail "$label —— docker compose config 未通过"
-    env ${fill[@]+"${fill[@]}"} docker compose "$@" config 2>&1 | tail -4 | sed 's/^/      /'
+    env ${fill[@]+"${fill[@]}"} python3 deploy/compose.py --env-file /dev/null "$@" config 2>&1 | tail -4 | sed 's/^/      /'
   fi
 }
 
@@ -131,7 +133,7 @@ for f in "${stack_files[@]}"; do stack_args+=(-f "$f"); done
 others=()
 while IFS= read -r a; do others+=("$a"); done < <(placeholders_for FLARE_TOKEN_SECRET "${stack_files[@]}")
 if out="$(env -u FLARE_TOKEN_SECRET ${others[@]+"${others[@]}"} \
-      docker compose "${stack_args[@]}" config 2>&1)"; then
+      python3 deploy/compose.py --env-file /dev/null "${stack_args[@]}" config 2>&1)"; then
   note_fail "不设 FLARE_TOKEN_SECRET 竟然通过了 —— 默认签名密钥等于默认漏洞，这个护栏不能丢"
 elif printf '%s\n' "$out" | grep -q 'FLARE_TOKEN_SECRET'; then
   note_ok "缺 FLARE_TOKEN_SECRET 时拒绝启动"
@@ -171,6 +173,12 @@ if [ -f deploy/.env.example ]; then
   fi
 else
   note_fail "缺 deploy/.env.example"
+fi
+
+if python3 scripts/test_redis_compose_auth.py ComposeEntryTest; then
+  note_ok "文档实际启动命令和多环境文件入口可渲染"
+else
+  note_fail "文档实际启动命令或多环境文件入口失败"
 fi
 
 echo ""

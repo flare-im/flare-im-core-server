@@ -64,7 +64,7 @@ Media 使用既有 PG 池与自己的服务生命周期启动共享 durable 发�
 
 ### Media只读授权与登记清单
 
-正常Staff ACL RPC支持最多128个具体`user:<id>`的`read`授权，整体替换；空列表撤销显式授权。锁定应用资产后比较排序集合，无变化不重复写证据；修改与`media_read_grants/replace`证据同事务。不是S3桶ACL，也不授予写/删除/角色/通配权限。私有读和新签名URL生成每次查权威授权，不依赖元数据缓存；owner/public原策略不变，Staff或System同名ID不能借User授权。已签发的预签名URL在过期前不能由PG撤销立刻作废。
+正常Staff ACL RPC支持最多128个具体`user:<id>`的`read`授权，整体替换；空列表撤销显式授权。锁定应用资产后比较排序集合，无变化不重复写证据；修改与`media_read_grants/replace`证据同事务。不是S3桶ACL，也不授予写/删除/角色/通配权限。源处理读取每次查权威 owner/public/User grant，不依赖元数据缓存；应用内已认证 User 的展示读与新展示签名 URL 不要求这些授权，Staff 或 System 同名 ID 不能借用 User 身份。已签发的预签名URL在过期前不能由PG撤销立刻作废。
 
 清单枚举具体应用的已登记资产，限制相对前缀、file_id游标和1～200条页，提供`next_cursor/has_more`；不返回签名URL或任意metadata。不扫描物理桶，不能证明未登记对象/对象存在性。正式源DDL增加0013，最终一次初始化折叠，不应用到存量库。
 

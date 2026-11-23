@@ -102,6 +102,7 @@ CORE_SERVICES=(
     "storage-writer"
     "storage-reader"
     "sync-orchestrator"
+    "push-proxy"
     "push-server"
     "push-worker"
     "media"

@@ -546,6 +546,76 @@ mod tests {
         HookDispatcher::new(registry)
     }
 
+    /// A healthy Social decision can take 400 ms while the local host builds/tests.
+    /// Exercise the shipped profile, not a hand-picked test timeout: 300 ms used
+    /// to cancel all three queue attempts before the policy answered.
+    #[tokio::test(start_paused = true)]
+    async fn shipped_social_policy_accepts_slow_decisions_but_still_fails_closed() {
+        use super::super::config::HookConfig;
+
+        struct DelayedDecision(bool);
+        #[async_trait]
+        impl PreSendHook for DelayedDecision {
+            async fn handle(&self, _: &Ctx, draft: &mut MessageDraft) -> PreSendDecision {
+                tokio::time::sleep(Duration::from_millis(400)).await;
+                if self.0 { allow(draft) } else { refuse(draft) }
+            }
+        }
+        for profile in [
+            "hooks.toml",
+            "hooks.social.toml",
+            "hooks.social.example.toml",
+        ] {
+            let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../config")
+                .join(profile);
+            let config: HookConfig =
+                toml::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+            let policy = config
+                .pre_send
+                .iter()
+                .find(|p| p.name == "social-policy-pre-send")
+                .unwrap();
+            assert!(policy.enabled && policy.require_success, "{profile}");
+            let metadata = required("social-policy-pre-send")
+                .with_timeout(Duration::from_millis(policy.timeout_ms));
+            assert!(
+                metadata.timeout < DEFAULT_PRE_SEND_BUDGET,
+                "reserve time for the rest of the chain"
+            );
+            for allowed in [true, false] {
+                let registry = HookRegistry::new();
+                registry.register_pre_send(
+                    metadata.clone(),
+                    HookSelector::default(),
+                    Arc::new(DelayedDecision(allowed)),
+                );
+                let result = HookDispatcher::new(registry)
+                    .pre_send(&ctx("t1"), &mut MessageDraft::new(vec![]))
+                    .await;
+                if allowed {
+                    assert!(
+                        result.is_ok(),
+                        "{profile}: healthy delayed policy was cancelled: {result:?}"
+                    );
+                } else {
+                    assert_eq!(
+                        result.unwrap_err().reason(),
+                        "SPAM",
+                        "the actual policy denial must survive"
+                    );
+                }
+            }
+            let started = Instant::now();
+            let error = hanging(metadata.clone())
+                .pre_send(&ctx("t1"), &mut MessageDraft::new(vec![]))
+                .await
+                .unwrap_err();
+            assert_eq!(error.code(), Some(ErrorCode::ServiceUnavailable));
+            assert_eq!(Instant::now() - started, metadata.timeout);
+        }
+    }
+
     /// 单条超时：必需的回 503，可选的跳过。
     #[tokio::test(start_paused = true)]
     async fn a_hook_timeout_is_a_503_or_a_skip() {

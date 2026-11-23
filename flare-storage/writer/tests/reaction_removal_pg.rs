@@ -42,9 +42,11 @@ impl Drop for Cleanup {
                         "DELETE FROM message_reactions WHERE tenant_id = $1 AND message_id = ANY($2)",
                     )
                     .bind(TENANT)
-                    .bind(message_ids)
+                    .bind(&message_ids)
                     .execute(&pool)
-                    .await
+                    .await?;
+                    sqlx::query("DELETE FROM messages WHERE tenant_id=$1 AND server_id=ANY($2)")
+                        .bind(TENANT).bind(&message_ids).execute(&pool).await
                 })
         });
         if let Ok(Err(err)) = cleanup.join() {
@@ -85,12 +87,18 @@ async fn removing_a_reaction_is_idempotent_and_never_takes_away_another_users_re
         url: url.clone(),
         message_ids: vec![m1.clone(), m2.clone()],
     };
+    for id in [&m1, &m2] {
+        sqlx::query("INSERT INTO messages(tenant_id,server_id,conversation_id,client_msg_id,sender_id,source,seq,timestamp,conversation_type,message_type,status) VALUES($1,$2,'reaction-test',$2,'author',1,1,now(),2,1,2)")
+            .bind(TENANT).bind(id).execute(&pool).await.unwrap();
+    }
+    let sequence = std::sync::atomic::AtomicU64::new(1);
     let react = |message_id: String, user_id: &'static str, add: bool| {
         let store = store.clone();
         let ctx = ctx.clone();
+        let seq = sequence.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         async move {
             store
-                .upsert_message_reaction(&ctx, TENANT, &message_id, EMOJI, user_id, add)
+                .upsert_message_reaction(&ctx, TENANT, &message_id, EMOJI, user_id, add, seq)
                 .await
                 .expect("reaction applied");
         }

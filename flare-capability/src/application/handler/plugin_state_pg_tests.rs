@@ -108,7 +108,7 @@ impl PushRepository for Topics {
 /// The card is seq 1; events follow.
 struct Seq(AtomicU64);
 impl SequenceAllocatorPort for Seq {
-    async fn allocate_seq(&self, _: &str, _: &str) -> Result<u64> {
+    async fn allocate_seq(&self, _: &Ctx, _: &str, _: &str) -> Result<u64> {
         Ok(self.0.fetch_add(1, Ordering::SeqCst) + 1)
     }
 }

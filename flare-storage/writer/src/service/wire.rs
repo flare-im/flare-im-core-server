@@ -16,7 +16,6 @@ use crate::infrastructure::messaging::ack_publisher::MqAckPublisher;
 use crate::infrastructure::persistence::repository::event_stream::PostgresEventStreamStore;
 use crate::infrastructure::persistence::repository::postgres_store::PostgresMessageStore;
 use crate::infrastructure::persistence::repository::redis_cache::RedisHotCacheRepository;
-use crate::infrastructure::persistence::repository::redis_idempotency::RedisIdempotencyRepository;
 use crate::infrastructure::persistence::repository::redis_wal_cleanup::RedisWalCleanupRepository;
 use crate::interface::messaging::{MessageCreatedConsumerFactory, MessageEventsConsumerFactory};
 
@@ -33,7 +32,6 @@ use flare_server_core::mq::nats::NatsProducer;
 use flare_server_core::mq::producer::Producer;
 
 // 类型别名，简化泛型参数
-type IdempotencyRepo = RedisIdempotencyRepository;
 type HotCacheRepo = RedisHotCacheRepository;
 type ArchiveRepo = PostgresMessageStore;
 type EventStreamRepo = PostgresEventStreamStore;
@@ -41,7 +39,6 @@ type WalCleanupRepo = RedisWalCleanupRepository;
 type AckPub = MqAckPublisher;
 
 type MessagePersistenceService = MessagePersistenceDomainService<
-    IdempotencyRepo,
     HotCacheRepo,
     ArchiveRepo,
     EventStreamRepo,
@@ -50,7 +47,6 @@ type MessagePersistenceService = MessagePersistenceDomainService<
 >;
 
 type MessagePersistenceHandler = MessagePersistenceCommandHandler<
-    IdempotencyRepo,
     HotCacheRepo,
     ArchiveRepo,
     EventStreamRepo,
@@ -134,13 +130,9 @@ pub async fn initialize(
     let ack_publisher = build_ack_publisher(&config, mq_producer.clone())?;
     let failure_publishers = build_failure_publishers(&config, mq_producer.clone());
     let retry_forwarder_dispatcher = build_retry_forwarder_dispatcher(&config, mq_producer)?;
-    // 一个进程一条共享的 Redis 连接，去重、热缓存与 WAL 清理共用（有界建连、应答与重建）。
+    // 一个进程一条共享的 Redis 连接，热缓存与 WAL 清理共用（有界建连、应答与重建）。
     let redis = build_redis_client(&config)
         .map(|client| Arc::new(SharedRedisConnection::new(client, config.redis_limits)));
-
-    let idempotency_repo = redis
-        .as_ref()
-        .map(|redis| Arc::new(RedisIdempotencyRepository::new(redis.clone(), &config)));
 
     let hot_cache_repo = redis
         .as_ref()
@@ -179,7 +171,6 @@ pub async fn initialize(
     let write_ledger_repo: Arc<dyn MessageWriteLedgerRepository> = archive_repo.clone();
     let domain_service: Arc<MessagePersistenceService> = Arc::new(
         MessagePersistenceDomainService::new(
-            idempotency_repo,
             hot_cache_repo,
             Some(archive_repo.clone()),
             Some(event_stream_repo.clone()),
@@ -405,7 +396,6 @@ mod tests {
             redis_url: None,
             redis_hot_ttl_seconds: 0,
             redis_hot_tail_limit: 0,
-            redis_idempotency_ttl_seconds: 0,
             redis_limits: Default::default(),
             wal_hash_key: None,
             postgres_url: None,
