@@ -261,7 +261,7 @@ end of their sections.
 ## Anti-disturbance gate
 
 After the filtering above, every candidate device goes through the notification rules of
-`flare-protocol/flare-notify-rules`, the single implementation the client engine also runs. Push
+`flare-notify-rules`, the single implementation the client engine also runs. Push
 Server does not re-implement them: it reads the persisted state, runs the crate in process and
 writes the result back with a compare-and-set. Catch-up alerts from a handoff and the batches of
 a group conversation's waves (next section) go through the same decision and gate.

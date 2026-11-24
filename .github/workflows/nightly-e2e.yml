@@ -59,7 +59,6 @@ jobs:
               || git clone --depth 1 "$1" "$2"
           }
           clone https://github.com/flare-im/flare-transport.git "flare-transport"
-          clone https://github.com/flare-im/flare-protocol.git "flare-protocol"
           clone https://github.com/flare-im/flare-notify-rules.git "flare-notify-rules"
           clone https://github.com/flare-im/flare-protocol-grpc.git "flare-protocol-grpc"
           clone https://github.com/flare-im/flare-server-runtime.git "flare-server-runtime"
