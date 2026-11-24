@@ -70,13 +70,14 @@ WORKDIR /build
 # Sibling crates are path dependencies of this workspace, so the build context is the
 # parent directory. Copy them first — they change far less often than flare-im-core, so
 # this layer stays cached across most rebuilds.
-COPY flare-protocol ./flare-protocol
+COPY flare-notify-rules ./flare-notify-rules
 COPY flare-protocol-grpc ./flare-protocol-grpc
 COPY flare-transport ./flare-transport
 COPY flare-server-runtime ./flare-server-runtime
 # The released flare-capability links the plugin service router of flare-plugin-host
 # (flare-capability/with-plugin-host); only that crate of flare-plugin is needed.
 COPY flare-plugin-devkit/flare-plugin-host ./flare-plugin-devkit/flare-plugin-host
+COPY flare-plugin-devkit/flare-plugin-protocol ./flare-plugin-devkit/flare-plugin-protocol
 # The gateway version gate shares the device-to-release platform mapping with the clients
 # (flare-access, built without its client feature); only that crate of the engine is needed.
 COPY flare-core-sdk-engine/access ./flare-core-sdk-engine/access

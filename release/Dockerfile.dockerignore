@@ -8,8 +8,8 @@
 # 默认拒绝，只有五个 COPY 输入进入上下文。尤其不发送 Deploy 的私有
 # .local 证据、运行凭据或工作区根 capture 文件；下方再排除允许仓中的运行产物。
 **
-!flare-protocol/
-!flare-protocol/**
+!flare-notify-rules/
+!flare-notify-rules/**
 !flare-protocol-grpc/
 !flare-protocol-grpc/**
 !flare-transport/
@@ -93,7 +93,9 @@ flare-sdk-plugin
 flare-plugins-commercial
 flare-plugin-devkit
 !flare-plugin-devkit/flare-plugin-host
+!flare-plugin-devkit/flare-plugin-protocol
 flare-plugin-devkit/flare-plugin-host/target
+flare-plugin-devkit/flare-plugin-protocol/target
 flare-social-server
 
 # E2E 测试残留数据（实测某次达 4.6GB，COPY 时把服务器磁盘撑爆）。

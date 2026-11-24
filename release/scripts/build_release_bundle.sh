@@ -264,7 +264,7 @@ cp "$PROJECT_ROOT/deploy/init.sql" "$package_dir/sql/init.sql"
 mkdir -p "$package_dir/sql/patches"
 cp "$PROJECT_ROOT"/deploy/patches/*.sql "$package_dir/sql/patches/"
 cp -R "$WORKSPACE_ROOT/flare-protocol-grpc/proto" "$package_dir/proto/flare-grpc-proto/proto"
-cp -R "$WORKSPACE_ROOT/flare-protocol/proto" "$package_dir/proto/flare-proto/proto"
+cp -R "$WORKSPACE_ROOT/flare-protocol-grpc/crates/flare-proto/proto" "$package_dir/proto/flare-proto/proto"
 
 while IFS= read -r bin; do
     src="$target_profile_dir/$bin"

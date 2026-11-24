@@ -18,7 +18,7 @@ const TENANT: &str = "t-vectors";
 
 fn load_gate_vectors() -> Value {
     let path = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../../flare-protocol/flare-notify-rules/tests/vectors/gate.json");
+        .join("../../../flare-notify-rules/tests/vectors/gate.json");
     let text = std::fs::read_to_string(&path)
         .unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
     serde_json::from_str(&text).unwrap_or_else(|error| panic!("parse {}: {error}", path.display()))
