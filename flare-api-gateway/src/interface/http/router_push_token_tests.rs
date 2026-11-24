@@ -453,9 +453,10 @@ fn assert_denied(result: &(StatusCode, Value), status: StatusCode, reason: &str)
 }
 
 #[tokio::test]
-async fn fcm_and_apns_use_the_same_signed_user_registration_entry() {
+async fn mobile_providers_use_the_same_signed_user_registration_entry() {
     for (name, provider) in [
         ("fcm", DevicePushProvider::Fcm),
+        ("jpush", DevicePushProvider::Jpush),
         ("apns", DevicePushProvider::Apns),
     ] {
         let fake = FakePushProxy::default();

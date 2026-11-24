@@ -10,8 +10,67 @@ use crate::{
     },
     interface::grpc::resource_bridge::PluginHostBridgeGrpc,
 };
+use flare_im_capability_core::plugin::invocation::PluginRuntimeVerifier;
 use flare_server_core::error::{FlareError, Result};
-use std::sync::Arc;
+use std::{path::Path, sync::Arc, time::Duration};
+use tokio::io::AsyncReadExt;
+
+const RUNTIME_KEYS_LIMIT: u64 = 64 * 1024;
+
+async fn read_runtime_keys(path: &Path) -> std::io::Result<String> {
+    let mut contents = String::new();
+    tokio::fs::File::open(path)
+        .await?
+        .take(RUNTIME_KEYS_LIMIT + 1)
+        .read_to_string(&mut contents)
+        .await?;
+    if contents.len() as u64 > RUNTIME_KEYS_LIMIT {
+        return Err(std::io::Error::other("runtime key list exceeds size limit"));
+    }
+    Ok(contents)
+}
+
+async fn runtime_verifier() -> Result<Option<PluginRuntimeVerifier>> {
+    use std::env::{VarError, var};
+
+    let invalid = || FlareError::system("invalid plugin runtime public keys configuration");
+    match (
+        var("FLARE_PLUGIN_RUNTIME_PUBLIC_KEYS"),
+        var("FLARE_PLUGIN_RUNTIME_PUBLIC_KEYS_FILE"),
+    ) {
+        (Err(VarError::NotPresent), Err(VarError::NotPresent)) => Ok(None),
+        (Ok(raw), Err(VarError::NotPresent)) => PluginRuntimeVerifier::from_public_keys_json(&raw)
+            .map(Some)
+            .map_err(|_| invalid()),
+        (Err(VarError::NotPresent), Ok(file)) => {
+            let path = std::path::PathBuf::from(file);
+            let mut current = read_runtime_keys(&path).await.map_err(|_| invalid())?;
+            let verifier =
+                PluginRuntimeVerifier::from_public_keys_json(&current).map_err(|_| invalid())?;
+            let live = verifier.clone();
+            tokio::spawn(async move {
+                let mut refused = false;
+                loop {
+                    tokio::time::sleep(Duration::from_secs(2)).await;
+                    match read_runtime_keys(&path).await {
+                        Ok(raw) if raw == current => refused = false,
+                        Ok(raw) if live.reload_public_keys(&raw).is_ok() => {
+                            current = raw;
+                            refused = false;
+                        }
+                        _ if !refused => {
+                            tracing::warn!("plugin runtime public keys reload rejected");
+                            refused = true;
+                        }
+                        _ => {}
+                    }
+                }
+            });
+            Ok(Some(verifier))
+        }
+        _ => Err(invalid()),
+    }
+}
 
 pub async fn compose(
     routes: &Arc<PluginRouteBook>,
@@ -60,16 +119,7 @@ pub async fn compose(
     let realtime = realtime_push(&service_signer)?;
     // Plugin deployments' runtime credentials (`x-flare-plugin-runtime`) for the write
     // capability: `[{"key_id","deployment_id","public_key_base64"}]`. Absent: refused.
-    let runtime_verifier = match std::env::var("FLARE_PLUGIN_RUNTIME_PUBLIC_KEYS") {
-        Ok(raw) => Some(
-            flare_im_capability_core::plugin::invocation::PluginRuntimeVerifier::from_public_keys_json(
-                &raw,
-            )
-            .map_err(|_| FlareError::system("invalid FLARE_PLUGIN_RUNTIME_PUBLIC_KEYS"))?,
-        ),
-        Err(std::env::VarError::NotPresent) => None,
-        Err(_) => return Err(FlareError::system("invalid FLARE_PLUGIN_RUNTIME_PUBLIC_KEYS")),
-    };
+    let runtime_verifier = runtime_verifier().await?;
     let budget = Arc::new(PostgresResourceBudget(pool.cloned().ok_or_else(invalid)?));
     budget.check_schema().await.map_err(|_| invalid())?;
     // Service calls need both a router linked into this binary and the runtime credentials

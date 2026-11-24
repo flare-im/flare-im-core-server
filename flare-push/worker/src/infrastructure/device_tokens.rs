@@ -20,7 +20,7 @@ const IO_BUDGET: Duration = Duration::from_secs(3);
 const RECEIPT_TTL_SECS: u64 = 7 * 24 * 3600;
 const MAX_RECORD_BYTES: usize = 16 * 1024;
 /// Vendor channels a device can be bound through; the registry hash field is `provider:device_id`.
-const DEVICE_PROVIDERS: [&str; 3] = ["fcm", "apns", "getui"];
+const DEVICE_PROVIDERS: [&str; 4] = ["fcm", "apns", "getui", "jpush"];
 /// Reads only the target device's fields (one per vendor channel), so the cost of a task does
 /// not grow with how many devices the user has registered. Oversized records fail inside Redis
 /// instead of crossing the wire.

@@ -58,7 +58,7 @@ pub struct PushReceiptHttp {
     /// 载荷里的处置：`loud`、`quiet`、`clear`、`badge_only`、`recall_replace`、`digest`。
     #[serde(default)]
     pub disposition: String,
-    /// `apns`、`fcm` 或 `getui`。
+    /// `apns`、`fcm`、`getui` 或 `jpush`。
     #[serde(default)]
     pub provider: String,
     /// `extension`（iOS 通知扩展）或 `app`（应用进程处理了这条推送）。

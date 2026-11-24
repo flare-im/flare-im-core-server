@@ -16,6 +16,7 @@ use crate::{
         apns_push::{ApnsCredentials, ApnsOfflinePushExecutor},
         fcm_push::{FcmOfflinePushExecutor, FcmServiceAccount},
         getui_push::{GetuiAndroidVendor, GetuiClient, GetuiConfig, GetuiOfflinePushExecutor},
+        jpush::{JpushCredentials, JpushExecutor},
         vendor_http,
     },
 };
@@ -53,6 +54,7 @@ struct Application {
     fcm: Option<FcmServiceAccount>,
     apns: Option<ApnsCredentials>,
     getui: Option<GetuiCredentials>,
+    jpush: Option<JpushCredentials>,
 }
 #[derive(serde::Deserialize, serde::Serialize)]
 #[serde(deny_unknown_fields)]
@@ -162,6 +164,7 @@ fn assemble(
                 "apns" => Vendor::Apns,
                 "fcm" => Vendor::Fcm,
                 "getui" => Vendor::Getui,
+                "jpush" => Vendor::Jpush,
                 _ => return Err(rejected()),
             };
             if disabled.contains(&name) {
@@ -192,6 +195,21 @@ fn assemble(
                     account,
                     http.clone(),
                     tokens.clone(),
+                )?),
+            ));
+        }
+        if let Some(account) = app.jpush {
+            if !allowed.contains(&OfflineDeliveryBackend::Jpush) {
+                return Err(rejected());
+            }
+            providers.push((
+                Vendor::Jpush,
+                Arc::new(JpushExecutor::new(
+                    account,
+                    http.clone(),
+                    tokens.clone(),
+                    ttl_ms,
+                    request_ms,
                 )?),
             ));
         }

@@ -3,8 +3,8 @@
 //! 策略来自应用的 `client_policy` 投影，按发布清单平台段（`web`、`android`、`ios`、`tauri`、
 //! `electron`）取；没报构建号的连接按 0 判（预发布期不留宽容窗口）。
 
-use flare_access::manifest::{normalize_device_platform, release_platform};
 use flare_im_contracts::domain::tenant::TenantClientPolicy;
+use flare_proto::client_platform::{normalize_device_platform, release_platform};
 
 /// 为什么要求升级。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -69,7 +69,7 @@ pub fn upgrade_verdict(
     })
 }
 
-/// 门禁与构建分布用的平台：CONNECT 设备平台按 `flare_access::manifest::release_platform` 映射成
+/// 门禁与构建分布用的平台：CONNECT 设备平台按 `flare_proto::client_platform::release_platform` 映射成
 /// 发布清单平台段（别名先归一，与 Social 网关同一处）。没有清单的平台（鸿蒙等）和认不出外壳的桌面
 /// （`distribution` 不是 `tauri` / `electron`）不设门禁，返回 `None`。
 pub fn gate_platform(device_platform: &str, distribution: Option<&str>) -> Option<&'static str> {

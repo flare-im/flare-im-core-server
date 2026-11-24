@@ -32,10 +32,11 @@ pub enum Vendor {
     Apns,
     Fcm,
     Getui,
+    Jpush,
 }
 
 impl Vendor {
-    pub const ALL: [Vendor; 3] = [Vendor::Apns, Vendor::Fcm, Vendor::Getui];
+    pub const ALL: [Vendor; 4] = [Vendor::Apns, Vendor::Fcm, Vendor::Getui, Vendor::Jpush];
 
     /// The provider name bindings, credentials, metrics and traces use.
     pub const fn as_str(self) -> &'static str {
@@ -43,6 +44,7 @@ impl Vendor {
             Self::Apns => "apns",
             Self::Fcm => "fcm",
             Self::Getui => "getui",
+            Self::Jpush => "jpush",
         }
     }
 
@@ -56,7 +58,8 @@ impl Vendor {
 
 /// Binding preference when none is configured: APNs reaches an iPhone directly, Getui reaches
 /// Android phones in China through the phone maker's channel, FCM covers the rest.
-pub const DEFAULT_BINDING_ORDER: [Vendor; 3] = [Vendor::Apns, Vendor::Getui, Vendor::Fcm];
+pub const DEFAULT_BINDING_ORDER: [Vendor; 4] =
+    [Vendor::Apns, Vendor::Getui, Vendor::Fcm, Vendor::Jpush];
 
 /// The configured binding order (`[services.push_worker] binding_order`). Names must be known
 /// vendors, each at most once. Vendors left out follow the listed ones in their default order:
@@ -68,7 +71,7 @@ pub fn resolve_binding_order(names: &[String]) -> Result<Vec<Vendor>, FlareError
         let vendor = Vendor::parse(name).ok_or_else(|| {
             FlareError::localized(
                 ErrorCode::InvalidParameter,
-                "push_worker.binding_order lists an unknown vendor; use apns, fcm or getui",
+                "push_worker.binding_order lists an unknown vendor; use apns, fcm, getui or jpush",
             )
         })?;
         if order.contains(&vendor) {
@@ -290,14 +293,14 @@ pub fn is_alert_disposition(task: &PushTaskEnvelope) -> bool {
 }
 
 /// Whether the device reports arrival for this push: an iOS binding with a notification service
-/// extension and an alert disposition, or an Android FCM binding that receives data messages.
+/// extension and an alert disposition, or an Android binding that receives data messages.
 /// The denominator of the arrival rate (`receipt_capable` on the sent metric).
 pub fn receipt_capable(vendor: Vendor, binding: &DevicePushToken, task: &PushTaskEnvelope) -> bool {
     let apple = is_apple_platform(&binding.platform);
     (apple
         && binding_has_capability(binding, CAPABILITY_SERVICE_EXTENSION)
         && is_alert_disposition(task))
-        || (vendor == Vendor::Fcm
+        || (matches!(vendor, Vendor::Fcm | Vendor::Jpush)
             && !apple
             && binding_has_capability(binding, CAPABILITY_DATA_MESSAGES))
 }
@@ -348,14 +351,14 @@ mod tests {
     }
 
     #[test]
-    fn the_order_defaults_to_apns_getui_fcm_and_completes_a_partial_list() {
+    fn the_default_order_completes_a_partial_list() {
         assert_eq!(
             resolve_binding_order(&[]).unwrap(),
-            vec![Vendor::Apns, Vendor::Getui, Vendor::Fcm]
+            vec![Vendor::Apns, Vendor::Getui, Vendor::Fcm, Vendor::Jpush]
         );
         assert_eq!(
             resolve_binding_order(&["FCM".to_string()]).unwrap(),
-            vec![Vendor::Fcm, Vendor::Apns, Vendor::Getui]
+            vec![Vendor::Fcm, Vendor::Apns, Vendor::Getui, Vendor::Jpush]
         );
         assert!(resolve_binding_order(&["hms".to_string()]).is_err());
         assert!(resolve_binding_order(&["fcm".to_string(), "fcm".to_string()]).is_err());

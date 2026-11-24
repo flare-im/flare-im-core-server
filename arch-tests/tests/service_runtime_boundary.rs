@@ -187,12 +187,30 @@ fn assert_bootstrap_uses_runtime_scaffold(
     }
 }
 
+/// service-kit config 模型的源码：按内聚分布在 config 模块多个文件里
+/// （mod/types/services/loader），守卫拼读整个模块目录——写死单文件路径
+/// 会在模块拆分时变成盲区（2026-11-24 拆分 mod.rs 时曾因此误报）。
+fn service_kit_config_model(root: &std::path::Path) -> String {
+    let config_src = root.join("crates/flare-im-service-kit/src/config");
+    let mut sources: Vec<_> = fs::read_dir(&config_src)
+        .expect("read service-kit config module dir")
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().is_some_and(|ext| ext == "rs"))
+        .collect();
+    sources.sort();
+    let mut model = String::new();
+    for path in sources {
+        model.push_str(&fs::read_to_string(&path).expect("read config model source"));
+        model.push('\n');
+    }
+    model
+}
+
 #[test]
 fn sync_orchestrator_has_typed_service_config() {
     let root = workspace_root();
-    let config_model =
-        fs::read_to_string(root.join("crates/flare-im-service-kit/src/config/mod.rs"))
-            .expect("read service-kit config model");
+    let config_model = service_kit_config_model(&root);
     let config_file = root.join("config/services/sync-orchestrator.toml");
 
     assert!(
@@ -216,9 +234,7 @@ fn sync_orchestrator_has_typed_service_config() {
 #[test]
 fn push_proxy_has_typed_service_config() {
     let root = workspace_root();
-    let config_model =
-        fs::read_to_string(root.join("crates/flare-im-service-kit/src/config/mod.rs"))
-            .expect("read service-kit config model");
+    let config_model = service_kit_config_model(&root);
     let config_file = root.join("config/services/push-proxy.toml");
 
     assert!(

@@ -22,17 +22,20 @@ use flare_im_contracts::utils::normalize_tenant_id;
 use flare_server_core::TokenService;
 use tonic::{Request, Status};
 
-pub const PLATFORM_ISSUER: &str = "flare-platform";
-pub const CORE_PROJECTION_AUDIENCE: &str = "flare-core-projection";
-/// Audience of the read-only `ClientBuildStats.GetConnectionBuilds` assertion.
-pub const CORE_BUILD_STATS_AUDIENCE: &str = "flare-core-build-stats";
-pub const PROJECTION_WORKER_SUBJECT: &str = "flare-platform-worker";
-pub const SCHEDULER_SUBJECT: &str = "flare-platform-control-scheduler";
+// Wire values shared with the platform signer live in flare-core-base (single source of
+// truth for both sides of the control boundary); re-exported under these historical
+// names so callers do not change.
+pub use flare_core_base::platform_auth::{
+    CORE_BUILD_STATS_AUDIENCE, CORE_PROJECTION_AUDIENCE, PROJECTION_WORKER_SUBJECT,
+    SCHEDULER_SUBJECT,
+};
+pub use flare_core_base::platform_auth::FLARE_PLATFORM_ISSUER as PLATFORM_ISSUER;
 /// The platform's Ed25519 public key (PEM or base64); only Capability and Online read it.
 pub const PLATFORM_PUBLIC_KEY_ENV: &str = "FLARE_PLATFORM_PUBLIC_KEY";
 const TOKEN_USE_CONTROL: &str = "control";
 const MAX_TOKEN_BYTES: usize = 8192;
-const MAX_TOKEN_LIFETIME_SECONDS: usize = 60;
+const MAX_TOKEN_LIFETIME_SECONDS: usize =
+    flare_core_base::platform_auth::PLATFORM_CONTROL_TOKEN_TTL_SECONDS as usize;
 
 #[derive(Clone)]
 pub struct PlatformAssertionVerifier(Arc<TokenService>);

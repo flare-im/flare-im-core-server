@@ -136,6 +136,7 @@ pub async fn initialize(
         backend @ (OfflineDeliveryBackend::Apns
         | OfflineDeliveryBackend::Fcm
         | OfflineDeliveryBackend::Getui
+        | OfflineDeliveryBackend::Jpush
         | OfflineDeliveryBackend::Mobile) => {
             let providers = if backend == OfflineDeliveryBackend::Mobile {
                 config.offline_mobile_providers.clone()

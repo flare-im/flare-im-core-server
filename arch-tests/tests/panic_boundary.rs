@@ -61,6 +61,12 @@ fn strip_inline_test_modules(content: &str) -> String {
             continue;
         }
 
+        // `#[cfg(test)]` 之后的属性行（如 `#[path = "..."]`）仍属于同一条 mod 声明，
+        // 不能把 pending 状态清掉——否则三行形式的声明会漏剥离。
+        if pending_test_cfg && trimmed.starts_with("#[") {
+            continue;
+        }
+
         // 只认 `mod tests` 会漏掉任何自定义命名的测试模块（例如
         // `mod quic_port_probe_tests`），把测试里的 expect 误判成生产代码违规。
         // 判据改成「带 #[cfg(test)] 的任意 mod」——这才是「这是测试代码」的真判据。
@@ -82,8 +88,13 @@ fn strip_inline_test_modules(content: &str) -> String {
     output
 }
 
-/// Files that a `#[cfg(test)] #[path = "..."] mod name;` declaration pulls in. They sit
+/// Files that a `#[cfg(test)] mod name;` declaration pulls in. They sit
 /// under `src/` next to production code, but they only ever compile as test code.
+/// 两种声明形式都要识别：
+/// - 带 `#[path]` 的：路径在属性里，直接解析；
+/// - 不带 `#[path]` 的：按 Rust 模块解析规则找 `dir/name.rs` 或 `dir/name/mod.rs`。
+///   只认 `#[path]` 会漏掉 `#[cfg(test)] mod tests;` 这种最常见的写法，
+///   整个测试文件（如 `static_read_endpoints/tests.rs`）会被当成生产代码误判。
 fn test_only_path_modules(files: &[PathBuf]) -> Vec<PathBuf> {
     let mut test_only = Vec::new();
     for file in files {
@@ -110,17 +121,51 @@ fn test_only_path_modules(files: &[PathBuf]) -> Vec<PathBuf> {
             }
             let declares_module = (trimmed.starts_with("mod ") || trimmed.starts_with("pub mod "))
                 && trimmed.ends_with(';');
-            if declares_module
-                && cfg_test
-                && let Some(path) = path_attr
-            {
-                test_only.push(dir.join(path));
+            if declares_module && cfg_test {
+                if let Some(path) = path_attr {
+                    test_only.push(dir.join(path));
+                } else if let Some(name) = module_declaration_name(trimmed) {
+                    for candidate in inline_test_module_paths(dir, file, name) {
+                        if candidate.is_file() {
+                            test_only.push(candidate);
+                        }
+                    }
+                }
             }
             cfg_test = false;
             path_attr = None;
         }
     }
     test_only
+}
+
+/// `mod tests;` / `pub mod tests;` -> `tests`
+fn module_declaration_name(line: &str) -> Option<&str> {
+    line.trim_start_matches("pub ")
+        .strip_prefix("mod ")?
+        .strip_suffix(';')?
+        .trim()
+        .split("::")
+        .next()
+        .filter(|name| !name.is_empty())
+}
+
+/// Rust 2018+ 模块解析规则下，`mod name;` 可能指向的两个文件：
+/// - `mod.rs` / `lib.rs` / `main.rs` 中声明：子模块在同级 `name.rs` 或 `name/mod.rs`；
+/// - `other_file.rs` 中声明：子模块在 `other_file/name.rs` 或 `other_file/name/mod.rs`。
+fn inline_test_module_paths(dir: &Path, declaring_file: &Path, name: &str) -> Vec<PathBuf> {
+    let file_name = declaring_file
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or_default();
+    let base_dir = match file_name {
+        "mod.rs" | "lib.rs" | "main.rs" => dir.to_path_buf(),
+        stem => dir.join(stem.trim_end_matches(".rs")),
+    };
+    vec![
+        base_dir.join(format!("{name}.rs")),
+        base_dir.join(name).join("mod.rs"),
+    ]
 }
 
 fn brace_delta(line: &str) -> isize {

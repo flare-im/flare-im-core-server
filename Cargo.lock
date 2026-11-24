@@ -1576,21 +1576,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1d674e81391d1e1ab681a28d99df07927c6d4aa5b027d7da16ba32d1d21ecd99"
 
 [[package]]
-name = "flare-access"
-version = "0.1.0"
-dependencies = [
- "base64",
- "chrono",
- "ed25519-dalek",
- "getrandom 0.2.16",
- "schemars",
- "serde",
- "serde_json",
- "sha2 0.10.9",
- "thiserror 2.0.18",
-]
-
-[[package]]
 name = "flare-admin-gateway"
 version = "1.0.3"
 dependencies = [
@@ -2429,7 +2414,6 @@ dependencies = [
  "base64",
  "chrono",
  "ed25519-dalek",
- "flare-access",
  "flare-core",
  "flare-core-runtime",
  "flare-grpc-proto",

@@ -18,8 +18,6 @@
 !flare-server-runtime/**
 !flare-core-server/
 !flare-core-server/**
-!flare-core-sdk-engine/access/
-!flare-core-sdk-engine/access/**
 
 # ── 版本控制与编译产物 ──
 .git
@@ -78,7 +76,6 @@ certs
 
 # ── 本镜像用不到的仓（整仓排除）──
 # 服务端只需要 flare-proto / flare-grpc-proto / flare-core / flare-server-core、
-# flare-core-sdk-engine 里的 flare-access（网关版本门禁与客户端共用平台映射）、
 # flare-plugin 里的 flare-plugin-host（发布版 flare-capability 由
 # flare-capability/with-plugin-host 链接它）与本仓自身。
 # 下面这些是客户端 SDK、UI kit、官网、社交业务——一个字节都用不上，合计约 10GB。
@@ -87,8 +84,6 @@ docs
 flare-im-design
 flare-core-sdk
 flare-core-sdk-engine
-!flare-core-sdk-engine/access
-flare-core-sdk-engine/access/target
 flare-sdk-plugin
 flare-plugins-commercial
 flare-plugin-devkit

@@ -74,7 +74,9 @@ const FIXED_BY_W11_T: &[&str] = &[
     "flare-orchestrator/src/infrastructure/persistence/redis_user_sync_index.rs",
     "flare-orchestrator/src/interface/mq/storage_consumer.rs",
     "flare-storage/writer/src/convert.rs",
-    "flare-storage/writer/src/domain/repository/message_idempotency_repository.rs",
+    // W11-T 修复时还是 message_idempotency_repository.rs，后重构为幂等台账：
+    // 替代文件延续同一份修复承诺（2026-11-24 扫描确认无回退模式后换入）。
+    "flare-storage/writer/src/domain/repository/idempotency_ledger_retention.rs",
     "flare-storage/writer/src/domain/service/message_persistence.rs",
     "flare-storage/writer/src/infrastructure/persistence/repository/redis_cache.rs",
     "flare-storage/writer/src/interface/messaging/message_consumer.rs",

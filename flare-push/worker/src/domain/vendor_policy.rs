@@ -70,6 +70,7 @@ impl VendorLimits {
             Vendor::Apns => (256, 2_000),
             Vendor::Fcm => (256, 1_000),
             Vendor::Getui => (64, 300),
+            Vendor::Jpush => (32, 100),
         };
         Self {
             max_concurrency,

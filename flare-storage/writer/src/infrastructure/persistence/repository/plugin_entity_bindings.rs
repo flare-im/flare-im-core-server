@@ -328,7 +328,7 @@ mod tests {
     /// The protocol's v2 example poll: `example.poll.card` binds `/pollId`.
     pub(crate) const POLL_MANIFEST: &str = include_str!(concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/../../../flare-protocol/flare-plugin-protocol/tests/fixtures/plugin-ui-v2-manifest.json"
+        "/../../../flare-plugin-devkit/flare-plugin-protocol/tests/fixtures/plugin-ui-v2-manifest.json"
     ));
 
     /// A projection of the poll, and the manifests its digests name.

@@ -140,13 +140,13 @@ axum = "0.8"
 etcd-client = "0.17"
 
 # Flare Core
-flare-core = { version = "1.0.3", path = "../flare-transport" }
+flare-core = { version = "1.1.1", path = "../flare-transport" }
 
 # Flare Server Core (启用 proto feature 以使用错误转换函数)
-flare-server-core = { version = "1.0.3", path = "../flare-server-runtime", features = ["proto", "grpc", "http"] }
-flare-core-base = { version = "1.0.3", path = "../flare-server-runtime/flare-core-base" }
-flare-core-messaging = { version = "1.0.3", path = "../flare-server-runtime/flare-core-messaging" }
-flare-core-runtime = { version = "1.0.3", path = "../flare-server-runtime/flare-core-runtime" }
+flare-server-core = { version = "1.1.1", path = "../flare-server-runtime", features = ["proto", "grpc", "http"] }
+flare-core-base = { version = "1.1.1", path = "../flare-server-runtime/flare-core-base" }
+flare-core-messaging = { version = "1.1.1", path = "../flare-server-runtime/flare-core-messaging" }
+flare-core-runtime = { version = "1.1.1", path = "../flare-server-runtime/flare-core-runtime" }
 
 # Flare IM shared crates
 flare-im-contracts = { version = "1.0.3", path = "crates/flare-im-contracts" }
@@ -158,8 +158,6 @@ flare-im-hooks = { version = "1.0.3", path = "crates/flare-im-hooks" }
 flare-im-capability-core = { version = "1.0.3", path = "crates/flare-im-capability-core" }
 flare-im-usage = { version = "1.0.3", path = "crates/flare-im-usage" }
 
-# 设备平台到发布清单平台段的映射与客户端同源（只用文档类型，不带客户端部分）
-flare-access = { version = "0.1.0", path = "../flare-core-sdk-engine/access", default-features = false }
 
 # Flare Proto
 flare-proto = { version = "2.2.0", path = "../flare-protocol-grpc/crates/flare-proto" }

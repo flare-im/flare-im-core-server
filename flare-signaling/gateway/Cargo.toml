@@ -13,7 +13,6 @@ path = "cmd/main.rs"
 
 [dependencies]
 flare-core = { workspace = true }
-flare-access = { workspace = true }
 flare-server-core = { workspace = true, features = ["discovery", "auth", "grpc"] }
 flare-core-runtime = { workspace = true }
 flare-proto = { workspace = true }

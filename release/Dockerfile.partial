@@ -63,9 +63,6 @@ COPY flare-transport ./flare-transport
 COPY flare-server-runtime ./flare-server-runtime
 COPY flare-plugin-devkit/flare-plugin-host ./flare-plugin-devkit/flare-plugin-host
 COPY flare-plugin-devkit/flare-plugin-protocol ./flare-plugin-devkit/flare-plugin-protocol
-# The gateway version gate shares the device-to-release platform mapping with the clients
-# (flare-access, built without its client feature); only that crate of the engine is needed.
-COPY flare-core-sdk-engine/access ./flare-core-sdk-engine/access
 COPY flare-core-server ./flare-core-server
 
 WORKDIR /build/flare-core-server

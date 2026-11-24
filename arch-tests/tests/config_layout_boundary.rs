@@ -116,8 +116,21 @@ fn startup_script_uses_canonical_service_config_file_names() {
 #[test]
 fn directory_loader_order_matches_documented_configuration_layers() {
     let root = workspace_root();
-    let runtime = fs::read_to_string(root.join("crates/flare-im-service-kit/src/config/mod.rs"))
-        .expect("read config loader");
+    // 配置加载逻辑按内聚分布在 config 模块的多个文件里（mod/types/services/loader），
+    // 守卫扫描整个模块目录而不是写死单个文件——单文件路径在模块拆分时会变成盲区。
+    let config_src = root.join("crates/flare-im-service-kit/src/config");
+    let mut runtime = String::new();
+    let mut sources: Vec<_> = fs::read_dir(&config_src)
+        .expect("read config module dir")
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().is_some_and(|ext| ext == "rs"))
+        .collect();
+    sources.sort();
+    for path in sources {
+        runtime.push_str(&fs::read_to_string(&path).expect("read config loader source"));
+        runtime.push('\n');
+    }
     let readme = fs::read_to_string(root.join("config/README.md")).expect("read config readme");
 
     for layer in ["shared", "services", "overrides"] {

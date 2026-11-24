@@ -692,6 +692,7 @@ impl<'a> ValidReceipt<'a> {
             "apns" => "apns",
             "fcm" => "fcm",
             "getui" => "getui",
+            "jpush" => "jpush",
             _ => return None,
         };
         let path = match receipt.path.trim() {
@@ -1354,7 +1355,7 @@ struct BindingAttributes {
 
 /// 绑定属性的校验。三个通道都离不开应用标识：APNs 拿它当 topic，FCM 拿它区分同一项目下的
 /// 多个应用，个推的厂商通知点开时要打开这个包里的页面。缺了它就投不出去，所以登记时就拒收。
-/// 环境只对 APNs 有意义，别的通道带了说明客户端把字段填错了位置。
+/// 环境由直连 APNs 与经 JPush 转发 APNs 的 Apple 设备登记。
 fn binding_attributes(
     provider: &str,
     req: &RegisterDevicePushTokenRequest,
@@ -1373,9 +1374,12 @@ fn binding_attributes(
     let environment = req.environment.trim();
     match (provider, environment) {
         (_, "") | ("apns", APNS_ENVIRONMENT_SANDBOX | APNS_ENVIRONMENT_PRODUCTION) => {}
+        ("jpush", APNS_ENVIRONMENT_SANDBOX | APNS_ENVIRONMENT_PRODUCTION)
+            if flare_proto::client_platform::normalize_device_platform(&req.platform)
+                == Some("ios") => {}
         _ => {
             return Err(Status::invalid_argument(
-                "environment must be sandbox or production and is only for apns",
+                "environment must be sandbox or production on an APNs delivery path",
             ));
         }
     }
@@ -1418,6 +1422,7 @@ fn binding_attributes(
 fn provider_string(provider: i32) -> Result<String, Status> {
     match DevicePushProvider::try_from(provider) {
         Ok(DevicePushProvider::Getui) => Ok("getui".to_string()),
+        Ok(DevicePushProvider::Jpush) => Ok("jpush".to_string()),
         Ok(DevicePushProvider::Fcm) => Ok("fcm".to_string()),
         Ok(DevicePushProvider::Apns) => Ok("apns".to_string()),
         Ok(DevicePushProvider::Unspecified) | Err(_) => Err(Status::invalid_argument(
@@ -1433,6 +1438,7 @@ mod provider_contract_tests {
     fn all_vendor_registrations_are_typed_and_bounded() {
         for (provider, name) in [
             (DevicePushProvider::Getui, "getui"),
+            (DevicePushProvider::Jpush, "jpush"),
             (DevicePushProvider::Fcm, "fcm"),
             (DevicePushProvider::Apns, "apns"),
         ] {
@@ -1480,7 +1486,7 @@ mod provider_contract_tests {
             }
         );
         // 应用标识之外的属性三个通道都可以不带。
-        for provider in ["apns", "fcm", "getui"] {
+        for provider in ["apns", "fcm", "getui", "jpush"] {
             assert!(binding_attributes(provider, &registration()).is_ok());
         }
         let production = RegisterDevicePushTokenRequest {

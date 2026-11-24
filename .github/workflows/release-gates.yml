@@ -58,6 +58,8 @@ jobs:
           }
           clone https://github.com/flare-im/flare-transport.git "../flare-transport"
           clone https://github.com/flare-im/flare-protocol.git "../flare-protocol"
+          clone https://github.com/flare-im/flare-plugin-devkit.git "../flare-plugin-devkit"
+          clone https://github.com/flare-im/flare-notify-rules.git "../flare-notify-rules"
           clone https://github.com/flare-im/flare-protocol-grpc.git "../flare-protocol-grpc"
           clone https://github.com/flare-im/flare-server-runtime.git "../flare-server-runtime"
           clone https://github.com/flare-im/flare-core-sdk-engine.git "../flare-core-sdk-engine"
@@ -85,6 +87,39 @@ jobs:
         run: cargo test -p flare-push-server recipientless_conversation_ping
       - name: Architecture large conversation guards
         run: cargo test -p flare-im-arch-tests large_conversation
+
+  architecture-guards:
+    name: Architecture guards (full suite)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # arch-tests 自身零依赖，但它是 workspace 成员：cargo 解析 workspace
+      # manifest 时所有 path 依赖必须存在，否则 metadata 都拿不到
+      # （与 large-group-primitives 的克隆步骤保持同一份清单）。
+      - name: 拉取同级仓库
+        run: |
+          BR="${GITHUB_REF_NAME:-main}"
+          clone() {
+            git clone --depth 1 -b "$BR" "$1" "$2" 2>/dev/null \
+              || git clone --depth 1 "$1" "$2"
+          }
+          clone https://github.com/flare-im/flare-transport.git "../flare-transport"
+          clone https://github.com/flare-im/flare-protocol.git "../flare-protocol"
+          clone https://github.com/flare-im/flare-plugin-devkit.git "../flare-plugin-devkit"
+          clone https://github.com/flare-im/flare-notify-rules.git "../flare-notify-rules"
+          clone https://github.com/flare-im/flare-protocol-grpc.git "../flare-protocol-grpc"
+          clone https://github.com/flare-im/flare-server-runtime.git "../flare-server-runtime"
+          clone https://github.com/flare-im/flare-core-sdk-engine.git "../flare-core-sdk-engine"
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: .
+          key: release-arch-guards
+      # 全量跑：守卫体系的失效方式从来不是「红」而是「没人跑」——
+      # panic_boundary 曾因守卫自身盲区红在主干而无人发现，单跑一个
+      # 守卫等于把其余 19 条防线挪出了 CI。
+      - name: Run every workspace-level architecture guard
+        run: cargo test -p flare-im-arch-tests
 
   observability-config:
     name: Observability config

@@ -371,6 +371,7 @@ fn push_token(raw: &str) -> Result<String> {
 fn provider(raw: &str) -> Result<DevicePushProvider> {
     match raw.trim().to_ascii_lowercase().as_str() {
         "getui" => Ok(DevicePushProvider::Getui),
+        "jpush" => Ok(DevicePushProvider::Jpush),
         "fcm" => Ok(DevicePushProvider::Fcm),
         "apns" => Ok(DevicePushProvider::Apns),
         _ => Err(GatewayError::bad_request(

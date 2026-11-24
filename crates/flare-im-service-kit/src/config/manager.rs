@@ -92,7 +92,7 @@ impl ConfigManager {
         let env_config_path = environment_config_path(config_root, env);
 
         if env_config_path.exists() {
-            let env_config = super::load_toml_value(&env_config_path)
+            let env_config = super::loader::load_toml_value(&env_config_path)
                 .with_context(|| format!("无法读取环境配置文件: {}", env_config_path.display()))?;
 
             // 合并环境配置到基础配置中

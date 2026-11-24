@@ -112,10 +112,13 @@ fn connect_token_validator(
     auth: &AuthProviderConfig,
     core_tokens: Option<Arc<TokenService>>,
     trusted_issuers: &[TrustedIssuerConfig],
-) -> anyhow::Result<Arc<dyn TokenValidator>> {
+) -> flare_server_core::error::Result<Arc<dyn TokenValidator>> {
+    // 基建层的 build_* 返回 anyhow::Result；服务边界统一转为 server_core 错误体系。
     match core_tokens {
-        Some(token_service) => build_token_validator(auth, token_service, trusted_issuers),
-        None => build_http_hook_token_validator(auth),
+        Some(token_service) => {
+            build_token_validator(auth, token_service, trusted_issuers).map_err(Into::into)
+        }
+        None => build_http_hook_token_validator(auth).map_err(Into::into),
     }
 }
 

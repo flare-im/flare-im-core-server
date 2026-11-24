@@ -24,6 +24,7 @@ use crate::domain::vendor_policy::{BreakerConfig, VendorLimits};
 pub enum OfflineDeliveryBackend {
     Outbox,
     Getui,
+    Jpush,
     Fcm,
     Apns,
     Mobile,
@@ -35,6 +36,7 @@ impl OfflineDeliveryBackend {
         Ok(match value.trim().to_ascii_lowercase().as_str() {
             "outbox" => Self::Outbox,
             "getui" => Self::Getui,
+            "jpush" => Self::Jpush,
             "fcm" | "firebase" => Self::Fcm,
             "apns" | "apple" => Self::Apns,
             "mobile" => Self::Mobile,
@@ -52,6 +54,7 @@ impl OfflineDeliveryBackend {
         match self {
             Self::Outbox => "outbox",
             Self::Getui => "getui",
+            Self::Jpush => "jpush",
             Self::Fcm => "fcm",
             Self::Apns => "apns",
             Self::Mobile => "mobile",
@@ -418,7 +421,7 @@ impl PushWorkerConfig {
     }
 }
 
-/// `[services.push_worker.vendors.<apns|fcm|getui>]` 叠到各厂商的缺省值上。取值越界是配置错误，
+/// `[services.push_worker.vendors.<apns|fcm|getui|jpush>]` 叠到各厂商的缺省值上。取值越界是配置错误，
 /// 启动即失败，不悄悄改成别的值。
 fn resolve_vendor_limits(
     section: Option<&PushWorkerVendorsConfig>,
@@ -430,6 +433,7 @@ fn resolve_vendor_limits(
                 Vendor::Apns => vendors.apns.as_ref(),
                 Vendor::Fcm => vendors.fcm.as_ref(),
                 Vendor::Getui => vendors.getui.as_ref(),
+                Vendor::Jpush => vendors.jpush.as_ref(),
             });
             Ok((vendor, configured_vendor_limits(vendor, configured)?))
         })
@@ -505,7 +509,7 @@ fn resolve_offline_delivery_backend(
     let Some(raw) = raw else {
         if production {
             return Err(FlareError::system(
-                "FLARE_ENV=production requires PUSH_WORKER_OFFLINE_DELIVERY_BACKEND to be set: choose fcm, apns, getui or mobile, or set it to disabled to run without offline push",
+                "FLARE_ENV=production requires PUSH_WORKER_OFFLINE_DELIVERY_BACKEND to be set: choose fcm, apns, getui, jpush or mobile, or set it to disabled to run without offline push",
             ));
         }
         return Ok(OfflineDeliveryBackend::Disabled);
@@ -513,7 +517,7 @@ fn resolve_offline_delivery_backend(
     let backend = OfflineDeliveryBackend::parse(raw)?;
     if production && backend == OfflineDeliveryBackend::Outbox {
         return Err(FlareError::system(
-            "FLARE_ENV=production forbids the offline outbox backend: it stores tasks and delivers nothing; set PUSH_WORKER_OFFLINE_DELIVERY_BACKEND to fcm, apns, getui or mobile, or to disabled to run without offline push",
+            "FLARE_ENV=production forbids the offline outbox backend: it stores tasks and delivers nothing; set PUSH_WORKER_OFFLINE_DELIVERY_BACKEND to fcm, apns, getui, jpush or mobile, or to disabled to run without offline push",
         ));
     }
     Ok(backend)
@@ -541,10 +545,11 @@ fn mobile_providers(
             OfflineDeliveryBackend::Fcm
                 | OfflineDeliveryBackend::Apns
                 | OfflineDeliveryBackend::Getui
+                | OfflineDeliveryBackend::Jpush
         ) || providers.contains(&provider)
         {
             return Err(FlareError::system(
-                "OFFLINE_PROVIDERS must be unique fcm/apns/getui entries",
+                "OFFLINE_PROVIDERS must be unique fcm/apns/getui/jpush entries",
             ));
         }
         providers.push(provider);
@@ -815,6 +820,7 @@ mod tests {
             ("fcm", OfflineDeliveryBackend::Fcm),
             ("apns", OfflineDeliveryBackend::Apns),
             ("getui", OfflineDeliveryBackend::Getui),
+            ("jpush", OfflineDeliveryBackend::Jpush),
             ("mobile", OfflineDeliveryBackend::Mobile),
         ] {
             assert_eq!(

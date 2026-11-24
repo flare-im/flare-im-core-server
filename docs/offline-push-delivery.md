@@ -35,9 +35,9 @@ conflicts, so a client whose bundle, environment, locale or capabilities changed
 binding with `expectedVersion` set to the current one.
 
 `PUSH_WORKER_OFFLINE_DELIVERY_BACKEND` defaults to `disabled` (DLQ/explicit parking,
-not silent phone delivery). Choose `fcm`, `apns` or `getui` for one provider, or `mobile` plus
-an explicit unique `PUSH_WORKER_OFFLINE_PROVIDERS=fcm,apns` list. The latter runs at most
-three provider futures concurrently, so an unavailable vendor cannot starve another.
+not silent phone delivery). Choose `fcm`, `apns`, `getui` or `jpush` for one provider, or `mobile` with
+an explicit unique `PUSH_WORKER_OFFLINE_PROVIDERS=fcm,apns,jpush` list. The worker selects one
+usable binding per device in the configured order.
 `outbox` remains an explicitly selected development backend and is forbidden in production.
 With `FLARE_ENV=production` the variable must also be set: an unset backend would fall back to
 `disabled` without anyone having chosen it, so the worker refuses to start before connecting
@@ -47,7 +47,7 @@ needs the worker for online push); it starts and logs one warning that offline p
 Mobile backends require `PUSH_WORKER_MOBILE_APPLICATIONS_FILE`, a private regular single-link
 0600 JSON mount (at most 4 MiB/1,024 applications), owned operationally by push-worker.
 Schema `flare.mobile-push-applications/v2` contains an `applications` array; each entry has
-an exact `app_id` plus optional `fcm`, `apns`, and `getui` credentials. Unknown fields, duplicate
+an exact `app_id` plus optional `fcm`, `apns`, `getui` and `jpush` credentials. Unknown fields, duplicate
 applications, empty providers and providers outside the explicit backend allowlist reject startup.
 A `flare.mobile-push-applications/v1` document is refused with an error that names v2: its APNs
 record had a single `topic` and a global `sandbox` switch, which v2 replaces with the allowed
@@ -77,6 +77,13 @@ that breaks a rule is left out by the publisher). Its credential destination is 
 `https://restapi.getui.com/v2/<app_id>`; an old custom `...BASE_URL` cannot redirect secrets.
 Credentials are validated at startup and never printed. Refresh is single-flight per application/vendor executor.
 
+JPush uses the application's `app_key` and `master_secret` at
+`https://api.jpush.cn/v3/push`. Android receives a custom message and displays it
+with the native Flare push renderer. iOS receives an APNs notification through
+JPush, using the environment declared by the device binding. An ambiguous
+`1011` response leaves the registration intact. Status and retry information
+follow the same worker paths as the other providers.
+
 ```json
 {
   "schema": "flare.mobile-push-applications/v2",
@@ -87,7 +94,8 @@ Credentials are validated at startup and never printed. Refresh is single-flight
     "fcm": { "project_id": "...", "client_email": "...", "private_key": "..." },
     "getui": { "app_id": "...", "app_key": "...", "master_secret": "...",
                "android_vendor": { "huawei_category": "IM", "xiaomi_channel_id": "100001",
-                                   "xiaomi_template_id": "xm-direct" } }
+                                   "xiaomi_template_id": "xm-direct" } },
+    "jpush": { "app_key": "...", "master_secret": "..." }
   }]
 }
 ```
