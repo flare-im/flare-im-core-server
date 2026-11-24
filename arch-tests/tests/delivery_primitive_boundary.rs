@@ -113,10 +113,20 @@ fn large_conversation_unread_updates_are_threshold_guarded() {
         "conversation unread approximation threshold must stay configurable"
     );
 
-    let postgres_repository = fs::read_to_string(
-        root.join("flare-conversation/src/infrastructure/persistence/postgres_repository.rs"),
-    )
-    .expect("read conversation postgres repository");
+    let repository =
+        root.join("flare-conversation/src/infrastructure/persistence/postgres_repository");
+    let single_file = repository.with_extension("rs");
+    let postgres_repository = if single_file.is_file() {
+        fs::read_to_string(single_file).expect("read conversation postgres repository")
+    } else {
+        let mut source = fs::read_to_string(repository.join("mod.rs"))
+            .expect("read conversation postgres repository module");
+        source.push_str(
+            &fs::read_to_string(repository.join("helpers.rs"))
+                .expect("read conversation postgres repository helpers"),
+        );
+        source
+    };
     // 未读写扩散必须仍受成员数阈值守卫,且守卫为「有界探测」——不得对全群成员做无界 COUNT
     // (旧实现 member_stats COUNT 会让大群每条消息 O(成员) 扫描,实测病态计划钉核)。
     assert!(
