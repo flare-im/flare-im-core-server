@@ -11,7 +11,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 /// The protocol's v2 example poll: `example.poll.card` binds `/pollId`.
 const POLL_MANIFEST: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
-    "/../../../flare-plugin-devkit/flare-plugin-protocol/tests/fixtures/plugin-ui-v2-manifest.json"
+    "/../../../flare-im-plugin-sdk/flare-plugin-protocol/tests/fixtures/plugin-ui-v2-manifest.json"
 ));
 
 /// A projection of the poll, and the manifests its digests name.

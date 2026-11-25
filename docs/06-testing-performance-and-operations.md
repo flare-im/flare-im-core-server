@@ -22,7 +22,7 @@
 启动：
 
 ```bash
-cd flare-core-server/deploy
+cd flare-im-core-server/deploy
 docker compose -f docker-compose.yml -f docker-compose.nats.yml up -d
 ```
 
@@ -137,7 +137,7 @@ cargo test -p flare-media --lib -- --ignored
 | SDK 核心 | `cd flare-im-core-sdk && rtk cargo test`；`rtk cargo test --features storage-sqlite` | 可靠发送、SQLite 本地存储、sync lifecycle 不回退。 |
 | SDK codegen | `cd flare-im-core-sdk && rtk cargo xtask codegen-check` | sdk-spec、native ABI、生成模板和平台包保持一致。 |
 | 六端一期示例 | Android `assembleDebug`；Flutter `flutter analyze && flutter build apk --debug`；iOS `swift test` + simulator `xcodebuild`；Web typecheck/test/build/Playwright；Tauri typecheck/test/build/cargo check/tauri build；Uni typecheck/test | 一期客户端至少能构建、运行核心业务流，并暴露 SDK 事件/诊断。 |
-| 插件基线 | `(cd flare-plugin-call/server && rtk cargo test)`；`(cd flare-plugin-call/sdk && rtk cargo test)` | 现有 SFU/server plugin 与 client plugin helper 不被 core/SDK 协议变更拖坏。 |
+| 插件基线 | `(cd flare-im-plugin-call/server && rtk cargo test)`；`(cd flare-im-plugin-call/sdk && rtk cargo test)` | 现有 SFU/server plugin 与 client plugin helper 不被 core/SDK 协议变更拖坏。 |
 
 当前已验证的 live 端到端基线：
 
@@ -150,14 +150,14 @@ cargo test -p flare-media --lib -- --ignored
 
 ## 消息收发读链路烟测
 
-Edge + Core + Social 全栈起来、并用 `flare-social-server/scripts/prepare_e2e_fixture.py` 建好隔离租户后执行（参数见 `./scripts/smoke_message_flow.sh --help`）。该脚本验证的是单条消息收发读链路，不是容量压测。它覆盖：
+Edge + Core + Social 全栈起来、并用 `flare-im-server/scripts/prepare_e2e_fixture.py` 建好隔离租户后执行（参数见 `./scripts/smoke_message_flow.sh --help`）。该脚本验证的是单条消息收发读链路，不是容量压测。它覆盖：
 
 - 经 Edge 的 Social 注册、登录、加好友（满足 social 档 PreSend 的好友判定）。
 - 用 Social 登录返回的 IM 令牌经 Edge 调 Core `/api/v1/messages/send`，返回成功及正的会话序号。
 - 收发双方经 Core `/api/v1/conversations` 回读到该会话且 `max_seq` 不低于发送序号。
 - 数据库容器内只读 SELECT：`messages` 落库，`message_write_ledger.write_state` 至少达到 `archive_persisted`。
 - 任何模式都不发送未签名的身份头，不接受默认租户 `0`；`scripts/test_smoke_message_flow.py` 以桩程序自检这些约束。
-- `--mode grpc`（DEP-06）：经 `tools/flare-smoke-grpc` 直连 Message Ingest 发送，`x-flare-ctx` 由 Cell 内部签名私钥在进程内签名；回读与落库确认走只读数据库会话（Core 读接口只认未签名身份，不调用）；私钥与口令只从 600 文件读取，默认/弱口令拒绝。须在 compose 内网的一次性探针容器里运行，见 `scripts/README.md` 与 flare-deploy `tests/stack/grpc_smoke_probe.py`。
+- `--mode grpc`（DEP-06）：经 `tools/flare-smoke-grpc` 直连 Message Ingest 发送，`x-flare-ctx` 由 Cell 内部签名私钥在进程内签名；回读与落库确认走只读数据库会话（Core 读接口只认未签名身份，不调用）；私钥与口令只从 600 文件读取，默认/弱口令拒绝。须在 compose 内网的一次性探针容器里运行，见 `scripts/README.md` 与 flare-im-deploy `tests/stack/grpc_smoke_probe.py`。
 
 ## 消息发送压测入口状态
 

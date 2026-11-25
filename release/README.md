@@ -71,7 +71,7 @@ export FLARE_DOCKER_CARGO_REGISTRY_MIRROR='sparse+https://mirrors.ustc.edu.cn/cr
 ```bash
 # 1) 在开发机构建（跨架构时加 --platform linux/amd64）
 podman build --platform linux/amd64 --build-arg CARGO_BUILD_JOBS=4 \
-  -f flare-core-server/release/Dockerfile -t flare-im-core:<tag> .
+  -f flare-im-core-server/release/Dockerfile -t flare-im-core:<tag> .
 
 # 2) 导出并推送（631MB 镜像压缩后约 200MB）
 podman save flare-im-core:<tag> | gzip | \
@@ -99,7 +99,7 @@ docker build \
   --build-arg APT_MIRROR=mirrors.aliyun.com \
   --build-arg CARGO_REGISTRY_MIRROR=https://mirrors.aliyun.com/crates.io-index/ \
   --build-arg CARGO_BUILD_JOBS=2 \
-  -f flare-core-server/release/Dockerfile.partial -t flare-im-core:<新tag> .
+  -f flare-im-core-server/release/Dockerfile.partial -t flare-im-core:<新tag> .
 ```
 
 ⚠️ `BASE_IMAGE` 必须是**同一份源码基线**产出的完整镜像。基线不确定时
@@ -132,7 +132,7 @@ docker build \
   --build-arg APT_MIRROR=mirrors.aliyun.com \
   --build-arg CARGO_REGISTRY_MIRROR=https://mirrors.aliyun.com/crates.io-index/ \
   --build-arg CARGO_BUILD_JOBS=2 \
-  -f flare-core-server/release/Dockerfile -t flare-im-core:dev .
+  -f flare-im-core-server/release/Dockerfile -t flare-im-core:dev .
 ```
 
 ⚠️ **改了源码却发现镜像里还是旧二进制**：builder 阶段可能整段命中缓存。
@@ -415,7 +415,7 @@ conversation、online、storage reader、push proxy 与可选的 capability 这 
 先尝试服务发现，也就没有这些 WARN；下游不在同一容器时，改成对应的私网地址。
 `*_STATIC_FALLBACK` 只在 `discovery://` 解析失败时才用。supervisor 清单按前缀
 `FLARE_API_GATEWAY_` / `FLARE_ADMIN_GATEWAY_` 把这些变量传给对应子进程。
-flare-deploy 单机模板在 Core 的 Compose `environment` 里把 Admin Gateway 的 6 个
+flare-im-deploy 单机模板在 Core 的 Compose `environment` 里把 Admin Gateway 的 6 个
 `FLARE_ADMIN_GATEWAY_GRPC_*_SERVICE_URL`（media、conversation、online、storage reader、
 capability、push proxy）直接设成上表地址，preflight 核对它们。
 
@@ -423,7 +423,7 @@ capability、push proxy）直接设成上表地址，preflight 核对它们。
 `discovery://flare-social-hook` **不能**用于该模式：Message Ingest 会在
 连接 Redis/MQ 前拒绝启动。部署方必须提供已审核、指向 Social 私网
 `flare-social-hook` 的独立 Hook 配置文件，并把路径传给
-`MESSAGE_INGEST_HOOKS_CONFIG`。`flare-deploy/templates/compose/single/hooks.social.static.toml`
+`MESSAGE_INGEST_HOOKS_CONFIG`。`flare-im-deploy/templates/compose/single/hooks.social.static.toml`
 是保持原有 fail-closed 策略、仅将传输端点改为私网 `social:50210` 的候选；
 需只读挂载。不要通过禁用 Hook 来让健康检查变绿。
 这只是 fail-fast/端口候选，尚无跨 Core/Social 的 Hook、Presence/Kick、
@@ -440,6 +440,6 @@ capability、push proxy）直接设成上表地址，preflight 核对它们。
 部署在换用 `ca9c41a` 之后的完整镜像或其增量镜像之前，必须先在 compose 里给
 每个服务关掉健康检查。
 一次性迁移镜像 `Dockerfile.migrate` 显式声明 `HEALTHCHECK NONE`：
-`flare-deploy/release/build_local.py` 对缺检查的常驻镜像和没写 NONE 的一次性
+`flare-im-deploy/release/build_local.py` 对缺检查的常驻镜像和没写 NONE 的一次性
 镜像都直接拒绝。
 `python3 release/tests/test_runtime_image.py` 静态校验上述几处。

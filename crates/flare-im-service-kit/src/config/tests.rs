@@ -379,7 +379,7 @@ fn config_candidates_unchanged_without_env() {
         vec![
             PathBuf::from("config"),
             PathBuf::from("config.toml"),
-            PathBuf::from("flare-core-server/config"),
+            PathBuf::from("flare-im-core-server/config"),
         ]
     );
 }

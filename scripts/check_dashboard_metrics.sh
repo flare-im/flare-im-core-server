@@ -26,7 +26,7 @@
 # 源码注册 ≠ 运行时有样本：这里只保证"名字与标签真实存在"。有没有写入路径看 check_dead_metrics.sh，
 # 真实流量下有没有样本看 release/scripts/verify_metrics_have_data.sh。
 #
-# 依赖同级仓库 ../flare-server-runtime 与 ../flare-transport（可用 FLARE_SERVER_CORE_DIR / FLARE_CORE_DIR 覆盖）；
+# 依赖同级仓库 ../flare-im-server-runtime 与 ../flare-im-transport（可用 FLARE_SERVER_CORE_DIR / FLARE_CORE_DIR 覆盖）；
 # 缺仓时报错退出而不是跳过——跳过等于没接。
 set -uo pipefail
 
@@ -46,9 +46,9 @@ dash_dir = pathlib.Path(env.get("FLARE_DASHBOARD_DIR", root / "deploy/grafana/pr
 alert_file = pathlib.Path(env.get("FLARE_ALERT_RULES", root / "deploy/alert_rules.yml"))
 prom_file = pathlib.Path(env.get("FLARE_PROMETHEUS_CONFIG", root / "deploy/prometheus.yml"))
 source_roots = [
-    ("flare-core-server", root),
-    ("flare-server-runtime", pathlib.Path(env.get("FLARE_SERVER_CORE_DIR", root.parent / "flare-server-runtime"))),
-    ("flare-transport", pathlib.Path(env.get("FLARE_CORE_DIR", root.parent / "flare-transport"))),
+    ("flare-im-core-server", root),
+    ("flare-im-server-runtime", pathlib.Path(env.get("FLARE_SERVER_CORE_DIR", root.parent / "flare-im-server-runtime"))),
+    ("flare-im-transport", pathlib.Path(env.get("FLARE_CORE_DIR", root.parent / "flare-im-transport"))),
 ]
 
 

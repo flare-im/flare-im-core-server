@@ -12,7 +12,7 @@
 # 不存在未签名路径，也不发旧的身份元数据。Core 的 conversation/storage-reader
 # 读接口只认未签名的身份元数据，所以回读（存储行、会话行）与归档落库确认改走只读
 # 数据库会话，口令只从 600 文件读取，默认/弱口令一律拒绝。gRPC 端口只在 compose
-# 内网可达，该模式按设计在一次性网内探针容器里运行（见 flare-deploy
+# 内网可达，该模式按设计在一次性网内探针容器里运行（见 flare-im-deploy
 # tests/stack/grpc_smoke_probe.py）；本脚本在 grpc 模式下只需要 bash、find 与该二进制。
 #
 # 旧的直连 gRPC 模式（向 message-ingest / storage-reader 直发未签名的身份头、默认
@@ -44,7 +44,7 @@ Required:
   SMOKE_BASE_URL           Public origin, e.g. https://im.example.test:18443
                            (https only; plain http is accepted for loopback hosts).
   SMOKE_TENANT_ID          Isolated fixture tenant e2e-<20 lowercase hex>, e.g. one
-                           created by flare-social-server/scripts/prepare_e2e_fixture.py.
+                           created by flare-im-server/scripts/prepare_e2e_fixture.py.
                            The default tenant "0" is never accepted.
   SMOKE_PG_CONTAINER       PostgreSQL container used for the read-only check,
                            unless SMOKE_SKIP_DB_CHECK=1.
@@ -83,7 +83,7 @@ conversation seq at least the sent seq, read the way Core's conversation list
 reads it (conversation and member not deleted, seq =
 GREATEST(conversations.last_message_seq, newest message the member may see)).
 The gRPC ports are only reachable inside the compose network; run this mode in
-a one-off in-network probe container (flare-deploy tests/stack/grpc_smoke_probe.py).
+a one-off in-network probe container (flare-im-deploy tests/stack/grpc_smoke_probe.py).
 
 Required (gRPC mode):
   SMOKE_TENANT_ID              Isolated fixture tenant e2e-<20 lowercase hex>.

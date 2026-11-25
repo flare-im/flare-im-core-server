@@ -20,7 +20,7 @@ feature snapshot, which drives the composer "+" panel layout.
 ## Publishing
 
 Business services publish through `flare.capability.v1.TenantNoticeService.Publish`
-(`flare-protocol-grpc/proto/capability_service.proto`) with `{topic, version}`; the tenant is the
+(`flare-im-protocol-grpc/proto/capability_service.proto`) with `{topic, version}`; the tenant is the
 signed service context's (`x-flare-ctx`). The answer is `{accepted, current_version}`.
 
 - Only a registered publisher may publish, and only under its namespaces:
@@ -41,7 +41,7 @@ signed service context's (`x-flare-ctx`). The answer is `{accepted, current_vers
 ## Delivery
 
 The signaling gateway subscribes to the notice channel and sends each online connection of the
-tenant `DataPacket.tenant_notice` (`flare-protocol/proto/data.proto`):
+tenant `DataPacket.tenant_notice` (`flare-im-protocol/proto/data.proto`):
 
 ```text
 TenantNotice { topic, version, spread_ms, tenant_wide }

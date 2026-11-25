@@ -160,7 +160,7 @@ Notifications of one conversation share a `collapse_key` (`apns-collapse-id`, Ge
 ## Notification text
 
 The server renders a title and a body for every notification it shows. They are a fallback: client code that runs on arrival (Android data messages, an iOS notification service extension) may render again with local conversation names and the device language.
-The strings and the language rule come from the `text` module of `flare-notify-rules` (`flare-notify-rules`), which the client engine uses for its own notifications too.
+The strings and the language rule come from the `text` module of `flare-im-notify-rules` (`flare-im-notify-rules`), which the client engine uses for its own notifications too.
 
 - **Language**: the target binding's `locale`. A tag whose primary subtag is `zh` (`zh`, `zh-CN`, `zh-Hant-TW`, `zh_CN`) renders Chinese, any other tag English, a binding without one Chinese. Text the sender wrote is never translated; only the templates change.
 - **Sanitizing**: the sender's `offline_push_info` and any text taken from the message (text, rich-text plain text, system text, notification title and body) lose control characters, bidirectional override and isolate characters, and invisible format characters (zero-width space, BOM, Hangul fillers); whitespace runs collapse to one space. Titles are cut to 64 and bodies to 180 grapheme clusters, and to 256 and 1024 UTF-8 bytes, with a trailing `…` counted inside the limit; a single cluster longer than 64 bytes keeps only its first character. Text that is empty after cleaning counts as absent. The limits hold for the final text, count prefix and mention marker included.

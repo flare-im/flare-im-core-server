@@ -1,4 +1,4 @@
-//! 用规则 crate 的向量（`flare-notify-rules/tests/vectors/gate.json`）回放服务端的接线：
+//! 用规则 crate 的向量（`flare-im-notify-rules/tests/vectors/gate.json`）回放服务端的接线：
 //! 状态经存储编码、比较后写回，尾部刷新经到期队列领取，「回到前台」经设备信号惰性生效。
 //! 回放规则与 crate 的 README「Vectors」一节相同，得出的日志或汇总必须与文件里的期望一致。
 
@@ -18,7 +18,7 @@ const TENANT: &str = "t-vectors";
 
 fn load_gate_vectors() -> Value {
     let path = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../../flare-notify-rules/tests/vectors/gate.json");
+        .join("../../../flare-im-notify-rules/tests/vectors/gate.json");
     let text = std::fs::read_to_string(&path)
         .unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
     serde_json::from_str(&text).unwrap_or_else(|error| panic!("parse {}: {error}", path.display()))

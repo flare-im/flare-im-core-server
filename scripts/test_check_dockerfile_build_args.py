@@ -50,7 +50,7 @@ class DockerfileBuildArgsGateTest(unittest.TestCase):
         )
 
     def test_frozen_console_repo_is_not_scanned(self):
-        self.write("flare-core-server/deploy/Dockerfile", GOOD)
+        self.write("flare-im-core-server/deploy/Dockerfile", GOOD)
         self.write("flare-im-console/deploy/Dockerfile.api", BAD)
         result = self.run_gate()
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -59,24 +59,24 @@ class DockerfileBuildArgsGateTest(unittest.TestCase):
 
     def test_other_repo_missing_args_still_fails(self):
         self.write("flare-im-console/deploy/Dockerfile.api", BAD)
-        self.write("flare-social-server/deploy/Dockerfile", BAD)
+        self.write("flare-im-server/deploy/Dockerfile", BAD)
         result = self.run_gate()
         self.assertEqual(result.returncode, 1)
-        self.assertIn("flare-social-server/deploy/Dockerfile", result.stderr)
+        self.assertIn("flare-im-server/deploy/Dockerfile", result.stderr)
         self.assertNotIn("flare-im-console", result.stderr)
 
     def test_exclusion_is_exact_top_level_name(self):
         # 同名前缀的新仓、更深层的同名目录都不属于冻结仓，必须照常拦截。
         self.write("flare-im-console-next/Dockerfile", BAD)
-        self.write("flare-social-server/vendor/flare-im-console/Dockerfile", BAD)
+        self.write("flare-im-server/vendor/flare-im-console/Dockerfile", BAD)
         result = self.run_gate()
         self.assertEqual(result.returncode, 1)
         self.assertIn("flare-im-console-next/Dockerfile", result.stderr)
-        self.assertIn("flare-social-server/vendor/flare-im-console/Dockerfile", result.stderr)
+        self.assertIn("flare-im-server/vendor/flare-im-console/Dockerfile", result.stderr)
 
     def test_each_missing_item_is_named(self):
         self.write(
-            "flare-deploy/Dockerfile.bundle",
+            "flare-im-deploy/Dockerfile.bundle",
             GOOD.replace("ARG CARGO_BUILD_JOBS\n", "").replace(
                 "ENV RUST_MIN_STACK=16777216\n", ""
             ),
@@ -86,9 +86,9 @@ class DockerfileBuildArgsGateTest(unittest.TestCase):
         self.assertIn("缺少 CARGO_BUILD_JOBS, RUST_MIN_STACK", result.stderr)
 
     def test_runtime_only_and_build_dirs_are_skipped(self):
-        self.write("flare-social-server/deploy/Dockerfile.runtime", RUNTIME_ONLY)
-        self.write("flare-core-server/target/debug/Dockerfile", BAD)
-        self.write("flare-core-server/deploy/Dockerfile", GOOD)
+        self.write("flare-im-server/deploy/Dockerfile.runtime", RUNTIME_ONLY)
+        self.write("flare-im-core-server/target/debug/Dockerfile", BAD)
+        self.write("flare-im-core-server/deploy/Dockerfile", GOOD)
         result = self.run_gate()
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("1 个源码构建 Dockerfile", result.stdout)

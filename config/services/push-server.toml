@@ -32,7 +32,7 @@ default_tenant_id = "0"
 hook_config = "config/hooks.core.toml"
 # hook_config_dir = "config/hooks.d"
 
-# 防打扰闸门：每台设备的离线推送按提示规则（flare-notify-rules）决定响铃、静默更新、合并、推迟还是只更新角标。
+# 防打扰闸门：每台设备的离线推送按提示规则（flare-im-notify-rules）决定响铃、静默更新、合并、推迟还是只更新角标。
 # 状态在推送 Redis（PUSH_SERVER_GATE_REDIS_URL，默认 [redis.push] profile，与设备绑定表同一实例），
 # 设备「回到前台」与角标基线读 Online 写在会话 Redis（上面的 redis profile）里的标记。
 #   enabled               关掉后每条消息直接给每台设备发一条任务，不合并、不推迟、不带角标

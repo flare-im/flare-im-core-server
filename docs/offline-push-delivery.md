@@ -121,7 +121,7 @@ deployments must supply their own policy profile explicitly. End-to-end product 
 must verify the policy is installed and actually denies unauthorized sends.
 
 The conditional lifecycle is now implemented in Rust and generated bindings; see
-`../../flare-core-sdk-engine/docs/native-push-lifecycle.md`. Token/permission callbacks and
+`../../flare-im-core-engine/docs/native-push-lifecycle.md`. Token/permission callbacks and
 resume/network recovery have a thin Flutter bridge. No Firebase/APNs plugin or device is
 automatically initialized, and OS channels/background display/badges still need host/device
 integration. Platform's encrypted self-service source and leased publisher are implemented
@@ -269,7 +269,7 @@ end of their sections.
 ## Anti-disturbance gate
 
 After the filtering above, every candidate device goes through the notification rules of
-`flare-notify-rules`, the single implementation the client engine also runs. Push
+`flare-im-notify-rules`, the single implementation the client engine also runs. Push
 Server does not re-implement them: it reads the persisted state, runs the crate in process and
 writes the result back with a compare-and-set. Catch-up alerts from a handoff and the batches of
 a group conversation's waves (next section) go through the same decision and gate.

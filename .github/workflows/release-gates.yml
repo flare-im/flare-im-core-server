@@ -47,7 +47,7 @@ jobs:
       # 这一步是补上的（2026-08-20）。这两个 workflow **从建好那天起就没跑过**：
       # 触发条件只有 pull_request，而本项目是直接推 main/dev、不走 PR。
       # 手动 dispatch 一次才发现它们连 `cargo check` 都到不了——
-      # 全部失败在 `failed to read ../flare-transport/Cargo.toml`。
+      # 全部失败在 `failed to read ../flare-im-transport/Cargo.toml`。
       - name: 拉取同级仓库
         working-directory: .
         run: |
@@ -56,13 +56,13 @@ jobs:
             git clone --depth 1 -b "$BR" "$1" "$2" 2>/dev/null \
               || git clone --depth 1 "$1" "$2"
           }
-          clone https://github.com/flare-im/flare-transport.git "../flare-transport"
-          clone https://github.com/flare-im/flare-protocol.git "../flare-protocol"
-          clone https://github.com/flare-im/flare-plugin-devkit.git "../flare-plugin-devkit"
-          clone https://github.com/flare-im/flare-notify-rules.git "../flare-notify-rules"
-          clone https://github.com/flare-im/flare-protocol-grpc.git "../flare-protocol-grpc"
-          clone https://github.com/flare-im/flare-server-runtime.git "../flare-server-runtime"
-          clone https://github.com/flare-im/flare-core-sdk-engine.git "../flare-core-sdk-engine"
+          clone https://github.com/flare-im/flare-im-transport.git "../flare-im-transport"
+          clone https://github.com/flare-im/flare-im-protocol.git "../flare-im-protocol"
+          clone https://github.com/flare-im/flare-im-plugin-sdk.git "../flare-im-plugin-sdk"
+          clone https://github.com/flare-im/flare-im-notify-rules.git "../flare-im-notify-rules"
+          clone https://github.com/flare-im/flare-im-protocol-grpc.git "../flare-im-protocol-grpc"
+          clone https://github.com/flare-im/flare-im-server-runtime.git "../flare-im-server-runtime"
+          clone https://github.com/flare-im/flare-im-core-engine.git "../flare-im-core-engine"
 
       # 与 ci.yml 的「安装构建依赖」保持同一份清单：rdkafka-sys 会现编 librdkafka，
       # 缺 curl / ssl / zlib / sasl 的开发头就挂在 `#include <curl/curl.h>`。
@@ -103,13 +103,13 @@ jobs:
             git clone --depth 1 -b "$BR" "$1" "$2" 2>/dev/null \
               || git clone --depth 1 "$1" "$2"
           }
-          clone https://github.com/flare-im/flare-transport.git "../flare-transport"
-          clone https://github.com/flare-im/flare-protocol.git "../flare-protocol"
-          clone https://github.com/flare-im/flare-plugin-devkit.git "../flare-plugin-devkit"
-          clone https://github.com/flare-im/flare-notify-rules.git "../flare-notify-rules"
-          clone https://github.com/flare-im/flare-protocol-grpc.git "../flare-protocol-grpc"
-          clone https://github.com/flare-im/flare-server-runtime.git "../flare-server-runtime"
-          clone https://github.com/flare-im/flare-core-sdk-engine.git "../flare-core-sdk-engine"
+          clone https://github.com/flare-im/flare-im-transport.git "../flare-im-transport"
+          clone https://github.com/flare-im/flare-im-protocol.git "../flare-im-protocol"
+          clone https://github.com/flare-im/flare-im-plugin-sdk.git "../flare-im-plugin-sdk"
+          clone https://github.com/flare-im/flare-im-notify-rules.git "../flare-im-notify-rules"
+          clone https://github.com/flare-im/flare-im-protocol-grpc.git "../flare-im-protocol-grpc"
+          clone https://github.com/flare-im/flare-im-server-runtime.git "../flare-im-server-runtime"
+          clone https://github.com/flare-im/flare-im-core-engine.git "../flare-im-core-engine"
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:

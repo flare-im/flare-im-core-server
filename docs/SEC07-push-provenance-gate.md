@@ -7,7 +7,7 @@
 单机九容器拓扑中，Core 的所有 Push 生产者与消费者（Ingest、Orchestrator、Push Proxy/Server/Worker）同在一个 Core 容器内，Social 不使用 broker。此时伪造 broker 记录需要先取得 Core 的 broker 凭据——而这等同攻破 Core 本身，届时签名私钥同样失守。因此 P0 单机采用 `broker-isolated` 模式，由部署层保证、由代码核验可观察的一半：
 
 - `PUSH_{PROXY,SERVER,WORKER}_EVENT_PROVENANCE_MODE=broker-isolated`：仅当配置的 broker 为 NATS 且 URL 携带凭据时放行（`flare_im_service_kit::push_delivery`）；否则 Proxy 拒绝入队、Server/Worker 拒绝启动。默认仍为 `paused`；`signed-v1` 继续保留、拒绝。
-- 部署层（`flare-deploy` 单机模板 + `flarectl`）负责另一半：NATS 开启认证、凭据只注入 Core；broker 网络只挂 Core 与 NATS。监管清单的 `PUSH_SERVER_DELIVERY_READY`/`PUSH_WORKER_DELIVERY_READY` 仅用于选择进程，不能绕过上述门禁。
+- 部署层（`flare-im-deploy` 单机模板 + `flarectl`）负责另一半：NATS 开启认证、凭据只注入 Core；broker 网络只挂 Core 与 NATS。监管清单的 `PUSH_SERVER_DELIVERY_READY`/`PUSH_WORKER_DELIVERY_READY` 仅用于选择进程，不能绕过上述门禁。
 - 消费侧身份：Push Server/Worker 的下游（Online 查询、Gateway 投递）只接受已验签的 `flare-push-server`/`flare-push-worker` 服务上下文。`broker-isolated` 下，`AttestedRecordHandler` 在处理器看到记录前，按记录头里的 canonical tenant 用 Cell 内部上下文私钥签发该服务身份、再经与入站 RPC 相同的验签路径得到 `VerifiedContext`（`BrokerRecordIdentity`）；租户缺失或不规范的记录直接进 DLQ。这是对"broker 只收 Core 写入"这一前提的显式落地，不是来源证明，`signed-v1` 仍需逐条签名。监管清单只给 Push Server/Worker 私钥，Push Proxy 仍只验签。
 - 多主机/多 Cell 拓扑（Core 拆分到多个容器或主机、第三方生产者接入 broker）不满足这一前提，必须实现下文的 `signed-v1` 方案。下文各节的信任断点分析与验收清单对 `signed-v1` 依然有效。
 
@@ -27,9 +27,9 @@
 
 ### Broker 元数据不是身份
 
-`flare-server-runtime/flare-core-messaging/src/mq/kafka/consumer.rs::decode_message` 的 topic/key 来自 Kafka record（key 缺失时仍会回退 header），而 NATS `mq/nats/consumer.rs::decode_message` 的 subject 来自 broker、`MessageContext.key` **仅由生产者可写的 `x-message-key` header 重建**。因此 NATS 上不能把 `MessageContext.key` 描述成 broker 强制的分区键；签名可以覆盖该 header 的值并验证一致性，但真正的发布者限制仍必须依赖 NATS 账户/subject ACL 和生产者私钥隔离。Kafka v1 记录必须拒绝真实 key 缺失，不能借 header fallback 冒充 broker key；需要在 MQ 适配层暴露可区分的 broker key 或专用已核验投递元数据。
+`flare-im-server-runtime/flare-core-messaging/src/mq/kafka/consumer.rs::decode_message` 的 topic/key 来自 Kafka record（key 缺失时仍会回退 header），而 NATS `mq/nats/consumer.rs::decode_message` 的 subject 来自 broker、`MessageContext.key` **仅由生产者可写的 `x-message-key` header 重建**。因此 NATS 上不能把 `MessageContext.key` 描述成 broker 强制的分区键；签名可以覆盖该 header 的值并验证一致性，但真正的发布者限制仍必须依赖 NATS 账户/subject ACL 和生产者私钥隔离。Kafka v1 记录必须拒绝真实 key 缺失，不能借 header fallback 冒充 broker key；需要在 MQ 适配层暴露可区分的 broker key 或专用已核验投递元数据。
 
-`flare-server-runtime/flare-core-messaging/src/mq/nats/config.rs::default_stream_specs` 的 Push subject 是 `flare.im.push.*`，**不匹配** `flare.im.push.messages.v1` 等五段 subject；`flare-core-server/deploy/kafka-topics.sh` 也只创建旧 topic。`.v1` 命名、stream/topic、retention、容量和 ACL 尚未落地。现有 `flare.im.push.*` 与 `.v1` 不能混用同一 consumer，也不得给裸 backlog 事后补签。
+`flare-im-server-runtime/flare-core-messaging/src/mq/nats/config.rs::default_stream_specs` 的 Push subject 是 `flare.im.push.*`，**不匹配** `flare.im.push.messages.v1` 等五段 subject；`flare-im-core-server/deploy/kafka-topics.sh` 也只创建旧 topic。`.v1` 命名、stream/topic、retention、容量和 ACL 尚未落地。现有 `flare.im.push.*` 与 `.v1` 不能混用同一 consumer，也不得给裸 backlog 事后补签。
 
 ## 2. 建议实施顺序（每一步均保持 Push 暂停）
 

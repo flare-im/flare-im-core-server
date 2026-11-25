@@ -78,7 +78,7 @@ class RedisComposeUrlTest(unittest.TestCase):
 
 class ComposeEntryTest(unittest.TestCase):
     def config_environment(self, directory):
-        configs = [COMPOSE.parent / "docker-compose.stack.yml", COMPOSE.parents[2] / "flare-social-server/deploy/docker-compose.social.yml"]
+        configs = [COMPOSE.parent / "docker-compose.stack.yml", COMPOSE.parents[2] / "flare-im-server/deploy/docker-compose.social.yml"]
         required = set(re.findall(r"\$\{([A-Z0-9_]+):\?", "\n".join(path.read_text() for path in configs if path.is_file())))
         base = Path(directory) / "base.env"
         base.write_text("".join(f"{key}=test-value\n" for key in sorted(required - {"REDIS_URL"})) + "REDIS_PASSWORD=base-password\n")

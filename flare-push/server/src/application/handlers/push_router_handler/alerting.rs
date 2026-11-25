@@ -8,7 +8,7 @@
 //! - 到期：吞并的消息在间隔结束补发一次尾部刷新；推迟的提示到期后进闸门；群会话的波次到期后
 //!   枚举一次接收者（见 `waves`）。
 //!
-//! 规则只在 `flare-notify-rules` 里，状态读写在 [`NotifyGate`]；这里不做任何「该不该响」的判断。
+//! 规则只在 `flare-im-notify-rules` 里，状态读写在 [`NotifyGate`]；这里不做任何「该不该响」的判断。
 
 use std::collections::BTreeSet;
 

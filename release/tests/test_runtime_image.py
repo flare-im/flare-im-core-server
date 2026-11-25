@@ -99,7 +99,7 @@ class RuntimeImageHealthcheckTests(unittest.TestCase):
 
 class DerivedImageHealthcheckTests(unittest.TestCase):
     def test_one_shot_migrator_disables_healthcheck_explicitly(self):
-        # flare-deploy/release/build_local.py rejects a one-shot image whose
+        # flare-im-deploy/release/build_local.py rejects a one-shot image whose
         # Config.Healthcheck is not an explicit NONE.
         steps = final_stage(MIGRATOR.read_text())
         found = [step for step in steps if step.startswith("HEALTHCHECK ")]

@@ -70,18 +70,18 @@ WORKDIR /build
 # Sibling crates are path dependencies of this workspace, so the build context is the
 # parent directory. Copy them first — they change far less often than flare-im-core, so
 # this layer stays cached across most rebuilds.
-COPY flare-notify-rules ./flare-notify-rules
-COPY flare-protocol-grpc ./flare-protocol-grpc
-COPY flare-transport ./flare-transport
-COPY flare-server-runtime ./flare-server-runtime
+COPY flare-im-notify-rules ./flare-im-notify-rules
+COPY flare-im-protocol-grpc ./flare-im-protocol-grpc
+COPY flare-im-transport ./flare-im-transport
+COPY flare-im-server-runtime ./flare-im-server-runtime
 # The released flare-capability links the plugin service router of flare-plugin-host
 # (flare-capability/with-plugin-host); only that crate of flare-plugin is needed.
-COPY flare-plugin-devkit/flare-plugin-host ./flare-plugin-devkit/flare-plugin-host
-COPY flare-plugin-devkit/flare-plugin-protocol ./flare-plugin-devkit/flare-plugin-protocol
+COPY flare-im-plugin-runtime/flare-plugin-host ./flare-im-plugin-runtime/flare-plugin-host
+COPY flare-im-plugin-sdk/flare-plugin-protocol ./flare-im-plugin-sdk/flare-plugin-protocol
 
-COPY flare-core-server ./flare-core-server
+COPY flare-im-core-server ./flare-im-core-server
 
-WORKDIR /build/flare-core-server
+WORKDIR /build/flare-im-core-server
 
 # 编译并发度。默认跟随 CPU 核数；但 rustc 在 release 下每个并行任务都很吃内存，
 # 小内存机器上并行 4 个足以 OOM——而这台机器往往同时跑着整套服务，
@@ -96,7 +96,7 @@ ARG CARGO_BUILD_JOBS=default
 ENV CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS}
 
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
-    --mount=type=cache,target=/build/flare-core-server/target \
+    --mount=type=cache,target=/build/flare-im-core-server/target \
     cargo build --locked --release \
         -p flare-api-gateway \
         -p flare-admin-gateway \
@@ -155,8 +155,8 @@ RUN if [ "$APT_MIRROR" != "deb.debian.org" ]; then \
     && install -d -o 10001 -g 10001 -m 0700 /home/flare/data
 
 COPY --from=builder /out/ /usr/local/bin/
-COPY flare-core-server/config /etc/flare/config
-COPY flare-core-server/release/supervise-core.toml /etc/flare/supervise-core.toml
+COPY flare-im-core-server/config /etc/flare/config
+COPY flare-im-core-server/release/supervise-core.toml /etc/flare/supervise-core.toml
 
 # The reusable binary is flare-supervise; Core's documented CLI is
 # `flare-core supervise --services=all|a,b`. Existing Compose services keep

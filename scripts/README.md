@@ -44,7 +44,7 @@ docker compose up -d
 # 先启动业务系统 gRPC Hook 服务，并确保它可通过服务发现或固定 endpoint 访问
 
 # 再启动 IM Core（业务系统 Hook 模式）
-cd ../flare-core-server && ./scripts/start_server.sh
+cd ../flare-im-core-server && ./scripts/start_server.sh
 ```
 
 Hook 配置文件：
@@ -82,7 +82,7 @@ SMOKE_PG_CONTAINER=<postgres 容器名> \
 - 回读：收发双方 `GET {Edge}/api/api/v1/conversations` 中该会话的 `max_seq` 不低于发送序号
 - 持久化：`messages` 有该条记录，`message_write_ledger.write_state` 至少达到 `archive_persisted`
 
-约束：租户只接受 `e2e-<20 位小写十六进制>`（可用 `flare-social-server/scripts/prepare_e2e_fixture.py` 创建），不接受默认租户 `0`；口令只从 `SMOKE_PASSWORD_FILE`（600 权限）读取或在私有临时目录生成，令牌与口令不进命令行参数、不回显。全部参数见 `./scripts/smoke_message_flow.sh --help`，脚本自检为 `python3 scripts/test_smoke_message_flow.py`。
+约束：租户只接受 `e2e-<20 位小写十六进制>`（可用 `flare-im-server/scripts/prepare_e2e_fixture.py` 创建），不接受默认租户 `0`；口令只从 `SMOKE_PASSWORD_FILE`（600 权限）读取或在私有临时目录生成，令牌与口令不进命令行参数、不回显。全部参数见 `./scripts/smoke_message_flow.sh --help`，脚本自检为 `python3 scripts/test_smoke_message_flow.py`。
 
 带签名的 gRPC 模式（`--mode grpc`，DEP-06）直连单容器 Core 的 Message Ingest，由 `tools/flare-smoke-grpc` 执行：
 
@@ -99,7 +99,7 @@ SMOKE_GRPC_DB_PASSWORD_FILE=<600 文件：该角色口令> \
 - 发送：`MessageSendService/SendMessage` 只带 `x-flare-ctx`，用 Cell 内部签名私钥在 flare-smoke-grpc 进程内签名（actor_type=user，60 s 有效）；不存在未签名路径，也不发旧的身份元数据。
 - 回读与落库确认：Core 的 conversation/storage-reader 读接口只认未签名的身份元数据，所以不调用它们，改走只读数据库会话（启动参数 `default_transaction_read_only=on`，每轮 `BEGIN TRANSACTION READ ONLY` 后 ROLLBACK）：`messages` 恰好 1 行、`message_write_ledger` 至少 `archive_persisted`、收发双方的会话 seq 不低于发送序号（与 Core 会话列表同口径：会话与成员未删除，seq 取 `conversations.last_message_seq` 与该成员可见范围内消息最大 seq 的较大者；前者非 0 租户恒为 NULL，不能单独作判据）。数据库连不上时不发送。
 - 秘密：私钥与口令只从 600 普通文件读取，不进 argv、环境变量与输出；默认/弱口令（如 `flare123`、短于 16 字符、含角色名）一律拒绝；环境里出现 `PGPASSWORD`、`DATABASE_URL` 等也拒绝。
-- 运行位置：gRPC 端口只在 compose 内网可达，在一次性网内探针容器里运行，探针的创建方式与 linux/aarch64 二进制的离线构建见 flare-deploy `tests/stack/grpc_smoke_probe.py`。`--dry-run` 只校验设置、加载私钥试签、检查口令策略并打印计划，不建任何连接。
+- 运行位置：gRPC 端口只在 compose 内网可达，在一次性网内探针容器里运行，探针的创建方式与 linux/aarch64 二进制的离线构建见 flare-im-deploy `tests/stack/grpc_smoke_probe.py`。`--dry-run` 只校验设置、加载私钥试签、检查口令策略并打印计划，不建任何连接。
 - 自检：`cargo test -p flare-smoke-grpc`（含与 Ingest 同样验签的本地假服务；去掉签名时这些用例失败），带 Core 迁移的一次性库上另有 `--ignored` 的只读回读用例。
 
 ### 能力插件生命周期冒烟
@@ -547,7 +547,7 @@ tail -f /tmp/flare-access-gateway.log | grep -E "(connect|disconnect|login)"
 cd deploy && docker compose up -d
 
 # 2. 启动所有核心服务（包括多网关实例）
-cd ../flare-core-server
+cd ../flare-im-core-server
 ./scripts/start_multi_gateway.sh
 
 # 3. 等待服务启动（约15秒）
@@ -567,7 +567,7 @@ cargo run --example chatroom_client -- user2
 cd deploy && docker compose up -d
 
 # 2. 启动所有核心服务（包括多网关实例）
-cd ../flare-core-server
+cd ../flare-im-core-server
 ./scripts/start_multi_gateway.sh
 
 # 3. 等待服务启动（约15秒）

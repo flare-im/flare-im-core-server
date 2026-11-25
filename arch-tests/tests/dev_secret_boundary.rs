@@ -6,14 +6,14 @@ fn development_tls_material_is_not_checked_in() {
     let forbidden = [
         "certs/server.key",
         "certs/server.crt",
-        "flare-transport/certs/server.key",
-        "flare-transport/certs/server.crt",
-        "flare-transport/examples/certs/server.key",
-        "flare-transport/examples/certs/server.crt",
-        "flare-core-sdk-engine/certs/server.key",
-        "flare-core-sdk-engine/certs/server.crt",
-        "flare-core-sdk-engine/examples/certs/server.key",
-        "flare-core-sdk-engine/examples/certs/server.crt",
+        "flare-im-transport/certs/server.key",
+        "flare-im-transport/certs/server.crt",
+        "flare-im-transport/examples/certs/server.key",
+        "flare-im-transport/examples/certs/server.crt",
+        "flare-im-core-engine/certs/server.key",
+        "flare-im-core-engine/certs/server.crt",
+        "flare-im-core-engine/examples/certs/server.key",
+        "flare-im-core-engine/examples/certs/server.crt",
     ];
 
     // 判据是「checked in」：本地生成的开发证书留在磁盘上是正常工作流
@@ -33,7 +33,7 @@ fn development_tls_material_is_not_checked_in() {
 }
 
 /// 该路径是否被 git 追踪（在其所属仓库内执行 `git ls-files --`，非零退出按未追踪处理）。
-/// 兄弟仓（flare-transport/...）的文件要在它自己的仓库里查：根仓的索引看不到它们。
+/// 兄弟仓（flare-im-transport/...）的文件要在它自己的仓库里查：根仓的索引看不到它们。
 fn git_tracks(root: &std::path::Path, rel: &str) -> bool {
     let (repo, in_repo_path) = match rel.split_once('/') {
         Some((first, rest)) if root.join(first).join(".git").exists() => {

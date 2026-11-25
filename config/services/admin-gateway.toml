@@ -41,7 +41,7 @@ port = 50051
 #   MEDIA http://127.0.0.1:60081            CONVERSATION http://127.0.0.1:50090
 #   ONLINE http://127.0.0.1:50061           STORAGE_READER http://127.0.0.1:60083
 #   CAPABILITY http://127.0.0.1:50110       PUSH_PROXY http://127.0.0.1:50091
-# flare-deploy 单机模板在 Compose 里把这 6 个 *_SERVICE_URL 直接设成上述地址，不走回退。
+# flare-im-deploy 单机模板在 Compose 里把这 6 个 *_SERVICE_URL 直接设成上述地址，不走回退。
 # 把对应的 *_SERVICE_URL 设成 http:// 地址即直接连接，不再先尝试发现；下游不在同一容器时
 # 填它的私网地址。见 release/README.md「DEP-08 单容器静态发现候选」。
 

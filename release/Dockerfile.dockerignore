@@ -8,16 +8,16 @@
 # 默认拒绝，只有五个 COPY 输入进入上下文。尤其不发送 Deploy 的私有
 # .local 证据、运行凭据或工作区根 capture 文件；下方再排除允许仓中的运行产物。
 **
-!flare-notify-rules/
-!flare-notify-rules/**
-!flare-protocol-grpc/
-!flare-protocol-grpc/**
-!flare-transport/
-!flare-transport/**
-!flare-server-runtime/
-!flare-server-runtime/**
-!flare-core-server/
-!flare-core-server/**
+!flare-im-notify-rules/
+!flare-im-notify-rules/**
+!flare-im-protocol-grpc/
+!flare-im-protocol-grpc/**
+!flare-im-transport/
+!flare-im-transport/**
+!flare-im-server-runtime/
+!flare-im-server-runtime/**
+!flare-im-core-server/
+!flare-im-core-server/**
 
 # ── 版本控制与编译产物 ──
 .git
@@ -79,19 +79,19 @@ certs
 # flare-plugin 里的 flare-plugin-host（发布版 flare-capability 由
 # flare-capability/with-plugin-host 链接它）与本仓自身。
 # 下面这些是客户端 SDK、UI kit、官网、社交业务——一个字节都用不上，合计约 10GB。
-flare-website
+flare-im-website
 docs
 flare-im-design
-flare-core-sdk
-flare-core-sdk-engine
+flare-im-core-sdk
+flare-im-core-engine
 flare-sdk-plugin
-flare-plugins-commercial
-flare-plugin-devkit
-!flare-plugin-devkit/flare-plugin-host
-!flare-plugin-devkit/flare-plugin-protocol
-flare-plugin-devkit/flare-plugin-host/target
-flare-plugin-devkit/flare-plugin-protocol/target
-flare-social-server
+flare-im-plugins-commercial
+flare-im-plugin-sdk
+!flare-im-plugin-runtime/flare-plugin-host
+!flare-im-plugin-sdk/flare-plugin-protocol
+flare-im-plugin-runtime/flare-plugin-host/target
+flare-im-plugin-sdk/flare-plugin-protocol/target
+flare-im-server
 
 # E2E 测试残留数据（实测某次达 4.6GB，COPY 时把服务器磁盘撑爆）。
 **/temp-data

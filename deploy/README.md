@@ -55,7 +55,7 @@ NATS；使用 Kafka 时同时设置 `FLARE_MQ_DEFAULT_BACKEND=kafka`。
 ### B. 只起中间件（服务跑在本机，开发用）
 
 ```bash
-cd flare-core-server/deploy
+cd flare-im-core-server/deploy
 docker compose -f docker-compose.yml -f docker-compose.nats.yml up -d
 ```
 
@@ -64,7 +64,7 @@ docker compose -f docker-compose.yml -f docker-compose.nats.yml up -d
 Kafka 版本：
 
 ```bash
-cd flare-core-server/deploy
+cd flare-im-core-server/deploy
 docker compose -f docker-compose.yml -f docker-compose.kafka.yml up -d
 export FLARE_MQ_DEFAULT_BACKEND=kafka
 ```
@@ -89,7 +89,7 @@ PostgreSQL 密码带 URL 保留字符时仍需显式提供编码后的 `DATABASE
 ### 检查服务状态
 
 ```bash
-cd flare-core-server/deploy
+cd flare-im-core-server/deploy
 docker compose ps
 curl -s http://localhost:28500/v1/agent/services | jq 'keys'   # 看注册了哪些服务
 ```
@@ -144,7 +144,7 @@ python3 compose.py -f docker-compose.yml -f docker-compose.stack.yml logs -f api
 
 **Apache Kafka**（KRaft，无 ZooKeeper）
 
-- **宿主机 bootstrap**: `127.0.0.1:29092`（与仓库 `flare-core-server/config/base.toml` 中 `[kafka.*].brokers` 默认一致）
+- **宿主机 bootstrap**: `127.0.0.1:29092`（与仓库 `flare-im-core-server/config/base.toml` 中 `[kafka.*].brokers` 默认一致）
 - **Compose 网络内**: `kafka:9092`（服务 `hostname` 为 `kafka`）
 - **数据目录**: `./data/kafka`
 

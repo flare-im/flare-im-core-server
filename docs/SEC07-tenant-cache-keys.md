@@ -186,7 +186,7 @@ backlog rollout. No step may infer identity from bare broker headers or
 Implementation slices for the broker provenance contract (not implemented by
 this SEC-07 patch):
 
-1. Add `SignedPushRecordV1` to `flare-protocol/proto/topic_envelope.proto`: version,
+1. Add `SignedPushRecordV1` to `flare-im-protocol/proto/topic_envelope.proto`: version,
    key ID, producer ID, exact topic, partition key, tenant ID, event ID,
    produced-at, source event ID (for derived worker tasks), payload schema,
    payload SHA-256, raw payload and Ed25519 signature. Sign a documented
@@ -215,7 +215,7 @@ this SEC-07 patch):
    method-scoped Gateway/Online workload token. Prefer a dedicated Worker
    signing key/verifier over distributing the all-purpose Cell private key.
 5. Add broker identity and topic/subject publish-consume ACL provisioning to
-   the deployment manifests (including production `flare-deploy`), plus key
+   the deployment manifests (including production `flare-im-deploy`), plus key
    rotation and alerting. Start with `signed-v1` disabled; rehearse replay of
    the old unsigned backlog while the legacy consumer is still isolated.
    Old unsigned records cannot be made trustworthy by a migration reader that
