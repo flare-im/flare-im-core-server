@@ -2,8 +2,8 @@
 //!
 //! Redis 去重（[`super::IngestIdempotencyStore`]）只覆盖结果 TTL 这么长的窗口。客户端离线超过这个窗口后
 //! 用同一 `client_msg_id` 重发，或 Redis 丢了去重键，摄入会把它当新消息处理。账本由 Storage Writer 在落库
-//! 的同一事务里写入，按 `(tenant_id, sender_id, conversation_id, client_msg_id)` 唯一，保留 7 天；摄入只在
-//! [`crate::domain::model::LedgerLookbackPolicy`] 判定需要时读它，新消息的热路径不访问 PG。
+//! 的同一事务里写入，按 `(tenant_id, sender_id, conversation_id, client_msg_id)` 唯一，保留 7 天。发送前由
+//! [`crate::domain::model::LedgerLookbackPolicy`] 决定是否回查历史发送。发送后以同一身份核对消息行，确认 Persisted。
 
 use async_trait::async_trait;
 use flare_proto::common::SendAckDurability;
@@ -29,4 +29,13 @@ pub trait IdempotencyLedger: Send + Sync {
         conversation_id: &str,
         client_msg_id: &str,
     ) -> Result<Option<LedgerRecord>>;
+
+    /// Read the canonical receipt only while its matching archive row is queryable.
+    async fn find_committed(
+        &self,
+        tenant_id: &str,
+        sender_id: &str,
+        conversation_id: &str,
+        client_msg_id: &str,
+    ) -> Result<Option<(String, u64)>>;
 }

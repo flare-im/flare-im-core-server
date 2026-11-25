@@ -725,6 +725,7 @@ impl PostgresMessageStore {
         let (burn_enabled, burn_after_read_seconds, burn_status, first_read_at, burn_at, burned_at) =
             legacy_retention_columns(message);
 
+        let started = std::time::Instant::now();
         let mut tx = self.pool.begin().await?;
         let claims: Vec<LedgerClaim> = LedgerClaim::of(
             &tenant_id,
@@ -884,9 +885,29 @@ impl PostgresMessageStore {
                     flare_server_core::error::FlareError::system("machine commit audit unavailable")
                 })?;
         }
+        let committing = std::time::Instant::now();
         tx.commit().await?;
+        trace_archive_commit(
+            &proto_msg.client_msg_id,
+            started,
+            committing,
+            std::time::Instant::now(),
+        );
         Ok(outcome)
     }
+}
+
+fn trace_archive_commit(
+    client_id: &str,
+    started: std::time::Instant,
+    committing: std::time::Instant,
+    committed: std::time::Instant,
+) {
+    tracing::trace!(target: "flare_storage_writer::archive_commit", client_id,
+        transaction_us = (committed - started).as_micros() as u64,
+        commit_us = (committed - committing).as_micros() as u64,
+        observed_unix_us = chrono::Utc::now().timestamp_micros(),
+        "archive transaction committed");
 }
 
 impl ArchiveStoreRepository for PostgresMessageStore {
@@ -1505,6 +1526,7 @@ impl PostgresMessageStore {
 
         for attempt in 0..max_retries {
             // 使用事务确保原子性
+            let started = std::time::Instant::now();
             let mut tx = match self.pool.begin().await {
                 Ok(tx) => tx,
                 Err(e) => {
@@ -1705,8 +1727,18 @@ impl PostgresMessageStore {
                         for row in &rows_to_insert {proof.record(&mut tx,&row.0,&row.1,&row.2).await.map_err(|_|flare_server_core::error::FlareError::system("machine commit audit unavailable"))?;}
                     }
                     // 提交事务
+                    let committing = std::time::Instant::now();
                     match tx.commit().await {
                         Ok(_) => {
+                            if tracing::enabled!(target: "flare_storage_writer::archive_commit", tracing::Level::TRACE)
+                            {
+                                let committed = std::time::Instant::now();
+                                for row in &rows_to_insert {
+                                    if let Some(id) = &row.3 {
+                                        trace_archive_commit(id, started, committing, committed);
+                                    }
+                                }
+                            }
                             tracing::info!(
                                 batch_size = rows_to_insert.len(),
                                 attempt = attempt + 1,

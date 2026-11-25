@@ -3,7 +3,7 @@
 //!
 //! - 离线 2 小时后用同一 `client_msg_id` 重发：Redis 里首发结果早已过期，客户端创建时间早于窗口，回查账本
 //!   命中，回首发的 server_id / seq / 持久性，不生成新消息，结果回填进 Redis；
-//! - 新消息（创建时间就在眼前）、没带创建时间的消息不读账本；
+//! - 新消息（创建时间就在眼前）、没带创建时间的消息跳过发送前的账本回查，发布后核对已提交的行；
 //! - 账本读不了时回可重试错误、释放占位；账本里是另一会话的消息时按新消息发出。
 
 use std::collections::HashMap;
@@ -146,6 +146,28 @@ impl IdempotencyLedger for MemoryLedger {
                 client_msg_id.into(),
             ))
             .cloned())
+    }
+    async fn find_committed(
+        &self,
+        tenant_id: &str,
+        sender_id: &str,
+        conversation_id: &str,
+        client_msg_id: &str,
+    ) -> Result<Option<(String, u64)>> {
+        if self.fail.load(Ordering::SeqCst) {
+            return Err(FlareError::system("archive database unavailable"));
+        }
+        Ok(self
+            .rows
+            .lock()
+            .unwrap()
+            .get(&(
+                tenant_id.into(),
+                sender_id.into(),
+                conversation_id.into(),
+                client_msg_id.into(),
+            ))
+            .map(|r| (r.server_id.clone(), r.conversation_seq)))
     }
 }
 
@@ -436,7 +458,7 @@ async fn a_resend_two_hours_after_going_offline_replays_the_ledger_result_withou
     assert_eq!(backfilled.server_id, "srv-original");
     assert_eq!(backfilled.conversation_seq, 7);
 
-    // 再重发一次：Redis 命中，不再读账本。
+    // 再重发一次：Redis 命中，跳过发送前回查；持久确认仍核对已提交的记录。
     let again = h
         .handler
         .handle_send_message(&user_ctx(), text("cli-offline", created_two_hours_ago))
@@ -447,11 +469,11 @@ async fn a_resend_two_hours_after_going_offline_replays_the_ledger_result_withou
     assert!(h.producer.published().is_empty());
 }
 
-/// 新消息的创建时间就在眼前（或客户端没给）：不读账本，照常分配 seq 并发布。
+/// 新消息的创建时间就在眼前（或客户端没给）：跳过发送前的去重回查，发布后只能确认实际落库的行。
 #[tokio::test]
-async fn a_new_message_never_reads_the_ledger() {
+async fn a_fresh_send_skips_historical_dedup_and_confirms_only_the_archived_row() {
     let h = harness().await;
-    // 即使账本里碰巧有同一键，新消息也不去读它。
+    // 模拟另一设备已经用同一身份完成落库。
     h.ledger.insert("cli-new", original(GROUP));
     let fresh = h
         .handler
@@ -473,12 +495,16 @@ async fn a_new_message_never_reads_the_ledger() {
     assert_eq!(
         h.ledger.lookups(),
         0,
-        "the hot path must not touch PostgreSQL"
+        "a fresh send must skip the historical dedup lookup"
     );
     let published = h.producer.published();
     assert_eq!(published.len(), 3);
-    for (outcome, published) in [fresh, unset, recent].iter().zip(&published) {
-        assert_ne!(outcome.message_id, "srv-original");
+    assert_ne!(published[0].server_id, "srv-original");
+    assert_eq!(fresh.message_id, "srv-original");
+    assert_eq!(fresh.conversation_seq, 7);
+    assert_eq!(fresh.durability, SendAckDurability::Persisted);
+    for (outcome, published) in [unset, recent].iter().zip(&published[1..]) {
+        assert_eq!(outcome.durability, SendAckDurability::BrokerAccepted);
         assert_eq!(outcome.message_id, published.server_id);
     }
 }
@@ -560,4 +586,31 @@ async fn a_reused_client_id_replays_its_own_conversation_receipt_after_redis_los
     assert_eq!(outcome.message_id, "own-receipt");
     assert!(h.producer.published().is_empty());
     assert_eq!(h.ledger.lookups(), 1);
+}
+
+#[tokio::test]
+async fn archive_read_failure_then_scoped_retry_preserves_the_first_admission() {
+    let h = harness().await;
+    h.ledger.fail.store(true, Ordering::SeqCst);
+    let created = now_ms();
+    let admitted = h
+        .handler
+        .handle_send_message(&user_ctx(), text("receipt", created))
+        .await
+        .unwrap();
+    assert_eq!(admitted.durability, SendAckDurability::BrokerAccepted);
+    h.ledger.fail.store(false, Ordering::SeqCst);
+    let mut row = original(GROUP);
+    row.server_id = admitted.message_id.clone();
+    row.conversation_seq = admitted.conversation_seq;
+    h.ledger.insert("receipt", row);
+    let verified = h
+        .handler
+        .handle_send_message(&user_ctx(), text("receipt", created))
+        .await
+        .unwrap();
+    assert_eq!(verified.durability, SendAckDurability::Persisted);
+    assert_eq!(verified.message_id, admitted.message_id);
+    assert_eq!(verified.conversation_seq, admitted.conversation_seq);
+    assert_eq!(h.producer.published().len(), 1);
 }

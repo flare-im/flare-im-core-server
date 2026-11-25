@@ -440,7 +440,11 @@ impl PostgresBaseStorage {
             && let Ok(extra_obj) = from_value::<HashMap<String, Value>>(extra_value)
         {
             for (k, v) in extra_obj {
-                extra_map.insert(k, v.to_string().trim_matches('"').to_string());
+                let value = match v {
+                    Value::String(text) => text,
+                    other => other.to_string(),
+                };
+                extra_map.insert(k, value);
             }
         }
         extra_map.remove("serverReactions");

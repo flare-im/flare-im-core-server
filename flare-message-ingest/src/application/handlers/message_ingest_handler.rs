@@ -359,7 +359,24 @@ impl MessageIngestHandler {
         cmd: SendMessageCommand,
     ) -> Result<SendMessageOutcome> {
         let total_start = Instant::now();
-        let result = self.handle_send_message_inner(ctx, cmd).await;
+        let sender = cmd.message.sender_id.clone();
+        let conversation = cmd.message.conversation_id.clone();
+        let client_id = cmd.message.client_msg_id.clone();
+        let signed_card = Self::card_post_fingerprint(ctx).is_some();
+        let mut result = self.handle_send_message_inner(ctx, cmd).await;
+        tracing::trace!(target: "flare_message_ingest::archive_receipt", client_id = %client_id,
+            admission_us = total_start.elapsed().as_micros() as u64, "ingest admission duration");
+        if let Ok(outcome) = &mut result {
+            self.confirm_archive(
+                ctx,
+                &sender,
+                &conversation,
+                &client_id,
+                signed_card,
+                outcome,
+            )
+            .await;
+        }
         match &result {
             Ok(outcome) => {
                 self.metrics
@@ -379,6 +396,79 @@ impl MessageIngestHandler {
             }
         }
         result
+    }
+
+    async fn confirm_archive(
+        &self,
+        ctx: &Ctx,
+        sender: &str,
+        conversation: &str,
+        client_id: &str,
+        signed_card: bool,
+        outcome: &mut SendMessageOutcome,
+    ) {
+        match outcome.durability {
+            // Older Redis entries may have recorded broker admission as Persisted.
+            SendAckDurability::Persisted => outcome.durability = SendAckDurability::BrokerAccepted,
+            SendAckDurability::BrokerAccepted | SendAckDurability::WalAccepted => {}
+            _ => return,
+        }
+        let Some((ledger, _)) = &self.idempotency_ledger else {
+            return;
+        };
+        let Some(tenant) = ctx.tenant_id() else {
+            return;
+        };
+        let tenant = flare_im_contracts::utils::normalize_tenant_id(tenant);
+        let key = if client_id.is_empty() {
+            &outcome.message_id
+        } else {
+            client_id
+        };
+        // Bound pool acquisition and all lookups together. On writer lag or a read failure
+        // retain the admission stage; a retry can check the same scoped receipt again.
+        let lookup = async {
+            for delay_ms in [0, 20, 60, 160] {
+                if delay_ms > 0 {
+                    tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+                }
+                if let Some(receipt) = ledger
+                    .find_committed(&tenant, sender, conversation, key)
+                    .await?
+                {
+                    return Ok(Some(receipt));
+                }
+            }
+            Ok::<_, FlareError>(None)
+        };
+        let start = Instant::now();
+        let receipt = tokio::time::timeout(Duration::from_millis(350), lookup).await;
+        let status = match receipt {
+            Ok(Ok(Some((id, seq))))
+                if !id.is_empty()
+                    && seq > 0
+                    && (!signed_card
+                        || (id == outcome.message_id && seq == outcome.conversation_seq)) =>
+            {
+                outcome.message_id = id;
+                outcome.conversation_seq = seq;
+                outcome.durability = SendAckDurability::Persisted;
+                "confirmed"
+            }
+            Ok(Ok(_)) => "unconfirmed",
+            Ok(Err(_)) => "error",
+            Err(_) => "timeout",
+        };
+        let elapsed = start.elapsed();
+        self.metrics
+            .observe_send_stage("archive_receipt", status, elapsed);
+        tracing::trace!(
+            target: "flare_message_ingest::archive_receipt",
+            client_id = %client_id,
+            elapsed_us = elapsed.as_micros() as u64,
+            outcome = status,
+            "archive receipt duration"
+        );
     }
 
     async fn handle_send_message_inner(
@@ -671,11 +761,15 @@ impl MessageIngestHandler {
                     .execute_pre_send(ctx, message, execute_user_pre_send),
             )
             .await?;
-        let message = after_pre_send(hook_context.message, card_post, &conversation_id)?;
+        let mut message = after_pre_send(hook_context.message, card_post, &conversation_id)?;
 
         // PreSend Hook 可以整体改写 attributes：改出别的租户声明即拒绝。落库租户只认消息头，
         // 但带着别的租户声明的消息不该再往下游走。
         ensure_tenant_attributes_match(&message, &tenant_id)?;
+        // The live delivery and the writer's stored envelope carry the same verified scope.
+        message
+            .attributes
+            .insert("tenant_id".into(), tenant_id.clone());
 
         // 3. 准备消息提交。此阶段只填充默认值/server_id/timeline，不分配 seq；
         // seq 在 ensure/decorate 成功后再分配，减少失败路径制造会话序列空洞。
@@ -1118,10 +1212,7 @@ fn send_ack_durability(
     if persistence_mode.should_push_only(profile.is_temporary()) {
         SendAckDurability::TransientAccepted
     } else {
-        // 统一单写模型：消息已写入 WAL + 分配 conversation_seq + 发布到 JetStream 持久主队列，
-        // 即"提交点"已 durable（storage-writer 必定消费落库）。直接同步回 Persisted 作为发送方
-        // 权威持久化确认——发送方无需再等"自己的消息穿过整条 fanout 回流"(根治 116s 尾延迟)。
-        SendAckDurability::Persisted
+        SendAckDurability::BrokerAccepted
     }
 }
 

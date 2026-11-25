@@ -261,10 +261,24 @@ async fn initialize_with_config(
     message_ingest_handler = message_ingest_handler
         .with_tenant_runtime(tenant_runtime.clone())
         .with_tenant_policy(tenant_policy);
-    // 发送幂等账本与 tenants 表同在 Core 库，复用同一个连接串；池子懒建，只有过 Redis 窗口的重发才会用到。
+    // 发送幂等账本与 tenants 表同在 Core 库，复用同一个连接串；池子懒建，供持久回执确认与过 Redis 窗口的重发共用。
     match config.tenant_runtime_postgres_url.as_deref() {
         Some(url) => {
-            let ledger = crate::infrastructure::persistence::postgres_idempotency_ledger::PostgresIdempotencyLedger::connect_lazy(url)?;
+            use crate::infrastructure::persistence::postgres_idempotency_ledger::PostgresIdempotencyLedger;
+            let ledger = match std::env::var("MESSAGE_INGEST_LEDGER_MAX_CONNECTIONS") {
+                Ok(raw) => {
+                    let limit = raw.parse().map_err(|_| {
+                        flare_server_core::error::FlareError::system(
+                            "invalid MESSAGE_INGEST_LEDGER_MAX_CONNECTIONS",
+                        )
+                    })?;
+                    PostgresIdempotencyLedger::connect_with_limit(url, limit)?
+                }
+                Err(std::env::VarError::NotPresent) => {
+                    PostgresIdempotencyLedger::connect_lazy(url)?
+                }
+                Err(e) => return Err(flare_server_core::error::FlareError::system(e.to_string())),
+            };
             message_ingest_handler = message_ingest_handler.with_idempotency_ledger(
                 Arc::new(ledger),
                 // 与 Redis 存储实际使用的结果 TTL 一致（它把 0 抬成 1 秒）。

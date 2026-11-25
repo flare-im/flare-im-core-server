@@ -214,6 +214,8 @@ impl LongConnectionHandler {
         let conversation_id =
             (!message.conversation_id.is_empty()).then(|| message.conversation_id.clone());
         let client_msg_id = message.client_msg_id.clone();
+        tracing::trace!(target: "flare_signaling_gateway::inbound_message", connection_id,
+            frame_id = %command.message_id, client_id = %client_msg_id, "inbound message dispatched");
         let send_command = SendMessageCommand::new(connection_id.to_string(), message, command.seq);
         let result = self
             .send_handler
