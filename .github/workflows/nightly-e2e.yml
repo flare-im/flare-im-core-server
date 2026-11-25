@@ -63,6 +63,9 @@ jobs:
           clone https://github.com/flare-im/flare-im-protocol-grpc.git "flare-im-protocol-grpc"
           clone https://github.com/flare-im/flare-im-server-runtime.git "flare-im-server-runtime"
           clone https://github.com/flare-im/flare-im-plugin-sdk.git "flare-im-plugin-sdk"
+          # 有 flare-plugin-host 时 start_server.sh 编链接插件服务路由的 flare-capability
+          # （见 scripts/lib/capability_build.sh）；宿主在运行时仓。
+          clone https://github.com/flare-im/flare-im-plugin-runtime.git "flare-im-plugin-runtime"
 
       # rust-cache 要在同级仓就位之后：它先跑 `cargo metadata` 算缓存键，
       # 放在前面时两个工作区都因缺 ../flare-im-transport 解析失败，缓存整段失效。
