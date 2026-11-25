@@ -5,9 +5,9 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
-use serde::Deserialize;
-use flare_server_core::error::Result;
 use crate::RegistryConfig;
+use flare_server_core::error::Result;
+use serde::Deserialize;
 
 /// Redis 连接池配置
 #[derive(Debug, Clone, Deserialize, Default)]

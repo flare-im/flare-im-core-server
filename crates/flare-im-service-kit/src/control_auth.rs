@@ -25,11 +25,11 @@ use tonic::{Request, Status};
 // Wire values shared with the platform signer live in flare-core-base (single source of
 // truth for both sides of the control boundary); re-exported under these historical
 // names so callers do not change.
+pub use flare_core_base::platform_auth::FLARE_PLATFORM_ISSUER as PLATFORM_ISSUER;
 pub use flare_core_base::platform_auth::{
     CORE_BUILD_STATS_AUDIENCE, CORE_PROJECTION_AUDIENCE, PROJECTION_WORKER_SUBJECT,
     SCHEDULER_SUBJECT,
 };
-pub use flare_core_base::platform_auth::FLARE_PLATFORM_ISSUER as PLATFORM_ISSUER;
 /// The platform's Ed25519 public key (PEM or base64); only Capability and Online read it.
 pub const PLATFORM_PUBLIC_KEY_ENV: &str = "FLARE_PLATFORM_PUBLIC_KEY";
 const TOKEN_USE_CONTROL: &str = "control";

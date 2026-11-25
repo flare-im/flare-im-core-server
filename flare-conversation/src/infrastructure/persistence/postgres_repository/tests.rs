@@ -6,9 +6,9 @@
 // 经此转发拿到 mod.rs（postgres_repository 模块）的顶层项。
 #[cfg(test)]
 use super::{
+    MAX_PARTICIPANT_PAGE_LIMIT, MAX_RECOMPUTED_UNREAD, ParticipantPageCursor,
     clamp_participant_page_limit, encode_participant_cursor, fill_single_chat_peers,
-    last_message_preview_from_content, parse_participant_cursor, ParticipantPageCursor,
-    MAX_PARTICIPANT_PAGE_LIMIT, MAX_RECOMPUTED_UNREAD,
+    last_message_preview_from_content, parse_participant_cursor,
 };
 
 #[cfg(test)]
@@ -173,7 +173,6 @@ mod last_message_preview_tests {
     }
 }
 
-
 #[cfg(test)]
 mod participant_page_limit_tests {
     use super::{
@@ -268,11 +267,7 @@ mod participant_page_limit_tests {
         // (实测陈旧统计下病态计划 39 分钟钉核)。必须用「LIMIT 阈值+1」有界探测,读至多 阈值+1 行。
         // 生产代码分布在 mod.rs 与 helpers.rs，自检源码必须拼接两者，
         // 否则搬进 helpers 的实现会漏检。
-        let source = format!(
-            "{}{}",
-            include_str!("mod.rs"),
-            include_str!("helpers.rs")
-        );
+        let source = format!("{}{}", include_str!("mod.rs"), include_str!("helpers.rs"));
         // 运行时拼接 needle,避免本断言的字面量被 include_str! 读进来命中自己。
         let unbounded_count = format!("SELECT COUNT(*)::{} AS member_count", "INT");
         assert!(

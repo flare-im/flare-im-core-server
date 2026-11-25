@@ -38,7 +38,6 @@
 //!    payload 是 JSON 字符串（`type_url` 为 `...PayloadJson`）。
 //! 3. 返回的 JSON 结构由你定义 —— 核心不解析它，原样交给客户端。
 
-use std::collections::HashMap;
 use std::time::Duration;
 
 use flare_grpc_proto::capability::extension_plugin_server::{
@@ -46,7 +45,6 @@ use flare_grpc_proto::capability::extension_plugin_server::{
 };
 use flare_grpc_proto::capability::{GenericRequest, GenericResponse};
 use flare_im_capability_core::plugin::invocation::{PLUGIN_CALL_HEADER, PluginCallVerifier};
-use sha2::{Digest, Sha256};
 use tonic::{Request, Response, Status, transport::Server};
 
 /// 能力 id。客户端就是用这个字符串来调用本插件。
@@ -59,6 +57,7 @@ const CAPABILITY_ID: &str = "link.preview.v1";
 const PLUGIN_ID: &str = "flare-link-preview";
 
 /// 本插件的清单：控制面审批、投影里带的也是这份字节。
+#[cfg(test)]
 const MANIFEST: &str = include_str!("capability_link_preview.manifest.json");
 
 /// 核心的通用健康探针。它不带调用票据，也不碰任何业务，直接回答。
@@ -276,7 +275,9 @@ impl ExtensionPlugin for LinkPreviewPlugin {
 }
 
 /// 清单摘要（64 位小写十六进制），注册时声明。
+#[cfg(test)]
 fn manifest_sha256() -> String {
+    use sha2::{Digest, Sha256};
     hex::encode(Sha256::digest(MANIFEST.as_bytes()))
 }
 
@@ -338,6 +339,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 #[cfg(test)]
 mod link_preview_tests {
     use super::*;
+    use std::collections::HashMap;
 
     const PAGE: &str = r#"<html><head>
         <title>Fallback Title</title>

@@ -92,12 +92,10 @@ impl InMemoryCapabilityGrants {
         }
         Ok(())
     }
-
 }
 
 #[async_trait]
 impl CapabilityPolicyBackend for InMemoryCapabilityGrants {
-
     async fn ensure_not_suspended(&self, tenant_id: &str, capability_id: &str) -> Result<()> {
         self.check_not_suspended(tenant_id, capability_id)
     }

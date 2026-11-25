@@ -26,13 +26,12 @@ mod types;
 #[cfg(test)]
 mod tests;
 
-pub use loader::{app_config, load_config, load_config_with_validation, FlareAppConfig};
+pub use loader::{FlareAppConfig, app_config, load_config, load_config_with_validation};
 // tests.rs 经 use super::* 访问的 crate 内私有入口（仅测试构建需要）
 #[cfg(test)]
 pub(crate) use loader::{
-    apply_registry_mode_override, config_candidates, default_config, expand_env_placeholders,
-    expand_env_placeholders_in_value, expand_env_placeholders_in_value_with,
-    load_config_from_source,
+    apply_registry_mode_override, config_candidates, default_config,
+    expand_env_placeholders_in_value_with, load_config_from_source,
 };
 pub use manager::ConfigManager;
 pub use services::*;

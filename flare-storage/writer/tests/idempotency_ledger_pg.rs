@@ -174,6 +174,23 @@ async fn check(pool: PgPool) {
         .expect("first send");
     assert_eq!(first, ArchiveOutcome::default());
     assert!(stored(&pool, "messages", "srv-1").await);
+    let archived: bool = sqlx::query_scalar(
+        "SELECT write_state = 'archive_persisted' AND archive_persisted_at = created_at
+         FROM message_write_ledger WHERE tenant_id = $1 AND server_id = 'srv-1'",
+    )
+    .bind(TENANT)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(archived);
+    sqlx::query(
+        "UPDATE message_write_ledger SET write_state = 'ack_published'
+         WHERE tenant_id = $1 AND server_id = 'srv-1'",
+    )
+    .bind(TENANT)
+    .execute(&pool)
+    .await
+    .unwrap();
     assert_eq!(
         ledger_owner(&pool, "conv-a", "cli-1").await.as_deref(),
         Some("srv-1")
@@ -195,6 +212,30 @@ async fn check(pool: PgPool) {
         .expect("redelivery");
     assert!(redelivered.duplicates.is_empty());
     assert_eq!(redelivered.already_archived, ["srv-1"]);
+    let stage: String = sqlx::query_scalar(
+        "SELECT write_state FROM message_write_ledger WHERE tenant_id = $1 AND server_id = 'srv-1'",
+    )
+    .bind(TENANT)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(stage, "ack_published");
+
+    sqlx::query("ALTER TABLE messages ADD CHECK (server_id <> 'reject-at-message')")
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert!(
+        store
+            .archive_messages(
+                &ctx,
+                &[message("reject-at-message", "conv-a", "failed", 99)]
+            )
+            .await
+            .is_err()
+    );
+    assert!(!stored(&pool, "message_write_ledger", "reject-at-message").await);
+    assert!(ledger_owner(&pool, "conv-a", "failed").await.is_none());
 
     // 另一会话拥有独立回执，之后的重发也必须去重。
     let reused = store
@@ -243,6 +284,15 @@ async fn check(pool: PgPool) {
         Some("cross-first")
     );
     assert!(!stored(&pool, "messages", "cross-retry").await);
+    let archived: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM message_write_ledger WHERE tenant_id = $1 AND server_id LIKE 'cross-%'
+         AND write_state = 'archive_persisted' AND archive_persisted_at = created_at",
+    )
+    .bind(TENANT)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(archived, 11);
 
     // 没有 client_msg_id 的消息不入账，照常写入。
     let anonymous = store

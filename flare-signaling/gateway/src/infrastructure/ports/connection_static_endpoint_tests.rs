@@ -27,6 +27,12 @@ impl OnlineService for LoopbackOnline {
     ) -> std::result::Result<Response<LogoutResponse>, Status> {
         Err(Status::unimplemented("not used by endpoint regression"))
     }
+    async fn report_device_state(
+        &self,
+        _: Request<ReportDeviceStateRequest>,
+    ) -> std::result::Result<Response<ReportDeviceStateResponse>, Status> {
+        Err(Status::unimplemented("not used by endpoint regression"))
+    }
     async fn heartbeat(
         &self,
         _: Request<HeartbeatRequest>,

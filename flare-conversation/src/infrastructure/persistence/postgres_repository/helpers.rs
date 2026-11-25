@@ -7,7 +7,7 @@ use flare_server_core::error::{ErrorCode, Result, map_infra_error, require_user_
 
 use crate::domain::model::ConversationParticipant;
 
-use super::{PARTICIPANT_COLUMNS, participant_from_row, PostgresConversationRepository};
+use super::{PARTICIPANT_COLUMNS, PostgresConversationRepository, participant_from_row};
 
 impl PostgresConversationRepository {
     /// 用户态成员读的前置条件：调用者自己是该会话的成员（未退出；隐藏了会话的也算），否则按
@@ -121,4 +121,3 @@ impl PostgresConversationRepository {
         Ok(capped > i64::from(precise_unread_threshold))
     }
 }
-

@@ -127,7 +127,6 @@ impl PostgresCapabilityPolicy {
         .map_err(|e| CapabilityError::System(format!("capability tenant switch: {e}")))?;
         Ok(row.is_some())
     }
-
 }
 
 #[async_trait]

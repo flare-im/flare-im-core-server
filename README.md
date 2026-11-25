@@ -49,7 +49,7 @@ re-verified daily.
   that a third party fails to decrypt.
 - **Self-hostable and auditable.** Rust, Apache-2.0, protocol and core both in the repo —
   not a box you can only trust.
-- **6 platform SDKs + 185 UI components.** TypeScript (shared by Web / Tauri / Electron),
+- **6 platform SDKs + 207 UI components.** TypeScript (shared by Web / Tauri / Electron),
   Swift, Kotlin, Dart, HarmonyOS ArkTS / Cangjie — all generated from one `sdk-spec`.
 
 ## Where does my code go
@@ -63,7 +63,7 @@ flowchart TB
     end
 
     subgraph client["✓ Open source: client"]
-        ui["flare-im-design<br/>185 UI components · 4 platforms"]
+        ui["flare-im-design<br/>207 UI components · 4 platforms"]
         sdk["Platform SDKs<br/>TS / Swift / Kotlin / Dart / ArkTS"]
         engine["flare-im-core-sdk<br/>Rust client engine<br/>send queue · local store · sync · E2EE"]
     end
@@ -109,6 +109,12 @@ message before it is stored. The runtime is `crates/flare-im-hooks`.
 This is the same "bring your own identity" model as Sendbird or Twilio Conversations —
 the difference being that Flare is self-hostable and its protocol and core are auditable.
 Details in [GOVERNANCE.md](.github/GOVERNANCE.md).
+
+## Core boundary
+
+![Target Core Server boundary: business systems enter through the api-gateway, hooks, CapabilityService and the admin-gateway; the core holds access, the message write path, conversations and sync, delivery, media and extensions over shared contract crates and infrastructure](docs/assets/core-server-boundary.png)
+
+Core Server is the authority for membership, visibility, final ordering and durable ACKs. Business systems keep their own rules and results and reach the core only through four entry points; none of them takes part in seq assignment, archiving or ACK decisions.
 
 ## Service topology
 

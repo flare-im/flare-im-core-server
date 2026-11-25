@@ -744,12 +744,13 @@ impl PostgresMessageStore {
             return Ok(outcome);
         }
 
+        // The ledger, message and audit proof become visible together at commit.
         let ledger_result = sqlx::query(
             r#"
             INSERT INTO message_write_ledger (
-                tenant_id, server_id, conversation_id, seq
+                tenant_id, server_id, conversation_id, seq, write_state, archive_persisted_at
             )
-            VALUES ($1, $2, $3, $4)
+            VALUES ($1, $2, $3, $4, $5, CURRENT_TIMESTAMP)
             ON CONFLICT (tenant_id, server_id) DO NOTHING
             "#,
         )
@@ -757,6 +758,7 @@ impl PostgresMessageStore {
         .bind(&proto_msg.server_id)
         .bind(&proto_msg.conversation_id)
         .bind(seq)
+        .bind(MessageWriteStage::ArchivePersisted.as_str())
         .execute(&mut *tx)
         .await
         .map_err(|err| {
@@ -839,34 +841,6 @@ impl PostgresMessageStore {
                 proto_msg.server_id,
                 proto_msg.conversation_id,
                 seq
-            ))
-        })?;
-
-        sqlx::query(
-            r#"
-            UPDATE message_write_ledger
-            SET write_state = $3,
-                archive_persisted_at = COALESCE(archive_persisted_at, CURRENT_TIMESTAMP),
-                last_error = NULL,
-                updated_at = CURRENT_TIMESTAMP
-            WHERE tenant_id = $1
-              AND server_id = $2
-            "#,
-        )
-        .bind(&tenant_id)
-        .bind(&proto_msg.server_id)
-        .bind(MessageWriteStage::ArchivePersisted.as_str())
-        .execute(&mut *tx)
-        .await
-        .map_err(|err| {
-            tracing::error!(
-                error = %err,
-                message_id = %proto_msg.server_id,
-                "update message write ledger archive stage failed"
-            );
-            flare_server_core::error::FlareError::system(format!(
-                "update message write ledger archive stage failed message_id={}: {err}",
-                proto_msg.server_id
             ))
         })?;
 
@@ -1586,7 +1560,7 @@ impl PostgresMessageStore {
             let mut ledger_builder: QueryBuilder<Postgres> = QueryBuilder::new(
                 r#"
                 INSERT INTO message_write_ledger (
-                    tenant_id, server_id, conversation_id, seq
+                    tenant_id, server_id, conversation_id, seq, write_state, archive_persisted_at
                 )
                 "#,
             );
@@ -1596,6 +1570,8 @@ impl PostgresMessageStore {
                 b.push_bind(&row.1); // server_id
                 b.push_bind(&row.2); // conversation_id
                 b.push_bind(row.10); // seq
+                b.push_bind(MessageWriteStage::ArchivePersisted.as_str());
+                b.push("CURRENT_TIMESTAMP");
             });
             ledger_builder.push(
                 " ON CONFLICT (tenant_id, server_id) DO NOTHING RETURNING tenant_id, server_id",
@@ -1697,32 +1673,6 @@ impl PostgresMessageStore {
             // 执行批量插入
             match query_builder.build().execute(&mut *tx).await {
                 Ok(_) => {
-                    for row in &rows_to_insert {
-                        sqlx::query(
-                            r#"
-                            UPDATE message_write_ledger
-                            SET write_state = $3,
-                                archive_persisted_at = COALESCE(archive_persisted_at, CURRENT_TIMESTAMP),
-                                last_error = NULL,
-                                updated_at = CURRENT_TIMESTAMP
-                            WHERE tenant_id = $1
-                              AND server_id = $2
-                            "#,
-                        )
-                        .bind(&row.0)
-                        .bind(&row.1)
-                        .bind(MessageWriteStage::ArchivePersisted.as_str())
-                        .execute(&mut *tx)
-                        .await
-                        .map_err(|e| {
-                            flare_server_core::error::FlareError::system(format!(
-                                "update message write ledger archive stage failed message_id={} attempt={}: {e}",
-                                row.1,
-                                attempt + 1
-                            ))
-                        })?;
-                    }
-
                     if let Some(proof)=ctx.get_data::<flare_im_service_kit::audit_effects::write_proof::VerifiedWrite>() {
                         for row in &rows_to_insert {proof.record(&mut tx,&row.0,&row.1,&row.2).await.map_err(|_|flare_server_core::error::FlareError::system("machine commit audit unavailable"))?;}
                     }

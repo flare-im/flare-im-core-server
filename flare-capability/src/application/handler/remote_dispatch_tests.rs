@@ -1856,9 +1856,21 @@ mod plugin_state_and_catalog {
         let written = r#"{"zh-CN":"x"}"#;
         let (longest, too_long) = ("x".repeat(1024), "x".repeat(1025));
         for (answer, code, message) in [
-            (format!("POLL_CLOSED\n{written}"), "POLL_CLOSED", Some(written)),
-            (format!("PLUGIN_DISABLED\n{written}"), "PLUGIN_REJECTED", Some(written)),
-            (format!("POLL_CLOSED\n{longest}"), "POLL_CLOSED", Some(longest.as_str())),
+            (
+                format!("POLL_CLOSED\n{written}"),
+                "POLL_CLOSED",
+                Some(written),
+            ),
+            (
+                format!("PLUGIN_DISABLED\n{written}"),
+                "PLUGIN_REJECTED",
+                Some(written),
+            ),
+            (
+                format!("POLL_CLOSED\n{longest}"),
+                "POLL_CLOSED",
+                Some(longest.as_str()),
+            ),
             (format!("POLL_CLOSED\n{too_long}"), "POLL_CLOSED", None),
             ("POLL_CLOSED\n".to_owned(), "POLL_CLOSED", None),
             ("POLL_CLOSED".to_owned(), "POLL_CLOSED", None),

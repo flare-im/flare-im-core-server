@@ -1577,7 +1577,7 @@ GW_ONLINE_URL = "http://127.0.0.1:50061"
         manifest.validate().unwrap();
         // Each downstream variable suffix and the manifest service that listens for it. The
         // API Gateway dials the six message-path services; the Admin Gateway dials only Media,
-        // Conversation, Online, the Storage Reader and Capability.
+        // Conversation, Online, the Storage Reader, Capability and the Push Proxy.
         let api_downstreams: &[(&str, &str)] = &[
             ("MEDIA", "media"),
             ("MESSAGE_INGEST", "message-ingest"),
@@ -1592,6 +1592,7 @@ GW_ONLINE_URL = "http://127.0.0.1:50061"
             ("ONLINE", "signaling-online"),
             ("STORAGE_READER", "storage-reader"),
             ("CAPABILITY", "capability"),
+            ("PUSH_PROXY", "push-proxy"),
         ];
         let listener = |name: &str| {
             let service = manifest.services.iter().find(|s| s.name == name).unwrap();

@@ -41,6 +41,7 @@ impl MediaService {
         .await
     }
 
+    #[allow(clippy::too_many_arguments)] // the upload request's fields plus the resolved actor
     pub(super) async fn initiate_direct_upload_as(
         &self,
         ctx: &Context,
@@ -515,10 +516,9 @@ impl MediaService {
             if (session.actor_kind == UploadActorKind::Staff
                 || session.purpose == MediaPurpose::Avatar)
                 && persisted.is_ok()
+                && let Err(err) = object_repo.delete_object(&object_key).await
             {
-                if let Err(err) = object_repo.delete_object(&object_key).await {
-                    tracing::warn!(error = %err, "failed to remove administrative upload temporary object");
-                }
+                tracing::warn!(error = %err, "failed to remove administrative upload temporary object");
             }
             persisted
         };

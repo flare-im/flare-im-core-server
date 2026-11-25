@@ -105,7 +105,6 @@ pub(crate) fn encode_participant_cursor(
 /// 语义：重算值在此饱和。IM 前端本就显示 "99+"；且外层
 /// `GREATEST(sp.unread_count, unread_tail.unread_count)` 中已持久化的
 /// `sp.unread_count` 不受影响仍作下限，精确计数并未因此丢失。
-
 pub(crate) const MAX_RECOMPUTED_UNREAD: i64 = 1000;
 
 /// 成员分页的页大小上限。
@@ -515,7 +514,6 @@ fn participant_from_row(row: &sqlx::postgres::PgRow) -> ConversationParticipant 
         mention_only: row.get("mention_only"),
     }
 }
-
 
 impl ConversationRepository for PostgresConversationRepository {
     async fn load_bootstrap(
@@ -2923,4 +2921,3 @@ impl ConversationRepository for PostgresConversationRepository {
         Ok(unread_count)
     }
 }
-

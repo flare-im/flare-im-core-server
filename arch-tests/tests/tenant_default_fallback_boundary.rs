@@ -66,7 +66,7 @@ const FIXED_BY_W11_T: &[&str] = &[
     "crates/flare-im-message-pipeline/src/hook/builder.rs",
     "crates/flare-im-message-pipeline/src/hook/execution_service.rs",
     "crates/flare-im-message-pipeline/src/messaging/push_repository.rs",
-    "flare-conversation/src/infrastructure/persistence/postgres_repository.rs",
+    "flare-conversation/src/infrastructure/persistence/postgres_repository/mod.rs",
     "flare-message-ingest/src/application/handlers/message_ingest_handler.rs",
     "flare-message-ingest/src/application/handlers/wal_replay_handler.rs",
     "flare-orchestrator/src/application/handlers/event_handler.rs",

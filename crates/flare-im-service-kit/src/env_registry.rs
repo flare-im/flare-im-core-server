@@ -967,6 +967,12 @@ pub const REGISTERED_ENV_VARS: &[EnvVarSpec] = &[
         EnvOwner::MessageIngest,
         EnvPurpose::RuntimeTuning,
     ),
+    // Read-pool size of the PostgreSQL idempotency ledger and durable-ACK check.
+    env(
+        "MESSAGE_INGEST_LEDGER_MAX_CONNECTIONS",
+        EnvOwner::MessageIngest,
+        EnvPurpose::RuntimeTuning,
+    ),
     env(
         "INGEST_IDEMPOTENCY_RESULT_TTL_SECS",
         EnvOwner::MessageIngest,

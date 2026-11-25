@@ -117,7 +117,6 @@ impl MediaService {
 }
 
 mod admin_upload;
-mod public_avatar;
 mod attachment_read;
 #[cfg(test)]
 mod cdn_url_tests;
@@ -127,6 +126,7 @@ mod image_probe;
 #[cfg(test)]
 pub(crate) mod isolation_tests;
 mod multipart;
+mod public_avatar;
 mod reclaim;
 mod references;
 mod storage;

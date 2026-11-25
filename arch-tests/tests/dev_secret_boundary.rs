@@ -47,8 +47,7 @@ fn git_tracks(root: &std::path::Path, rel: &str) -> bool {
         .current_dir(repo)
         .output()
         .map(|output| {
-            output.status.success()
-                && !String::from_utf8_lossy(&output.stdout).trim().is_empty()
+            output.status.success() && !String::from_utf8_lossy(&output.stdout).trim().is_empty()
         })
         .unwrap_or(false)
 }

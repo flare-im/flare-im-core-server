@@ -23,7 +23,6 @@ pub trait RecipientResolver: Send + Sync {
 
 #[async_trait]
 pub trait CapabilityPolicyBackend: Send + Sync {
-
     /// 严格租户开关检查；缺少开关时拒绝。开关不代表平台审批授权，
     /// 也不能代替调用者的 operation 权限检查。
     async fn ensure_tenant_capability_enabled(

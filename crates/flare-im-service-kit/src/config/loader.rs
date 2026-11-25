@@ -20,8 +20,9 @@ use super::manager;
 use super::services::*;
 use super::types::*;
 use super::types::{
-    default_mq_backend, positive_stream_option, DEFAULT_STREAM_DUPLICATE_WINDOW_SECONDS,
-    DEFAULT_STREAM_MAX_AGE_SECONDS, DEFAULT_STREAM_MAX_BYTES, DEFAULT_STREAM_NUM_REPLICAS,
+    DEFAULT_STREAM_DUPLICATE_WINDOW_SECONDS, DEFAULT_STREAM_MAX_AGE_SECONDS,
+    DEFAULT_STREAM_MAX_BYTES, DEFAULT_STREAM_NUM_REPLICAS, default_mq_backend,
+    positive_stream_option,
 };
 
 /// 全局应用配置实例，使用 OnceLock 确保只初始化一次

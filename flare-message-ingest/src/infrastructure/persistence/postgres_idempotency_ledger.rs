@@ -13,7 +13,7 @@ use sqlx::postgres::PgPoolOptions;
 
 use crate::domain::repository::{IdempotencyLedger, LedgerRecord};
 
-const DEFAULT_MAX_CONNECTIONS: NonZeroU32 = NonZeroU32::new(4).unwrap();
+const DEFAULT_MAX_CONNECTIONS: NonZeroU32 = NonZeroU32::MIN.saturating_add(3); // 4
 const ACQUIRE_TIMEOUT: Duration = Duration::from_secs(2);
 const IDLE_TIMEOUT: Duration = Duration::from_secs(300);
 

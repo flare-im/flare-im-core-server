@@ -31,7 +31,7 @@ RTC 房间加入、端到端加密），退出码 0 即全通过 —— 你不�
   看得到 323 字节密文、明文未泄漏、第三方解密失败。
 - **可自托管、可审计**：Rust 实现，Apache-2.0，协议与核心都在仓库里 ——
   不是一个你只能相信的黑盒。
-- **6 个平台 SDK + 185 个 UI 组件**：TypeScript（Web / Tauri / Electron 共用）、
+- **6 个平台 SDK + 207 个 UI 组件**：TypeScript（Web / Tauri / Electron 共用）、
   Swift、Kotlin、Dart、鸿蒙 ArkTS / 仓颉，接口契约由同一份 sdk-spec 生成。
 
 
@@ -73,7 +73,7 @@ flowchart TB
     end
 
     subgraph client["✓ 开源：客户端"]
-        ui["flare-im-design<br/>185 个 UI 组件 · 四端"]
+        ui["flare-im-design<br/>207 个 UI 组件 · 四端"]
         sdk["平台 SDK<br/>TS / Swift / Kotlin / Dart / ArkTS"]
         engine["flare-im-core-sdk<br/>Rust 客户端引擎<br/>发送队列 · 本地存储 · 同步 · E2EE"]
     end
@@ -118,6 +118,12 @@ flowchart TB
 
 这与 Sendbird / Twilio Conversations 的「自带身份」模型一致，区别是
 Flare 可自托管、协议与核心可审计。边界详情见 [GOVERNANCE.md](.github/GOVERNANCE.md)。
+
+## 核心边界
+
+![Core Server 目标边界：业务系统经 api-gateway、Hook、CapabilityService 与 admin-gateway 接入；核心在共享契约与基础设施之上持有接入、消息写路径、会话与同步、投递、媒体与扩展](docs/assets/core-server-boundary.zh-CN.png)
+
+Core Server 是成员资格、可见性、最终顺序与持久 ACK 的权威。业务系统自持规则与结果，只经四个入口接入，不参与 seq 分配、归档与 ACK 判定。
 
 ## 服务拓扑
 
