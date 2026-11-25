@@ -312,7 +312,7 @@ mod tests {
             ("admin", CORE_PROJECTION_AUDIENCE),
             ("control", "flare-core-admin"),
             ("access", CORE_PROJECTION_AUDIENCE),
-            ("control", "flare-social-projection"),
+            ("control", "flare-im-projection"),
         ] {
             let token = signer
                 .generate_with_ed25519(

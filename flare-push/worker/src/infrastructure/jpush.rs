@@ -2,7 +2,7 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
 use flare_im_contracts::{Ctx, DevicePushToken};
-use flare_notify_rules::text::Lang;
+use flare_im_notify_rules::text::Lang;
 use flare_proto::PushTaskEnvelope;
 use flare_server_core::{ErrorCode, FlareError};
 use reqwest::StatusCode;

@@ -1,6 +1,6 @@
 use std::sync::atomic::AtomicUsize;
 
-use flare_notify_rules::{
+use flare_im_notify_rules::{
     Gate, GateConfig, Ladder, MultiDevicePolicy, PreviewMode, QuietHours, UserPrefs,
 };
 use flare_proto::common::{ConversationType, Event, MessageRecallEvent, ReadReceiptEvent};

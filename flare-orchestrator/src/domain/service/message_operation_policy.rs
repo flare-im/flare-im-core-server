@@ -75,7 +75,7 @@ pub const RECALL_WINDOW_MS: i64 = 24 * 3600 * 1000;
 pub const EDIT_WINDOW_MS: i64 = 24 * 3600 * 1000;
 /// Service identities (signed `Service` actors) trusted to operate on any message of their tenant:
 /// the Social IM bridge, through which Social's group administration and moderation act.
-pub const TRUSTED_OPERATION_SERVICES: &[&str] = &["flare-social-bridge"];
+pub const TRUSTED_OPERATION_SERVICES: &[&str] = &["flare-im-bridge"];
 /// The most messages one read receipt may name in `message_ids` (a visible page); all of them are
 /// checked against their stored messages in one batch lookup.
 pub const MAX_RECEIPT_MESSAGE_IDS: usize = 50;

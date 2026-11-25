@@ -39,7 +39,7 @@ struct Publisher {
     tenant_wide: bool,
 }
 
-/// 登记的发布者：`FLARE_TENANT_NOTICE_PUBLISHERS="flare-social-bridge=social.,*;other=foo."`。
+/// 登记的发布者：`FLARE_TENANT_NOTICE_PUBLISHERS="flare-im-bridge=social.,*;other=foo."`。
 /// 每项 `服务=前缀,前缀`；列表里的 `*` 表示还可以发给全部租户。没有登记的服务一律拒绝。
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct NoticePublishers {
@@ -135,15 +135,15 @@ mod tests {
     #[test]
     fn publishers_parse_and_authorize_their_own_namespace() {
         let publishers =
-            NoticePublishers::parse("flare-social-bridge=social.,*; reports=report.").unwrap();
+            NoticePublishers::parse("flare-im-bridge=social.,*; reports=report.").unwrap();
         assert!(
             publishers
-                .authorize("flare-social-bridge", "app-a", "social.features")
+                .authorize("flare-im-bridge", "app-a", "social.features")
                 .is_ok()
         );
         assert!(
             publishers
-                .authorize("flare-social-bridge", "*", "social.features")
+                .authorize("flare-im-bridge", "*", "social.features")
                 .is_ok()
         );
         assert_eq!(
@@ -160,7 +160,7 @@ mod tests {
         );
         for topic in ["flare.plugin.catalog", "Social.features", "social"] {
             assert_eq!(
-                publishers.authorize("flare-social-bridge", "app-a", topic),
+                publishers.authorize("flare-im-bridge", "app-a", topic),
                 Err(NoticeDenied::InvalidTopic),
                 "{topic}"
             );

@@ -420,9 +420,9 @@ flare-im-deploy 单机模板在 Core 的 Compose `environment` 里把 Admin Gate
 capability、push proxy）直接设成上表地址，preflight 核对它们。
 
 启用 Social PreSend Hook 时，`config/hooks.social.toml` 的
-`discovery://flare-social-hook` **不能**用于该模式：Message Ingest 会在
+`discovery://flare-im-hook` **不能**用于该模式：Message Ingest 会在
 连接 Redis/MQ 前拒绝启动。部署方必须提供已审核、指向 Social 私网
-`flare-social-hook` 的独立 Hook 配置文件，并把路径传给
+`flare-im-hook` 的独立 Hook 配置文件，并把路径传给
 `MESSAGE_INGEST_HOOKS_CONFIG`。`flare-im-deploy/templates/compose/single/hooks.social.static.toml`
 是保持原有 fail-closed 策略、仅将传输端点改为私网 `social:50210` 的候选；
 需只读挂载。不要通过禁用 Hook 来让健康检查变绿。

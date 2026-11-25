@@ -95,7 +95,7 @@ impl CachedStaticChannel {
     }
 }
 
-/// `discovery://flare-social-hook` → `flare-social-hook`
+/// `discovery://flare-im-hook` → `flare-im-hook`
 pub fn discovery_route_authority(service_name: &str) -> String {
     format!("{DISCOVERY_ROUTE_PREFIX}{service_name}")
 }

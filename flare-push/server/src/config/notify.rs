@@ -25,7 +25,7 @@ use std::ffi::OsStr;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use flare_notify_rules::{Gate, GateConfig, Ladder};
+use flare_im_notify_rules::{Gate, GateConfig, Ladder};
 use serde::Deserialize;
 
 use crate::domain::model::{DEFAULT_ALL_MENTION_INTERVAL_MS, NotifyPolicy, TenantNotifyPolicy};

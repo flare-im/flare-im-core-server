@@ -166,7 +166,7 @@ fn authorize_message_claims(
                 return Err(Status::permission_denied("invalid platform system message"));
             }
         }
-        SignedActorType::Service if claims.actor_id == "flare-social-bridge" => {
+        SignedActorType::Service if claims.actor_id == "flare-im-bridge" => {
             let expected_type = if system_only {
                 MessageType::System
             } else {
@@ -764,7 +764,7 @@ mod tests {
 
     #[test]
     fn only_exact_bridge_identity_can_send_internal_message() {
-        let bridge = claims(SignedActorType::Service, "flare-social-bridge");
+        let bridge = claims(SignedActorType::Service, "flare-im-bridge");
         assert!(
             authorize_message_claims(
                 &bridge,
@@ -895,7 +895,7 @@ mod tests {
         let detail = flare_server_core::error::grpc::decode_error_detail(&status).expect("detail");
         assert_eq!(detail.reason, plugin_platform::PLUGIN_CARD_PLATFORM_ONLY);
         // Neither may the bridge, as a notification.
-        let bridge = claims(SignedActorType::Service, "flare-social-bridge");
+        let bridge = claims(SignedActorType::Service, "flare-im-bridge");
         let mut notice = plugin_card_message("alice");
         notice.source = MessageSource::System as i32;
         notice.message_type = MessageType::Notification as i32;
@@ -1158,7 +1158,7 @@ mod tests {
                 MessageType::System,
                 true,
                 SignedActorType::Service,
-                "flare-social-bridge",
+                "flare-im-bridge",
             ),
         ] {
             let caller = claims(actor_type, actor_id);

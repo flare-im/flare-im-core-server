@@ -198,7 +198,7 @@ mod tests {
         let recorded = Arc::new(Recorded::default());
         let server = TenantNoticeGrpcServer::new(
             Some(recorded.clone() as Arc<dyn TenantNotices>),
-            NoticePublishers::parse("flare-social-bridge=social.,*").unwrap(),
+            NoticePublishers::parse("flare-im-bridge=social.,*").unwrap(),
             Some(verifier),
         );
         (recorded, server, signer)
@@ -211,7 +211,7 @@ mod tests {
             request(
                 &signer,
                 SignedActorType::Service,
-                "flare-social-bridge",
+                "flare-im-bridge",
                 "app-a",
                 "social.features",
                 version,
@@ -235,7 +235,7 @@ mod tests {
         let wide = request(
             &signer,
             SignedActorType::Service,
-            "flare-social-bridge",
+            "flare-im-bridge",
             "*",
             "social.features",
             4,
@@ -265,7 +265,7 @@ mod tests {
             ),
             (
                 SignedActorType::Service,
-                "flare-social-bridge",
+                "flare-im-bridge",
                 "app-a",
                 "billing.plan",
                 1,
@@ -273,7 +273,7 @@ mod tests {
             ),
             (
                 SignedActorType::Service,
-                "flare-social-bridge",
+                "flare-im-bridge",
                 "app-a",
                 "flare.plugin.catalog",
                 1,
@@ -281,7 +281,7 @@ mod tests {
             ),
             (
                 SignedActorType::Service,
-                "flare-social-bridge",
+                "flare-im-bridge",
                 "app-a",
                 "social.features",
                 0,
@@ -305,7 +305,7 @@ mod tests {
         let forged = request(
             &other,
             SignedActorType::Service,
-            "flare-social-bridge",
+            "flare-im-bridge",
             "app-a",
             "social.features",
             1,

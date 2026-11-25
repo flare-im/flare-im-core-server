@@ -10,7 +10,7 @@
 //!
 //! 通道只决定哪个消费者投递、谁先谁后，不改变任务本身。
 
-use flare_notify_rules::{ConversationKind, Tier};
+use flare_im_notify_rules::{ConversationKind, Tier};
 use flare_proto::common::AlertClass;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]

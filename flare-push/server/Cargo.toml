@@ -40,7 +40,7 @@ chrono = { workspace = true }
 # 设备当地时间：绑定登记的 IANA 时区换算成勿扰时段要的「一周中的分钟」。
 chrono-tz = { workspace = true }
 # 提示规则的唯一实现：决策、会话槽位与设备预算。服务端只负责读写状态。
-flare-notify-rules = { path = "../../../flare-im-notify-rules" }
+flare-im-notify-rules = { path = "../../../flare-im-notify-rules" }
 futures = { workspace = true }
 ulid = { workspace = true }  # 添加ulid依赖
 

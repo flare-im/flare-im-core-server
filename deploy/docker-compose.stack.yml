@@ -194,7 +194,7 @@ services:
       SERVICE_ADVERTISE_HOST: conversation
       CONVERSATION_ROSTER_POLICY_GRPC_URL: ${CONVERSATION_ROSTER_POLICY_GRPC_URL:-}
       # 会话管理员只读接口校验 admin-gateway 转发的 Staff 上下文，PurgeConversationHistory 验
-      # flare-social-bridge 的服务签名，都用 Cell 公钥；不给公钥时一律 fail closed。
+      # flare-im-bridge 的服务签名，都用 Cell 公钥；不给公钥时一律 fail closed。
       FLARE_INTERNAL_CTX_PUBLIC_KEY: ${FLARE_INTERNAL_CTX_PUBLIC_KEY:?set the Cell Ed25519 public key}
     command: ["flare-conversation"]
 

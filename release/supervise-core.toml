@@ -114,7 +114,7 @@ name = "conversation"
 command = "/usr/local/bin/flare-conversation"
 inherit_env_prefixes = ["CONVERSATION_"]
 # The Cell key set verifies the Staff context Admin Gateway forwards (every admin read fails
-# closed without it), the flare-social-bridge service context of PurgeConversationHistory, and
+# closed without it), the flare-im-bridge service context of PurgeConversationHistory, and
 # the x-flare-ctx of the read service, which with FLARE_REQUIRE_SIGNED_READ_CTX refuses
 # unsigned reads.
 inherit_env = [

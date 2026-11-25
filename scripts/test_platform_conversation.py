@@ -207,7 +207,7 @@ port = {conversation_port}
             if args.via_social:
                 env.update(SOCIAL_POSTGRES_URL=social_url, SOCIAL_REGISTRY_MODE='static',
                            SOCIAL_JWT_SECRET=secrets.token_urlsafe(48), FLARE_INTERNAL_CTX_SIGNING_KEY=private,
-                           FLARE_SOCIAL_GATEWAY_ADDRESS=f'127.0.0.1:{social_gateway_port}',
+                           FLARE_IM_GATEWAY_ADDRESS=f'127.0.0.1:{social_gateway_port}',
                            FLARE_PLATFORM_CORE_API_URL=f'http://127.0.0.1:{core_gateway_port}')
                 materials.extend([social_url, env['SOCIAL_JWT_SECRET']])
             def start(name):

@@ -339,7 +339,7 @@ async fn purge_deletes_only_history_before_the_boundary() {
     let (conversation, other_conversation) = ("single-ab", "single-ac");
     sqlx::query(
         "INSERT INTO conversations (tenant_id, conversation_id, attributes) \
-         VALUES ($1, $2, '{\"flare.social.friendship_epoch\": \"1\"}')",
+         VALUES ($1, $2, '{\"flare.im.friendship_epoch\": \"1\"}')",
     )
     .bind(tenant)
     .bind(conversation)

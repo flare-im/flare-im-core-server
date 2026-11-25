@@ -183,7 +183,7 @@ pub async fn initialize(
     ));
 
     // 10. 构建 gRPC 处理器
-    // PurgeConversationHistory 逐 RPC 验 flare-social-bridge 的签名；没配公钥时该 RPC fail closed。
+    // PurgeConversationHistory 逐 RPC 验 flare-im-bridge 的签名；没配公钥时该 RPC fail closed。
     let purge_verifier = match std::env::var("FLARE_INTERNAL_CTX_PUBLIC_KEY") {
         Ok(material) => Some(
             SignedContextVerifier::from_public_key(&material).map_err(|_| {

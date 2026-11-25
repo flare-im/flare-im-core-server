@@ -25,7 +25,7 @@ signed service context's (`x-flare-ctx`). The answer is `{accepted, current_vers
 
 - Only a registered publisher may publish, and only under its namespaces:
   `FLARE_TENANT_NOTICE_PUBLISHERS` on flare-capability, `service=prefix[,prefix|*]` entries
-  separated by `;`, for example `flare-social-bridge=social.,*` (namespace `social.`, may
+  separated by `;`, for example `flare-im-bridge=social.,*` (namespace `social.`, may
   address `*`). Empty accepts no publisher; Core's own catalog notices are unaffected.
 - Publishing is one Redis Lua script: it compares the version with the last one kept at
   `<channel>:last:<tenant>:<topic>` and, only when newer, stores it and publishes to the notice

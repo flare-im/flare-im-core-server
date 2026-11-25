@@ -508,7 +508,7 @@ mod tests {
         let service = signer(GATEWAY_KEY, kid::GATEWAY)
             .sign(&SignedContextIdentity::new(
                 SignedActorType::Service,
-                "flare-social-bridge",
+                "flare-im-bridge",
                 "tenant-a",
                 "req-2",
             ))

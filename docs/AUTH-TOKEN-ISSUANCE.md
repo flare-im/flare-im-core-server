@@ -14,7 +14,7 @@ client with inconsistent behaviour.
 | Shape | Issues / refreshes | Validates | How the client gets a token |
 |---|---|---|---|
 | core only | `flare-api-gateway` exposes `POST /api/v1/auth/tokens` and `POST /api/v1/auth/tokens/refresh`; the lifecycle lives in `flare-server-core::auth::issuer`, the gateway only routes | gateways in `core_jwt` mode | **SDK-managed**: set `auth.tokenEndpoint`, call `login(userId)` without a token; the SDK fetches and refreshes before expiry |
-| flare-social | `flare-user` login returns `im_connect_token`; refresh via `flare-user` | gateways trust the social issuer or use `http_hook` | **App-managed**: the social SDK passes the token to `login`, calls `update_access_token` after refresh (already the case) |
+| flare-im | `flare-user` login returns `im_connect_token`; refresh via `flare-user` | gateways trust the social issuer or use `http_hook` | **App-managed**: the social SDK passes the token to `login`, calls `update_access_token` after refresh (already the case) |
 | custom business backend | the backend signs (holds the secret or calls the gateway issue API with an app credential) | `core_jwt` trusted issuer or `http_hook` | **App-managed**: same as above |
 
 Clients never touch a signing secret. `sdk.generate_core_token` is removed from every binding.
@@ -55,7 +55,7 @@ Per `GATEWAY_SPEC.md` the gateway owns no token lifecycle: issue/refresh/revoke 
 
 Unit tests for issue/refresh/rotation/grace/revocation in server-core; gateway route and handler tests;
 SDK login-without-token and refresh scheduling tests; production check on 118.107.9.221 (gateway image
-rebuilt with `AUTH_DEV_ISSUE=true`, web and iOS simulator log in with a user id only); flare-social e2e regression.
+rebuilt with `AUTH_DEV_ISSUE=true`, web and iOS simulator log in with a user id only); flare-im e2e regression.
 
 ## 6. Token validation: core-standalone / third-party / hybrid
 

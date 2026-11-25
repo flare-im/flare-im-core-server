@@ -4,7 +4,7 @@
 
 use chrono::{Offset, TimeZone, Utc};
 use chrono_tz::Tz;
-use flare_notify_rules::{
+use flare_im_notify_rules::{
     AlertClass as RulesAlertClass, ConversationKind, Decision, MinuteOfWeek, MultiDevicePolicy,
     PreviewMode, QuietHours, UserPrefs,
 };

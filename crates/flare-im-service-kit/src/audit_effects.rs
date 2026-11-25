@@ -1,4 +1,4 @@
-//! Management effect events (v4 R3-2), the Core twin of `flare-social-common::audit`.
+//! Management effect events (v4 R3-2), the Core twin of `flare-im-common::audit`.
 //!
 //! The gateway admin partition publishes `flare.audit.request.v1` / `flare.audit.result.v1`
 //! around every dispatch; the service that performed a management write publishes one

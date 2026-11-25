@@ -745,7 +745,7 @@ impl MessageIngestHandler {
             .and_then(|verified| verified.claims())
             .is_some_and(|claims| {
                 claims.actor_type == SignedActorType::Service
-                    && (claims.actor_id == "flare-social-bridge"
+                    && (claims.actor_id == "flare-im-bridge"
                         || flare_im_service_kit::platform_send::is_platform_system_sender(claims))
             });
         // A platform card post was verified as exactly this message; keep it to restore after the

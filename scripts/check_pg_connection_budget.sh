@@ -14,7 +14,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BASE_CONFIG="$ROOT/config/base.toml"
 COMPOSE="$ROOT/release/docker-compose.infra.yml"
 
-# flare-social 七个服务各自的池，不在本仓库声明，按实测取整预留。
+# flare-im 七个服务各自的池，不在本仓库声明，按实测取整预留。
 BUSINESS_STACK_RESERVE=${BUSINESS_STACK_RESERVE:-60}
 
 fail() { echo "✗ $*" >&2; exit 1; }

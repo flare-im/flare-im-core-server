@@ -14,7 +14,7 @@
 | 形态 | 谁签发/刷新 | 谁校验 | 客户端拿 token 的方式 |
 |---|---|---|---|
 | **只用 core** | `flare-api-gateway` 暴露 `/api/v1/auth/tokens`（签发）与 `/api/v1/auth/tokens/refresh`（刷新），生命周期实现在 `flare-server-core::auth::issuer`，网关只做路由 | 各网关 `core_jwt` 模式 | **SDK 托管**：配置 `auth.tokenEndpoint`，`login(userId)` 不传 token，SDK 自己去网关取并到期前刷新 |
-| **flare-social** | `flare-user` 登录返回 `im_connect_token`（`local_generate`），刷新走 `flare-user` 的 refresh；或 `hook` 模式由业务系统签 | 网关信任 social issuer，或 `http_hook` 回调 social | **应用托管**：social SDK 已把 `im_connect_token` 作为显式 token 传给 core `login`，刷新后调 `update_access_token`（现状已如此，本次只验证不改） |
+| **flare-im** | `flare-user` 登录返回 `im_connect_token`（`local_generate`），刷新走 `flare-user` 的 refresh；或 `hook` 模式由业务系统签 | 网关信任 social issuer，或 `http_hook` 回调 social | **应用托管**：social SDK 已把 `im_connect_token` 作为显式 token 传给 core `login`，刷新后调 `update_access_token`（现状已如此，本次只验证不改） |
 | **自建业务** | 业务后端自己签（持有密钥或调网关签发接口，用 app 凭据） | `core_jwt`（trusted issuer）或 `http_hook` | **应用托管**：同上，业务 App 调自家登录接口拿 token，传给 `login(userId, token)`；监听 `TOKEN_EXPIRED` 后刷新并 `update_access_token` |
 
 客户端只有两条路：**SDK 托管**（core-only）与**应用托管**（social / 自建）。两条路都不接触签名密钥。
@@ -79,7 +79,7 @@
 - core SDK：`login` 无 token 走网关的单测（mock HTTP）；刷新调度单测；契约 codegen-check。
 - 生产 118.107.9.221：网关镜像重建部署（`FLARE_API_GATEWAY_AUTH_DEV_ISSUE=true`），web 只输用户 ID 登录成功；
   iOS 模拟器同样只输用户 ID 登录。
-- social：flare-social e2e 里登录→IM 连接路径不变（回归）。
+- social：flare-im e2e 里登录→IM 连接路径不变（回归）。
 
 ## 6. Token 验证（Validation）：core 独立 / 三方接入 / 二者混合
 
@@ -94,7 +94,7 @@
 | **三方 hook 验证（纯委托）** | `AUTH_MODE=http_hook` + `AUTH_HOOK_URL` | 每枚 token 都 POST 给业务 hook 验证，业务方拥有整套 token 流程。 |
 | **混合（core 本地 + 三方兜底）** | `AUTH_MODE=core_jwt` + `AUTH_HOOK_URL` | `ChainedTokenValidator` 分层：先本地（core JWT + 受信 issuer，认得的零网络开销），本地不认的（三方 opaque token）才回落到 hook 询问业务方。**一套部署既能 core 独立验证，又能适配三方 token 验证。** |
 
-`flare-social` 现走「受信 issuer」（`flare-user` 用共享密钥签 JWT，core 本地按 issuer+secret 验），
+`flare-im` 现走「受信 issuer」（`flare-user` 用共享密钥签 JWT，core 本地按 issuer+secret 验），
 无网络开销；若业务方改用 opaque token 或要服务端强控（撤销/轮换），换用**验证 hook**（混合形态）即可，客户端契约不变。
 
 ### 6.2 验证 hook 契约

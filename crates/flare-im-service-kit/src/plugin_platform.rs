@@ -522,7 +522,7 @@ mod tests {
         other.actor_type = SignedActorType::Service;
         assert!(!is_plugin_state_publisher(&other));
         let mut other = publisher.clone();
-        other.actor_id = "flare-social-bridge".into();
+        other.actor_id = "flare-im-bridge".into();
         assert!(!is_plugin_state_publisher(&other));
         let mut other = publisher.clone();
         other.roles.push("admin".into());

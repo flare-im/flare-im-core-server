@@ -15,7 +15,7 @@ use std::collections::BTreeSet;
 use flare_im_contracts::domain::push_policy::{
     conversation_collapse_key, device_digest_collapse_key,
 };
-use flare_notify_rules::{
+use flare_im_notify_rules::{
     ConversationPrefs, DecideInput, Decision, DigestAlert, DueAction, SlotAction, Tier, UserPrefs,
     decide,
 };
@@ -44,7 +44,7 @@ pub(super) struct GatedRecipient {
     /// 已收敛成只含本人的载荷。
     pub(super) push_payload: Vec<u8>,
     pub(super) alert_class: AlertClass,
-    pub(super) mentioned: flare_notify_rules::Mentioned,
+    pub(super) mentioned: flare_im_notify_rules::Mentioned,
     pub(super) preference: NotifyPreference,
     /// 按几条消息进闸门：平时是 1，会话波次的一批是这一批里还没推给他的条数。
     pub(super) times: u32,

@@ -151,9 +151,9 @@ where
     }
 }
 
-const GROUP_NOTICE_EVENT_ID: &str = "flare.social.event_id";
-const GROUP_NOTICE_EVENT_TYPE: &str = "flare.social.event_type";
-const GROUP_NOTICE_AUDIENCE: &str = "flare.social.recipient_user_ids";
+const GROUP_NOTICE_EVENT_ID: &str = "flare.im.event_id";
+const GROUP_NOTICE_EVENT_TYPE: &str = "flare.im.event_type";
+const GROUP_NOTICE_AUDIENCE: &str = "flare.im.recipient_user_ids";
 
 fn group_notice_channel(message: &flare_proto::Message) -> Option<&str> {
     use flare_proto::common::{ConversationType, message_content::Content};

@@ -30,7 +30,7 @@ pub const DEFAULT_IDEMPOTENCY_RESULT_TTL_SECS: u64 = 3_600;
 /// 首发已被接受而结果没回到上游时，上游用同一个 `client_msg_id` 重投，靠这里折叠成同一条消息；
 /// 重投落在去重窗口之外就会生成第二条。最长的上游是 Social outbox：同一行最多投递 12 次，按其
 /// 退避、租约与投递超时算最坏跨度约 2391 s（假定没有积压；Core 停机期间大量行同时到期时会更长），
-/// flare-social `outbox_dispatcher` 的门禁按本下限校验它。配置低于下限时启动告警。
+/// flare-im `outbox_dispatcher` 的门禁按本下限校验它。配置低于下限时启动告警。
 pub const MIN_IDEMPOTENCY_RESULT_TTL_SECS: u64 = 2_700;
 
 // MIG-06 构建门禁：默认去重窗口不短于下限；占位 TTL 只管一次处理，不能拿来充当去重窗口。
@@ -170,7 +170,7 @@ impl IngestIdempotencyStore for RedisIngestIdempotencyStore {
 mod tests {
     use super::*;
 
-    /// MIG-06：下限是与 flare-social outbox 门禁共用的承诺值，改它要两边一起改。默认值不低于
+    /// MIG-06：下限是与 flare-im outbox 门禁共用的承诺值，改它要两边一起改。默认值不低于
     /// 下限、占位 TTL 低于下限由模块级常量断言在普通构建时就检查。
     #[test]
     fn default_result_ttl_covers_the_longest_upstream_redelivery_span() {

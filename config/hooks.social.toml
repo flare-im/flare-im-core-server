@@ -1,11 +1,11 @@
-# flare-social 业务 Hook 模式：发信前 Social 权限门禁。
+# flare-im 业务 Hook 模式：发信前 Social 权限门禁。
 #
 # 激活方式：
 #   ./scripts/start_server_social.sh
 # 或：
 #   FLARE_HOOKS_PROFILE=social ./scripts/start_server.sh
 #
-# 前置条件：flare-social-hook 已启动并在 Consul 注册为 flare-social-hook
+# 前置条件：flare-im-hook 已启动并在 Consul 注册为 flare-im-hook
 #   ../flare-im-server/scripts/start_social.sh
 
 [[pre_send]]
@@ -25,10 +25,10 @@ require_success = true
 
 [pre_send.transport]
 type = "grpc"
-endpoint = "discovery://flare-social-hook"
+endpoint = "discovery://flare-im-hook"
 
 [pre_send.metadata]
-plugin = "flare-social-hook"
+plugin = "flare-im-hook"
 hook_operation = "flare.hook.v1.pre_send"
 policy = "social_message_permission"
 deny_reason_code = "SOCIAL_PRESEND_DENIED"

@@ -629,7 +629,7 @@ where
     {
         let (_, claims) = self.verified_identity(&request)?;
         if claims.actor_type != SignedActorType::Service
-            || claims.actor_id != "flare-social-bridge"
+            || claims.actor_id != "flare-im-bridge"
             || claims.roles.as_slice() != ["identity.revoke"]
             || claims.permission.is_some()
         {
@@ -1559,7 +1559,7 @@ mod admin_branch_tests {
                 "another-service",
                 vec!["identity.revoke".into()],
             ),
-            (SignedActorType::Service, "flare-social-bridge", vec![]),
+            (SignedActorType::Service, "flare-im-bridge", vec![]),
         ] {
             assert!(
                 online
@@ -1578,7 +1578,7 @@ mod admin_branch_tests {
         let result = online
             .handle_revoke_identity_sessions(call(
                 SignedActorType::Service,
-                "flare-social-bridge",
+                "flare-im-bridge",
                 vec!["identity.revoke".into()],
                 "tenant-b",
                 input.clone(),
@@ -1597,7 +1597,7 @@ mod admin_branch_tests {
             online
                 .handle_revoke_identity_sessions(call(
                     SignedActorType::Service,
-                    "flare-social-bridge",
+                    "flare-im-bridge",
                     vec!["identity.revoke".into()],
                     "tenant-a",
                     malformed
@@ -2181,7 +2181,7 @@ mod admin_branch_tests {
         let revoke = |tenant: &str, session_ids: Vec<String>| {
             let identity = SignedContextIdentity::new(
                 SignedActorType::Service,
-                "flare-social-bridge",
+                "flare-im-bridge",
                 tenant,
                 "owned-revocation",
             )

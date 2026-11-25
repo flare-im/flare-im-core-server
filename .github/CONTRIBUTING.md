@@ -26,7 +26,7 @@ Flare IM 是多仓库项目，改动前先确认该去哪个仓库：
 | `flare-im-core-sdk` | 客户端核心（Rust） |
 | `flare-im-core-client-sdk` | 七端 SDK 与示例应用 |
 | `flare-im-design` | 跨端 UI Kit |
-| `flare-social` | 社交业务层 |
+| `flare-im` | 社交业务层 |
 | `flare-sdk-plugin` | 插件 SDK（能力插件的契约、schema 与模板） |
 | `flare-plugin` | 插件宿主指南 |
 | `official` | 官网与对外文档 |

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 启动 flare-im-core（业务中立：不注册 flare-social 等业务 Hook）
+# 启动 flare-im-core（业务中立：不注册 flare-im 等业务 Hook）
 #
 # 用法与 start_server.sh 相同，例如：
 #   ./scripts/start_server_core.sh

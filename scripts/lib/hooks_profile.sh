@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Hook 配置档激活：core（无业务 Hook）| social（flare-social PreSend）
+# Hook 配置档激活：core（无业务 Hook）| social（flare-im PreSend）
 #
 # 用法（由 start_server*.sh 调用）：
 #   flare_im_activate_hooks_profile core  /path/to/flare-im-core
@@ -9,7 +9,7 @@ flare_im_hooks_profile_usage() {
     cat <<'EOF'
 Hook 配置档:
   core    — 业务中立，不注册 PreSend/PostSend 等 Hook
-  social  — 启用 flare-social PreSend（需 flare-social-hook 在 Consul 可达）
+  social  — 启用 flare-im PreSend（需 flare-im-hook 在 Consul 可达）
 
 示例:
   ./scripts/start_server_core.sh single

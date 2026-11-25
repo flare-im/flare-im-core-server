@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 启动 flare-im-core（启用 flare-social PreSend Hook）
+# 启动 flare-im-core（启用 flare-im PreSend Hook）
 #
 # 用法与 start_server.sh 相同，例如：
 #   ./scripts/start_server_social.sh
@@ -7,10 +7,10 @@
 #
 # Hook 配置：config/hooks.social.toml
 #
-# 前置：需另启 Social 栈（至少 flare-social-hook）：
+# 前置：需另启 Social 栈（至少 flare-im-hook）：
 #   cd ../flare-im-server && ./scripts/start_social.sh
 #
-# 可选：本脚本启动前检查 Consul 中 flare-social-hook
+# 可选：本脚本启动前检查 Consul 中 flare-im-hook
 #   START_SOCIAL_HOOK_CHECK=0 ./scripts/start_server_social.sh  # 跳过检查
 
 set -euo pipefail
@@ -28,9 +28,9 @@ if [ "${START_SOCIAL_HOOK_CHECK:-1}" != "0" ]; then
         if ! curl -sf "${consul_url}/v1/status/leader" >/dev/null 2>&1; then
             echo -e "${YELLOW}⚠ Consul 未就绪 (${consul_url})；Social Hook 发现可能失败${NC}" >&2
         else
-            svc_json=$(curl -sf "${consul_url}/v1/catalog/service/flare-social-hook" 2>/dev/null || true)
+            svc_json=$(curl -sf "${consul_url}/v1/catalog/service/flare-im-hook" 2>/dev/null || true)
             if [ -z "$svc_json" ] || [ "$svc_json" = "[]" ] || [ "$svc_json" = "null" ]; then
-                echo -e "${YELLOW}⚠ 未在 Consul 发现 flare-social-hook${NC}" >&2
+                echo -e "${YELLOW}⚠ 未在 Consul 发现 flare-im-hook${NC}" >&2
                 echo -e "${YELLOW}  请先启动: cd ../flare-im-server && ./scripts/start_social.sh${NC}" >&2
                 echo -e "${YELLOW}  或跳过检查: START_SOCIAL_HOOK_CHECK=0 $0 $*${NC}" >&2
             fi

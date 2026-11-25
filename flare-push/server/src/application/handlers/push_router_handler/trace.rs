@@ -11,7 +11,7 @@ use std::collections::BTreeSet;
 
 use flare_im_contracts::push_trace::{PushTraceEntry, TraceStage, trace_key};
 use flare_im_service_kit::push_trace::PushTraceRecorder;
-use flare_notify_rules::{DecideInput, Decision, SlotAction};
+use flare_im_notify_rules::{DecideInput, Decision, SlotAction};
 
 use super::*;
 use crate::application::notify_gate::Admission;
@@ -390,11 +390,11 @@ impl PushRouterHandler {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use flare_notify_rules::{ConversationPrefs, Mentioned, QuietHours, UserPrefs};
+    use flare_im_notify_rules::{ConversationPrefs, Mentioned, QuietHours, UserPrefs};
 
     fn input() -> DecideInput {
         DecideInput {
-            class: flare_notify_rules::AlertClass::Normal,
+            class: flare_im_notify_rules::AlertClass::Normal,
             mentioned: Mentioned::No,
             ..DecideInput::default()
         }
@@ -436,7 +436,7 @@ mod tests {
                 }),
                 ..UserPrefs::default()
             },
-            local_time: flare_notify_rules::MinuteOfWeek::new(2, 23 * 60),
+            local_time: flare_im_notify_rules::MinuteOfWeek::new(2, 23 * 60),
             ..input()
         };
         assert_eq!(decision_reason(Decision::Quiet, &night), "quiet_hours");
@@ -445,7 +445,7 @@ mod tests {
             decision_reason(
                 Decision::Delay {
                     delay_ms: 15_000,
-                    then: flare_notify_rules::Tier::Normal
+                    then: flare_im_notify_rules::Tier::Normal
                 },
                 &input()
             ),
@@ -489,7 +489,7 @@ mod tests {
         assert_eq!(
             admission_label(&admission(
                 SlotAction::Quiet { count: 3 },
-                Some(flare_notify_rules::DigestAlert {
+                Some(flare_im_notify_rules::DigestAlert {
                     conversations: 3,
                     messages: 9
                 }),

@@ -310,7 +310,7 @@ async fn transport_failures_drop_the_cached_static_channel_but_server_statuses_d
         &authority, &status
     ));
     assert!(!invalidate_static_channel_on_transport_failure(
-        "discovery://flare-social-hook",
+        "discovery://flare-im-hook",
         &status
     ));
 

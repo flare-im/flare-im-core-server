@@ -1,9 +1,9 @@
 # Social 域 Hook 集成示例：单聊 + 群聊发信前业务门禁
 #
 # 复制为 config/hooks.toml 片段，或与 hooks.example.toml 合并。
-# Message Ingest 在 PreSend 阶段经 gRPC 调用 flare-social-hook，部署 Hook 排在调用链最后。
-# flare-social-hook 只实现 flare.hook.v1.pre_send；写后联动由 Social Domain Event
-# -> flare-social-im-bridge -> Conversation/Orchestrator gRPC 完成。
+# Message Ingest 在 PreSend 阶段经 gRPC 调用 flare-im-hook，部署 Hook 排在调用链最后。
+# flare-im-hook 只实现 flare.hook.v1.pre_send；写后联动由 Social Domain Event
+# -> flare-im-core-bridge -> Conversation/Orchestrator gRPC 完成。
 
 [[pre_send]]
 name = "social-policy-pre-send"
@@ -22,12 +22,12 @@ require_success = true
 
 [pre_send.transport]
 type = "grpc"
-# 经注册中心发现 flare-social-hook（与 social.toml 中 register_social_service 一致）
+# 经注册中心发现 flare-im-hook（与 social.toml 中 register_social_service 一致）
 # 本地无 registry 时可改回 http://127.0.0.1:50210
-endpoint = "discovery://flare-social-hook"
+endpoint = "discovery://flare-im-hook"
 
 [pre_send.metadata]
-plugin = "flare-social-hook"
+plugin = "flare-im-hook"
 hook_operation = "flare.hook.v1.pre_send"
 policy = "social_message_permission"
 deny_reason_code = "SOCIAL_PRESEND_DENIED"

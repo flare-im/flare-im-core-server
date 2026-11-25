@@ -797,7 +797,7 @@ impl ConversationRepository for RedisConversationRepository {
                 let evidence = serde_json::json!({
                     "event":flare_im_service_kit::audit_effects::EFFECT_EVENT,
                     "request_id":request_id,"at_ms":chrono::Utc::now().timestamp_millis(),
-                    "scope":tenant,"source":"signaling-online","actor_id":"flare-social-bridge",
+                    "scope":tenant,"source":"signaling-online","actor_id":"flare-im-bridge",
                     "actor_type":"service","credential_id":format!("internal-key:{signing_key_id}"),"permission":null,"aggregate":"online_connection",
                     "aggregate_id":record.connection_id,"action":"retire","outcome":"committed",
                 })

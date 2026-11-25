@@ -12,7 +12,7 @@ use flare_grpc_proto::conversation::BatchGetUserNotificationSettingsRequest;
 use flare_grpc_proto::conversation::conversation_internal_read_service_client::ConversationInternalReadServiceClient;
 use flare_im_contracts::Ctx;
 use flare_im_contracts::service_names::{CONVERSATION, get_service_name};
-use flare_notify_rules::UserPrefs;
+use flare_im_notify_rules::UserPrefs;
 use flare_server_core::error::{ErrorCode, FlareError};
 use tokio::sync::Mutex;
 use tonic::transport::Channel;
@@ -180,7 +180,7 @@ impl UserNotifySettingsRepository for CachedUserNotifySettings {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use flare_notify_rules::{MultiDevicePolicy, PreviewMode};
+    use flare_im_notify_rules::{MultiDevicePolicy, PreviewMode};
     use std::sync::Mutex as StdMutex;
 
     #[derive(Default)]

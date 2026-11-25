@@ -1153,7 +1153,7 @@ impl Gateway {
         self.signer
             .sign(&SignedContextIdentity::new(
                 SignedActorType::Service,
-                "flare-social-bridge",
+                "flare-im-bridge",
                 tenant,
                 "req-service-1",
             ))

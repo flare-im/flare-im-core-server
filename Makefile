@@ -19,7 +19,7 @@ help:
 	@echo "  clean           cargo clean"
 	@echo "  start-core      Start full stack, single gateway, no business hooks"
 	@echo "  start-core-fast Start core stack without cargo build (FLARE_SKIP_BUILD=1)"
-	@echo "  start-social    Start full stack, single gateway, flare-social hook"
+	@echo "  start-social    Start full stack, single gateway, flare-im hook"
 	@echo "  stop            Stop all services"
 	@echo "  run-<service>   Start service (see list below)"
 	@echo ""

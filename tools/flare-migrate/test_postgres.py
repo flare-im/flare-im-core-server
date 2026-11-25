@@ -37,14 +37,14 @@ SOCIAL_TABLES = (
     "flare_moments_audience", "flare_moments_settings", "flare_moments_visibility_rules",
     "flare_my_group_settings", "flare_referral_stats", "flare_refresh_tokens",
     "flare_relation_contact_codes", "flare_reports",
-    "flare_role_bundle", "flare_sensitive_hits", "flare_sensitive_words", "flare_social_outbox",
-    "flare_social_outbox_aggregate_seq", "flare_tenant_client_policy", "flare_tenant_counters", "flare_tenants",
+    "flare_role_bundle", "flare_sensitive_hits", "flare_sensitive_words", "flare_im_outbox",
+    "flare_im_outbox_aggregate_seq", "flare_tenant_client_policy", "flare_tenant_counters", "flare_tenants",
     "flare_user_credentials", "flare_user_groups", "flare_user_login_keys", "flare_user_privacy",
     "flare_user_profiles", "flare_user_referrals", "flare_users",
     "flare_verification_codes", "social_notification_policy",
 )
 # The Social schema's only BIGSERIAL keys; their sequences are separate pg_dump objects.
-SOCIAL_SERIAL_KEYS = {"flare_group_directory_member_events": "id", "flare_social_outbox": "outbox_id"}
+SOCIAL_SERIAL_KEYS = {"flare_group_directory_member_events": "id", "flare_im_outbox": "outbox_id"}
 
 
 def social_legacy_sql():
@@ -376,7 +376,7 @@ class PostgresMigrationTests(unittest.TestCase):
                     self.run_tool(db, admission=source_review)
             with self.connect(mixed) as db:
                 self.assertEqual(db.query(absent), "t")
-                self.assertEqual(db.query("SELECT count(*) FROM flare_social_outbox;"), "1")
+                self.assertEqual(db.query("SELECT count(*) FROM flare_im_outbox;"), "1")
                 listed = ",".join(f"'{name}'" for name in SOCIAL_TABLES)
                 owned = db.query(f"""SELECT s.relname FROM pg_depend d
                   JOIN pg_class s ON s.oid=d.objid AND s.relkind='S'
@@ -384,7 +384,7 @@ class PostgresMigrationTests(unittest.TestCase):
                   WHERE d.classid='pg_class'::regclass AND d.refclassid='pg_class'::regclass
                     AND d.deptype IN ('a','i') AND t.relnamespace='public'::regnamespace
                     AND t.relname IN ({listed}) ORDER BY 1;""").split()
-            self.assertEqual(owned, ["flare_group_directory_member_events_id_seq", "flare_social_outbox_outbox_id_seq"])
+            self.assertEqual(owned, ["flare_group_directory_member_events_id_seq", "flare_im_outbox_outbox_id_seq"])
             # Excluding only the listed tables still dumps their serial sequences: refused.
             self.restore_without(mixed, naive, SOCIAL_TABLES)
             with self.connect(naive) as db:

@@ -10,7 +10,7 @@
 #
 # Hook 配置档（推荐专用脚本）：
 #   ./scripts/start_server_core.sh    — config/hooks.core.toml，不注册业务 Hook
-#   ./scripts/start_server_social.sh  — config/hooks.social.toml，需 flare-social-hook
+#   ./scripts/start_server_social.sh  — config/hooks.social.toml，需 flare-im-hook
 #   FLARE_HOOKS_PROFILE=core|social ./scripts/start_server.sh ...
 
 set -e
@@ -79,7 +79,7 @@ cleanup_launchctl_dev_labels
 echo -e "${GREEN}   ✓ 清理完成${NC}"
 echo ""
 
-# Hook 配置档（可选）：core=无业务 Hook，social=flare-social PreSend
+# Hook 配置档（可选）：core=无业务 Hook，social=flare-im PreSend
 if [ -n "${FLARE_HOOKS_PROFILE:-}" ]; then
     # shellcheck source=lib/hooks_profile.sh
     source "$SCRIPT_DIR/lib/hooks_profile.sh"

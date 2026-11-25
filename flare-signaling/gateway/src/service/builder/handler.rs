@@ -209,7 +209,7 @@ mod tests {
     fn social_token() -> String {
         let header = URL_SAFE_NO_PAD.encode(br#"{"alg":"EdDSA","typ":"JWT"}"#);
         let claims = URL_SAFE_NO_PAD
-            .encode(br#"{"sub":"social-user","iss":"flare-social","exp":4102444800}"#);
+            .encode(br#"{"sub":"social-user","iss":"flare-im","exp":4102444800}"#);
         let signature = URL_SAFE_NO_PAD.encode([7u8; 64]);
         format!("{header}.{claims}.{signature}")
     }

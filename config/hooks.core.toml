@@ -5,6 +5,6 @@
 # 或：
 #   FLARE_HOOKS_PROFILE=core ./scripts/start_server.sh
 #
-# 没有部署 Hook；发信链路不依赖 flare-social-hook。平台和应用的 Hook 在 hook_configs 里。
+# 没有部署 Hook；发信链路不依赖 flare-im-hook。平台和应用的 Hook 在 hook_configs 里。
 
 # （ intentionally empty — HookConfig 各列表默认为 [] ）

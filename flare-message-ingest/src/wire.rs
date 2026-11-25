@@ -582,7 +582,7 @@ mod hook_startup_tests {
         config.pre_send.push(HookDefinition {
             name: "social-policy-pre-send".into(),
             transport: HookTransportConfig::Grpc {
-                endpoint: "discovery://flare-social-hook".into(),
+                endpoint: "discovery://flare-im-hook".into(),
                 metadata: HashMap::new(),
             },
             ..Default::default()
@@ -612,7 +612,7 @@ mod hook_startup_tests {
         let discovery_hook = HookDefinition {
             name: "phase-hook".into(),
             transport: HookTransportConfig::Grpc {
-                endpoint: "discovery://flare-social-hook".into(),
+                endpoint: "discovery://flare-im-hook".into(),
                 metadata: HashMap::new(),
             },
             ..Default::default()

@@ -215,10 +215,10 @@ mod tests {
     #[async_trait]
     impl PreSendHook for StampEpoch {
         async fn handle(&self, _ctx: &Ctx, draft: &mut MessageDraft) -> PreSendDecision {
-            draft.metadata.remove("flare.social.friendship_epoch");
+            draft.metadata.remove("flare.im.friendship_epoch");
             draft
                 .metadata
-                .insert("flare.social.friendship_epoch".into(), "3".into());
+                .insert("flare.im.friendship_epoch".into(), "3".into());
             PreSendDecision::Continue
         }
     }
@@ -236,7 +236,7 @@ mod tests {
         let mut message = Message::default();
         message
             .attributes
-            .insert("flare.social.friendship_epoch".into(), "999".into());
+            .insert("flare.im.friendship_epoch".into(), "999".into());
         message
             .attributes
             .insert("client_tag".into(), "kept".into());
@@ -247,7 +247,7 @@ mod tests {
         assert_eq!(
             out.message
                 .attributes
-                .get("flare.social.friendship_epoch")
+                .get("flare.im.friendship_epoch")
                 .map(String::as_str),
             Some("3")
         );
@@ -273,7 +273,7 @@ mod tests {
         let mut message = Message::default();
         message
             .attributes
-            .insert("flare.social.friendship_epoch".into(), "2".into());
+            .insert("flare.im.friendship_epoch".into(), "2".into());
         let out = service
             .execute_pre_send(&ctx, message, false)
             .await
@@ -281,7 +281,7 @@ mod tests {
         assert_eq!(
             out.message
                 .attributes
-                .get("flare.social.friendship_epoch")
+                .get("flare.im.friendship_epoch")
                 .map(String::as_str),
             Some("2")
         );

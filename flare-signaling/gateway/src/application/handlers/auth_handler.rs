@@ -342,7 +342,7 @@ impl Authenticator for AuthHandler {
                     .metadata
                     .get("identity_issuer")
                     .map(String::as_str)
-                    == Some("flare-social-identity")
+                    == Some("flare-im-identity")
                 {
                     let sid = principal
                         .metadata
@@ -1115,7 +1115,7 @@ mod tests {
         let mut authenticated = principal(Some("device-a"));
         authenticated
             .metadata
-            .insert("identity_issuer".into(), "flare-social-identity".into());
+            .insert("identity_issuer".into(), "flare-im-identity".into());
         authenticated
             .metadata
             .insert("identity_session_id".into(), sid.clone());
@@ -1154,7 +1154,7 @@ mod tests {
         let mut malformed = principal(Some("device-a"));
         malformed
             .metadata
-            .insert("identity_issuer".into(), "flare-social-identity".into());
+            .insert("identity_issuer".into(), "flare-im-identity".into());
         assert!(
             !handler(
                 Some(malformed),

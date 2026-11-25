@@ -536,7 +536,7 @@ async fn check_identity_commands(pool: Arc<PgPool>, client: Arc<redis::Client>, 
     assert_eq!(evidence.len(), 2);
     for row in evidence {
         assert_eq!(row["actor_type"], "service");
-        assert_eq!(row["actor_id"], "flare-social-bridge");
+        assert_eq!(row["actor_id"], "flare-im-bridge");
         assert_eq!(row["credential_id"], "internal-key:owned-key");
         assert_eq!(row["request_id"], "fixed-identity-intent", "owned-key");
     }

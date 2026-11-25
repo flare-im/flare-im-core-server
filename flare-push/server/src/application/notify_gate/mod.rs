@@ -14,7 +14,7 @@ use std::sync::Arc;
 
 use flare_im_contracts::Ctx;
 use flare_im_service_kit::metrics::PushServerMetrics;
-use flare_notify_rules::{
+use flare_im_notify_rules::{
     ConversationKind, ConversationTag, Decision, DigestAlert, DueAction, Gate, GateInput,
     PreviewMode, ReadOutcome, SlotAction, Tier, UserPrefs, fail_open,
 };

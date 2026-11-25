@@ -10,7 +10,7 @@
 
 use std::collections::HashMap;
 
-use flare_notify_rules::{
+use flare_im_notify_rules::{
     ConversationKind, DEVICE_STATE_LEN, DeviceState, Gate, GateConfig, PreviewMode, SLOT_STATE_LEN,
     SlotState, Tier,
 };
@@ -436,7 +436,7 @@ impl NotifyPolicy {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use flare_notify_rules::{ConversationTag, GateInput, SlotAction};
+    use flare_im_notify_rules::{ConversationTag, GateInput, SlotAction};
 
     #[test]
     fn records_round_trip_with_their_side_data() {

@@ -6,7 +6,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 use std::sync::Arc;
 
-use flare_notify_rules::{ConversationKind, Gate, GateConfig, SlotAction, Tier};
+use flare_im_notify_rules::{ConversationKind, Gate, GateConfig, SlotAction, Tier};
 use serde_json::{Map, Value, json};
 
 use super::*;

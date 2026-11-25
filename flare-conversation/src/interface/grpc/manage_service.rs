@@ -40,14 +40,14 @@ use super::shared::{
     proto_summary,
 };
 
-/// `PurgeConversationHistory` 唯一允许的调用方：flare-social-bridge 的服务身份。
-pub(crate) const PURGE_HISTORY_SERVICE_ACTOR: &str = "flare-social-bridge";
+/// `PurgeConversationHistory` 唯一允许的调用方：flare-im-bridge 的服务身份。
+pub(crate) const PURGE_HISTORY_SERVICE_ACTOR: &str = "flare-im-bridge";
 
-/// `PurgeConversationHistory` 的逐 RPC 验签（REL-03 会话管理验签第 ② 步，flare-social
+/// `PurgeConversationHistory` 的逐 RPC 验签（REL-03 会话管理验签第 ② 步，flare-im
 /// `docs/REL03-friendship-epoch.md`）。
 ///
 /// 清除历史是破坏性操作，只有 Social 调用：验 `x-flare-ctx`（与 message ingest 同一把
-/// `FLARE_INTERNAL_CTX_PUBLIC_KEY`），只收服务身份 `flare-social-bridge`，租户只取签名里的，调用方
+/// `FLARE_INTERNAL_CTX_PUBLIC_KEY`），只收服务身份 `flare-im-bridge`，租户只取签名里的，调用方
 /// 元数据里的 `x-tenant-id`、`x-user-id` 不起作用。没配验证器时 fail closed（UNAVAILABLE）。
 /// 以前这个 RPC 与其余会话管理 RPC 一样只看调用方自报的元数据，只靠网络隔离保护。其余 RPC
 /// 仍按元数据（第 ③④ 步）。

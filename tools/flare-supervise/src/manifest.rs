@@ -1338,7 +1338,7 @@ environment_bindings = { SDK_SIGNING_KEY = "CELL_KEY" }
                 .any(|name| name == "FLARE_INTERNAL_CTX_PUBLIC_KEY")
         );
         assert!(!manifest.env_allowed(push_proxy, "FLARE_INTERNAL_CTX_PRIVATE_KEY"));
-        // PurgeConversationHistory verifies the flare-social-bridge service context
+        // PurgeConversationHistory verifies the flare-im-bridge service context
         // (REL-03 step 2) and fails closed without the key.
         let conversation = manifest
             .services

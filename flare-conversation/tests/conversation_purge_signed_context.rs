@@ -1,5 +1,5 @@
-//! `PurgeConversationHistory` 逐 RPC 验签（REL-03 会话管理验签第 ② 步，flare-social
-//! `docs/REL03-friendship-epoch.md`）：经 gRPC 处理器的入口，只收 `flare-social-bridge` 的服务签名，
+//! `PurgeConversationHistory` 逐 RPC 验签（REL-03 会话管理验签第 ② 步，flare-im
+//! `docs/REL03-friendship-epoch.md`）：经 gRPC 处理器的入口，只收 `flare-im-bridge` 的服务签名，
 //! 租户取签名里的，没配验证器时 fail closed。
 //!
 //! 请求故意带非法参数（负的 `before_epoch`）：通过验签的请求在领域层被参数校验拒绝
@@ -122,7 +122,7 @@ fn request(token: Option<&str>) -> tonic::Request<PurgeConversationHistoryReques
     let mut request = tonic::Request::new(PurgeConversationHistoryRequest {
         conversation_id: "single:alice:bob".into(),
         before_ms: 1,
-        epoch_attribute: "flare.social.friendship_epoch".into(),
+        epoch_attribute: "flare.im.friendship_epoch".into(),
         before_epoch: -1,
     });
     let metadata = request.metadata_mut();
@@ -162,7 +162,7 @@ async fn a_wrong_key_or_identity_is_rejected() {
     let forged = sign(
         &other_signer,
         SignedActorType::Service,
-        "flare-social-bridge",
+        "flare-im-bridge",
     );
     assert_eq!(
         purge(&handler, Some(&forged)).await,
@@ -181,11 +181,11 @@ async fn a_wrong_key_or_identity_is_rejected() {
     }
 }
 
-/// `flare-social-bridge` 的服务签名通过验签，请求到达领域层（这里被参数校验拒绝）。
+/// `flare-im-bridge` 的服务签名通过验签，请求到达领域层（这里被参数校验拒绝）。
 #[tokio::test]
 async fn the_bridge_signature_reaches_the_command() {
     let (signer, verifier) = keys(61);
-    let bridge = sign(&signer, SignedActorType::Service, "flare-social-bridge");
+    let bridge = sign(&signer, SignedActorType::Service, "flare-im-bridge");
     assert_eq!(
         purge(&handler(Some(verifier)), Some(&bridge)).await,
         tonic::Code::InvalidArgument
@@ -196,7 +196,7 @@ async fn the_bridge_signature_reaches_the_command() {
 #[tokio::test]
 async fn without_a_verifier_purge_fails_closed() {
     let (signer, _) = keys(61);
-    let bridge = sign(&signer, SignedActorType::Service, "flare-social-bridge");
+    let bridge = sign(&signer, SignedActorType::Service, "flare-im-bridge");
     assert_eq!(
         purge(&handler(None), Some(&bridge)).await,
         tonic::Code::Unavailable

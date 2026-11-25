@@ -10,7 +10,7 @@
 use std::collections::HashMap;
 
 use flare_im_contracts::Ctx;
-use flare_notify_rules::UserPrefs;
+use flare_im_notify_rules::UserPrefs;
 use flare_server_core::error::FlareError;
 
 use crate::domain::model::{

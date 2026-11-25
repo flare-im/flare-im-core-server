@@ -549,7 +549,7 @@ impl WaveStore for MemoryGateStore {
 mod tests {
     use super::*;
     use crate::domain::model::SlotMessage;
-    use flare_notify_rules::{ConversationKind, Tier};
+    use flare_im_notify_rules::{ConversationKind, Tier};
 
     fn key(conversation: &str) -> GateSlotKey {
         GateSlotKey::new(GateDevice::new("t1", "u1", "phone"), conversation)

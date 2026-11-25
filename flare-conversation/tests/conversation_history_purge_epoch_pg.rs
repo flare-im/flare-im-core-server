@@ -27,7 +27,7 @@ use sqlx::PgPool;
 use sqlx::postgres::PgPoolOptions;
 
 const ENV_DATABASE_URL: &str = "FLARE_CONVERSATION_TEST_DATABASE_URL";
-const EPOCH: &str = "flare.social.friendship_epoch";
+const EPOCH: &str = "flare.im.friendship_epoch";
 /// 时间回落边界（服务端毫秒）。
 const BOUNDARY: i64 = 1_790_000_000_000;
 

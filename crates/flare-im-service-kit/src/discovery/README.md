@@ -244,7 +244,7 @@ WS=60051、QUIC=60052、内部 gRPC=60060，与 GatewayRouter 静态目标相符
 只设置 `GRPC_PORT` 会移动 WS/QUIC。Gateway→Online 仅在显式 static 模式且服务名
 确为 `flare-signaling-online` 时回退同 Cell `127.0.0.1:50061`。
 
-跨容器 Social Hook 不能保留 `discovery://flare-social-hook`：Message Ingest 在显式
+跨容器 Social Hook 不能保留 `discovery://flare-im-hook`：Message Ingest 在显式
 static 模式下会在 Redis/MQ 初始化前拒绝启用的非 `http(s)://` gRPC Hook 配置。
 部署配置须显式指向 Social 私网 `http://social:50210` 并保留强制 PreSend 失败关闭。
 启动校验只确认显式 URI 形式，不验证 DNS 是否解析到私网或远端是否就绪；这些仍需部署与 E2E smoke 检查。

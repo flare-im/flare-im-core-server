@@ -121,7 +121,7 @@ if [ -f ../flare-im-server/deploy/docker-compose.social.yml ]; then
     -f deploy/docker-compose.stack.yml \
     -f ../flare-im-server/deploy/docker-compose.social.yml
 else
-  echo "  · 跳过业务栈组合（同级仓 flare-social 不在）"
+  echo "  · 跳过业务栈组合（同级仓 flare-im 不在）"
 fi
 
 # ── 3. 缺签名密钥必须失败，而且是因为它 ─────────────────────────────────────

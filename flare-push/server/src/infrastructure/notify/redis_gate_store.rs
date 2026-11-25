@@ -647,7 +647,7 @@ mod tests {
     use super::*;
     use crate::domain::model::BadgeBase;
     use crate::domain::model::BadgeChange;
-    use flare_notify_rules::{ConversationKind, Tier};
+    use flare_im_notify_rules::{ConversationKind, Tier};
 
     #[test]
     fn delayed_records_read_back_or_are_dropped() {

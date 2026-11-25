@@ -90,7 +90,7 @@ services:
     command:
       - postgres
       - -c
-      # base.toml 里六个连接池的上限合计 176，业务栈（flare-social 七个服务）再要 ~50。
+      # base.toml 里六个连接池的上限合计 176，业务栈（flare-im 七个服务）再要 ~50。
       # 这里原本写死 80，一套完整部署跑起来必然耗尽连接：表现是发消息静默失败，
       # 而服务端日志里 seq 已经分配完、outcome=ok，极具误导性。
       # scripts/check_pg_connection_budget.sh 会守住这个不等式。

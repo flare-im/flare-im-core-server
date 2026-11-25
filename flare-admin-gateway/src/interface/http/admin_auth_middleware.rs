@@ -461,7 +461,7 @@ mod tests {
         let service = gateway
             .sign(&SignedContextIdentity::new(
                 SignedActorType::Service,
-                "flare-social-bridge",
+                "flare-im-bridge",
                 "tenant-a",
                 "req-2",
             ))

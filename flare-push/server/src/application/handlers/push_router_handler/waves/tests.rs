@@ -1,6 +1,6 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use flare_notify_rules::{Gate, GateConfig};
+use flare_im_notify_rules::{Gate, GateConfig};
 use flare_proto::common::{
     ConversationType, Mention, MentionType, MessageContent, message_content::Content,
 };

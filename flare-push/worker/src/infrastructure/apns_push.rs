@@ -44,7 +44,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use flare_im_contracts::domain::push_binding::APNS_ENVIRONMENT_SANDBOX;
 use flare_im_contracts::{Ctx, DevicePushToken};
-use flare_notify_rules::text::Lang;
+use flare_im_notify_rules::text::Lang;
 use flare_proto::PushTaskEnvelope;
 use flare_server_core::error::{ErrorCode, FlareError};
 use prometheus::{IntCounterVec, Opts};

@@ -4,7 +4,7 @@
 # Docker 对**未声明**的 --build-arg 只会给一句警告然后**静默忽略**。
 # 于是照着文档传了 CARGO_BUILD_JOBS 却毫无作用——构建仍按核数满并发跑，
 # 在小内存构建机上照样 OOM，而你以为自己已经限流了。
-# flare-social 的 Dockerfile 就缺这两个参数，实测传了等于没传。
+# flare-im 的 Dockerfile 就缺这两个参数，实测传了等于没传。
 set -uo pipefail
 
 # 扫描根默认是多仓工作区（本仓的上一级），CI 也按同级布局拉取依赖仓。
@@ -19,7 +19,7 @@ root = pathlib.Path(sys.argv[1])
 REQUIRED = ["APT_MIRROR", "CARGO_REGISTRY_MIRROR", "CARGO_BUILD_JOBS"]
 # 这些不是 build-arg 而是必须设的 ENV：跨架构模拟构建时 rustc 会在 QEMU 下
 # 栈溢出段错误，而"开发机构建 + 推镜像"是 40G 生产机唯一可行的交付方式。
-# flare-social 的 Dockerfile 早就有 RUST_MIN_STACK，flare-im-core 的一直缺，
+# flare-im 的 Dockerfile 早就有 RUST_MIN_STACK，flare-im-core 的一直缺，
 # 直到真的去跨架构构建才暴露——这种跨文件漂移正是门禁该管的。
 REQUIRED_ENV = ["RUST_MIN_STACK"]
 
