@@ -116,6 +116,15 @@ Details in [GOVERNANCE.md](.github/GOVERNANCE.md).
 
 Core Server is the authority for membership, visibility, final ordering and durable ACKs. Business systems keep their own rules and results and reach the core only through four entry points; none of them takes part in seq assignment, archiving or ACK decisions.
 
+Every change to Core Server keeps to these rules:
+
+- **No business vocabulary.** No friend, group role, business reason code, business event type or business service name lives in core source, DDL or wire contracts. Trusted callers come from deployment configuration.
+- **Business reaches the core only through generic contracts.** Typed gRPC writes (conversations, participants, system messages, notifications, `im.realtime.deliver`, media), hooks that run synchronously in ingest, roster policy and capability plugins. Business systems never read core storage, and the core never reads theirs.
+- **One write path.** Send → Ingest → WAL → main stream → fan-out → storage, projection, push. Hooks and capabilities never take part in seq, archiving or ACK.
+- **Core contract names carry `core`.** Shared crates are named `flare-im-core-*`, so business contracts can use `flare-im-*` without colliding.
+
+The business server built on these contracts is described in the [Flare IM Server target boundary](https://github.com/flare-im/flare-im-server/blob/dev/docs/TARGET-BOUNDARY.md).
+
 ## Service topology
 
 ```mermaid

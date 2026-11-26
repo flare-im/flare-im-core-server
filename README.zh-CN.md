@@ -125,6 +125,15 @@ Flare 可自托管、协议与核心可审计。边界详情见 [GOVERNANCE.md](
 
 Core Server 是成员资格、可见性、最终顺序与持久 ACK 的权威。业务系统自持规则与结果，只经四个入口接入，不参与 seq 分配、归档与 ACK 判定。
 
+对 Core Server 的每一处改动都遵守下面的规则：
+
+- **不含业务名词**：好友、群角色、业务原因码、业务事件类型、业务服务名都不进核心源码、DDL 与 wire 契约；受信调用方来自部署配置。
+- **业务只经通用契约接入**：typed gRPC 写入（会话、参与者、系统消息、通知、`im.realtime.deliver`、媒体）、在 Ingest 同步执行的 Hook、成员策略与能力插件。业务系统不读核心存储，核心也不读业务存储。
+- **只有一条写路径**：Send → Ingest → WAL → 主消息流 → 扇出 → 存储 / 投影 / 推送；Hook 与能力不参与 seq、归档与 ACK。
+- **核心契约名带 `core`**：共享 crate 命名为 `flare-im-core-*`，业务契约用 `flare-im-*` 时不撞名。
+
+建在这些契约上的业务服务端见 [Flare IM Server 目标边界](https://github.com/flare-im/flare-im-server/blob/dev/docs/TARGET-BOUNDARY.md)。
+
 ## 服务拓扑
 
 ```mermaid
