@@ -8,7 +8,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use flare_im_service_kit::metrics::StorageWriterMetrics;
+use flare_im_core_service_kit::metrics::StorageWriterMetrics;
 use tokio::sync::oneshot;
 
 use crate::domain::repository::IdempotencyLedgerRetention;

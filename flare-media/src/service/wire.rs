@@ -28,13 +28,13 @@ use tracing::warn;
 pub struct ApplicationContext {
     pub audit_delivery: Option<(
         Arc<sqlx::PgPool>,
-        flare_im_service_kit::audit_effects::AuditEffects,
+        flare_im_core_service_kit::audit_effects::AuditEffects,
     )>,
     pub handler: MediaGrpcHandler,
     /// 供后台任务（过期上传会话回收）使用的领域服务。
     pub media_service: Arc<MediaService>,
     /// 用量预聚合（对象字节存量变化与出口）；启动层把它的 flush 循环挂进运行时。
-    pub usage: flare_im_usage::UsageReporter,
+    pub usage: flare_im_core_usage::UsageReporter,
 }
 
 /// 构建应用上下文
@@ -47,13 +47,13 @@ pub struct ApplicationContext {
 /// # 返回
 /// * `ApplicationContext` - 构建好的应用上下文
 pub async fn initialize(
-    app_config: &flare_im_service_kit::config::FlareAppConfig,
+    app_config: &flare_im_core_service_kit::config::FlareAppConfig,
 ) -> Result<ApplicationContext> {
     // 1. 加载配置
     let media_config = MediaConfig::from_app_config(app_config);
 
     // 2. 构建媒体服务
-    let usage = flare_im_usage::UsageReporter::from_env("flare-media").await?;
+    let usage = flare_im_core_usage::UsageReporter::from_env("flare-media").await?;
     let reader =
         crate::infrastructure::message_attachment_reader::Reader::from_environment().await?;
     let (media_service, audit_pool) = build_media_service(&media_config, usage.recorder(), reader)
@@ -71,7 +71,7 @@ pub async fn initialize(
 
     let audit_delivery = if let Some(pool) = audit_pool {
         let publisher =
-            flare_im_service_kit::audit_effects::AuditEffects::from_env("flare-media").await?;
+            flare_im_core_service_kit::audit_effects::AuditEffects::from_env("flare-media").await?;
         if publisher.enabled() {
             Some((pool, publisher))
         } else {
@@ -94,7 +94,7 @@ pub async fn initialize(
 /// 构建媒体服务
 async fn build_media_service(
     config: &MediaConfig,
-    usage: flare_im_usage::UsageRecorder,
+    usage: flare_im_core_usage::UsageRecorder,
     reader: Arc<dyn crate::domain::repository::MessageAttachmentReader>,
 ) -> Result<(Arc<MediaService>, Option<Arc<sqlx::PgPool>>)> {
     let object_repo: Option<ObjectRepositoryRef> =

@@ -1,5 +1,5 @@
-use flare_im_service_kit::config::FlareAppConfig;
-use flare_im_service_kit::tenant_runtime::TenantAccessPolicy;
+use flare_im_core_service_kit::config::FlareAppConfig;
+use flare_im_core_service_kit::tenant_runtime::TenantAccessPolicy;
 use flare_server_core::error::Result;
 use std::env;
 

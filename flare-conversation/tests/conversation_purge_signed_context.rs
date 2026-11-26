@@ -1,5 +1,5 @@
-//! `PurgeConversationHistory` 逐 RPC 验签（REL-03 会话管理验签第 ② 步，flare-im
-//! `docs/REL03-friendship-epoch.md`）：经 gRPC 处理器的入口，只收 `flare-im-bridge` 的服务签名，
+//! `PurgeConversationHistory` 逐 RPC 验签（REL-03 会话管理验签第 ② 步）：经 gRPC 处理器的入口，
+//! 只收部署信任的业务集成服务签名（`FLARE_TRUSTED_INTEGRATION_PRINCIPALS`），
 //! 租户取签名里的，没配验证器时 fail closed。
 //!
 //! 请求故意带非法参数（负的 `before_epoch`）：通过验签的请求在领域层被参数校验拒绝
@@ -23,6 +23,7 @@ use flare_conversation::infrastructure::persistence::redis_presence::RedisPresen
 use flare_conversation::interface::grpc::ConversationGrpcHandler;
 use flare_grpc_proto::conversation::PurgeConversationHistoryRequest;
 use flare_grpc_proto::conversation::conversation_manage_service_server::ConversationManageService;
+use flare_im_core_service_kit::trusted_integration::TrustedIntegrationPrincipals;
 use flare_server_core::{
     SignedActorType, SignedContextIdentity, SignedContextSigner, SignedContextVerifier,
 };
@@ -91,7 +92,11 @@ fn handler(verifier: Option<SignedContextVerifier>) -> ConversationGrpcHandler {
         Arc::new(ConversationQueryHandler::new(repo, None, domain)),
     )
     .with_purge_verifier(verifier)
+    .with_trusted_integrations(TrustedIntegrationPrincipals::parse(INTEGRATION))
 }
+
+/// 测试部署信任的业务集成服务身份。
+const INTEGRATION: &str = "business-integration";
 
 fn keys(seed: u8) -> (SignedContextSigner, SignedContextVerifier) {
     let key = SigningKey::from_bytes(&[seed; 32]);
@@ -159,7 +164,7 @@ async fn a_wrong_key_or_identity_is_rejected() {
     let (other_signer, _) = keys(62);
     let handler = handler(Some(verifier));
 
-    let forged = sign(&other_signer, SignedActorType::Service, "flare-im-bridge");
+    let forged = sign(&other_signer, SignedActorType::Service, INTEGRATION);
     assert_eq!(
         purge(&handler, Some(&forged)).await,
         tonic::Code::Unauthenticated
@@ -177,11 +182,11 @@ async fn a_wrong_key_or_identity_is_rejected() {
     }
 }
 
-/// `flare-im-bridge` 的服务签名通过验签，请求到达领域层（这里被参数校验拒绝）。
+/// 受信业务集成服务的签名通过验签，请求到达领域层（这里被参数校验拒绝）。
 #[tokio::test]
 async fn the_bridge_signature_reaches_the_command() {
     let (signer, verifier) = keys(61);
-    let bridge = sign(&signer, SignedActorType::Service, "flare-im-bridge");
+    let bridge = sign(&signer, SignedActorType::Service, INTEGRATION);
     assert_eq!(
         purge(&handler(Some(verifier)), Some(&bridge)).await,
         tonic::Code::InvalidArgument
@@ -192,7 +197,7 @@ async fn the_bridge_signature_reaches_the_command() {
 #[tokio::test]
 async fn without_a_verifier_purge_fails_closed() {
     let (signer, _) = keys(61);
-    let bridge = sign(&signer, SignedActorType::Service, "flare-im-bridge");
+    let bridge = sign(&signer, SignedActorType::Service, INTEGRATION);
     assert_eq!(
         purge(&handler(None), Some(&bridge)).await,
         tonic::Code::Unavailable

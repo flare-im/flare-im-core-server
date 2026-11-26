@@ -22,7 +22,7 @@ pub const ADMIN_TOKEN_METHODS: [&str; 5] = [
     "QueryMessageWriteLedger",
 ];
 
-/// 套上读接口身份边界的 `StorageReaderService`（见 `flare_im_service_kit::signed_read`）：
+/// 套上读接口身份边界的 `StorageReaderService`（见 `flare_im_core_service_kit::signed_read`）：
 /// 消息、窗口、标签、编辑历史、已读、标记、反应、会话事件与会话头这些读，带签名的
 /// `x-flare-ctx` 决定租户与身份，与签名不一致的裸 `x-tenant-id`、`x-user-id` 一律拒绝；只有
 /// 边界不要求签名时，未签名调用才按元数据取身份。管理检索（[`ADMIN_TOKEN_METHODS`]）只认转发的

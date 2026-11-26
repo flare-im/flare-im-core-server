@@ -5,7 +5,7 @@
 
 use std::sync::Arc;
 
-use flare_im_contracts::domain::tenant::{TenantQuota, TenantStatus};
+use flare_im_core_contracts::domain::tenant::{TenantQuota, TenantStatus};
 use flare_server_core::auth::credential_snapshot::CredentialSnapshot;
 use flare_server_core::auth::credential_verifier::{
     CredentialReadError, LocalCredential, LocalCredentialReader,
@@ -32,7 +32,7 @@ impl LocalCredentialReader for PostgresTenantProjectionRepository {
         &self,
         key_id: &str,
     ) -> std::result::Result<Option<LocalCredential>, CredentialReadError> {
-        flare_im_service_kit::credential_projection::PostgresCredentialReader::new(
+        flare_im_core_service_kit::credential_projection::PostgresCredentialReader::new(
             (*self.pool).clone(),
         )
         .lookup(key_id)
@@ -44,7 +44,7 @@ impl LocalCredentialReader for PostgresTenantProjectionRepository {
 impl TenantProjectionRepository for PostgresTenantProjectionRepository {
     async fn replace_plugins(
         &self,
-        projection: &flare_im_capability_core::plugin::runtime::PluginProjection,
+        projection: &flare_im_core_capability_core::plugin::runtime::PluginProjection,
     ) -> Result<TenantProjectionOutcome> {
         super::postgres_plugin_authorization::PostgresPluginAuthorization::new(self.pool.clone())
             .replace(projection)
@@ -292,7 +292,7 @@ mod credential_postgres_tests {
         let handler = crate::interface::grpc::TenantProjectionGrpcServer::new(
             repo.clone(),
             Some(
-                flare_im_service_kit::control_auth::PlatformAssertionVerifier::from_public_key(
+                flare_im_core_service_kit::control_auth::PlatformAssertionVerifier::from_public_key(
                     &public,
                 )
                 .unwrap(),
@@ -656,7 +656,7 @@ mod credential_postgres_tests {
             .unwrap();
         assert_eq!(marker, db, "never mutate installed DB");
         let readonly =
-            flare_im_service_kit::credential_projection::connect_readonly_credential_pool_with(
+            flare_im_core_service_kit::credential_projection::connect_readonly_credential_pool_with(
                 options.clone(),
             )
             .await
@@ -688,7 +688,7 @@ mod credential_postgres_tests {
             .await
             .unwrap();
         assert!(matches!(
-            flare_im_service_kit::credential_projection::connect_readonly_credential_pool_with(
+            flare_im_core_service_kit::credential_projection::connect_readonly_credential_pool_with(
                 options
             )
             .await,

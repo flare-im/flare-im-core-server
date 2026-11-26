@@ -14,9 +14,9 @@ use std::time::Duration;
 
 use ed25519_dalek::SigningKey;
 use ed25519_dalek::pkcs8::{EncodePrivateKey, EncodePublicKey};
-use flare_im_contracts::Ctx;
-use flare_im_seq::SeqFloorProvider;
-use flare_im_service_kit::sequence_floor::StorageSeqFloorProvider;
+use flare_im_core_contracts::Ctx;
+use flare_im_core_seq::SeqFloorProvider;
+use flare_im_core_service_kit::sequence_floor::StorageSeqFloorProvider;
 use flare_server_core::error::ErrorCode;
 use flare_server_core::grpc::middleware::signed_context::verify_signed_context_metadata;
 use flare_server_core::{

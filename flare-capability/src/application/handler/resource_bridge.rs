@@ -20,7 +20,7 @@ use crate::domain::repository::resource_access::{
     ResourceAccessBackend, ResourceActor, ResourceCallBudget,
 };
 use crate::domain::repository::service_dispatch::{PluginServiceDispatch, ServiceDispatchError};
-use flare_im_capability_core::plugin::{
+use flare_im_core_capability_core::plugin::{
     authorization::PluginInvocation,
     invocation::{PluginCallVerifier, PluginRuntimeVerifier},
     resource::{
@@ -127,7 +127,7 @@ impl ResourceBridge {
         tokio::time::timeout(Duration::from_secs(2), async {
             if operation == HostCapability::ServiceDispatch.id() {
                 if bytes.len()
-                    > flare_im_capability_core::plugin::service::MAX_SERVICE_REQUEST_BYTES
+                    > flare_im_core_capability_core::plugin::service::MAX_SERVICE_REQUEST_BYTES
                 {
                     return Err(denied());
                 }
@@ -145,7 +145,7 @@ impl ResourceBridge {
                             CapabilityError::System("plugin service outcome unknown".into())
                         }
                         ServiceDispatchError::FeatureDisabled => CapabilityError::plugin(
-                            flare_im_service_kit::plugin_platform::PLUGIN_FEATURE_DISABLED,
+                            flare_im_core_service_kit::plugin_platform::PLUGIN_FEATURE_DISABLED,
                             "service feature is not open for this application",
                         ),
                         ServiceDispatchError::Refused => denied(),
@@ -350,7 +350,7 @@ impl ResourceBridge {
         }
         projected
             .authorize_event(
-                flare_im_capability_core::plugin::event::MESSAGE_CREATED,
+                flare_im_core_capability_core::plugin::event::MESSAGE_CREATED,
                 &claims.operation,
                 &claims.actor_id,
                 now,
@@ -404,7 +404,7 @@ impl ResourceBridge {
         }
         current
             .authorize_event(
-                flare_im_capability_core::plugin::event::MESSAGE_CREATED,
+                flare_im_core_capability_core::plugin::event::MESSAGE_CREATED,
                 &claims.operation,
                 &claims.actor_id,
                 fresh_now,
@@ -619,7 +619,7 @@ impl ResourceBridge {
 
     async fn user_writer(
         &self,
-        claims: flare_im_capability_core::plugin::invocation::PluginCallClaims,
+        claims: flare_im_core_capability_core::plugin::invocation::PluginCallClaims,
         capability: HostCapability,
         request_id: &str,
         now: i64,
@@ -670,7 +670,7 @@ impl ResourceBridge {
 
     async fn staff_writer(
         &self,
-        claims: flare_im_capability_core::plugin::invocation::PluginStaffCallClaims,
+        claims: flare_im_core_capability_core::plugin::invocation::PluginStaffCallClaims,
         capability: HostCapability,
         request_id: &str,
         now: i64,
@@ -716,7 +716,7 @@ impl ResourceBridge {
 
     async fn runtime_writer(
         &self,
-        claims: flare_im_capability_core::plugin::invocation::PluginRuntimeClaims,
+        claims: flare_im_core_capability_core::plugin::invocation::PluginRuntimeClaims,
         operation: &str,
         request_id: &str,
         now: i64,

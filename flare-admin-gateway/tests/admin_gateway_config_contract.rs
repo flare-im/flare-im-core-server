@@ -10,7 +10,7 @@ use std::collections::HashMap;
 
 use axum::http::StatusCode;
 use common::*;
-use flare_im_service_kit::gateway::{GatewayEnvScope, GatewaySettings};
+use flare_im_core_service_kit::gateway::{GatewayEnvScope, GatewaySettings};
 use serde_json::json;
 
 const HOOK_URL: &str = "https://admin-auth.example.com/validate";

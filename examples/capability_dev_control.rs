@@ -29,9 +29,9 @@ use flare_grpc_proto::capability::DispatchCapabilityRequest;
 use flare_grpc_proto::capability::capability_service_client::CapabilityServiceClient;
 use flare_grpc_proto::control::PluginsProjectionUpsert;
 use flare_grpc_proto::control::tenant_projection_client::TenantProjectionClient;
-use flare_im_capability_core::plugin::PluginManifest;
-use flare_im_capability_core::plugin::authorization::TenantPluginGrant;
-use flare_im_capability_core::plugin::runtime::{
+use flare_im_core_capability_core::plugin::PluginManifest;
+use flare_im_core_capability_core::plugin::authorization::TenantPluginGrant;
+use flare_im_core_capability_core::plugin::runtime::{
     MAX_PROJECTION_LEASE_MS, PluginProjection, ProjectedLifecycle, ProjectedPlugin, digest_bytes,
 };
 use flare_server_core::error::grpc::decode_error_detail;
@@ -43,7 +43,7 @@ use tonic::Request;
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
-/// 平台发给核心的控制断言（见 flare-im-service-kit `control_auth`）：投影 worker 的身份、
+/// 平台发给核心的控制断言（见 flare-im-core-service-kit `control_auth`）：投影 worker 的身份、
 /// 投影受众、`control` 用途，有效期不超过 60 秒。
 const PLATFORM_ISSUER: &str = "flare-platform";
 const PROJECTION_WORKER: &str = "flare-platform-worker";

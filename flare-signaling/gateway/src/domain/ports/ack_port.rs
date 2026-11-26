@@ -4,7 +4,7 @@
 //! [`crate::domain::service::SendAckDomainService::absorb_delivery_acks`]。
 
 use async_trait::async_trait;
-use flare_im_contracts::Ctx;
+use flare_im_core_contracts::Ctx;
 use flare_proto::common::{AckBatch, PushAck, ReadAck};
 use flare_server_core::error::Result;
 

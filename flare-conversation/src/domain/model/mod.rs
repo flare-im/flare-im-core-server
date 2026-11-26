@@ -191,9 +191,6 @@ pub struct RecentUnreadConversation {
     pub unread_count: i32,
 }
 
-// The existing bridge sets this business type when it projects its group into Core.
-pub(crate) const EXTERNAL_GROUP_ROSTER_BUSINESS_TYPE: &str = "social_group";
-
 /// 用户在会话上的偏好设置（读写合一）
 #[derive(Clone, Debug)]
 pub struct ConversationUserSettings {

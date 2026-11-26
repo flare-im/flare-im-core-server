@@ -9,7 +9,8 @@
 //!
 //! **Who operates.** A signed context (`x-flare-ctx`, verified by the service's signed-first
 //! layer) decides: a `User` (or `TenantAdmin`) acts as that user; a `System` actor and the
-//! services in [`TRUSTED_OPERATION_SERVICES`] act as trusted Core/Social services. A context signed
+//! business integration services the deployment trusts (`FLARE_TRUSTED_INTEGRATION_PRINCIPALS`,
+//! see [`TrustedIntegrationPrincipals`]) act as trusted services. A context signed
 //! with Capability's own key (`kid=capability`) may only publish plugin shared state. An unsigned
 //! (legacy metadata) context is at most a user: its `x-actor-type` is never trusted, since any
 //! internal process can send it.
@@ -44,19 +45,20 @@
 //!   are trusted services only. Custom events: attributes naming a user must name the operator.
 //!
 //! **Group roles.** Core's participant rows carry a `roles` column, but nothing keeps it in step
-//! with the group roles Social owns (Social never sends role updates), so Core does not read it to
-//! let an owner or administrator recall another member's message. That decision stays with Social:
-//! it calls Core as its signed service identity, which this policy trusts. `RecallHook` is not
-//! called on the event path for the same reason: it would make every recall wait on an external
-//! hook to answer a question Core can answer itself; Social's group-admin recall comes in as a
-//! trusted service instead.
+//! with group roles owned by the business system (which never sends role updates), so Core does
+//! not read it to let an owner or administrator recall another member's message. That decision
+//! stays with the business system: it calls Core as its signed integration service identity, which
+//! this policy trusts. `RecallHook` is not called on the event path for the same reason: it would
+//! make every recall wait on an external hook to answer a question Core can answer itself; a
+//! business group-admin recall comes in as a trusted service instead.
 //!
 //! Windows are platform constants until a tenant setting exists: Core has no per-tenant recall or
 //! edit window today.
 use std::sync::Arc;
 
-use flare_im_contracts::Ctx;
-use flare_im_service_kit::plugin_platform;
+use flare_im_core_contracts::Ctx;
+use flare_im_core_service_kit::plugin_platform;
+use flare_im_core_service_kit::trusted_integration::TrustedIntegrationPrincipals;
 use flare_proto::common::event::Payload;
 use flare_proto::common::message_content::Content;
 use flare_proto::common::{Event, EventType, Message, MessageContent, MessageStatus};
@@ -73,9 +75,6 @@ use crate::domain::repository::{
 pub const RECALL_WINDOW_MS: i64 = 24 * 3600 * 1000;
 /// How long after sending the sender may edit a message: 24 hours.
 pub const EDIT_WINDOW_MS: i64 = 24 * 3600 * 1000;
-/// Service identities (signed `Service` actors) trusted to operate on any message of their tenant:
-/// the Social IM bridge, through which Social's group administration and moderation act.
-pub const TRUSTED_OPERATION_SERVICES: &[&str] = &["flare-im-bridge"];
 /// The most messages one read receipt may name in `message_ids` (a visible page); all of them are
 /// checked against their stored messages in one batch lookup.
 pub const MAX_RECEIPT_MESSAGE_IDS: usize = 50;
@@ -98,8 +97,7 @@ pub mod reason {
 pub enum Operator {
     /// A user, acting for themselves.
     User(String),
-    /// A trusted Core or Social service (signed `System` actor or a [`TRUSTED_OPERATION_SERVICES`]
-    /// service).
+    /// A trusted service (signed `System` actor or a trusted business integration service).
     Trusted(String),
     /// Capability's plugin shared state publisher: nothing but plugin state.
     StatePublisher,
@@ -109,7 +107,7 @@ pub enum Operator {
 
 impl Operator {
     /// The operator of `ctx` (see the module docs).
-    pub fn of(ctx: &Ctx) -> Self {
+    pub fn of(ctx: &Ctx, trusted: &TrustedIntegrationPrincipals) -> Self {
         if let Some(claims) = ctx
             .get_data::<VerifiedContext>()
             .and_then(VerifiedContext::claims)
@@ -130,9 +128,7 @@ impl Operator {
                 SignedActorType::System if !claims.actor_id.is_empty() => {
                     Self::Trusted(claims.actor_id.clone())
                 }
-                SignedActorType::Service
-                    if TRUSTED_OPERATION_SERVICES.contains(&claims.actor_id.as_str()) =>
-                {
+                SignedActorType::Service if trusted.contains(&claims.actor_id) => {
                     Self::Trusted(claims.actor_id.clone())
                 }
                 _ => Self::None,
@@ -215,6 +211,7 @@ fn bind_user(field: &mut String, operator: &Operator) -> Result<()> {
 pub struct MessageOperationPolicy {
     targets: Option<Arc<dyn MessageTargetRepository>>,
     members: Option<Arc<dyn ConversationMembershipRepository>>,
+    trusted: TrustedIntegrationPrincipals,
     now_ms: fn() -> i64,
 }
 
@@ -231,6 +228,7 @@ impl MessageOperationPolicy {
         Self {
             targets,
             members: None,
+            trusted: TrustedIntegrationPrincipals::default(),
             now_ms: || chrono::Utc::now().timestamp_millis(),
         }
     }
@@ -242,6 +240,12 @@ impl MessageOperationPolicy {
         members: Option<Arc<dyn ConversationMembershipRepository>>,
     ) -> Self {
         self.members = members;
+        self
+    }
+
+    /// The business integration services trusted to operate on any message of their tenant.
+    pub fn with_trusted_integrations(mut self, trusted: TrustedIntegrationPrincipals) -> Self {
+        self.trusted = trusted;
         self
     }
 
@@ -405,7 +409,7 @@ impl MessageOperationPolicy {
     /// Authorize `event` from `ctx` (see the module docs) and return it normalized: user fields
     /// bound to the operator, client-claimed recall permissions cleared.
     pub async fn authorize(&self, ctx: &Ctx, tenant_id: &str, mut event: Event) -> Result<Event> {
-        let operator = Operator::of(ctx);
+        let operator = Operator::of(ctx, &self.trusted);
         let event_type = EventType::try_from(event.r#type).unwrap_or(EventType::Unspecified);
         // Shared state has its own gate (only the signed publisher); nothing else may use the
         // publisher's context, and the publisher may do nothing else.

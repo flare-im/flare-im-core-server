@@ -602,10 +602,10 @@ fn entity_inputs_list_every_card_that_passes_its_entity() {
 
 /// `plugin` running the manifest `raw`, the digests following it.
 pub(crate) fn with_manifest(
-    plugin: &flare_im_capability_core::plugin::runtime::ResolvedPlugin,
+    plugin: &flare_im_core_capability_core::plugin::runtime::ResolvedPlugin,
     raw: &str,
-) -> flare_im_capability_core::plugin::runtime::ResolvedPlugin {
-    use flare_im_capability_core::plugin::runtime::{ResolvedPlugin, digest_bytes};
+) -> flare_im_core_capability_core::plugin::runtime::ResolvedPlugin {
+    use flare_im_core_capability_core::plugin::runtime::{ResolvedPlugin, digest_bytes};
     let digest = digest_bytes(raw.as_bytes());
     let mut grant = plugin.grant.clone();
     grant.manifest_digest = digest.clone();
@@ -624,10 +624,10 @@ pub(crate) fn with_manifest(
 
 /// `plugin` with the application's feature states `features`.
 pub(crate) fn with_features(
-    plugin: &flare_im_capability_core::plugin::runtime::ResolvedPlugin,
+    plugin: &flare_im_core_capability_core::plugin::runtime::ResolvedPlugin,
     features: std::collections::BTreeMap<String, bool>,
-) -> flare_im_capability_core::plugin::runtime::ResolvedPlugin {
-    flare_im_capability_core::plugin::runtime::ResolvedPlugin::new(
+) -> flare_im_core_capability_core::plugin::runtime::ResolvedPlugin {
+    flare_im_core_capability_core::plugin::runtime::ResolvedPlugin::new(
         plugin.grant.clone(),
         std::sync::Arc::new(plugin.manifest().clone()),
         plugin.deployment.clone(),
@@ -641,9 +641,9 @@ pub(crate) fn with_features(
 /// The protocol's example poll, fully approved for `app-a`, served at `authority`.
 pub(crate) fn poll_snapshot(
     authority: String,
-) -> flare_im_capability_core::plugin::runtime::PluginRuntimeSnapshot {
-    use flare_im_capability_core::plugin::authorization::TenantPluginGrant;
-    use flare_im_capability_core::plugin::runtime::*;
+) -> flare_im_core_capability_core::plugin::runtime::PluginRuntimeSnapshot {
+    use flare_im_core_capability_core::plugin::authorization::TenantPluginGrant;
+    use flare_im_core_capability_core::plugin::runtime::*;
     let manifest = PluginManifest::from_json(POLL_MANIFEST.as_bytes()).unwrap();
     let raw = POLL_MANIFEST.to_string();
     let digest = digest_bytes(raw.as_bytes());

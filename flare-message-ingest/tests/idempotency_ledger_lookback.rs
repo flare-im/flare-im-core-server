@@ -13,11 +13,11 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use flare_im_contracts::Ctx;
-use flare_im_hooks::hooks::{HookDispatcher, HookRegistry};
-use flare_im_message_pipeline::MqPushRepository;
-use flare_im_seq::SequenceAllocator;
-use flare_im_service_kit::metrics::MessageOrchestratorMetrics;
+use flare_im_core_contracts::Ctx;
+use flare_im_core_hooks::hooks::{HookDispatcher, HookRegistry};
+use flare_im_core_message_pipeline::MqPushRepository;
+use flare_im_core_seq::SequenceAllocator;
+use flare_im_core_service_kit::metrics::MessageOrchestratorMetrics;
 use flare_message_ingest::application::MessageIngestHandler;
 use flare_message_ingest::application::commands::SendMessageCommand;
 use flare_message_ingest::application::extension::{ExtensionOrchestrator, ExtensionRouting};

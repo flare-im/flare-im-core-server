@@ -8,7 +8,7 @@
 
 use std::sync::Arc;
 
-use flare_im_service_kit::metrics::PushServerMetrics;
+use flare_im_core_service_kit::metrics::PushServerMetrics;
 use flare_server_core::error::FlareError;
 
 use crate::domain::model::{

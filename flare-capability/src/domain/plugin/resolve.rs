@@ -4,9 +4,9 @@
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
-use flare_im_capability_core::plugin::PluginManifest;
-use flare_im_capability_core::plugin::resource::HostCapability;
-use flare_im_capability_core::plugin::runtime::{
+use flare_im_core_capability_core::plugin::PluginManifest;
+use flare_im_core_capability_core::plugin::resource::HostCapability;
+use flare_im_core_capability_core::plugin::runtime::{
     PluginDeployment, PluginProjection, PluginRuntimeSnapshot, ProjectedLifecycle, ProjectedPlugin,
     ResolvedPlugin, configuration_digest,
 };

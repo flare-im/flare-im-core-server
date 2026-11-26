@@ -17,7 +17,7 @@ GREEN='\033[0;32m'; RED='\033[0;31m'; YELLOW='\033[1;33m'; NC='\033[0m'
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 DOC="$ROOT/docs/HOOK-PLUGIN-CONTRACT.md"
-ADAPTER="$ROOT/crates/flare-im-hooks/src/hooks/adapters/grpc.rs"
+ADAPTER="$ROOT/crates/flare-im-core-hooks/src/hooks/adapters/grpc.rs"
 
 for f in "$DOC" "$ADAPTER"; do
   if [ ! -f "$f" ]; then

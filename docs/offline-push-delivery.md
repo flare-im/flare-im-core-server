@@ -796,7 +796,7 @@ than the inline event's id, so router, worker and receipt entries land on one tr
 `push:trace:{tenant}:{user}:{key}` holds the newest 128 entries and `push:trace:idx:{tenant}:{user}`
 the newest 200 keys. Entries hold labels and ids only,
 never message content or tokens. All three processes write through one recorder
-(`flare_im_service_kit::push_trace`): a bounded queue drained by a background pipelined writer,
+(`flare_im_core_service_kit::push_trace`): a bounded queue drained by a background pipelined writer,
 configured in `[services.<service>.trace]`; a full queue or an unreachable Redis drops entries and
 counts them in `flare_push_trace_dropped_total{service}` instead of delaying a push.
 

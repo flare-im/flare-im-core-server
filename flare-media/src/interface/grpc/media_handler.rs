@@ -20,7 +20,7 @@ use flare_grpc_proto::media::{
     UploadFileRequest, UploadFileResponse, UploadMultipartChunkRequest,
     UploadMultipartChunkResponse,
 };
-use flare_im_service_kit::audit_effects::durable::StaffAudit;
+use flare_im_core_service_kit::audit_effects::durable::StaffAudit;
 use flare_server_core::auth::core_admin::permission::{MEDIAS_READ, MEDIAS_WRITE};
 use flare_server_core::context::Ctx;
 use flare_server_core::error::grpc::IntoGrpc;

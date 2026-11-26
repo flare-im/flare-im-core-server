@@ -4,7 +4,7 @@
 //!
 //! Answers are Capability's JSON unchanged. Capability checks scope and permission again.
 use axum::{Json, body::Bytes, extract::Extension, http::HeaderMap};
-use flare_im_service_kit::clients::AdminGrpcClients;
+use flare_im_core_service_kit::clients::AdminGrpcClients;
 use flare_server_core::{
     AuthenticatedPrincipal,
     error::{ErrorBuilder, ErrorCode},

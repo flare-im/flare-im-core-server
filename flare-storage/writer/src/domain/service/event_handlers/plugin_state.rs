@@ -6,7 +6,7 @@
 
 use crate::domain::model::{Event, PluginStatePayload};
 use crate::domain::repository::{ArchiveStoreRepository, EventStreamRepository, PluginStateWrite};
-use flare_im_capability_core::plugin::state::SharedState;
+use flare_im_core_capability_core::plugin::state::SharedState;
 use flare_server_core::error::{ErrorCode, Result, map_infra_error};
 use flare_server_core::flare_err;
 
@@ -60,8 +60,8 @@ mod tests {
     use super::*;
     use crate::domain::model::{EventPayload, EventType};
     use crate::domain::repository::StoredEventMatch;
-    use flare_im_contracts::Ctx;
-    use flare_im_contracts::utils::Context;
+    use flare_im_core_contracts::Ctx;
+    use flare_im_core_contracts::utils::Context;
     use std::sync::{Arc, Mutex};
 
     #[derive(Default)]

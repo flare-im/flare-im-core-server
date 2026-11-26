@@ -12,7 +12,7 @@
 
 use std::collections::BTreeSet;
 
-use flare_im_contracts::domain::push_policy::{
+use flare_im_core_contracts::domain::push_policy::{
     conversation_collapse_key, device_digest_collapse_key,
 };
 use flare_im_notify_rules::{
@@ -32,7 +32,7 @@ use crate::domain::notify_inputs::{
     counts_toward_badge, local_minute_of_week, preview_to_proto, rules_alert_class,
 };
 use crate::domain::repository::BadgeWrite;
-use flare_im_contracts::push_trace::{TraceStage, trace_key};
+use flare_im_core_contracts::push_trace::{TraceStage, trace_key};
 
 /// 尾部刷新、推迟提示与修正任务的优先级，与单聊消息的离线任务相同。
 const GATED_TASK_PRIORITY: i32 = 5;

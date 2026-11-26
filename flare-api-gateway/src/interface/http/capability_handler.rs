@@ -167,7 +167,7 @@ fn user_binding(principal: &AuthenticatedPrincipal) -> Result<(&str, &str), Http
     let tenant = principal
         .tenant_id
         .as_deref()
-        .filter(|t| flare_im_contracts::domain::tenant::is_valid_tenant_id(t))
+        .filter(|t| flare_im_core_contracts::domain::tenant::is_valid_tenant_id(t))
         .ok_or_else(|| {
             HttpApiError::bad_request("TENANT_REQUIRED", "authenticated tenant required")
         })?;
@@ -202,7 +202,7 @@ fn http_code(status: u16) -> ErrorCode {
 /// limit 429. Only what leaves the outcome open (timeout, transport, internal) is 503
 /// `CAPABILITY_OUTCOME_UNKNOWN`, which tells the client to retry with the same command id.
 fn dispatch_error(error: &tonic::Status) -> HttpApiError {
-    use flare_im_service_kit::plugin_platform::{
+    use flare_im_core_service_kit::plugin_platform::{
         CAPABILITY_OUTCOME_UNKNOWN, PLATFORM_DENIAL_CODES,
     };
     if let Some(detail) = flare_server_core::error::grpc::decode_error_detail(error)
@@ -234,7 +234,7 @@ fn dispatch_error(error: &tonic::Status) -> HttpApiError {
 /// sets on every plugin rejection), the command did not run. A refusal of another capability
 /// without a code keeps its `success: false` answer.
 fn plugin_rejected(data: &Value, message: &str) -> Option<HttpApiError> {
-    use flare_im_service_kit::plugin_platform::is_error_code;
+    use flare_im_core_service_kit::plugin_platform::is_error_code;
     let code = data
         .get("errorCode")
         .and_then(Value::as_str)

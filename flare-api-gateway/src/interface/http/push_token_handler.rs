@@ -20,7 +20,7 @@ use flare_grpc_proto::push::{
     DevicePushProvider, InspectDevicePushBindingRequest, RegisterDevicePushTokenRequest,
     RevokeDevicePushBindingRequest,
 };
-use flare_im_service_kit::discovery::{
+use flare_im_core_service_kit::discovery::{
     StaticChannelPolicy, invalidate_static_channel_on_transport_failure, resolve_grpc_channel,
     static_grpc_endpoint,
 };
@@ -268,8 +268,8 @@ fn device_caller(
         .as_deref()
         .map(str::trim)
         .filter(|tenant| !tenant.is_empty())
-        .map(flare_im_contracts::utils::normalize_tenant_id)
-        .filter(|tenant| flare_im_contracts::domain::tenant::is_valid_tenant_id(tenant))
+        .map(flare_im_core_contracts::utils::normalize_tenant_id)
+        .filter(|tenant| flare_im_core_contracts::domain::tenant::is_valid_tenant_id(tenant))
         .ok_or_else(|| forbidden("TENANT_REQUIRED", "a tenant-bound user token is required"))?;
     let user_id = principal.user_id.trim();
     if user_id.is_empty() || principal.has_gateway_admin_scope() {
@@ -557,7 +557,7 @@ pub async fn revoke_push_token(
     let Json(body) = body.map_err(|_| {
         GatewayError::bad_request("INVALID_REQUEST_BODY", "push revocation body rejected")
     })?;
-    if !flare_im_contracts::domain::push_binding::binding_id_valid(&body.revocation_token) {
+    if !flare_im_core_contracts::domain::push_binding::binding_id_valid(&body.revocation_token) {
         return Err(GatewayError::bad_request(
             "INVALID_CAPABILITY",
             "push revocation capability rejected",
@@ -737,7 +737,7 @@ mod tests {
     /// 通道；请求超时按 504 报。以前的懒连接通道有建连上限、没有探活，且永久复用。
     #[tokio::test]
     async fn static_push_proxy_uses_the_static_channel_and_drops_it_after_transport_failure() {
-        use flare_im_service_kit::discovery::is_static_channel_cached;
+        use flare_im_core_service_kit::discovery::is_static_channel_cached;
 
         // 一个刚关掉的回环端口：连上会被拒绝。
         let closed = {

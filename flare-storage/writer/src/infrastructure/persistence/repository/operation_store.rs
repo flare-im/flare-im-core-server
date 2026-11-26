@@ -413,7 +413,7 @@ impl OperationStore {
         let mut extra = row
             .get::<Option<Value>, _>("extra")
             .unwrap_or_else(|| json!({}));
-        let mut states = flare_im_contracts::message::reaction_states_from_extra(&extra);
+        let mut states = flare_im_core_contracts::message::reaction_states_from_extra(&extra);
         if states.iter().any(|state| {
             state.user_id == user_id && state.emoji == emoji && state.event_seq >= event_seq
         }) {

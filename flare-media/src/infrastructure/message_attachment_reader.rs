@@ -5,7 +5,7 @@ use crate::domain::repository::MessageAttachmentReader;
 use flare_grpc_proto::storage::{
     QueryMessagesBySeqRequest, storage_reader_service_client::StorageReaderServiceClient,
 };
-use flare_im_service_kit::ServiceClient;
+use flare_im_core_service_kit::ServiceClient;
 use flare_server_core::{
     context::Context,
     error::{ErrorCode, Result},
@@ -25,23 +25,22 @@ pub struct Reader {
 
 impl Reader {
     pub async fn from_environment() -> Result<Arc<Self>> {
-        use flare_im_contracts::service_names::{STORAGE_READER, get_service_name};
+        use flare_im_core_contracts::service_names::{STORAGE_READER, get_service_name};
         let name = get_service_name(STORAGE_READER);
         let explicit = std::env::var("MEDIA_STORAGE_READER_SERVICE_URL")
             .ok()
             .filter(|s| !s.trim().is_empty());
         let target = if let Some(url) = explicit {
             Target::Static(
-                flare_im_service_kit::discovery::connect_static_channel_lazy(url.trim()).map_err(
-                    |_| {
+                flare_im_core_service_kit::discovery::connect_static_channel_lazy(url.trim())
+                    .map_err(|_| {
                         flare_server_core::flare_err!(
                             ErrorCode::ConfigurationError,
                             "invalid Media Storage Reader endpoint"
                         )
-                    },
-                )?,
+                    })?,
             )
-        } else if let Some(discover) = flare_im_service_kit::discovery::create_discover(&name)
+        } else if let Some(discover) = flare_im_core_service_kit::discovery::create_discover(&name)
             .await
             .map_err(|_| {
                 flare_server_core::flare_err!(
@@ -53,8 +52,10 @@ impl Reader {
             Target::Discovery(name, Box::new(Mutex::new(ServiceClient::new(discover))))
         } else {
             Target::Static(
-                flare_im_service_kit::discovery::connect_static_channel_lazy(
-                    flare_im_service_kit::discovery::default_static_grpc_fallback(STORAGE_READER),
+                flare_im_core_service_kit::discovery::connect_static_channel_lazy(
+                    flare_im_core_service_kit::discovery::default_static_grpc_fallback(
+                        STORAGE_READER,
+                    ),
                 )
                 .map_err(|_| {
                     flare_server_core::flare_err!(
@@ -71,7 +72,7 @@ impl Reader {
             Target::Static(channel) => Ok(channel.clone()),
             Target::Discovery(name, client) => {
                 let mut client = client.lock().await;
-                flare_im_service_kit::discovery::get_discovered_channel_with_timeout(
+                flare_im_core_service_kit::discovery::get_discovered_channel_with_timeout(
                     name,
                     &mut client,
                 )

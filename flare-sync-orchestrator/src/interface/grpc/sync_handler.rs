@@ -1,11 +1,11 @@
 //! gRPC：`ExecuteSync` 与 DATA 信道共用 `flare.common.v1.Sync` / `SyncRes`。
 //!
-//! 仅编排 **IM 域**（会话、消息、事件、成员）；好友/群目录等 Social 数据走 Gateway REST。
+//! 仅编排 **IM 域**（会话、消息、事件、成员）；业务目录数据（联系人、群目录等）走业务网关。
 
 use std::sync::Arc;
 
 use flare_grpc_proto::sync::sync_service_server::SyncService;
-use flare_im_contracts::utils::require_user_id_from_context;
+use flare_im_core_contracts::utils::require_user_id_from_context;
 use flare_proto::common::{Sync, SyncRes};
 use flare_server_core::error::grpc::IntoGrpc;
 use flare_server_core::utils::extract_ctx_from_request_opt;

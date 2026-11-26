@@ -15,8 +15,8 @@ pub use event_builder::{
     build_read_receipt_event, build_recall_event, build_unmark_event, build_unpin_event,
 };
 
-pub use flare_im_message_pipeline::hook::builder::*;
-pub use flare_im_message_pipeline::{
+pub use flare_im_core_message_pipeline::hook::builder::*;
+pub use flare_im_core_message_pipeline::{
     PushEnvelopeBuilder, build_ack_push, build_custom_push, build_notification_push,
     build_system_push,
 };

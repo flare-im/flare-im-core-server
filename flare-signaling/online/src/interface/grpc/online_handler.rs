@@ -10,10 +10,10 @@ use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status};
 
-use flare_im_service_kit::control_auth::{
+use flare_im_core_service_kit::control_auth::{
     PlatformActorKind, PlatformAssertionVerifier, require_platform_assertion,
 };
-use flare_im_service_kit::staff_context::{VerifiedStaff, require_staff, require_staff_any};
+use flare_im_core_service_kit::staff_context::{VerifiedStaff, require_staff, require_staff_any};
 use flare_server_core::auth::core_admin::permission::{TENANT_KICK, USERS_KICK, USERS_READ};
 use flare_server_core::auth::{SignedActorType, SignedContextClaims, SignedContextVerifier};
 use flare_server_core::context::Ctx;
@@ -27,7 +27,8 @@ use crate::application::commands::{
     HeartbeatCommand, LoginCommand, LogoutCommand, ReportDeviceStateCommand,
 };
 use crate::application::queries::GetOnlineStatusQuery;
-use flare_im_service_kit::audit_effects::durable::StaffAudit;
+use flare_im_core_service_kit::audit_effects::durable::StaffAudit;
+use flare_im_core_service_kit::trusted_integration::TrustedIntegrationPrincipals;
 
 use crate::application::handlers::{
     OnlineCommandHandler, OnlinePresenceWatcherHandler, OnlineQueryHandler, OnlineUserHandler,
@@ -53,7 +54,9 @@ where
     identity_verifier: Option<SignedContextVerifier>,
     /// Cell 公钥集，Staff 钉死 `kid=gateway`：admin-gateway 转发的员工上下文。
     staff_verifier: Option<SignedContextVerifier>,
-    tenant_kick_fence: Option<flare_im_service_kit::tenant_kick_fence::TenantKickFence>,
+    tenant_kick_fence: Option<flare_im_core_service_kit::tenant_kick_fence::TenantKickFence>,
+    /// 部署信任的业务集成服务身份：只有它们能吊销身份会话。
+    trusted_integrations: TrustedIntegrationPrincipals,
 }
 
 impl<CR, SR, PP, PW> Clone for OnlineHandler<CR, SR, PP, PW>
@@ -73,6 +76,7 @@ where
             identity_verifier: self.identity_verifier.clone(),
             staff_verifier: self.staff_verifier.clone(),
             tenant_kick_fence: self.tenant_kick_fence.clone(),
+            trusted_integrations: self.trusted_integrations.clone(),
         }
     }
 }
@@ -99,6 +103,7 @@ where
             identity_verifier: None,
             staff_verifier: None,
             tenant_kick_fence: None,
+            trusted_integrations: TrustedIntegrationPrincipals::default(),
         }
     }
 
@@ -109,7 +114,7 @@ where
 
     pub fn with_tenant_kick_fence(
         mut self,
-        fence: Option<flare_im_service_kit::tenant_kick_fence::TenantKickFence>,
+        fence: Option<flare_im_core_service_kit::tenant_kick_fence::TenantKickFence>,
     ) -> Self {
         self.tenant_kick_fence = fence;
         self
@@ -122,6 +127,11 @@ where
 
     pub fn with_staff_verifier(mut self, verifier: Option<SignedContextVerifier>) -> Self {
         self.staff_verifier = verifier;
+        self
+    }
+
+    pub fn with_trusted_integrations(mut self, trusted: TrustedIntegrationPrincipals) -> Self {
+        self.trusted_integrations = trusted;
         self
     }
 
@@ -139,7 +149,9 @@ where
             .and_then(|marker| marker.claims())
             .cloned()
             .ok_or_else(|| Status::unauthenticated("online identity required"))?;
-        if claims.tenant_id != flare_im_contracts::utils::normalize_tenant_id(&claims.tenant_id) {
+        if claims.tenant_id
+            != flare_im_core_contracts::utils::normalize_tenant_id(&claims.tenant_id)
+        {
             return Err(Status::permission_denied("non-canonical online tenant"));
         }
         Ok((ctx, claims))
@@ -629,7 +641,7 @@ where
     {
         let (_, claims) = self.verified_identity(&request)?;
         if claims.actor_type != SignedActorType::Service
-            || claims.actor_id != "flare-im-bridge"
+            || !self.trusted_integrations.contains(&claims.actor_id)
             || claims.roles.as_slice() != ["identity.revoke"]
             || claims.permission.is_some()
         {
@@ -663,6 +675,7 @@ where
                 &input.session_ids,
                 input.cutoff_ms,
                 &claims.request_id,
+                &claims.actor_id,
                 &claims.kid,
             )
             .await
@@ -697,7 +710,7 @@ mod admin_branch_tests {
 
     use ed25519_dalek::SigningKey;
     use ed25519_dalek::pkcs8::{EncodePrivateKey, EncodePublicKey};
-    use flare_im_service_kit::control_auth::{
+    use flare_im_core_service_kit::control_auth::{
         CORE_PROJECTION_AUDIENCE, PLATFORM_ISSUER, PROJECTION_WORKER_SUBJECT, SCHEDULER_SUBJECT,
     };
     use flare_proto::common::{DeviceAppState as ProtoAppState, DeviceAttention as ProtoAttention};
@@ -708,6 +721,9 @@ mod admin_branch_tests {
     use tonic::Code;
 
     use super::*;
+
+    /// 测试部署信任的业务集成服务身份。
+    const INTEGRATION: &str = "business-integration";
     use crate::domain::aggregate::{Connection, ConnectionCreateParams};
     use crate::domain::connection_event_publisher::NoopConnectionEventPublisher;
     use crate::domain::model::OnlineStatusRecord;
@@ -826,6 +842,7 @@ mod admin_branch_tests {
             user: &UserId,
             _: &[String],
             _: i64,
+            _: &str,
             _: &str,
             _: &str,
         ) -> FlareResult<u32> {
@@ -1056,6 +1073,7 @@ mod admin_branch_tests {
         )
         .with_control_verifier(control)
         .with_staff_verifier(staff)
+        .with_trusted_integrations(TrustedIntegrationPrincipals::parse(INTEGRATION))
     }
 
     fn seeded() -> Arc<TenantSessions> {
@@ -1559,7 +1577,7 @@ mod admin_branch_tests {
                 "another-service",
                 vec!["identity.revoke".into()],
             ),
-            (SignedActorType::Service, "flare-im-bridge", vec![]),
+            (SignedActorType::Service, INTEGRATION, vec![]),
         ] {
             assert!(
                 online
@@ -1578,7 +1596,7 @@ mod admin_branch_tests {
         let result = online
             .handle_revoke_identity_sessions(call(
                 SignedActorType::Service,
-                "flare-im-bridge",
+                INTEGRATION,
                 vec!["identity.revoke".into()],
                 "tenant-b",
                 input.clone(),
@@ -1597,7 +1615,7 @@ mod admin_branch_tests {
             online
                 .handle_revoke_identity_sessions(call(
                     SignedActorType::Service,
-                    "flare-im-bridge",
+                    INTEGRATION,
                     vec!["identity.revoke".into()],
                     "tenant-a",
                     malformed
@@ -2036,6 +2054,7 @@ mod admin_branch_tests {
             Some(revocations.clone() as Arc<dyn BindingRevocationSink>),
         )
         .with_identity_verifier(Some(verifier))
+        .with_trusted_integrations(TrustedIntegrationPrincipals::parse(INTEGRATION))
     }
 
     /// 运维踢设备与用户踢自己的设备：被踢设备的推送绑定吊销，只吊销踢线那一刻之前登记的。正常
@@ -2181,7 +2200,7 @@ mod admin_branch_tests {
         let revoke = |tenant: &str, session_ids: Vec<String>| {
             let identity = SignedContextIdentity::new(
                 SignedActorType::Service,
-                "flare-im-bridge",
+                INTEGRATION,
                 tenant,
                 "owned-revocation",
             )

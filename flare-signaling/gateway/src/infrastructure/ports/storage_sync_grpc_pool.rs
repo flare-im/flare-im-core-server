@@ -2,8 +2,10 @@
 
 use flare_grpc_proto::storage::storage_reader_service_client::StorageReaderServiceClient;
 use flare_grpc_proto::sync::sync_service_client::SyncServiceClient;
-use flare_im_contracts::service_names::{STORAGE_READER, SYNC_ORCHESTRATOR, get_service_name};
-use flare_im_service_kit::discovery::{connect_grpc_channel_resilient, connect_static_channel};
+use flare_im_core_contracts::service_names::{STORAGE_READER, SYNC_ORCHESTRATOR, get_service_name};
+use flare_im_core_service_kit::discovery::{
+    connect_grpc_channel_resilient, connect_static_channel,
+};
 use flare_server_core::error::{ErrorBuilder, ErrorCode, Result};
 use tokio::sync::Mutex;
 use tonic::transport::Channel;

@@ -142,7 +142,7 @@ deployment enforces broker provenance. The manifest's
 `PUSH_SERVER_DELIVERY_READY` and `PUSH_WORKER_DELIVERY_READY` conditions only
 select the processes; setting them **does not** bypass each binary's separate
 fail-closed startup gate (`<ROLE>_EVENT_PROVENANCE_MODE`, see
-`flare_im_service_kit::push_delivery`). The single-host installer sets
+`flare_im_core_service_kit::push_delivery`). The single-host installer sets
 `broker-isolated`, which the gate accepts only with an authenticated NATS URL;
 `signed-v1` stays reserved for multi-host topologies. `flare-core health` can
 be green without Push and must not be interpreted as successful online/offline

@@ -10,7 +10,7 @@
 //! serde 的租户默认值，以及 `normalize_tenant_id(... unwrap_or_default())` 这种借归一化把空串
 //! 变成 `"0"` 的写法。`ALLOWED` 是尚未处理、各有理由的存量（按文件精确计数）：新增一处、或修掉
 //! 一处而不更新清单都会失败，清单只能缩小。缺租户应当报错或进死信，见
-//! `flare_im_contracts::utils::normalize_optional_tenant_id`。
+//! `flare_im_core_contracts::utils::normalize_optional_tenant_id`。
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -19,12 +19,12 @@ use std::path::{Path, PathBuf};
 /// 存量：(文件, 处数, 理由)。新代码不得加入；修掉后把对应行删掉或调小。
 const ALLOWED: &[(&str, usize, &str)] = &[
     (
-        "crates/flare-im-contracts/src/utils/mod.rs",
+        "crates/flare-im-core-contracts/src/utils/mod.rs",
         1,
         "定义显式租户 0 的常量（normalize_tenant_id 的别名目标），不是兜底本身",
     ),
     (
-        "crates/flare-im-service-kit/src/gateway_auth.rs",
+        "crates/flare-im-core-service-kit/src/gateway_auth.rs",
         1,
         "宽松策略下未绑定租户的连接按部署默认租户 0 查准入（单租户私有化的旧令牌不带租户），严格策略已拒绝；改为一律拒绝属部署级默认租户的取舍（第 36 条），待用户决定",
     ),
@@ -61,11 +61,11 @@ const ALLOWED: &[(&str, usize, &str)] = &[
 ];
 
 /// W11-T 改成缺租户即报错或进死信的文件：必须保持零兜底，也不得进入 `ALLOWED`。
-/// （W11-T 也改过的 `crates/flare-im-ack/src/ack/archiver.rs` 从不在模块树里，已删除。）
+/// （W11-T 也改过的 `crates/flare-im-core-ack/src/ack/archiver.rs` 从不在模块树里，已删除。）
 const FIXED_BY_W11_T: &[&str] = &[
-    "crates/flare-im-message-pipeline/src/hook/builder.rs",
-    "crates/flare-im-message-pipeline/src/hook/execution_service.rs",
-    "crates/flare-im-message-pipeline/src/messaging/push_repository.rs",
+    "crates/flare-im-core-message-pipeline/src/hook/builder.rs",
+    "crates/flare-im-core-message-pipeline/src/hook/execution_service.rs",
+    "crates/flare-im-core-message-pipeline/src/messaging/push_repository.rs",
     "flare-conversation/src/infrastructure/persistence/postgres_repository/mod.rs",
     "flare-message-ingest/src/application/handlers/message_ingest_handler.rs",
     "flare-message-ingest/src/application/handlers/wal_replay_handler.rs",
@@ -87,9 +87,9 @@ const FIXED_BY_W11_T: &[&str] = &[
 
 /// W12-T 改成缺租户即报错的文件：必须保持零兜底，也不得进入 `ALLOWED`。
 const FIXED_BY_W12_T: &[&str] = &[
-    "crates/flare-im-hooks/src/hooks/selector.rs",
-    "crates/flare-im-message-pipeline/src/extension/orchestrator.rs",
-    "crates/flare-im-message-pipeline/src/extension/routing.rs",
+    "crates/flare-im-core-hooks/src/hooks/selector.rs",
+    "crates/flare-im-core-message-pipeline/src/extension/orchestrator.rs",
+    "crates/flare-im-core-message-pipeline/src/extension/routing.rs",
     "flare-conversation/src/domain/service/conversation_domain_service.rs",
     "flare-media/src/interface/grpc/media_handler.rs",
     "flare-orchestrator/src/application/commands/message_action_commands.rs",

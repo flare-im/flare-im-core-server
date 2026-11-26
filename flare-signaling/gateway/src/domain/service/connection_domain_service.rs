@@ -5,7 +5,7 @@
 use flare_grpc_proto::signaling::{
     DeviceConflictStrategy, HeartbeatRequest, LoginRequest, LogoutRequest, ReportDeviceStateRequest,
 };
-use flare_im_contracts::Ctx;
+use flare_im_core_contracts::Ctx;
 use flare_server_core::error::{ErrorBuilder, ErrorCode, Result};
 use std::sync::Arc;
 use tracing::{info, instrument, warn};
@@ -399,7 +399,7 @@ mod tests {
         GetOnlineStatusRequest, GetOnlineStatusResponse, HeartbeatRequest, HeartbeatResponse,
         LoginResponse, LogoutRequest, LogoutResponse, ReportDeviceStateResponse,
     };
-    use flare_im_contracts::Ctx;
+    use flare_im_core_contracts::Ctx;
     use flare_proto::common::{DeviceAppState, DeviceAttention};
     use std::collections::HashMap;
     use tokio::sync::Mutex;

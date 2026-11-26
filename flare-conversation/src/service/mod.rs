@@ -1,4 +1,4 @@
-use flare_im_contracts::service_names::CONVERSATION;
+use flare_im_core_contracts::service_names::CONVERSATION;
 use flare_server_core::error::AnyhowContext;
 use tracing::info;
 
@@ -12,9 +12,9 @@ pub struct ApplicationBootstrap;
 impl ApplicationBootstrap {
     /// 运行应用的主入口点
     pub async fn run() -> flare_server_core::error::Result<()> {
-        let app_config = flare_im_service_kit::load_app_config_from_env();
+        let app_config = flare_im_core_service_kit::load_app_config_from_env();
         let service_config = app_config.conversation_service();
-        let runtime_plan = flare_im_service_kit::build_service_runtime_plan(
+        let runtime_plan = flare_im_core_service_kit::build_service_runtime_plan(
             app_config,
             &service_config.runtime,
             CONVERSATION,
@@ -33,7 +33,7 @@ impl ApplicationBootstrap {
         // 读接口的身份边界：带 x-flare-ctx 就验签并以之为准，FLARE_REQUIRE_SIGNED_READ_CTX
         // 打开时拒绝未签名调用。
         let read_layer =
-            flare_im_service_kit::signed_read::signed_read_layer_from_env(CONVERSATION)?;
+            flare_im_core_service_kit::signed_read::signed_read_layer_from_env(CONVERSATION)?;
 
         // 运行服务
         Self::run_with_context(context, runtime_plan, read_layer).await
@@ -42,7 +42,7 @@ impl ApplicationBootstrap {
     /// 运行服务（带应用上下文）
     async fn run_with_context(
         context: ApplicationContext,
-        runtime_plan: flare_im_service_kit::ImServiceRuntimePlan,
+        runtime_plan: flare_im_core_service_kit::ImServiceRuntimePlan,
         read_layer: flare_server_core::SignedFirstContextLayer,
     ) -> flare_server_core::error::Result<()> {
         use flare_grpc_proto::conversation::conversation_admin_service_server::ConversationAdminServiceServer;
@@ -52,7 +52,7 @@ impl ApplicationBootstrap {
         let address = runtime_plan.address;
         let service_name = runtime_plan.service_name.clone();
         let grpc_metrics =
-            flare_im_service_kit::metrics::GrpcMetricsLayer::new(service_name.clone());
+            flare_im_core_service_kit::metrics::GrpcMetricsLayer::new(service_name.clone());
         let handler = context.handler.clone();
         let admin_handler = context.admin_handler.clone();
 
@@ -85,8 +85,8 @@ impl ApplicationBootstrap {
                         handler.clone(),
                         &read_layer,
                     );
-                // 会话管理仍按调用方元数据（PurgeConversationHistory 除外，逐 RPC 验签）：Social
-                // Bridge 以服务签名代成员调用，「服务代用户」的表达定下之前不能套用读接口的冲突规则。
+                // 会话管理仍按调用方元数据（PurgeConversationHistory 除外，逐 RPC 验签）：业务
+                // 集成服务以服务签名代成员调用，「服务代用户」的表达定下之前不能套用读接口的冲突规则。
                 let manage_svc = ContextLayer::new()
                     .allow_missing()
                     .layer(ConversationManageServiceServer::new(handler));
@@ -158,7 +158,7 @@ impl ApplicationBootstrap {
         runtime
             .run_with_registration(|addr| {
                 Box::pin(async move {
-                    flare_im_service_kit::discovery::register_runtime_service_only(
+                    flare_im_core_service_kit::discovery::register_runtime_service_only(
                         &service_name,
                         addr,
                         None,

@@ -12,7 +12,7 @@ use flare_grpc_proto::control::client_build_stats_server::ClientBuildStats;
 use flare_grpc_proto::control::{
     ConnectionBuildCount, ConnectionBuilds, GetConnectionBuildsRequest,
 };
-use flare_im_service_kit::control_auth::{
+use flare_im_core_service_kit::control_auth::{
     CORE_BUILD_STATS_AUDIENCE, PlatformActorKind, PlatformAssertionVerifier,
     require_platform_assertion_for,
 };
@@ -71,8 +71,8 @@ impl ClientBuildStats for ClientBuildStatsGrpcServer {
         )?;
         actor.require_kind(PlatformActorKind::ProjectionWorker)?;
         let app_id = request.into_inner().app_id;
-        if !flare_im_contracts::domain::tenant::is_valid_tenant_id(&app_id)
-            || app_id != flare_im_contracts::utils::normalize_tenant_id(&app_id)
+        if !flare_im_core_contracts::domain::tenant::is_valid_tenant_id(&app_id)
+            || app_id != flare_im_core_contracts::utils::normalize_tenant_id(&app_id)
         {
             return Err(Status::invalid_argument("app_id must be canonical"));
         }
@@ -100,7 +100,7 @@ mod tests {
     use super::*;
     use ed25519_dalek::SigningKey;
     use ed25519_dalek::pkcs8::{EncodePrivateKey, EncodePublicKey};
-    use flare_im_service_kit::gateway::connection_builds::ConnectionBuildRow;
+    use flare_im_core_service_kit::gateway::connection_builds::ConnectionBuildRow;
     use std::sync::Mutex;
 
     /// 记下被问的租户，回答固定的汇总。
@@ -154,7 +154,7 @@ mod tests {
             payload,
             tenant_id,
             subject,
-            flare_im_service_kit::control_auth::CORE_BUILD_STATS_AUDIENCE,
+            flare_im_core_service_kit::control_auth::CORE_BUILD_STATS_AUDIENCE,
         )
     }
 
@@ -163,7 +163,7 @@ mod tests {
         let private = key.to_pkcs8_pem(Default::default()).unwrap();
         let signer = flare_server_core::TokenService::from_ed25519_private_key(
             &private,
-            flare_im_service_kit::control_auth::PLATFORM_ISSUER,
+            flare_im_core_service_kit::control_auth::PLATFORM_ISSUER,
             60,
         )
         .unwrap();
@@ -183,7 +183,7 @@ mod tests {
         }
     }
 
-    const WORKER: &str = flare_im_service_kit::control_auth::PROJECTION_WORKER_SUBJECT;
+    const WORKER: &str = flare_im_core_service_kit::control_auth::PROJECTION_WORKER_SUBJECT;
 
     #[tokio::test]
     async fn the_distribution_maps_the_older_total_to_a_flagged_row() {
@@ -230,7 +230,7 @@ mod tests {
                 ask("t1"),
                 "t1",
                 WORKER,
-                flare_im_service_kit::control_auth::CORE_PROJECTION_AUDIENCE,
+                flare_im_core_service_kit::control_auth::CORE_PROJECTION_AUDIENCE,
             ))
             .await
             .unwrap_err();
@@ -257,7 +257,7 @@ mod tests {
             .get_connection_builds(signed(
                 ask("t1"),
                 "t1",
-                flare_im_service_kit::control_auth::SCHEDULER_SUBJECT,
+                flare_im_core_service_kit::control_auth::SCHEDULER_SUBJECT,
             ))
             .await
             .unwrap_err();

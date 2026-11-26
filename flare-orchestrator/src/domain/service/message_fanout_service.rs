@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
-use flare_im_contracts::Ctx;
-use flare_im_message_pipeline::{MqPushRepository, PushRepository};
+use flare_im_core_contracts::Ctx;
+use flare_im_core_message_pipeline::{MqPushRepository, PushRepository};
 use flare_proto::common::Message;
 use flare_server_core::error::Result;
 use tracing::instrument;
@@ -20,7 +20,7 @@ pub struct MessageFanoutService {
     user_sync_compensation: Option<Arc<dyn UserSyncCompensationRepository>>,
     inline_message_push_enabled: bool,
     /// 扇出耗时指标。全程服务端时钟，见 observe_fanout_latency 的说明。
-    metrics: flare_im_service_kit::metrics::MessageOrchestratorMetrics,
+    metrics: flare_im_core_service_kit::metrics::MessageOrchestratorMetrics,
 }
 
 /// 取消息的**服务端**摄入时刻（毫秒），取不到返回 0（调用方据此跳过统计）。
@@ -29,7 +29,7 @@ pub struct MessageFanoutService {
 /// 客户端时钟偏了服务端就跟着偏（实测有客户端慢 34 秒），
 /// 拿它算服务端耗时会得出负数或荒谬的值。
 pub fn ingestion_ts_from_headers(headers: &std::collections::HashMap<String, String>) -> i64 {
-    flare_im_contracts::utils::extract_timeline_from_extra(headers, 0).ingestion_ts
+    flare_im_core_contracts::utils::extract_timeline_from_extra(headers, 0).ingestion_ts
 }
 
 struct UserSyncCompensationRequest<'a> {
@@ -49,7 +49,7 @@ impl MessageFanoutService {
             user_sync_index: None,
             user_sync_compensation: None,
             inline_message_push_enabled: true,
-            metrics: flare_im_service_kit::metrics::MessageOrchestratorMetrics::default(),
+            metrics: flare_im_core_service_kit::metrics::MessageOrchestratorMetrics::default(),
         }
     }
 
@@ -324,11 +324,11 @@ impl MessageFanoutService {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use flare_im_contracts::constants::headers::{
+    use flare_im_core_contracts::constants::headers::{
         DELIVERY_MODE_PING, DELIVERY_MODE_PING_WITH_INLINE, HEADER_DELIVERY_MODE,
         HEADER_INLINE_EVENTS_TRUNCATED,
     };
-    use flare_im_contracts::constants::topics::{TOPIC_MESSAGE_CREATED, TOPIC_PUSH_EVENTS};
+    use flare_im_core_contracts::constants::topics::{TOPIC_MESSAGE_CREATED, TOPIC_PUSH_EVENTS};
     use flare_proto::common::{
         ConversationType as ProtoConversationType, EventType, MqEnvelope, MqPayloadKind,
         TextContent, message_content, mq_envelope,

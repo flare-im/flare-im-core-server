@@ -4,18 +4,18 @@
 
 use std::sync::Arc;
 
-use flare_im_contracts::Ctx;
-use flare_im_contracts::utils::{
+use flare_im_core_contracts::Ctx;
+use flare_im_core_contracts::utils::{
     current_millis, extract_timeline_from_extra, normalize_optional_tenant_id, normalize_tenant_id,
 };
-use flare_im_service_kit::metrics::StorageWriterMetrics;
-use flare_im_usage::UsageRecorder;
+use flare_im_core_service_kit::metrics::StorageWriterMetrics;
+use flare_im_core_usage::UsageRecorder;
 use flare_proto::common::RetentionMode;
 use flare_server_core::error::{ErrorCode, Result, map_infra_error};
 use flare_server_core::flare_err;
 use tracing::{instrument, warn};
 
-use flare_im_contracts::utils::datetime_to_timestamp;
+use flare_im_core_contracts::utils::datetime_to_timestamp;
 
 use crate::domain::events::{AckEvent, AckStatus};
 use crate::domain::model::{Event, EventPayload, EventType, PersistenceResult, PreparedMessage};
@@ -653,8 +653,8 @@ mod tests {
         AckPublisher, ArchiveStoreRepository, EventStreamRepository, HotCacheRepository,
         MessageWriteLedgerRepository, MessageWriteStage, WalCleanupRepository,
     };
-    use flare_im_contracts::message::Message;
-    use flare_im_contracts::utils::{Context, TimelineMetadata};
+    use flare_im_core_contracts::message::Message;
+    use flare_im_core_contracts::utils::{Context, TimelineMetadata};
     use flare_server_core::error::Result as AnyhowResult;
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -1176,7 +1176,7 @@ mod tests {
     #[tokio::test]
     async fn an_unreachable_redis_does_not_hold_the_ack_after_the_durable_write() {
         use crate::infrastructure::persistence::repository::redis_cache::RedisHotCacheRepository;
-        use flare_im_service_kit::redis_connection::{
+        use flare_im_core_service_kit::redis_connection::{
             RedisConnectionLimits, SharedRedisConnection,
         };
 
@@ -1364,7 +1364,7 @@ mod tests {
             None,
             Some(Arc::new(NoopRepository)),
         )
-        .with_usage(flare_im_usage::UsageRecorder::unpublished(
+        .with_usage(flare_im_core_usage::UsageRecorder::unpublished(
             "storage-writer-test",
         ));
         let usage = service.usage.clone();
@@ -1429,7 +1429,7 @@ mod tests {
                 fail_at: 1,
             })),
         )
-        .with_usage(flare_im_usage::UsageRecorder::unpublished(
+        .with_usage(flare_im_core_usage::UsageRecorder::unpublished(
             "storage-writer-test",
         ));
         let usage = service.usage.clone();
@@ -1738,7 +1738,7 @@ mod tests {
             })),
         )
         .with_metrics(Some(metrics.clone()))
-        .with_usage(flare_im_usage::UsageRecorder::unpublished(
+        .with_usage(flare_im_core_usage::UsageRecorder::unpublished(
             "storage-writer-test",
         ));
         LedgerTestFixture {

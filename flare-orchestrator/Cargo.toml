@@ -36,10 +36,10 @@ thiserror = { workspace = true }
 uuid = { workspace = true }
 prost = { workspace = true }
 prost-types = { workspace = true }
-flare-im-contracts = { workspace = true }
-flare-im-message-pipeline = { workspace = true }
-flare-im-service-kit = { workspace = true }
-flare-im-seq = { workspace = true }
+flare-im-core-contracts = { workspace = true }
+flare-im-core-message-pipeline = { workspace = true }
+flare-im-core-service-kit = { workspace = true }
+flare-im-core-seq = { workspace = true }
 
 [dev-dependencies]
 # Signed test contexts (a throwaway Ed25519 key per test) for the message operation policy.

@@ -1,0 +1,193 @@
+use std::sync::Arc;
+use std::time::Instant;
+
+use flare_im_core_contracts::Ctx;
+use flare_proto::common::Message;
+
+use super::ExtensionRouting;
+use crate::{HookExecutionContext, HookExecutionService};
+use flare_server_core::error::Result;
+
+const EXTENSION_LOG_SCHEMA: &str = "extension.v1";
+
+/// 扩展编排器：按租户与消息类型决定走不走 Hook，并统一记录。时限、失败语义都在 Hook 运行时里。
+#[derive(Clone)]
+pub struct ExtensionOrchestrator {
+    hook_execution_service: Arc<HookExecutionService>,
+    routing: ExtensionRouting,
+}
+
+impl ExtensionOrchestrator {
+    pub fn new(
+        hook_execution_service: Arc<HookExecutionService>,
+        routing: ExtensionRouting,
+    ) -> Self {
+        Self {
+            hook_execution_service,
+            routing,
+        }
+    }
+
+    pub async fn execute_pre_send(
+        &self,
+        ctx: &Ctx,
+        message: Message,
+        execute_pre_send: bool,
+    ) -> Result<HookExecutionContext> {
+        if !self.routing.allows_hook_for_message(ctx, &message) {
+            self.trace_extension_skip(
+                ctx,
+                "hook",
+                "pre_send",
+                "route_filtered",
+                Some(message.message_type),
+                None,
+            );
+            return Ok(HookExecutionContext {
+                message,
+                hook_context: ctx.clone(),
+            });
+        }
+        let started_at = Instant::now();
+        let message_type = message.message_type;
+        let result = self
+            .hook_execution_service
+            .execute_pre_send(ctx, message, execute_pre_send)
+            .await;
+        match &result {
+            Ok(out) => self.trace_extension_exec(
+                ctx,
+                "hook",
+                "pre_send",
+                "ok",
+                started_at,
+                Some(out.message.message_type),
+                None,
+            ),
+            Err(_) => self.trace_extension_exec(
+                ctx,
+                "hook",
+                "pre_send",
+                "error",
+                started_at,
+                Some(message_type),
+                None,
+            ),
+        }
+        result
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn trace_extension_exec(
+        &self,
+        ctx: &Ctx,
+        extension_type: &str,
+        phase: &str,
+        result: &str,
+        started_at: Instant,
+        message_type: Option<i32>,
+        event_type: Option<i32>,
+    ) {
+        tracing::trace!(
+            event = "extension_exec",
+            schema = EXTENSION_LOG_SCHEMA,
+            component = "extension_orchestrator",
+            extension_type,
+            phase,
+            result,
+            elapsed_ms = started_at.elapsed().as_millis(),
+            trace_id = %ctx.trace_id(),
+            request_id = %ctx.request_id(),
+            tenant_id = ctx.tenant_id().unwrap_or_default(),
+            message_type = ?message_type,
+            event_type = ?event_type,
+            "extension execution completed"
+        );
+    }
+
+    fn trace_extension_skip(
+        &self,
+        ctx: &Ctx,
+        extension_type: &str,
+        phase: &str,
+        reason: &str,
+        message_type: Option<i32>,
+        event_type: Option<i32>,
+    ) {
+        tracing::trace!(
+            event = "extension_skip",
+            schema = EXTENSION_LOG_SCHEMA,
+            component = "extension_orchestrator",
+            extension_type,
+            phase,
+            reason,
+            trace_id = %ctx.trace_id(),
+            request_id = %ctx.request_id(),
+            tenant_id = ctx.tenant_id().unwrap_or_default(),
+            message_type = ?message_type,
+            event_type = ?event_type,
+            "extension execution skipped"
+        );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use super::*;
+    use async_trait::async_trait;
+    use flare_im_core_hooks::hooks::{
+        HookDispatcher, HookMetadata, HookRegistry, HookSelector, MessageDraft, PreSendDecision,
+        PreSendHook, is_pre_send_rejection,
+    };
+    use flare_server_core::context::Context;
+    use flare_server_core::error::ErrorCode;
+
+    /// 永不返回的 PreSend Hook：模拟被暂停、只接连接不回应答的扩展。
+    struct HangingPreSend;
+
+    #[async_trait]
+    impl PreSendHook for HangingPreSend {
+        async fn handle(&self, _ctx: &Ctx, _draft: &mut MessageDraft) -> PreSendDecision {
+            std::future::pending().await
+        }
+    }
+
+    /// 总时限先到（Hook 自身的超时更长）：回可重试的 `ServiceUnavailable`，与 Hook 不可达同一应答
+    /// （摄入侧 gRPC `UNAVAILABLE`，HTTP 发送 503）。
+    #[tokio::test]
+    async fn pre_send_budget_exhaustion_is_a_retryable_unavailable_not_an_operation_failure() {
+        let registry = HookRegistry::new();
+        registry.register_pre_send(
+            HookMetadata::default()
+                .with_name("hanging-policy")
+                .with_require_success(true)
+                .with_timeout(Duration::from_secs(60)),
+            HookSelector::default(),
+            Arc::new(HangingPreSend),
+        );
+        let orchestrator = ExtensionOrchestrator::new(
+            Arc::new(HookExecutionService::new(
+                Arc::new(HookDispatcher::new(registry).with_budget(Duration::from_millis(5))),
+                None,
+            )),
+            ExtensionRouting::default(),
+        );
+        let ctx: Ctx = Arc::new(Context::with_request_id("req").with_tenant_id("tenant-a"));
+
+        let error = match tokio::time::timeout(
+            Duration::from_secs(10),
+            orchestrator.execute_pre_send(&ctx, Message::default(), true),
+        )
+        .await
+        .expect("the budget ends the chain")
+        {
+            Ok(_) => panic!("a hanging required hook must not let the message through"),
+            Err(error) => error,
+        };
+        assert_eq!(error.code(), Some(ErrorCode::ServiceUnavailable), "{error}");
+        assert!(error.is_retryable(), "{error}");
+        assert!(!is_pre_send_rejection(&error), "{error}");
+    }
+}

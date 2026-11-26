@@ -28,7 +28,7 @@ pub const DEFAULT_IDEMPOTENCY_RESULT_TTL_SECS: u64 = 3_600;
 /// 结果 TTL 的下限（秒），是对上游可靠重投的承诺（MIG-06）。
 ///
 /// 首发已被接受而结果没回到上游时，上游用同一个 `client_msg_id` 重投，靠这里折叠成同一条消息；
-/// 重投落在去重窗口之外就会生成第二条。最长的上游是 Social outbox：同一行最多投递 12 次，按其
+/// 重投落在去重窗口之外就会生成第二条。最长的上游是业务集成服务的 outbox：同一行最多投递 12 次，按其
 /// 退避、租约与投递超时算最坏跨度约 2391 s（假定没有积压；Core 停机期间大量行同时到期时会更长），
 /// flare-im `outbox_dispatcher` 的门禁按本下限校验它。配置低于下限时启动告警。
 pub const MIN_IDEMPOTENCY_RESULT_TTL_SECS: u64 = 2_700;

@@ -7,7 +7,7 @@ use flare_grpc_proto::capability::{
     GenericRequest, GenericResponse,
     extension_plugin_server::{ExtensionPlugin, ExtensionPluginServer},
 };
-use flare_im_capability_core::plugin::invocation::PLUGIN_CALL_HEADER;
+use flare_im_core_capability_core::plugin::invocation::PLUGIN_CALL_HEADER;
 use serde_json::Value;
 use std::sync::{Arc, Mutex};
 use tonic::{Request, Response, Status};
@@ -52,7 +52,7 @@ impl ExtensionPlugin for Endpoint {
             .to_string();
         let reauthentication_proof = request
             .metadata()
-            .get(flare_im_capability_core::plugin::staff_reauth::STAFF_REAUTH_HEADER)
+            .get(flare_im_core_capability_core::plugin::staff_reauth::STAFF_REAUTH_HEADER)
             .and_then(|v| v.to_str().ok())
             .map(str::to_owned);
         let body = request.into_inner();

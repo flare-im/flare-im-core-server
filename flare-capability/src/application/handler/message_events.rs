@@ -5,7 +5,7 @@ use crate::domain::{capability::CapabilityPolicyBackend, repository::PluginAutho
 use flare_grpc_proto::capability::{
     GenericRequest, extension_plugin_client::ExtensionPluginClient,
 };
-use flare_im_capability_core::plugin::{
+use flare_im_core_capability_core::plugin::{
     event::*,
     invocation::{PLUGIN_CALL_HEADER, PluginCallSigner},
     runtime::digest_bytes,
@@ -104,7 +104,7 @@ impl MessageEventHandler {
     async fn deliver_to(
         &self,
         event: &PluginMessageEvent,
-        plugin: &flare_im_capability_core::plugin::runtime::ResolvedPlugin,
+        plugin: &flare_im_core_capability_core::plugin::runtime::ResolvedPlugin,
         subscription: &PluginEventSubscription,
         lease: i64,
     ) -> Result<(), ConsumerError> {
@@ -261,7 +261,7 @@ pub fn decode_message_event(
     for (key, value) in envelope.headers {
         headers.insert(key, value);
     }
-    let context = flare_im_contracts::context_from_mq_metadata(&headers);
+    let context = flare_im_core_contracts::context_from_mq_metadata(&headers);
     let app = context
         .tenant_id()
         .filter(|id| !id.is_empty() && *id != "*")

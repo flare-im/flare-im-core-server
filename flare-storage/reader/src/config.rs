@@ -1,5 +1,5 @@
-use flare_im_service_kit::config::FlareAppConfig;
-use flare_im_service_kit::redis_connection::RedisConnectionLimits;
+use flare_im_core_service_kit::config::FlareAppConfig;
+use flare_im_core_service_kit::redis_connection::RedisConnectionLimits;
 use flare_server_core::error::Result;
 use std::env;
 

@@ -8,7 +8,7 @@ use axum::{
     http::{HeaderMap, request::Parts},
 };
 use flare_grpc_proto::media::*;
-use flare_im_service_kit::clients::{AdminGrpcClients, MediaCaller};
+use flare_im_core_service_kit::clients::{AdminGrpcClients, MediaCaller};
 use flare_server_core::{
     AuthenticatedPrincipal,
     error::{ErrorBuilder, ErrorCode},
@@ -352,7 +352,7 @@ mod tests {
     use axum::http::{Request, StatusCode};
     use ed25519_dalek::SigningKey;
     use ed25519_dalek::pkcs8::{EncodePrivateKey, EncodePublicKey};
-    use flare_im_service_kit::clients::*;
+    use flare_im_core_service_kit::clients::*;
     use flare_server_core::auth::{KeySet, kid};
     use flare_server_core::{
         SignedActorType, SignedContextIdentity, SignedContextSigner, SignedContextVerifier,
@@ -430,11 +430,11 @@ mod tests {
                 StorageReaderServiceClientWrapper::from_channel(c.clone()),
             )),
             push: Arc::new(tokio::sync::Mutex::new(
-                flare_im_service_kit::clients::PushAdminClientWrapper::from_channel(c),
+                flare_im_core_service_kit::clients::PushAdminClientWrapper::from_channel(c),
             )),
             request_timeout: None,
         };
-        // The Social gateway admin partition signs the staff context with the gateway key.
+        // The business gateway admin partition signs the staff context with the gateway key.
         let (gateway_private, gateway_public) = pem_pair(61);
         let mut keys = KeySet::empty();
         keys.insert(kid::GATEWAY, &gateway_public).unwrap();

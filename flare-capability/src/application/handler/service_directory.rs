@@ -7,7 +7,7 @@
 use crate::domain::capability::CapabilityPolicyBackend;
 use crate::domain::repository::PluginAuthorizationReader;
 use crate::domain::repository::resource_access::ResourceCallBudget;
-use flare_im_capability_core::plugin::{
+use flare_im_core_capability_core::plugin::{
     runtime::PluginRuntimeSnapshot, service::PluginServiceClaims,
 };
 use std::sync::Arc;

@@ -1,0 +1,21 @@
+# Test fixture: one mandatory deployment PreSend hook reached through discovery, for every tenant
+# and conversation type (the shape a business policy gate registers with).
+
+[[pre_send]]
+name = "policy-pre-send"
+description = "mandatory business policy gate before a message is sent"
+enabled = true
+order = 110
+# Above a slow policy answer, below the 1500 ms total PreSend budget.
+timeout_ms = 1000
+require_success = true
+
+[pre_send.selector]
+# tenants omitted: every tenant.
+
+[pre_send.transport]
+type = "grpc"
+endpoint = "discovery://policy-hook"
+
+[pre_send.metadata]
+hook_operation = "flare.hook.v1.pre_send"

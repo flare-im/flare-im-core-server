@@ -80,7 +80,7 @@ jobs:
           workspaces: .
           key: release-large-group
       - name: Message pipeline push primitive tests
-        run: cargo test -p flare-im-message-pipeline push_only_message_
+        run: cargo test -p flare-im-core-message-pipeline push_only_message_
       - name: Orchestrator large conversation tests
         run: cargo test -p flare-orchestrator large_conversation
       - name: Push server recipient-less ping tests

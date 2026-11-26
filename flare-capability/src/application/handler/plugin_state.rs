@@ -21,12 +21,14 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use flare_im_capability_core::plugin::manifest::{PluginManifest, UiContributionKind};
-use flare_im_capability_core::plugin::resource::EntityStatePublishOutcome;
-use flare_im_capability_core::plugin::state::{SharedState, SharedStateOrder, valid_entity_id};
-use flare_im_capability_core::plugin::ui::{UiActionTarget, UiDocument};
-use flare_im_service_kit::metrics::REGISTRY;
-use flare_im_service_kit::plugin_platform::{PLUGIN_CARD_UNBOUND, PLUGIN_MESSAGE_RECALLED};
+use flare_im_core_capability_core::plugin::manifest::{PluginManifest, UiContributionKind};
+use flare_im_core_capability_core::plugin::resource::EntityStatePublishOutcome;
+use flare_im_core_capability_core::plugin::state::{
+    SharedState, SharedStateOrder, valid_entity_id,
+};
+use flare_im_core_capability_core::plugin::ui::{UiActionTarget, UiDocument};
+use flare_im_core_service_kit::metrics::REGISTRY;
+use flare_im_core_service_kit::plugin_platform::{PLUGIN_CARD_UNBOUND, PLUGIN_MESSAGE_RECALLED};
 use flare_proto::common::PluginStateEvent;
 use once_cell::sync::Lazy;
 use prometheus::{IntCounterVec, Opts};

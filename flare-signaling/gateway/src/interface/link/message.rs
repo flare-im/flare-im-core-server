@@ -231,8 +231,8 @@ impl LongConnectionHandler {
                 .build_request_ctx(connection_id)
                 .await
             && let Some(tenant_id) = ctx.tenant_id().filter(|tenant| {
-                flare_im_contracts::domain::tenant::is_valid_tenant_id(tenant)
-                    && flare_im_contracts::utils::normalize_tenant_id(tenant) == *tenant
+                flare_im_core_contracts::domain::tenant::is_valid_tenant_id(tenant)
+                    && flare_im_core_contracts::utils::normalize_tenant_id(tenant) == *tenant
             })
         {
             self.connection_handler.conversation_subscriptions().join(

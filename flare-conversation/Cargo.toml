@@ -19,8 +19,8 @@ flare-proto = { workspace = true }
 flare-grpc-proto = { workspace = true }
 flare-server-core = { workspace = true, features = ["nats", "kafka", "proto", "grpc", "discovery"] }
 flare-core-runtime = { workspace = true }
-flare-im-contracts = { workspace = true }
-flare-im-service-kit = { workspace = true }
+flare-im-core-contracts = { workspace = true }
+flare-im-core-service-kit = { workspace = true }
 prost = "0.14"
 redis = { workspace = true }
 serde = { workspace = true }

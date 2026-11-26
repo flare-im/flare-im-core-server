@@ -21,8 +21,8 @@ use flare_grpc_proto::control::{
     GetVersionsRequest, ProjectionAck, ProjectionVersions, RoleBundleProjectionUpsert,
     TenantProjectionUpsert, TenantVersions,
 };
-use flare_im_contracts::domain::tenant::{ClientBuildPolicy, ClientBuildRange};
-use flare_im_service_kit::control_auth::{
+use flare_im_core_contracts::domain::tenant::{ClientBuildPolicy, ClientBuildRange};
+use flare_im_core_service_kit::control_auth::{
     PlatformActorKind, PlatformAssertionVerifier, require_platform_assertion,
 };
 use flare_server_core::auth::credential_snapshot::{
@@ -37,12 +37,12 @@ use crate::application::queries::tenant_projection_versions;
 use crate::domain::model::{ClientPolicyRecord, TenantProjectionRecord};
 use crate::domain::repository::TenantProjectionRepository;
 use crate::domain::repository::tenant_notice::TenantNotices;
-use flare_im_service_kit::tenant_notice::PLUGIN_CATALOG_TOPIC;
+use flare_im_core_service_kit::tenant_notice::PLUGIN_CATALOG_TOPIC;
 
 fn credentials_snapshot(req: CredentialsProjectionUpsert) -> Result<CredentialSnapshot, Status> {
     let invalid = || Status::invalid_argument("invalid credential projection");
-    if !flare_im_contracts::domain::tenant::is_valid_tenant_id(&req.app_id)
-        || req.app_id != flare_im_contracts::utils::normalize_tenant_id(&req.app_id)
+    if !flare_im_core_contracts::domain::tenant::is_valid_tenant_id(&req.app_id)
+        || req.app_id != flare_im_core_contracts::utils::normalize_tenant_id(&req.app_id)
         || req.keys.len() > MAX_CREDENTIAL_KEYS
     {
         return Err(invalid());
@@ -153,7 +153,7 @@ impl<R: TenantProjectionRepository + 'static> TenantProjection for TenantProject
         actor.require_tenant(&request.get_ref().app_id)?;
         let wire = request.into_inner();
         let now = chrono::Utc::now().timestamp_millis();
-        let snapshot = flare_im_capability_core::plugin::runtime::PluginProjection::from_json(
+        let snapshot = flare_im_core_capability_core::plugin::runtime::PluginProjection::from_json(
             &wire.snapshot_json,
             now,
         )
@@ -259,7 +259,7 @@ impl<R: TenantProjectionRepository + 'static> TenantProjection for TenantProject
         ))
     }
 
-    /// 核不持有员工角色权限包:只有 Social 投影接收端实现它(供统一网关 admin 分区)。
+    /// 核不持有员工角色权限包:只有业务系统的投影接收端实现它(供统一网关 admin 分区)。
     /// 先验签并要求通配 worker 范围,再回 UNIMPLEMENTED,与 `UpsertFeatureFlags` 同样的口径。
     async fn upsert_role_bundle(
         &self,
@@ -271,7 +271,7 @@ impl<R: TenantProjectionRepository + 'static> TenantProjection for TenantProject
             return Err(Status::permission_denied("control tenant mismatch"));
         }
         Err(Status::unimplemented(
-            "flare-im-core does not consume role bundle projections; the Social projection receiver serves the gateway admin partition",
+            "flare-im-core does not consume role bundle projections; the business projection receiver serves the gateway admin partition",
         ))
     }
 
@@ -293,8 +293,8 @@ impl<R: TenantProjectionRepository + 'static> TenantProjection for TenantProject
             ));
         }
         if ids.iter().any(|id| {
-            !flare_im_contracts::domain::tenant::is_valid_tenant_id(id)
-                || id != &flare_im_contracts::utils::normalize_tenant_id(id)
+            !flare_im_core_contracts::domain::tenant::is_valid_tenant_id(id)
+                || id != &flare_im_core_contracts::utils::normalize_tenant_id(id)
         }) {
             return Err(Status::invalid_argument("im_tenant_ids must be canonical"));
         }
@@ -355,8 +355,9 @@ mod tests {
     struct MemoryRepo {
         rows: Mutex<HashMap<String, (TenantProjectionRecord, u64)>>,
         credentials: Mutex<HashMap<String, CredentialSnapshot>>,
-        plugins:
-            Mutex<HashMap<String, flare_im_capability_core::plugin::runtime::PluginProjection>>,
+        plugins: Mutex<
+            HashMap<String, flare_im_core_capability_core::plugin::runtime::PluginProjection>,
+        >,
         client_policies: Mutex<HashMap<String, ClientPolicyRecord>>,
     }
 
@@ -364,7 +365,7 @@ mod tests {
     impl TenantProjectionRepository for MemoryRepo {
         async fn replace_plugins(
             &self,
-            p: &flare_im_capability_core::plugin::runtime::PluginProjection,
+            p: &flare_im_core_capability_core::plugin::runtime::PluginProjection,
         ) -> FlareResult<TenantProjectionOutcome> {
             let mut rows = self.plugins.lock().unwrap();
             let current = rows.get(&p.tenant_id).map(|p| p.version).unwrap_or(0);
@@ -499,8 +500,8 @@ mod tests {
         signed_request(
             payload,
             tenant_id,
-            flare_im_service_kit::control_auth::PROJECTION_WORKER_SUBJECT,
-            flare_im_service_kit::control_auth::CORE_PROJECTION_AUDIENCE,
+            flare_im_core_service_kit::control_auth::PROJECTION_WORKER_SUBJECT,
+            flare_im_core_service_kit::control_auth::CORE_PROJECTION_AUDIENCE,
         )
     }
 
@@ -529,7 +530,7 @@ mod tests {
     #[tokio::test]
     async fn an_accepted_plugin_projection_announces_the_catalog_change() {
         use flare_grpc_proto::control::PluginsProjectionUpsert;
-        use flare_im_capability_core::plugin::runtime::PluginProjection;
+        use flare_im_core_capability_core::plugin::runtime::PluginProjection;
         let (repo, server) = server();
         let notices = Arc::new(RecordedNotices::default());
         let server = server.with_notices(Some(notices.clone() as Arc<dyn TenantNotices>));
@@ -570,7 +571,7 @@ mod tests {
     #[tokio::test]
     async fn plugins_require_worker_and_exact_app_and_keep_empty_revocation_watermark() {
         use flare_grpc_proto::control::PluginsProjectionUpsert;
-        use flare_im_capability_core::plugin::runtime::PluginProjection;
+        use flare_im_core_capability_core::plugin::runtime::PluginProjection;
         let (_, server) = server();
         let now = chrono::Utc::now().timestamp_millis();
         let snapshot = PluginProjection {
@@ -607,7 +608,7 @@ mod tests {
                     body.clone(),
                     "app-a",
                     "employee",
-                    flare_im_service_kit::control_auth::CORE_PROJECTION_AUDIENCE
+                    flare_im_core_service_kit::control_auth::CORE_PROJECTION_AUDIENCE
                 ))
                 .await
                 .is_err()
@@ -688,7 +689,7 @@ mod tests {
             request(),
             "app-a",
             "employee-7",
-            flare_im_service_kit::control_auth::CORE_PROJECTION_AUDIENCE,
+            flare_im_core_service_kit::control_auth::CORE_PROJECTION_AUDIENCE,
         );
         assert_eq!(
             server
@@ -756,7 +757,7 @@ mod tests {
         let private = key.to_pkcs8_pem(Default::default()).unwrap();
         let signer = flare_server_core::TokenService::from_ed25519_private_key(
             &private,
-            flare_im_service_kit::control_auth::PLATFORM_ISSUER,
+            flare_im_core_service_kit::control_auth::PLATFORM_ISSUER,
             60,
         )
         .unwrap();
@@ -841,8 +842,8 @@ mod tests {
             signed_request(
                 client_policy("app-a", 1, 1),
                 "app-a",
-                flare_im_service_kit::control_auth::SCHEDULER_SUBJECT,
-                flare_im_service_kit::control_auth::CORE_PROJECTION_AUDIENCE,
+                flare_im_core_service_kit::control_auth::SCHEDULER_SUBJECT,
+                flare_im_core_service_kit::control_auth::CORE_PROJECTION_AUDIENCE,
             ),
         ];
         for request in denied {
@@ -905,7 +906,7 @@ mod tests {
         assert_eq!(ack.current_version, 3);
         assert_eq!(
             repo.rows.lock().unwrap()["acme"].0.status,
-            flare_im_contracts::domain::tenant::TenantStatus::Active
+            flare_im_core_contracts::domain::tenant::TenantStatus::Active
         );
 
         // 更高版本：生效。
@@ -918,7 +919,7 @@ mod tests {
         assert_eq!(ack.current_version, 4);
         assert_eq!(
             repo.rows.lock().unwrap()["acme"].0.status,
-            flare_im_contracts::domain::tenant::TenantStatus::Suspended
+            flare_im_core_contracts::domain::tenant::TenantStatus::Suspended
         );
     }
 
@@ -1023,7 +1024,7 @@ mod tests {
                     body.clone(),
                     "tenant-a",
                     "employee-1",
-                    flare_im_service_kit::control_auth::CORE_PROJECTION_AUDIENCE
+                    flare_im_core_service_kit::control_auth::CORE_PROJECTION_AUDIENCE
                 ))
                 .await
                 .unwrap_err()
@@ -1035,7 +1036,7 @@ mod tests {
                 .upsert_tenant(signed_request(
                     body,
                     "tenant-a",
-                    flare_im_service_kit::control_auth::PROJECTION_WORKER_SUBJECT,
+                    flare_im_core_service_kit::control_auth::PROJECTION_WORKER_SUBJECT,
                     "flare-core-admin"
                 ))
                 .await

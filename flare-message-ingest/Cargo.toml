@@ -38,12 +38,12 @@ thiserror = { workspace = true }
 uuid = { workspace = true }
 prost = { workspace = true }
 prost-types = { workspace = true }
-flare-im-contracts = { workspace = true }
-flare-im-message-pipeline = { workspace = true }
-flare-im-service-kit = { workspace = true }
-flare-im-seq = { workspace = true }
-flare-im-hooks = { workspace = true }
-flare-im-usage = { workspace = true }
+flare-im-core-contracts = { workspace = true }
+flare-im-core-message-pipeline = { workspace = true }
+flare-im-core-service-kit = { workspace = true }
+flare-im-core-seq = { workspace = true }
+flare-im-core-hooks = { workspace = true }
+flare-im-core-usage = { workspace = true }
 
 [dev-dependencies]
 # 只用于 seq floor 服务签名的用例：生成一对测试用的 Cell 密钥，并对真实的 Storage Reader 签名边界

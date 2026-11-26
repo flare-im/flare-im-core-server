@@ -19,9 +19,9 @@
 
 use std::sync::Arc;
 
-use flare_im_contracts::Ctx;
-use flare_im_message_pipeline::{MqPushRepository, PushRepository};
-use flare_im_seq::SequenceAllocator;
+use flare_im_core_contracts::Ctx;
+use flare_im_core_message_pipeline::{MqPushRepository, PushRepository};
+use flare_im_core_seq::SequenceAllocator;
 use flare_proto::common::event::Payload as EventPayload;
 use flare_proto::common::{Event, EventType};
 use flare_server_core::{flare_err, flare_err_details};
@@ -34,9 +34,10 @@ use crate::domain::repository::{
     UserSyncCompensationTask, UserSyncIndexRepository,
 };
 use crate::domain::service::message_operation_policy::MessageOperationPolicy;
-use flare_im_message_pipeline::{
+use flare_im_core_message_pipeline::{
     CompositeEventValidationStrategy, EventValidationStrategy, ValidationContext,
 };
+use flare_im_core_service_kit::trusted_integration::TrustedIntegrationPrincipals;
 use flare_server_core::error::{ErrorCode, Result};
 
 /// 事件领域服务
@@ -94,6 +95,7 @@ where
     /// What the operation policy is built from.
     message_targets: Option<Arc<dyn MessageTargetRepository>>,
     conversation_members: Option<Arc<dyn ConversationMembershipRepository>>,
+    trusted_integrations: TrustedIntegrationPrincipals,
 }
 
 impl<PR, SA> EventDomainService<PR, SA>
@@ -119,13 +121,15 @@ where
             operation_policy: Arc::new(MessageOperationPolicy::default()),
             message_targets: None,
             conversation_members: None,
+            trusted_integrations: TrustedIntegrationPrincipals::default(),
         }
     }
 
     fn rebuild_operation_policy(mut self) -> Self {
         self.operation_policy = Arc::new(
             MessageOperationPolicy::new(self.message_targets.clone())
-                .with_members(self.conversation_members.clone()),
+                .with_members(self.conversation_members.clone())
+                .with_trusted_integrations(self.trusted_integrations.clone()),
         );
         self
     }
@@ -144,6 +148,12 @@ where
         members: Arc<dyn ConversationMembershipRepository>,
     ) -> Self {
         self.conversation_members = Some(members);
+        self.rebuild_operation_policy()
+    }
+
+    /// The business integration services trusted to operate on any message of their tenant.
+    pub fn with_trusted_integrations(mut self, trusted: TrustedIntegrationPrincipals) -> Self {
+        self.trusted_integrations = trusted;
         self.rebuild_operation_policy()
     }
 

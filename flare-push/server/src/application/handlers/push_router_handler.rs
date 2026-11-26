@@ -4,9 +4,9 @@ use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use flare_grpc_proto::access_gateway;
+use flare_im_core_service_kit::metrics::PushServerMetrics;
+use flare_im_core_service_kit::push_trace::PushTraceRecorder;
 use flare_im_notify_rules::{ConversationKind, Mentioned};
-use flare_im_service_kit::metrics::PushServerMetrics;
-use flare_im_service_kit::push_trace::PushTraceRecorder;
 use flare_proto::common::EventEnvelopeDeliveryMode;
 use flare_proto::common::{
     Ack, AckPayload, AlertClass, CustomData, CustomPayload, EventType, NotificationKind,
@@ -96,7 +96,7 @@ impl AlertFacts {
 /// 等级取载荷里各条消息的最高等级；提及、seq、消息标识与发送者取第一条要提示的消息——
 /// 设备上最终展示的也是这一条。
 fn alert_facts(payload_kind: i32, push_payload: &[u8]) -> AlertFacts {
-    use flare_im_contracts::domain::push_policy::{event_alert_class, message_alert_class};
+    use flare_im_core_contracts::domain::push_policy::{event_alert_class, message_alert_class};
     match PushTaskPayloadKind::try_from(payload_kind).unwrap_or(PushTaskPayloadKind::Unspecified) {
         PushTaskPayloadKind::Message => {
             let Ok(request) = access_gateway::PushMessageRequest::decode(push_payload) else {
@@ -809,7 +809,7 @@ fn offline_task_shaped(
     now_ms: i64,
     shape: TaskShape,
 ) -> PushTaskEnvelope {
-    use flare_im_contracts::domain::push_policy::conversation_collapse_key;
+    use flare_im_core_contracts::domain::push_policy::conversation_collapse_key;
 
     // 合并键按会话取。不属于任何会话的推送（系统通知、自定义推送）不合并：
     // 它们共用一个键的话，互不相干的通知会在设备上互相覆盖。
@@ -1964,8 +1964,8 @@ impl PushRouterHandler {
     fn request_tenant_id<'a>(&self, ctx: &'a flare_server_core::context::Ctx) -> Result<&'a str> {
         ctx.tenant_id()
             .filter(|tenant_id| {
-                flare_im_contracts::domain::tenant::is_valid_tenant_id(tenant_id)
-                    && flare_im_contracts::utils::normalize_tenant_id(tenant_id) == *tenant_id
+                flare_im_core_contracts::domain::tenant::is_valid_tenant_id(tenant_id)
+                    && flare_im_core_contracts::utils::normalize_tenant_id(tenant_id) == *tenant_id
             })
             .ok_or_else(|| {
                 ErrorBuilder::new(
@@ -3984,7 +3984,7 @@ mod tests {
     /// 离线任务带齐按设备投递要用的字段。
     #[tokio::test]
     async fn offline_tasks_carry_the_per_device_fields() {
-        use flare_im_contracts::domain::push_policy::conversation_collapse_key;
+        use flare_im_core_contracts::domain::push_policy::conversation_collapse_key;
 
         let publisher = Arc::new(MockPushTaskPublisher::default());
         let handler = device_router(

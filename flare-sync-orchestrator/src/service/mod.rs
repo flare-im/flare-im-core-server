@@ -1,5 +1,5 @@
 use flare_grpc_proto::sync::sync_service_server::SyncServiceServer;
-use flare_im_contracts::service_names::SYNC_ORCHESTRATOR;
+use flare_im_core_contracts::service_names::SYNC_ORCHESTRATOR;
 use flare_server_core::error::Result;
 use tonic::transport::Server;
 
@@ -9,13 +9,14 @@ pub struct ApplicationBootstrap;
 
 impl ApplicationBootstrap {
     pub async fn run() -> Result<()> {
-        let app_config = flare_im_service_kit::load_app_config_from_env();
+        let app_config = flare_im_core_service_kit::load_app_config_from_env();
         // 与其余 Core 服务同一个日志与 trace 入口：`[logging]`、`RUST_LOG`、`FLARE_LOG_FORMAT`
         // 与 `OTEL_EXPORTER_OTLP_ENDPOINT` 含义一致；守卫持有到服务退出，释放时导出最后一批 span。
-        let _tracing =
-            flare_im_service_kit::tracing::init_tracing_from_config(Some(app_config.logging()))?;
+        let _tracing = flare_im_core_service_kit::tracing::init_tracing_from_config(Some(
+            app_config.logging(),
+        ))?;
         let service_config = app_config.sync_orchestrator_service();
-        let runtime_plan = flare_im_service_kit::build_service_runtime_plan(
+        let runtime_plan = flare_im_core_service_kit::build_service_runtime_plan(
             app_config,
             &service_config.runtime,
             SYNC_ORCHESTRATOR,
@@ -25,12 +26,12 @@ impl ApplicationBootstrap {
         let address = runtime_plan.address;
         let service_name = runtime_plan.service_name.clone();
         let grpc_metrics =
-            flare_im_service_kit::metrics::GrpcMetricsLayer::new(service_name.clone());
+            flare_im_core_service_kit::metrics::GrpcMetricsLayer::new(service_name.clone());
 
         // 同步是按用户读会话与消息的聚合入口：带 x-flare-ctx 就验签并以之为准，只收用户身份；
         // FLARE_REQUIRE_SIGNED_READ_CTX 打开时拒绝未签名调用。验过的令牌随下游读原样转发。
         let read_layer =
-            flare_im_service_kit::signed_read::signed_read_layer_from_env(SYNC_ORCHESTRATOR)?
+            flare_im_core_service_kit::signed_read::signed_read_layer_from_env(SYNC_ORCHESTRATOR)?
                 .allow_actor_types([flare_server_core::SignedActorType::User]);
         let handler = SyncOrchestratorGrpcHandler::new();
         let runtime = runtime_plan.service_runtime().add_spawn_with_shutdown(
@@ -50,7 +51,7 @@ impl ApplicationBootstrap {
         runtime
             .run_with_registration(|addr| {
                 Box::pin(async move {
-                    flare_im_service_kit::discovery::register_runtime_service_only(
+                    flare_im_core_service_kit::discovery::register_runtime_service_only(
                         &service_name,
                         addr,
                         None,

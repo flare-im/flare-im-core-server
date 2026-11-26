@@ -11,8 +11,8 @@ use axum::{
 };
 use ed25519_dalek::SigningKey;
 use ed25519_dalek::pkcs8::EncodePrivateKey;
-use flare_im_service_kit::clients::*;
-use flare_im_service_kit::{
+use flare_im_core_service_kit::clients::*;
+use flare_im_core_service_kit::{
     gateway_auth::TenantRuntimeGuard,
     tenant_runtime::{TenantAccessPolicy, TenantRuntimeCache},
 };

@@ -14,7 +14,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use flare_grpc_proto::access_gateway::PushEventRequest;
-use flare_im_contracts::constants::headers::{
+use flare_im_core_contracts::constants::headers::{
     DELIVERY_MODE_PING, HEADER_DELIVERY_MODE, HEADER_INLINE_EVENTS_TRUNCATED,
 };
 use flare_proto::common::{EventEnvelopeDeliveryMode, MqEnvelope, MqPayloadKind, mq_envelope};

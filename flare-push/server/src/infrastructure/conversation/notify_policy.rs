@@ -16,8 +16,8 @@ use flare_grpc_proto::conversation::conversation_read_service_client::Conversati
 use flare_grpc_proto::conversation::{
     ListConversationParticipantsRequest, ListNotificationSubscribersRequest,
 };
-use flare_im_contracts::Ctx;
-use flare_im_contracts::service_names::{CONVERSATION, get_service_name};
+use flare_im_core_contracts::Ctx;
+use flare_im_core_contracts::service_names::{CONVERSATION, get_service_name};
 use flare_server_core::error::FlareError;
 use tokio::sync::Mutex;
 use tonic::transport::Channel;
@@ -87,16 +87,17 @@ impl ConversationNotifyPolicy {
             return Ok(channel.clone());
         }
         let name = get_service_name(CONVERSATION);
-        let fallback = flare_im_service_kit::discovery::default_static_grpc_fallback(&name);
-        let channel =
-            flare_im_service_kit::discovery::connect_grpc_channel_with_fallback(&name, fallback)
-                .await
-                .map_err(|e| {
-                    FlareError::localized(
-                        flare_server_core::error::ErrorCode::ServiceUnavailable,
-                        format!("connect {name}: {e}"),
-                    )
-                })?;
+        let fallback = flare_im_core_service_kit::discovery::default_static_grpc_fallback(&name);
+        let channel = flare_im_core_service_kit::discovery::connect_grpc_channel_with_fallback(
+            &name, fallback,
+        )
+        .await
+        .map_err(|e| {
+            FlareError::localized(
+                flare_server_core::error::ErrorCode::ServiceUnavailable,
+                format!("connect {name}: {e}"),
+            )
+        })?;
         *guard = Some(channel.clone());
         Ok(channel)
     }

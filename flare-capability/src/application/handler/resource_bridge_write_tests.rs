@@ -6,13 +6,13 @@ use crate::domain::capability::{CapabilityError, Result};
 use crate::domain::repository::service_dispatch::{PluginServiceDispatch, ServiceDispatchError};
 use crate::domain::repository::{PluginAuthorizationReader, resource_access::*};
 use crate::infrastructure::capability::InMemoryCapabilityGrants;
-use flare_im_capability_core::plugin::invocation::{
+use flare_im_core_capability_core::plugin::invocation::{
     PluginCallClaims, PluginCallSigner, PluginCallVerifier, PluginRuntimeClaims,
     PluginRuntimeSigner, PluginRuntimeVerifier, PluginStaffCallClaims,
 };
-use flare_im_capability_core::plugin::resource::{HostCapability, ResourceRequest};
-use flare_im_capability_core::plugin::runtime::{PluginRuntimeSnapshot, digest_bytes};
-use flare_im_capability_core::plugin::service::PluginServiceResponse;
+use flare_im_core_capability_core::plugin::resource::{HostCapability, ResourceRequest};
+use flare_im_core_capability_core::plugin::runtime::{PluginRuntimeSnapshot, digest_bytes};
+use flare_im_core_capability_core::plugin::service::PluginServiceResponse;
 use serde_json::{Value, json};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -569,7 +569,7 @@ async fn service_dispatch_takes_only_runtime_credentials_within_the_size_limit()
         .await;
     assert!(refused(&ticket), "{ticket:?}");
     let oversized =
-        vec![b' '; flare_im_capability_core::plugin::service::MAX_SERVICE_REQUEST_BYTES + 1];
+        vec![b' '; flare_im_core_capability_core::plugin::service::MAX_SERVICE_REQUEST_BYTES + 1];
     let large = bridge
         .call_with(
             BridgeCredential::Runtime("runtime-token"),

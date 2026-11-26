@@ -2,7 +2,7 @@
 
 Core counts usage in process and publishes pre-aggregated windows for the platform's metering
 (design v3.1 C11 and §15.4). No message causes a broker write of its own: each producing
-instance publishes one event per tenant and window. The library is `crates/flare-im-usage`.
+instance publishes one event per tenant and window. The library is `crates/flare-im-core-usage`.
 
 ## Stream and configuration
 

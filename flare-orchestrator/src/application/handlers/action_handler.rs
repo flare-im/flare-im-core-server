@@ -11,9 +11,9 @@
 
 use std::sync::Arc;
 
-use flare_im_contracts::Ctx;
-use flare_im_message_pipeline::{MqPushRepository, PushRepository};
-use flare_im_seq::SequenceAllocator;
+use flare_im_core_contracts::Ctx;
+use flare_im_core_message_pipeline::{MqPushRepository, PushRepository};
+use flare_im_core_seq::SequenceAllocator;
 use flare_proto::common::{DeleteType as ProtoDeleteType, MarkType, ReactionAction};
 use tracing::instrument;
 

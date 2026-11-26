@@ -10,7 +10,7 @@ use flare_grpc_proto::signaling::{
     LoginRequest, LoginResponse, LogoutRequest, LogoutResponse, ReportDeviceStateRequest,
     ReportDeviceStateResponse,
 };
-use flare_im_contracts::Ctx;
+use flare_im_core_contracts::Ctx;
 use flare_server_core::error::Result;
 use std::collections::HashMap;
 

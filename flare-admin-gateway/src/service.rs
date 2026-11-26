@@ -1,6 +1,6 @@
 use axum::extract::DefaultBodyLimit;
 use flare_core_runtime::ServiceRuntime;
-use flare_im_service_kit::{
+use flare_im_core_service_kit::{
     clients::{AdminGrpcClients, CapabilityAdminClientWrapper, DownstreamGrpcResolver},
     gateway::{GatewayEnvScope, GatewaySettings, capability_downstream_from_env},
     service_names::ADMIN_GATEWAY,
@@ -21,14 +21,15 @@ pub struct ApplicationBootstrap;
 
 impl ApplicationBootstrap {
     pub async fn run() -> Result<()> {
-        let app_config = flare_im_service_kit::load_config(Some("config"));
-        let _tracing =
-            flare_im_service_kit::tracing::init_tracing_from_config(Some(app_config.logging()))?;
+        let app_config = flare_im_core_service_kit::load_config(Some("config"));
+        let _tracing = flare_im_core_service_kit::tracing::init_tracing_from_config(Some(
+            app_config.logging(),
+        ))?;
 
         let settings = GatewaySettings::from_env_for(GatewayEnvScope::Admin)?;
         let admin_config = app_config.admin_gateway_service();
         let configured_address: SocketAddr =
-            flare_im_service_kit::ServiceHelper::parse_server_addr(
+            flare_im_core_service_kit::ServiceHelper::parse_server_addr(
                 app_config,
                 &admin_config.runtime,
                 ADMIN_GATEWAY,
@@ -49,7 +50,7 @@ impl ApplicationBootstrap {
         };
         info!(address = %address, "Admin Gateway HTTP listen address resolved");
 
-        // The Staff context the Social gateway admin partition signs is the only identity on
+        // The Staff context the business gateway admin partition signs is the only identity on
         // the admin surface: the Cell key set is required, with Staff pinned to `kid=gateway`.
         let staff_verifier = Arc::new(admin_staff_verifier_from_env("admin-gateway")?);
         info!(
@@ -114,7 +115,7 @@ impl ApplicationBootstrap {
             },
         )?;
         let app = create_admin_router(clients, capability)
-            .layer(flare_im_service_kit::metrics::HttpMetricsLayer::new(
+            .layer(flare_im_core_service_kit::metrics::HttpMetricsLayer::new(
                 ADMIN_GATEWAY,
             ))
             .layer(DefaultBodyLimit::max(settings.server.max_body_size))
@@ -127,7 +128,7 @@ impl ApplicationBootstrap {
             )
             .merge(flare_server_core::http::ops::router(ops));
 
-        let runtime = flare_im_service_kit::health::attach_runtime_health_checks(
+        let runtime = flare_im_core_service_kit::health::attach_runtime_health_checks(
             ServiceRuntime::new(ADMIN_GATEWAY)
                 .with_address(address)
                 .with_health_failure_action(
@@ -146,17 +147,20 @@ impl ApplicationBootstrap {
                 }),
             ADMIN_GATEWAY,
         );
-        let metrics = flare_im_service_kit::metrics::MetricsEndpointConfig::from_section(
+        let metrics = flare_im_core_service_kit::metrics::MetricsEndpointConfig::from_section(
             ADMIN_GATEWAY,
             admin_config.runtime.metrics.as_ref(),
         )?;
-        let runtime =
-            flare_im_service_kit::metrics::attach_metrics_endpoint(runtime, ADMIN_GATEWAY, metrics);
+        let runtime = flare_im_core_service_kit::metrics::attach_metrics_endpoint(
+            runtime,
+            ADMIN_GATEWAY,
+            metrics,
+        );
 
         Ok(runtime
             .run_with_registration(|addr| {
                 Box::pin(async move {
-                    flare_im_service_kit::discovery::register_runtime_service_only(
+                    flare_im_core_service_kit::discovery::register_runtime_service_only(
                         ADMIN_GATEWAY,
                         addr,
                         None,

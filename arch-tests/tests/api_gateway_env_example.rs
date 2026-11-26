@@ -16,8 +16,9 @@ fn env_example_lists_only_registered_api_gateway_variables() {
     let keys = example_keys(&example);
     assert!(!keys.is_empty(), ".env.example lists no variables");
 
-    let registry = fs::read_to_string(root.join("crates/flare-im-service-kit/src/env_registry.rs"))
-        .expect("read env registry");
+    let registry =
+        fs::read_to_string(root.join("crates/flare-im-core-service-kit/src/env_registry.rs"))
+            .expect("read env registry");
     let owners = registered_owners(&registry);
 
     let read = api_gateway_reads(&root);
@@ -84,8 +85,9 @@ fn registered_owners(source: &str) -> BTreeMap<String, String> {
 /// （config.rs 里 `scope,` 后紧跟 `"NAME"` 的写法，可跨行），以及网关源码里直接写出的变量名字面量。
 fn api_gateway_reads(root: &std::path::Path) -> BTreeSet<String> {
     let mut read = BTreeSet::new();
-    let config = fs::read_to_string(root.join("crates/flare-im-service-kit/src/gateway/config.rs"))
-        .expect("read gateway config");
+    let config =
+        fs::read_to_string(root.join("crates/flare-im-core-service-kit/src/gateway/config.rs"))
+            .expect("read gateway config");
     let mut rest = config.as_str();
     while let Some(at) = rest.find("scope,") {
         let after = rest[at + "scope,".len()..].trim_start();

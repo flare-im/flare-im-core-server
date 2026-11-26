@@ -8,7 +8,7 @@
 //! of both writers then describe one desired state.
 use std::collections::{BTreeMap, BTreeSet};
 
-use flare_im_capability_core::plugin::runtime::{
+use flare_im_core_capability_core::plugin::runtime::{
     BindingLifecycle, ProjectedBinding, configuration_digest,
 };
 use serde::{Deserialize, Serialize};

@@ -5,7 +5,7 @@ pub mod wal_repository;
 
 // 重新导出各个仓储 trait
 pub use conversation_repository::ConversationRepository;
-pub use flare_im_message_pipeline::{
+pub use flare_im_core_message_pipeline::{
     ConversationClient, PushRepository, RecipientRepository, needs_member_lookup,
 };
 pub use idempotency_ledger::{IdempotencyLedger, LedgerRecord};

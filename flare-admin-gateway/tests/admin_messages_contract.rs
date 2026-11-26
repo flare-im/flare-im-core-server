@@ -13,12 +13,12 @@ use flare_grpc_proto::storage::storage_reader_service_server::{
     StorageReaderService, StorageReaderServiceServer,
 };
 use flare_grpc_proto::storage::*;
-use flare_im_service_kit::audit_effects::AuditEffects;
-use flare_im_service_kit::clients::{
+use flare_im_core_service_kit::audit_effects::AuditEffects;
+use flare_im_core_service_kit::clients::{
     AdminGrpcClients, ConversationReadServiceClientWrapper, MediaServiceClientWrapper,
     OnlineServiceClientWrapper, StorageReaderServiceClientWrapper,
 };
-use flare_im_service_kit::staff_context::require_staff;
+use flare_im_core_service_kit::staff_context::require_staff;
 use flare_server_core::SignedContextVerifier;
 use flare_server_core::auth::core_admin::permission::{MESSAGES_EXPORT, MESSAGES_READ};
 use tonic::transport::Channel;
@@ -328,7 +328,7 @@ async fn messages_harness() -> MessagesHarness {
             StorageReaderServiceClientWrapper::from_channel(storage),
         )),
         push: Arc::new(tokio::sync::Mutex::new(
-            flare_im_service_kit::clients::PushAdminClientWrapper::from_channel(unused_push),
+            flare_im_core_service_kit::clients::PushAdminClientWrapper::from_channel(unused_push),
         )),
         request_timeout: None,
     };

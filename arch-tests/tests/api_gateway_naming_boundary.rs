@@ -6,7 +6,7 @@ fn api_gateway_runtime_identity_is_consistent() {
     let root = workspace_root();
 
     let service_names =
-        fs::read_to_string(root.join("crates/flare-im-contracts/src/service_names.rs"))
+        fs::read_to_string(root.join("crates/flare-im-core-contracts/src/service_names.rs"))
             .expect("read service names");
     assert!(service_names.contains("pub const API_GATEWAY: &str = \"flare-api-gateway\""));
 

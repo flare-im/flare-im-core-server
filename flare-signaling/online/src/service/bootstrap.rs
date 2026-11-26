@@ -3,7 +3,7 @@
 use tracing::info;
 
 use crate::service::wire::{self, ApplicationContext};
-use flare_im_contracts::service_names::SIGNALING_ONLINE;
+use flare_im_core_contracts::service_names::SIGNALING_ONLINE;
 use flare_server_core::error::{ErrorCode, Result, map_infra_error};
 
 /// 应用启动器
@@ -12,9 +12,9 @@ pub struct ApplicationBootstrap;
 impl ApplicationBootstrap {
     /// 运行应用的主入口点
     pub async fn run() -> Result<()> {
-        let app_config = flare_im_service_kit::load_app_config_from_env();
+        let app_config = flare_im_core_service_kit::load_app_config_from_env();
         let service_config = app_config.signaling_online_service();
-        let runtime_plan = flare_im_service_kit::build_service_runtime_plan(
+        let runtime_plan = flare_im_core_service_kit::build_service_runtime_plan(
             app_config,
             &service_config.runtime,
             SIGNALING_ONLINE,
@@ -35,7 +35,7 @@ impl ApplicationBootstrap {
     /// 运行服务（带应用上下文）
     async fn run_with_context(
         context: ApplicationContext,
-        runtime_plan: flare_im_service_kit::ImServiceRuntimePlan,
+        runtime_plan: flare_im_core_service_kit::ImServiceRuntimePlan,
     ) -> Result<()> {
         use flare_grpc_proto::signaling::online::online_admin_service_server::OnlineAdminServiceServer;
         use flare_grpc_proto::signaling::online::online_service_server::OnlineServiceServer;
@@ -44,7 +44,7 @@ impl ApplicationBootstrap {
         let address = runtime_plan.address;
         let service_name = runtime_plan.service_name.clone();
         let grpc_metrics =
-            flare_im_service_kit::metrics::GrpcMetricsLayer::new(service_name.clone());
+            flare_im_core_service_kit::metrics::GrpcMetricsLayer::new(service_name.clone());
         let online_handler = context.online_handler.clone();
 
         info!(
@@ -140,7 +140,7 @@ impl ApplicationBootstrap {
         runtime
             .run_with_registration(|addr| {
                 Box::pin(async move {
-                    flare_im_service_kit::discovery::register_runtime_service_only(
+                    flare_im_core_service_kit::discovery::register_runtime_service_only(
                         &service_name,
                         addr,
                         None,

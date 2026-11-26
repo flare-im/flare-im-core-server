@@ -6,7 +6,7 @@ use ed25519_dalek::{
     SigningKey,
     pkcs8::{EncodePrivateKey, EncodePublicKey},
 };
-use flare_im_capability_core::plugin::{
+use flare_im_core_capability_core::plugin::{
     PluginManifest,
     authorization::TenantPluginGrant,
     invocation::{PLUGIN_CALL_HEADER, PluginCallSigner, PluginCallVerifier},
@@ -91,9 +91,11 @@ fn command() -> CapabilityDispatchCommand {
     }
 }
 /// What a web client of build 1 renders: the engine vocabulary, a bundle runtime when `bundle`.
-fn catalog_descriptor(bundle: bool) -> flare_im_capability_core::plugin::ui::ClientUiDescriptor {
-    use flare_im_capability_core::plugin::manifest::ClientPlatform;
-    use flare_im_capability_core::plugin::ui::{
+fn catalog_descriptor(
+    bundle: bool,
+) -> flare_im_core_capability_core::plugin::ui::ClientUiDescriptor {
+    use flare_im_core_capability_core::plugin::manifest::ClientPlatform;
+    use flare_im_core_capability_core::plugin::ui::{
         BundleRuntime, ClientUiDescriptor, engine_vocabulary,
     };
     ClientUiDescriptor::new(
@@ -135,7 +137,7 @@ async fn dispatch_refuses_an_absent_expired_disabled_or_revoked_projection() {
         )),
     ));
     let backend: Arc<dyn CapabilityPolicyBackend> = policy();
-    use flare_im_service_kit::plugin_platform::{
+    use flare_im_core_service_kit::plugin_platform::{
         PLUGIN_DISABLED, PLUGIN_FEATURE_DISABLED, PLUGIN_NOT_INSTALLED, PLUGIN_PERMISSION_DENIED,
     };
     for (mode, code) in [
@@ -195,7 +197,7 @@ async fn a_lapsed_projection_is_an_outage_not_an_uninstall() {
     let (ctx, _, _) = identity(SignedActorType::User);
     let backend: Arc<dyn CapabilityPolicyBackend> = policy();
     let mut catalog = command();
-    catalog.capability_id = flare_im_capability_core::plugin::ui::UI_CATALOG_OPERATION.into();
+    catalog.capability_id = flare_im_core_capability_core::plugin::ui::UI_CATALOG_OPERATION.into();
     catalog.payload = Some(catalog_payload(false));
     for lapsed in [true, false] {
         let routes = Arc::new(
@@ -216,7 +218,7 @@ async fn a_lapsed_projection_is_an_outage_not_an_uninstall() {
         } else {
             assert_eq!(
                 plugin_code(&operation),
-                Some(flare_im_service_kit::plugin_platform::PLUGIN_NOT_INSTALLED)
+                Some(flare_im_core_service_kit::plugin_platform::PLUGIN_NOT_INSTALLED)
             );
             let read = read.unwrap();
             assert!(read.data["plugins"].as_array().unwrap().is_empty());
@@ -301,7 +303,7 @@ async fn an_installed_plugin_needs_no_user_grant_and_the_emergency_switch_still_
     let result = dispatch_remote(&ctx, &command(), &routes, &backend, Duration::from_secs(1)).await;
     assert_eq!(
         plugin_code(&result),
-        Some(flare_im_service_kit::plugin_platform::PLUGIN_DISABLED)
+        Some(flare_im_core_service_kit::plugin_platform::PLUGIN_DISABLED)
     );
     stop.send(()).unwrap();
     server.await.unwrap().unwrap();
@@ -413,7 +415,7 @@ async fn ui_catalog_uses_local_projection_and_strips_runtime_details() {
     let reader = Arc::new(Projection(Mutex::new(Some(projected.clone()))));
     let routes = Arc::new(PluginRouteBook::new().with_runtime_authorization(reader.clone(), None));
     let mut command = command();
-    command.capability_id = flare_im_capability_core::plugin::ui::UI_CATALOG_OPERATION.into();
+    command.capability_id = flare_im_core_capability_core::plugin::ui::UI_CATALOG_OPERATION.into();
     command.payload = Some(catalog_payload(false));
     let backend: Arc<dyn CapabilityPolicyBackend> = policy();
     let result = dispatch_remote(&ctx, &command, &routes, &backend, Duration::from_secs(1))
@@ -428,7 +430,7 @@ async fn ui_catalog_uses_local_projection_and_strips_runtime_details() {
         result.data["plugins"][0].get("queryOperations").is_none(),
         "no query operation is offered"
     );
-    let catalog: flare_im_capability_core::plugin::ui::UiCatalog =
+    let catalog: flare_im_core_capability_core::plugin::ui::UiCatalog =
         serde_json::from_value(result.data).unwrap();
     let schema = &catalog.plugins[0].extensions.contributions[0].schema;
     assert!(catalog.valid_until_ms <= grant_deadline);
@@ -492,7 +494,8 @@ async fn ui_catalog_requires_a_valid_client_ui_descriptor() {
         Some(serde_json::json!({"descriptor": bad})),
     ] {
         let mut request = command();
-        request.capability_id = flare_im_capability_core::plugin::ui::UI_CATALOG_OPERATION.into();
+        request.capability_id =
+            flare_im_core_capability_core::plugin::ui::UI_CATALOG_OPERATION.into();
         request.payload = payload.clone();
         let error = dispatch_remote(&ctx, &request, &routes, &backend, Duration::from_secs(1))
             .await
@@ -510,7 +513,7 @@ async fn ui_catalog_requires_a_valid_client_ui_descriptor() {
 /// projection version and descriptor.
 #[tokio::test]
 async fn ui_catalog_selects_contribution_variants_per_client_descriptor() {
-    use flare_im_capability_core::plugin::ui::{UiBundleRef, UiCatalog, UiUpgrade};
+    use flare_im_core_capability_core::plugin::ui::{UiBundleRef, UiCatalog, UiUpgrade};
     let (ctx, _, _) = identity(SignedActorType::User);
     let manifest = |min_client: Option<Value>| {
         let mut raw: Value = serde_json::from_str(&echo_manifest()).unwrap();
@@ -549,7 +552,7 @@ async fn ui_catalog_selects_contribution_variants_per_client_descriptor() {
         async move {
             let mut request = command();
             request.capability_id =
-                flare_im_capability_core::plugin::ui::UI_CATALOG_OPERATION.into();
+                flare_im_core_capability_core::plugin::ui::UI_CATALOG_OPERATION.into();
             request.payload = Some(catalog_payload(bundle));
             let result = dispatch_remote(&ctx, &request, &routes, &backend, Duration::from_secs(1))
                 .await
@@ -632,9 +635,9 @@ async fn ui_catalog_selects_contribution_variants_per_client_descriptor() {
 
 /// The served `board` bundle of the board manifests below: the manifest's declaration with the
 /// application's mirror addresses, unpacked files and approved bridge permissions.
-fn board_entry() -> flare_im_capability_core::plugin::bundle::WebBundleDecl {
-    use flare_im_capability_core::plugin::bridge::BridgePermission;
-    flare_im_capability_core::plugin::bundle::WebBundleDecl {
+fn board_entry() -> flare_im_core_capability_core::plugin::bundle::WebBundleDecl {
+    use flare_im_core_capability_core::plugin::bridge::BridgePermission;
+    flare_im_core_capability_core::plugin::bundle::WebBundleDecl {
         id: "board".into(),
         sha256: "ab".repeat(32),
         size: 4096,
@@ -668,9 +671,9 @@ fn board_manifest(digital_goods: bool) -> String {
 /// The catalog plugin a client of `platform` with a bundle runtime gets from `reader`.
 async fn bundle_catalog(
     reader: Arc<Projection>,
-    platform: flare_im_capability_core::plugin::manifest::ClientPlatform,
-) -> flare_im_capability_core::plugin::ui::ClientPlugin {
-    use flare_im_capability_core::plugin::ui::{
+    platform: flare_im_core_capability_core::plugin::manifest::ClientPlatform,
+) -> flare_im_core_capability_core::plugin::ui::ClientPlugin {
+    use flare_im_core_capability_core::plugin::ui::{
         BundleRuntime, ClientUiDescriptor, UiCatalog, engine_vocabulary,
     };
     let (ctx, _, _) = identity(SignedActorType::User);
@@ -688,7 +691,7 @@ async fn bundle_catalog(
         }),
     );
     let mut request = command();
-    request.capability_id = flare_im_capability_core::plugin::ui::UI_CATALOG_OPERATION.into();
+    request.capability_id = flare_im_core_capability_core::plugin::ui::UI_CATALOG_OPERATION.into();
     request.payload = Some(serde_json::json!({ "descriptor": descriptor }));
     let result = dispatch_remote(&ctx, &request, &routes, &backend, Duration::from_secs(1))
         .await
@@ -703,7 +706,7 @@ async fn bundle_catalog(
 /// variant is chosen instead.
 #[tokio::test]
 async fn ui_catalog_lists_the_served_web_bundles_a_selected_contribution_opens() {
-    use flare_im_capability_core::plugin::manifest::ClientPlatform;
+    use flare_im_core_capability_core::plugin::manifest::ClientPlatform;
     let mut projected = snapshot("http://127.0.0.1:1".into());
     projected.plugins[0] = with_manifest(&projected.plugins[0], &board_manifest(false))
         .with_web_bundles(vec![board_entry()])
@@ -746,7 +749,7 @@ async fn ui_catalog_lists_the_served_web_bundles_a_selected_contribution_opens()
 /// A bundle selling digital goods is never selected for iOS, and then not listed either.
 #[tokio::test]
 async fn ui_catalog_keeps_digital_goods_bundles_away_from_ios() {
-    use flare_im_capability_core::plugin::manifest::ClientPlatform;
+    use flare_im_core_capability_core::plugin::manifest::ClientPlatform;
     let mut projected = snapshot("http://127.0.0.1:1".into());
     let mut entry = board_entry();
     entry.digital_goods = true;
@@ -792,7 +795,7 @@ fn a_resolved_plugin_serves_only_declared_web_bundles() {
 #[test]
 fn served_web_bundles_need_the_manifest_the_registry_and_the_projection_to_agree() {
     use crate::domain::plugin::{WebBundleApproval, served_web_bundles};
-    use flare_im_capability_core::plugin::bridge::BridgePermission;
+    use flare_im_core_capability_core::plugin::bridge::BridgePermission;
     let manifest = PluginManifest::from_json(board_manifest(false).as_bytes()).unwrap();
     let projected = ProjectedWebBundle {
         id: "board".into(),
@@ -880,12 +883,12 @@ async fn ui_catalog_query_operations_are_only_authorized_signed_queries() {
     backend_config.set_tenant_capability("app-a", "example.echo.stopped", false);
     let backend: Arc<dyn CapabilityPolicyBackend> = backend_config.clone();
     let mut request = command();
-    request.capability_id = flare_im_capability_core::plugin::ui::UI_CATALOG_OPERATION.into();
+    request.capability_id = flare_im_core_capability_core::plugin::ui::UI_CATALOG_OPERATION.into();
     request.payload = Some(catalog_payload(false));
     let result = dispatch_remote(&ctx, &request, &routes, &backend, Duration::from_secs(1))
         .await
         .unwrap();
-    let catalog: flare_im_capability_core::plugin::ui::UiCatalog =
+    let catalog: flare_im_core_capability_core::plugin::ui::UiCatalog =
         serde_json::from_value(result.data).unwrap();
     let plugin = &catalog.plugins[0];
     assert_eq!(
@@ -935,12 +938,12 @@ async fn scan_catalog_authorizes_its_resolver_without_an_observe_action() {
     let backend_config = policy();
     let backend: Arc<dyn CapabilityPolicyBackend> = backend_config.clone();
     let mut request = command();
-    request.capability_id = flare_im_capability_core::plugin::ui::UI_CATALOG_OPERATION.into();
+    request.capability_id = flare_im_core_capability_core::plugin::ui::UI_CATALOG_OPERATION.into();
     request.payload = Some(catalog_payload(false));
     let result = dispatch_remote(&ctx, &request, &routes, &backend, Duration::from_secs(1))
         .await
         .unwrap();
-    let catalog: flare_im_capability_core::plugin::ui::UiCatalog =
+    let catalog: flare_im_core_capability_core::plugin::ui::UiCatalog =
         serde_json::from_value(result.data).unwrap();
     assert_eq!(
         catalog.plugins[0].query_operations,
@@ -958,7 +961,7 @@ async fn scan_catalog_authorizes_its_resolver_without_an_observe_action() {
     let closed = dispatch_remote(&ctx, &request, &routes, &backend, Duration::from_secs(1))
         .await
         .unwrap();
-    let catalog: flare_im_capability_core::plugin::ui::UiCatalog =
+    let catalog: flare_im_core_capability_core::plugin::ui::UiCatalog =
         serde_json::from_value(closed.data).unwrap();
     assert!(catalog.plugins[0].query_operations.is_empty());
     assert!(
@@ -1034,12 +1037,12 @@ async fn native_catalog_exposes_only_approved_transient_commands() {
     backend_config.set_tenant_capability("app-a", "example.echo.stopped", false);
     let backend: Arc<dyn CapabilityPolicyBackend> = backend_config;
     let mut request = command();
-    request.capability_id = flare_im_capability_core::plugin::ui::UI_CATALOG_OPERATION.into();
+    request.capability_id = flare_im_core_capability_core::plugin::ui::UI_CATALOG_OPERATION.into();
     request.payload = Some(catalog_payload(false));
     let result = dispatch_remote(&ctx, &request, &routes, &backend, Duration::from_secs(1))
         .await
         .unwrap();
-    let catalog: flare_im_capability_core::plugin::ui::UiCatalog =
+    let catalog: flare_im_core_capability_core::plugin::ui::UiCatalog =
         serde_json::from_value(result.data).unwrap();
     assert_eq!(
         catalog.plugins[0].transient_operations,
@@ -1092,7 +1095,7 @@ async fn ui_catalog_lists_the_authorized_transient_operations() {
     let routes = Arc::new(PluginRouteBook::new().with_runtime_authorization(reader, None));
     let backend: Arc<dyn CapabilityPolicyBackend> = policy();
     let mut request = command();
-    request.capability_id = flare_im_capability_core::plugin::ui::UI_CATALOG_OPERATION.into();
+    request.capability_id = flare_im_core_capability_core::plugin::ui::UI_CATALOG_OPERATION.into();
     request.payload = Some(catalog_payload(false));
     let result = dispatch_remote(&ctx, &request, &routes, &backend, Duration::from_secs(1))
         .await
@@ -1101,7 +1104,7 @@ async fn ui_catalog_lists_the_authorized_transient_operations() {
         result.data["plugins"][0]["transientOperations"],
         serde_json::json!(["example.echo.pay"])
     );
-    let catalog: flare_im_capability_core::plugin::ui::UiCatalog =
+    let catalog: flare_im_core_capability_core::plugin::ui::UiCatalog =
         serde_json::from_value(result.data).unwrap();
     let plugin = &catalog.plugins[0];
     assert_eq!(
@@ -1141,7 +1144,7 @@ async fn a_closed_feature_drops_the_page_actions_targeting_its_operations() {
     let reader = Arc::new(Projection(Mutex::new(None)));
     let routes = Arc::new(PluginRouteBook::new().with_runtime_authorization(reader.clone(), None));
     let mut request = command();
-    request.capability_id = flare_im_capability_core::plugin::ui::UI_CATALOG_OPERATION.into();
+    request.capability_id = flare_im_core_capability_core::plugin::ui::UI_CATALOG_OPERATION.into();
     request.payload = Some(catalog_payload(false));
     let backend: Arc<dyn CapabilityPolicyBackend> = policy();
     for (open, expected) in [(false, vec!["other"]), (true, vec!["open", "other"])] {
@@ -1156,7 +1159,7 @@ async fn a_closed_feature_drops_the_page_actions_targeting_its_operations() {
             serde_json::json!(["example.echo.home"]),
             "every authorized query is listed, Observe actions or not"
         );
-        let catalog: flare_im_capability_core::plugin::ui::UiCatalog =
+        let catalog: flare_im_core_capability_core::plugin::ui::UiCatalog =
             serde_json::from_value(result.data).unwrap();
         let plugin = &catalog.plugins[0];
         assert_eq!(
@@ -1184,8 +1187,8 @@ async fn a_closed_feature_drops_the_page_actions_targeting_its_operations() {
 /// beyond it, an expiry or a disable still closes the plugin.
 #[tokio::test]
 async fn projection_issued_ahead_of_core_clock_keeps_plugins_in_effect() {
-    use flare_im_capability_core::plugin::authorization::CLOCK_SKEW_MARGIN_MS;
-    use flare_im_service_kit::plugin_platform::PLUGIN_DISABLED;
+    use flare_im_core_capability_core::plugin::authorization::CLOCK_SKEW_MARGIN_MS;
+    use flare_im_core_service_kit::plugin_platform::PLUGIN_DISABLED;
     let now = chrono::Utc::now().timestamp_millis();
     let mut value = snapshot("http://127.0.0.1:1".into());
     value.issued_at_ms = now + 2_850;
@@ -1203,7 +1206,7 @@ async fn projection_issued_ahead_of_core_clock_keeps_plugins_in_effect() {
 
     let (ctx, _, _) = identity(SignedActorType::User);
     let mut request = command();
-    request.capability_id = flare_im_capability_core::plugin::ui::UI_CATALOG_OPERATION.into();
+    request.capability_id = flare_im_core_capability_core::plugin::ui::UI_CATALOG_OPERATION.into();
     request.payload = Some(catalog_payload(false));
     let reader = Arc::new(Projection(Mutex::new(Some(value.clone()))));
     let routes = Arc::new(PluginRouteBook::new().with_runtime_authorization(reader, None));
@@ -1279,7 +1282,7 @@ async fn catalog_cross_plugin_pages_require_an_enabled_approved_destination() {
     let peer = projected("example.peer", serde_json::json!([]));
     let (ctx, _, _) = identity(SignedActorType::User);
     let mut request = command();
-    request.capability_id = flare_im_capability_core::plugin::ui::UI_CATALOG_OPERATION.into();
+    request.capability_id = flare_im_core_capability_core::plugin::ui::UI_CATALOG_OPERATION.into();
     request.payload = Some(catalog_payload(false));
     for reversed in [false, true] {
         for blocked in [
@@ -1325,7 +1328,7 @@ async fn catalog_cross_plugin_pages_require_an_enabled_approved_destination() {
                 dispatch_remote(&ctx, &request, &routes, &backend, Duration::from_secs(1))
                     .await
                     .unwrap();
-            let catalog: flare_im_capability_core::plugin::ui::UiCatalog =
+            let catalog: flare_im_core_capability_core::plugin::ui::UiCatalog =
                 serde_json::from_value(response.data).unwrap();
             let actions = &catalog
                 .plugins
@@ -1358,7 +1361,7 @@ mod plugin_state_and_catalog {
         MemoryBindings, RecordingSink, poll_snapshot, publisher,
     };
     use crate::application::handler::plugin_test_server::PluginServer;
-    use flare_im_service_kit::plugin_platform::{
+    use flare_im_core_service_kit::plugin_platform::{
         PLUGIN_CARD_UNBOUND, PLUGIN_MESSAGE_RECALLED, PLUGIN_PERMISSION_DENIED,
     };
     use serde_json::json;
@@ -1638,7 +1641,7 @@ mod plugin_state_and_catalog {
         .unwrap();
         *h.reader.0.lock().unwrap() = Some(snapshot);
         let mut command = poll_command(
-            flare_im_capability_core::plugin::ui::UI_CATALOG_OPERATION,
+            flare_im_core_capability_core::plugin::ui::UI_CATALOG_OPERATION,
             catalog_payload(false),
         );
         command.conversation_id = None;
@@ -1646,7 +1649,7 @@ mod plugin_state_and_catalog {
         let text = result.data.to_string();
         assert!(!text.contains("\"admin\"") && !text.contains("example.poll.list"));
         assert!(!text.contains("s3cret") && !text.contains("webhookSecret"));
-        let catalog: flare_im_capability_core::plugin::ui::UiCatalog =
+        let catalog: flare_im_core_capability_core::plugin::ui::UiCatalog =
             serde_json::from_value(result.data).unwrap();
         assert!(catalog.unavailable.is_empty());
         let plugin = &catalog.plugins[0];
@@ -1688,7 +1691,7 @@ mod plugin_state_and_catalog {
     /// `id` instead of `pollId`.
     fn two_card_snapshot(
         authority: String,
-    ) -> flare_im_capability_core::plugin::runtime::PluginRuntimeSnapshot {
+    ) -> flare_im_core_capability_core::plugin::runtime::PluginRuntimeSnapshot {
         use crate::application::handler::plugin_state::tests::POLL_MANIFEST;
         let mut raw: Value = serde_json::from_str(POLL_MANIFEST).unwrap();
         let mut second = raw["clientExtensions"]["contributions"][0].clone();

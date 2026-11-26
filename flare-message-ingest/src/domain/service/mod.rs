@@ -5,7 +5,7 @@ pub use conversation_ensure_service::{
     ConversationEnsureRequest, ConversationEnsureService, ConversationEventPublisher,
     build_conversation_ensure_request_from_message,
 };
-pub use flare_im_message_pipeline::{
+pub use flare_im_core_message_pipeline::{
     CompositeEventValidationStrategy, CompositeMessageValidationStrategy,
     EventRequiredFieldsValidationStrategy, EventTypeValidationStrategy, EventValidationStrategy,
     HookExecutionContext, HookExecutionService, MessageRequiredFieldsValidationStrategy,
@@ -15,4 +15,4 @@ pub use flare_im_message_pipeline::{
 pub use message_ingest_service::{MessageIngestService, MessageIngestServiceOptions};
 
 // Re-export shared hook builders.
-pub use flare_im_message_pipeline::hook::builder::*;
+pub use flare_im_core_message_pipeline::hook::builder::*;

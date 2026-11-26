@@ -17,7 +17,7 @@ use flare_grpc_proto::conversation::{
 };
 use flare_grpc_proto::message::SendMessageRequest;
 use flare_grpc_proto::message::message_send_service_client::MessageSendServiceClient;
-use flare_im_service_kit::plugin_platform::{CARD_POST_ROLE, card_post_request_id};
+use flare_im_core_service_kit::plugin_platform::{CARD_POST_ROLE, card_post_request_id};
 use flare_proto::common::{ConversationType, Message};
 use flare_server_core::{
     SignedActorType, SignedContextIdentity, SignedContextSigner, set_signed_context_token,
@@ -360,7 +360,7 @@ mod tests {
             conversation_kind("2AW1QQ2SKVWFEPJRXN"),
             Some(ConversationType::Group)
         );
-        for other in ["", "3AAI", "4ASYS", "7CHANNEL", "sync:alice"] {
+        for other in ["", "3AAI", "4ASYS", "7CHANNEL", "inbox:alice"] {
             assert_eq!(conversation_kind(other), None, "{other}");
         }
     }

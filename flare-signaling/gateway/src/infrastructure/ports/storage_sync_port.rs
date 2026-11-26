@@ -3,8 +3,8 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use flare_im_contracts::Ctx;
-use flare_im_contracts::utils::require_user_id_from_context;
+use flare_im_core_contracts::Ctx;
+use flare_im_core_contracts::utils::require_user_id_from_context;
 use flare_proto::common::{Sync, SyncRes};
 use flare_server_core::SignedContextSigner;
 use tonic::Status;

@@ -3,7 +3,7 @@
 use flare_server_core::error::{AnyhowContext, Result};
 use tracing::info;
 
-use flare_im_contracts::service_names::ORCHESTRATOR;
+use flare_im_core_contracts::service_names::ORCHESTRATOR;
 use flare_server_core::mq::NatsConsumerConfig;
 
 use super::wire;
@@ -14,9 +14,9 @@ pub struct ApplicationBootstrap;
 impl ApplicationBootstrap {
     /// 运行应用的主入口点
     pub async fn run() -> Result<()> {
-        let app_config = flare_im_service_kit::load_app_config_from_env();
+        let app_config = flare_im_core_service_kit::load_app_config_from_env();
         let service_config = app_config.orchestrator_service();
-        let runtime_plan = flare_im_service_kit::build_service_runtime_plan(
+        let runtime_plan = flare_im_core_service_kit::build_service_runtime_plan(
             app_config,
             &service_config.runtime,
             ORCHESTRATOR,
@@ -37,7 +37,7 @@ impl ApplicationBootstrap {
     /// 运行服务（带应用上下文）
     async fn run_with_context(
         context: wire::ApplicationContext,
-        runtime_plan: flare_im_service_kit::ImServiceRuntimePlan,
+        runtime_plan: flare_im_core_service_kit::ImServiceRuntimePlan,
     ) -> Result<()> {
         use flare_grpc_proto::message::message_action_service_server::MessageActionServiceServer;
         use flare_grpc_proto::message::message_event_service_server::MessageEventServiceServer;
@@ -47,7 +47,7 @@ impl ApplicationBootstrap {
         let service_name = runtime_plan.service_name.clone();
         let identity_layer = event_identity_layer()?;
         let grpc_metrics =
-            flare_im_service_kit::metrics::GrpcMetricsLayer::new(service_name.clone());
+            flare_im_core_service_kit::metrics::GrpcMetricsLayer::new(service_name.clone());
         let action_grpc = context.message_action_grpc.clone();
         let event_execute_grpc = context.message_event_execute_grpc.clone();
 
@@ -173,7 +173,7 @@ impl ApplicationBootstrap {
             service_runtime = service_runtime.add_spawn_with_shutdown(
                 "orchestrator-metrics",
                 move |shutdown_rx| async move {
-                    flare_im_service_kit::metrics::serve_prometheus_metrics(
+                    flare_im_core_service_kit::metrics::serve_prometheus_metrics(
                         metrics_config,
                         shutdown_rx,
                     )
@@ -226,7 +226,7 @@ impl ApplicationBootstrap {
                 let metadata = metadata_clone.clone();
                 let service_name = service_name.clone();
                 Box::pin(async move {
-                    flare_im_service_kit::discovery::register_runtime_service_only_with_metadata(
+                    flare_im_core_service_kit::discovery::register_runtime_service_only_with_metadata(
                         &service_name,
                         addr,
                         None,

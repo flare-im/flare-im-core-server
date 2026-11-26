@@ -22,15 +22,15 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use flare_im_capability_core::plugin::ProtocolError;
-use flare_im_capability_core::plugin::authorization::PluginInvocation;
-use flare_im_capability_core::plugin::invocation::{
+use flare_im_core_capability_core::plugin::ProtocolError;
+use flare_im_core_capability_core::plugin::authorization::PluginInvocation;
+use flare_im_core_capability_core::plugin::invocation::{
     MAX_PERMISSION_CODE_BYTES, PluginStaffCallClaims, plugin_permission_target,
 };
-use flare_im_capability_core::plugin::manifest::OperationMode;
-use flare_im_capability_core::plugin::resource::HostCapability;
-use flare_im_capability_core::plugin::state::SharedState;
-use flare_im_service_kit::staff_context::VerifiedStaff;
+use flare_im_core_capability_core::plugin::manifest::OperationMode;
+use flare_im_core_capability_core::plugin::resource::HostCapability;
+use flare_im_core_capability_core::plugin::state::SharedState;
+use flare_im_core_service_kit::staff_context::VerifiedStaff;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -78,7 +78,7 @@ pub struct AdminPluginRequest {
 /// The command id of the intent `idempotency_key` names for staff member `staff_id`:
 /// `intent-<sha256 hex>` of the two, the same on every attempt and never the same for two staff
 /// members or two keys. It fits a plugin command id (`[A-Za-z0-9_:-]{1,128}`).
-pub use flare_im_capability_core::plugin::staff_reauth::staff_command_id;
+pub use flare_im_core_capability_core::plugin::staff_reauth::staff_command_id;
 
 fn valid_idempotency_key(key: &str) -> bool {
     !key.is_empty()
@@ -265,13 +265,13 @@ pub async fn dispatch_admin(
         })
         .ok_or_else(|| denied("operation is not an admin operation of this kind"))?;
     let scope = match declared.scope {
-        flare_im_capability_core::plugin::admin::AdminOperationScope::Application => {
+        flare_im_core_capability_core::plugin::admin::AdminOperationScope::Application => {
             if staff.organization_scope.is_some() {
                 return Err(denied("application operation refuses organization scope"));
             }
-            flare_im_capability_core::plugin::invocation::PluginAdminScope::Application
+            flare_im_core_capability_core::plugin::invocation::PluginAdminScope::Application
         }
-        flare_im_capability_core::plugin::admin::AdminOperationScope::Organization => {
+        flare_im_core_capability_core::plugin::admin::AdminOperationScope::Organization => {
             let organization = staff
                 .organization_scope
                 .as_deref()
@@ -284,7 +284,7 @@ pub async fn dispatch_admin(
             {
                 return Err(denied("organization scope does not own this application"));
             }
-            flare_im_capability_core::plugin::invocation::PluginAdminScope::Organization {
+            flare_im_core_capability_core::plugin::invocation::PluginAdminScope::Organization {
                 organization_id: organization.into(),
             }
         }

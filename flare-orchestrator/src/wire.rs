@@ -14,10 +14,12 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use flare_im_contracts::constants::topics::TOPIC_MESSAGE_MAIN;
-use flare_im_contracts::service_names::CONVERSATION;
-use flare_im_message_pipeline::{ConversationClient, MqPushRepository, RecipientRepositoryImpl};
-use flare_im_seq::SequenceAllocator;
+use flare_im_core_contracts::constants::topics::TOPIC_MESSAGE_MAIN;
+use flare_im_core_contracts::service_names::CONVERSATION;
+use flare_im_core_message_pipeline::{
+    ConversationClient, MqPushRepository, RecipientRepositoryImpl,
+};
+use flare_im_core_seq::SequenceAllocator;
 use flare_server_core::error::{AnyhowContext, Result};
 use flare_server_core::mq::consumer::dispatcher::{Dispatcher, TopicDispatcher};
 use flare_server_core::mq::consumer::{ConsumerConfig, MessageHandler as MqMessageHandler};
@@ -57,7 +59,7 @@ pub struct ApplicationContext {
 ///
 /// 类似 Go Wire 的 Initialize 函数，按照依赖顺序构建所有组件
 pub async fn initialize(
-    app_config: &flare_im_service_kit::config::FlareAppConfig,
+    app_config: &flare_im_core_service_kit::config::FlareAppConfig,
 ) -> Result<ApplicationContext> {
     let config = Arc::new(MessageOrchestratorConfig::from_app_config(app_config));
 
@@ -91,11 +93,11 @@ pub async fn initialize(
         .unwrap_or(CONVERSATION);
     // 启动期 lazy：不等待 conversation 在 Consul 注册，首包 RPC 再建连。
     let conversation_channel =
-        flare_im_service_kit::discovery::connect_grpc_channel_lazy_from_app_config(
+        flare_im_core_service_kit::discovery::connect_grpc_channel_lazy_from_app_config(
             app_config,
             CONVERSATION,
             conversation_service_type,
-            flare_im_service_kit::discovery::default_static_grpc_fallback(
+            flare_im_core_service_kit::discovery::default_static_grpc_fallback(
                 conversation_service_type,
             ),
         )
@@ -106,8 +108,8 @@ pub async fn initialize(
         })?;
     // 事件收件人要读单聊成员：orchestrator 的入口（MQ 与动作 RPC）都没有可转发的签名，
     // 以本服务身份签读请求（会话服务按租户读成员，不要求是成员）。
-    let read_signer = flare_im_service_kit::signed_read::service_signer_from_env(
-        flare_im_contracts::service_names::ORCHESTRATOR,
+    let read_signer = flare_im_core_service_kit::signed_read::service_signer_from_env(
+        flare_im_core_contracts::service_names::ORCHESTRATOR,
     )?;
     if read_signer.is_none() {
         tracing::warn!(
@@ -116,16 +118,16 @@ pub async fn initialize(
     }
     // Message operations (recall, edit, delete, reaction, pin, mark) are authorized against the
     // stored message, read from Storage Reader as this service (see MessageOperationPolicy).
-    let storage_reader_name = flare_im_contracts::service_names::get_service_name(
-        flare_im_contracts::service_names::STORAGE_READER,
+    let storage_reader_name = flare_im_core_contracts::service_names::get_service_name(
+        flare_im_core_contracts::service_names::STORAGE_READER,
     );
     let storage_reader_channel =
-        flare_im_service_kit::discovery::connect_grpc_channel_lazy_from_app_config(
+        flare_im_core_service_kit::discovery::connect_grpc_channel_lazy_from_app_config(
             app_config,
-            flare_im_contracts::service_names::STORAGE_READER,
+            flare_im_core_contracts::service_names::STORAGE_READER,
             &storage_reader_name,
-            flare_im_service_kit::discovery::default_static_grpc_fallback(
-                flare_im_contracts::service_names::STORAGE_READER,
+            flare_im_core_service_kit::discovery::default_static_grpc_fallback(
+                flare_im_core_contracts::service_names::STORAGE_READER,
             ),
         )
         .map_err(|e| {
@@ -158,7 +160,7 @@ pub async fn initialize(
     let conversation_repository = Arc::new(
         ConversationClient::new(conversation_channel).with_service_read_signer(
             read_signer.clone(),
-            flare_im_contracts::service_names::ORCHESTRATOR,
+            flare_im_core_contracts::service_names::ORCHESTRATOR,
         ),
     );
 
@@ -172,10 +174,13 @@ pub async fn initialize(
             flare_server_core::error::FlareError::system(format!("sequence allocator: {}", e))
         })?
         .with_floor_provider(Arc::new(
-            flare_im_service_kit::sequence_floor::StorageSeqFloorProvider::from_channel(
+            flare_im_core_service_kit::sequence_floor::StorageSeqFloorProvider::from_channel(
                 storage_reader_channel,
             )
-            .with_service_signer(read_signer, flare_im_contracts::service_names::ORCHESTRATOR),
+            .with_service_signer(
+                read_signer,
+                flare_im_core_contracts::service_names::ORCHESTRATOR,
+            ),
         ));
 
     // Client read acks that do not raise the reader's watermark are dropped before they
@@ -210,7 +215,11 @@ pub async fn initialize(
         .with_user_sync_compensation(user_sync_compensation_repository)
         .with_read_watermark(read_watermark_repository)
         .with_message_targets(message_targets.clone())
-        .with_conversation_members(conversation_members),
+        .with_conversation_members(conversation_members)
+        .with_trusted_integrations(
+            flare_im_core_service_kit::trusted_integration::TrustedIntegrationPrincipals::from_env(
+            ),
+        ),
     );
 
     let event_handler = Arc::new(EventHandler::new(event_domain_service.clone()));
@@ -258,7 +267,7 @@ pub async fn initialize(
 ///
 /// NATS 后端没有重试 topic，失败的消息靠 JetStream 原生重投：扇出或下游（storage-writer 的流、
 /// 会话服务、Redis）暂时不可用时 handler 报可重试错误，按
-/// [`flare_im_service_kit::consumer_retry`] 的退避延迟重投，12 次重试的等待合计 135 s，之后仍
+/// [`flare_im_core_service_kit::consumer_retry`] 的退避延迟重投，12 次重试的等待合计 135 s，之后仍
 /// 失败才进 DLQ。默认的 3 次立即重投会在下游停机的同一瞬间用完。Kafka 后端走重试 topic
 /// （`message_retry_delay_ms`），不变。
 pub(crate) fn main_queue_consumer_config(mq_backend: &str) -> ConsumerConfig {
@@ -266,7 +275,7 @@ pub(crate) fn main_queue_consumer_config(mq_backend: &str) -> ConsumerConfig {
         .with_concurrency(32)
         .with_ordered(true);
     if mq_backend == "nats" {
-        flare_im_service_kit::consumer_retry::with_downstream_outage_retry(config)
+        flare_im_core_service_kit::consumer_retry::with_downstream_outage_retry(config)
     } else {
         config
     }
@@ -370,7 +379,7 @@ mod consumer_retry_tests {
     fn nats_main_queue_retries_span_a_restart_window_inside_max_deliver() {
         let consumer = main_queue_consumer_config("nats");
         let max_deliver = MessageOrchestratorConfig::default().max_deliver();
-        let window = flare_im_service_kit::consumer_retry::check_downstream_outage_retry(
+        let window = flare_im_core_service_kit::consumer_retry::check_downstream_outage_retry(
             &consumer,
             max_deliver,
         )

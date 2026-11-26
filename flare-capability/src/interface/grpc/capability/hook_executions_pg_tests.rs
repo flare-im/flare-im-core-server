@@ -15,7 +15,7 @@ use flare_grpc_proto::capability::{
     GenericRequest, GetHookStatisticsRequest, GetHookStatisticsResponse, HookStatistics,
     QueryHookExecutionsRequest, QueryHookExecutionsResponse,
 };
-use flare_im_hooks::hooks::execution::{
+use flare_im_core_hooks::hooks::execution::{
     HOOK_TIMEOUT_CODE, HookExecutionOutcome, HookExecutionRecord,
 };
 use flare_proto::common::{Pagination, TimeRange};

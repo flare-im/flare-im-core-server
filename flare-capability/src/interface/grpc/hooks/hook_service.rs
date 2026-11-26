@@ -14,8 +14,8 @@ use flare_grpc_proto::capability::{
     SetHookStatusResponse, TestHookConfigRequest, TestHookConfigResponse, UpdateHookConfigRequest,
     UpdateHookConfigResponse,
 };
-use flare_im_hooks::hooks::execution::execution_hook_id;
-use flare_im_hooks::hooks::{HOOK_POINTS, HookDefinition, StoredHook, test_call};
+use flare_im_core_hooks::hooks::execution::execution_hook_id;
+use flare_im_core_hooks::hooks::{HOOK_POINTS, HookDefinition, StoredHook, test_call};
 use flare_server_core::auth::core_admin::PLATFORM_SCOPE_TENANT;
 use flare_server_core::error::Result as FlareResult;
 use flare_server_core::error::{ErrorBuilder, ErrorCode, FlareError};

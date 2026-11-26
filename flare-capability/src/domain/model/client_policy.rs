@@ -5,9 +5,9 @@
 
 use std::collections::BTreeMap;
 
-use flare_im_contracts::domain::tenant::{ClientBuildPolicy, is_valid_tenant_id};
-use flare_im_contracts::utils::normalize_tenant_id;
-use flare_im_service_kit::tenant_notice::{ACCESS_TOPIC, RELEASE_TOPIC};
+use flare_im_core_contracts::domain::tenant::{ClientBuildPolicy, is_valid_tenant_id};
+use flare_im_core_contracts::utils::normalize_tenant_id;
+use flare_im_core_service_kit::tenant_notice::{ACCESS_TOPIC, RELEASE_TOPIC};
 
 /// 一个应用最多带多少个平台的构建策略。
 pub const MAX_BUILD_POLICY_PLATFORMS: usize = 32;
@@ -167,7 +167,7 @@ impl ClientPolicyRecord {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use flare_im_contracts::domain::tenant::ClientBuildRange;
+    use flare_im_core_contracts::domain::tenant::ClientBuildRange;
 
     fn record(version: u64, access_serial: u64, release_generation: u64) -> ClientPolicyRecord {
         ClientPolicyRecord::new(

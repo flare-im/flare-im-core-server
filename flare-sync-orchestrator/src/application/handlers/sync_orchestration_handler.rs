@@ -10,8 +10,8 @@ use flare_grpc_proto::conversation::{
     ListConversationParticipantsRequest, UpdateConversationUserSettingsRequest,
     UpdateCursorRequest, UpdateUserNotificationSettingsRequest,
 };
-use flare_im_contracts::Ctx;
-use flare_im_contracts::utils::normalize_optional_tenant_id;
+use flare_im_core_contracts::Ctx;
+use flare_im_core_contracts::utils::normalize_optional_tenant_id;
 use flare_proto::Message;
 use flare_proto::common::SyncRecoveryHint;
 use flare_proto::common::sync::Payload as SyncPayload;
@@ -650,10 +650,11 @@ where
         if authenticated_user != user_id {
             return Err(sync_read_access_denied());
         }
-        if flare_im_contracts::constants::sync_inbox::is_sync_inbox_conversation_id(conversation_id)
-        {
+        if flare_im_core_contracts::constants::user_inbox::is_user_inbox_conversation_id(
+            conversation_id,
+        ) {
             if conversation_id
-                != flare_im_contracts::constants::sync_inbox::sync_inbox_conversation_id(
+                != flare_im_core_contracts::constants::user_inbox::user_inbox_conversation_id(
                     authenticated_user,
                 )
             {
@@ -799,7 +800,7 @@ where
             futures::stream::iter(windows.into_iter().map(|(cid, messages, _last_seq)| {
                 let after = after_by_id.get(cid.as_str()).copied().unwrap_or(0);
                 async move {
-                    if flare_im_contracts::constants::sync_inbox::is_sync_inbox_conversation_id(
+                    if flare_im_core_contracts::constants::user_inbox::is_user_inbox_conversation_id(
                         &cid,
                     ) {
                         return Ok::<_, FlareError>((
@@ -1906,7 +1907,7 @@ fn event_replay_gap_repair_context(
 fn valid_sync_conversation_id(conversation_id: &str) -> bool {
     let conversation_id = conversation_id.trim();
     !conversation_id.is_empty()
-        && !flare_im_contracts::constants::sync_inbox::is_sync_inbox_conversation_id(
+        && !flare_im_core_contracts::constants::user_inbox::is_user_inbox_conversation_id(
             conversation_id,
         )
 }
@@ -2675,7 +2676,7 @@ mod tests {
                 &ctx(),
                 "22",
                 MultiConversationSync {
-                    conversation_ids: vec!["sync:22".into(), "group".into()],
+                    conversation_ids: vec!["inbox:22".into(), "group".into()],
                     limit_per_conversation: 20,
                     ..Default::default()
                 },
@@ -2693,7 +2694,7 @@ mod tests {
         let inbox = page
             .slices
             .iter()
-            .find(|slice| slice.conversation_id == "sync:22")
+            .find(|slice| slice.conversation_id == "inbox:22")
             .unwrap();
         assert!(inbox.items.is_empty());
         assert_eq!(inbox.max_conversation_seq, 0);
@@ -2728,7 +2729,7 @@ mod tests {
                 &ctx(),
                 "22",
                 SingleConversationSync {
-                    conversation_id: "sync:22".into(),
+                    conversation_id: "inbox:22".into(),
                     ..Default::default()
                 },
             )
@@ -2741,7 +2742,7 @@ mod tests {
                 &ctx(),
                 "22",
                 MultiConversationSync {
-                    conversation_ids: vec!["sync:22".into()],
+                    conversation_ids: vec!["inbox:22".into()],
                     ..Default::default()
                 },
             )
@@ -2749,7 +2750,7 @@ mod tests {
             .unwrap();
         assert_eq!(batch.slices.len(), 1);
         assert_eq!(batch.slices[0].max_conversation_seq, 0);
-        for cid in ["sync:other", "sync:", "sync: 22"] {
+        for cid in ["inbox:other", "inbox:", "inbox: 22"] {
             let error = handler
                 .single_conversation_sync(
                     &ctx(),
@@ -3302,7 +3303,7 @@ mod tests {
                         ..Default::default()
                     },
                     ConversationSummary {
-                        conversation_id: "sync:internal".to_string(),
+                        conversation_id: "inbox:internal".to_string(),
                         max_conversation_seq: 100,
                         updated_at: 2_000,
                         ..Default::default()

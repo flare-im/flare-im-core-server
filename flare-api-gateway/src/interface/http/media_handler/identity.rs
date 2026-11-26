@@ -2,7 +2,7 @@
 //! 由 `MediaCaller` 在每次 RPC 前现签 Cell 内部上下文；不读取调用方自带的身份头。
 use axum::extract::FromRequestParts;
 use axum::http::request::Parts;
-use flare_im_service_kit::clients::MediaCaller;
+use flare_im_core_service_kit::clients::MediaCaller;
 use flare_server_core::{
     AuthenticatedPrincipal,
     context::Ctx,

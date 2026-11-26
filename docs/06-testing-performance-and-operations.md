@@ -92,7 +92,7 @@ SMOKE_TENANT_ID=e2e-0123456789abcdef0123 SMOKE_PG_CONTAINER=<postgres 容器名>
 cargo test --workspace
 cargo test -p flare-orchestrator
 cargo test -p flare-storage-writer
-cargo test -p flare-im-service-kit --test startup_contract
+cargo test -p flare-im-core-service-kit --test startup_contract
 python3 scripts/test_smoke_message_flow.py
 ./scripts/smoke_message_flow.sh --help
 ```
@@ -114,8 +114,8 @@ python3 scripts/test_smoke_message_flow.py
 | `FLARE_CONVERSATION_TEST_REDIS_URL` | 一次性 Redis | `conversation_history_purge_pg` 的读侧缓存失效用例 |
 | `FLARE_MEDIA_TEST_DATABASE_URL` | 一次性 PostgreSQL | `flare-media` lib 的 5 条 |
 | `FLARE_STORAGE_TEST_DATABASE_URL` | 一次性 PostgreSQL；`operation_idempotency_pg` 需要已按 `migrations/`（`flare-migrate run`）或 `deploy/init.sql` 建好的库 | `flare-storage-writer` 的 `event_stream_redelivery_pg`、`operation_idempotency_pg` |
-| `FLARE_REDIS_TEST_URL` | 一次性 Redis | `flare-im-ack` 的 `test_ack_status_management` |
-| `FLARE_TEST_REDIS_URL` | 一次性 Redis | `flare-signaling-online` 的准入用例；`flare-im-seq` 的 `leased_allocator` 3 条（未设置时连本机 `redis://127.0.0.1/`，`sequence_allocator` 的 3 条固定连这个地址） |
+| `FLARE_REDIS_TEST_URL` | 一次性 Redis | `flare-im-core-ack` 的 `test_ack_status_management` |
+| `FLARE_TEST_REDIS_URL` | 一次性 Redis | `flare-signaling-online` 的准入用例；`flare-im-core-seq` 的 `leased_allocator` 3 条（未设置时连本机 `redis://127.0.0.1/`，`sequence_allocator` 的 3 条固定连这个地址） |
 | `PUSH_WORKER_GETUI_APP_ID` / `_APP_KEY` / `_MASTER_SECRET` / `_SANDBOX_CID` | 个推沙箱凭据 | `flare-push-worker` 的 `getui_sandbox_push` |
 
 示例（连接串从本机 0600 文件读入环境变量，不要写进命令历史）：
@@ -132,7 +132,7 @@ cargo test -p flare-media --lib -- --ignored
 | 门禁 | 命令 | 通过标准 |
 |------|------|----------|
 | 协议主干 | `cd flare-proto && rtk cargo test`；`cd flare-grpc-proto && rtk cargo test` | proto 编译不回退。 |
-| 服务端大群原语 | `cd flare-im-core && rtk cargo test -p flare-im-message-pipeline`；`rtk cargo test -p flare-orchestrator`；`rtk cargo test -p flare-push-server`；`rtk cargo test -p flare-im-arch-tests large_conversation` | 大群不物化全量收件人；push-only ping 不携带 inline message payload；recipient-less ping 走在线索引。 |
+| 服务端大群原语 | `cd flare-im-core && rtk cargo test -p flare-im-core-message-pipeline`；`rtk cargo test -p flare-orchestrator`；`rtk cargo test -p flare-push-server`；`rtk cargo test -p flare-im-arch-tests large_conversation` | 大群不物化全量收件人；push-only ping 不携带 inline message payload；recipient-less ping 走在线索引。 |
 | 传输与 runtime | `cd flare-core && rtk cargo test --all-features`；`cd flare-server-core && rtk cargo test --all-features` | heartbeat half-open、runtime shutdown、MQ backpressure 等回归保持通过。 |
 | SDK 核心 | `cd flare-im-core-sdk && rtk cargo test`；`rtk cargo test --features storage-sqlite` | 可靠发送、SQLite 本地存储、sync lifecycle 不回退。 |
 | SDK codegen | `cd flare-im-core-sdk && rtk cargo xtask codegen-check` | sdk-spec、native ABI、生成模板和平台包保持一致。 |

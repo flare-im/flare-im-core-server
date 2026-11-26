@@ -9,9 +9,9 @@ use ed25519_dalek::{
     SigningKey,
     pkcs8::{EncodePrivateKey, EncodePublicKey},
 };
-use flare_im_capability_core::plugin::PluginManifest;
-use flare_im_capability_core::plugin::invocation::{PluginCallSigner, PluginCallVerifier};
-use flare_im_capability_core::plugin::runtime::PluginRuntimeSnapshot;
+use flare_im_core_capability_core::plugin::PluginManifest;
+use flare_im_core_capability_core::plugin::invocation::{PluginCallSigner, PluginCallVerifier};
+use flare_im_core_capability_core::plugin::runtime::PluginRuntimeSnapshot;
 use flare_server_core::{
     SignedActorType, SignedContextIdentity, SignedContextSigner, SignedContextVerifier,
 };
@@ -161,7 +161,7 @@ impl PluginAuthorizationReader for ProjectionChangingDuringRead {
                 grant.valid_until_ms = snapshot.valid_until_ms;
             }
             ProjectionReadTiming::FutureGrant => {
-                use flare_im_capability_core::plugin::authorization::CLOCK_SKEW_MARGIN_MS;
+                use flare_im_core_capability_core::plugin::authorization::CLOCK_SKEW_MARGIN_MS;
                 // The lease must outlast the late start, or the snapshot itself is refused.
                 snapshot.valid_until_ms = completed_at + 120_000;
                 grant.valid_until_ms = snapshot.valid_until_ms;
@@ -224,8 +224,10 @@ fn staff_attempt_scoped(
         member_organization,
         target_organization,
     );
-    flare_im_service_kit::staff_context::verify_staff_metadata(&metadata, &verifier, permission)
-        .unwrap()
+    flare_im_core_service_kit::staff_context::verify_staff_metadata(
+        &metadata, &verifier, permission,
+    )
+    .unwrap()
 }
 
 /// The gateway-signed Staff `x-flare-ctx` of one attempt for `app-a`, as admin-gateway forwards
@@ -475,7 +477,7 @@ async fn organization_operations_require_signed_scope_matching_the_projected_own
 
 #[tokio::test]
 async fn staff_reauthentication_reaches_only_transport_metadata_and_never_json_input() {
-    use flare_im_capability_core::plugin::staff_reauth::STAFF_REAUTH_HEADER;
+    use flare_im_core_capability_core::plugin::staff_reauth::STAFF_REAUTH_HEADER;
     let h = harness().await;
     let ordinary = staff(READ);
     dispatch_admin(

@@ -6,8 +6,8 @@ use crate::domain::model::{
     EventType, HardDeletedPayload, MarkPayload, PinPayload, PluginStatePayload, ReactionPayload,
     ReadPayload, RecallPayload, RequestContext, TenantContext, UnmarkPayload, UnpinPayload,
 };
-use flare_im_contracts::Ctx;
-use flare_im_contracts::utils::{
+use flare_im_core_contracts::Ctx;
+use flare_im_core_contracts::utils::{
     millis_to_timestamp, normalize_optional_tenant_id, normalize_tenant_id, timestamp_to_millis,
 };
 use flare_proto::common;
@@ -15,7 +15,7 @@ use flare_proto::common::message_content::Content;
 use prost::Message as ProstMessage;
 
 /// 统一从 flare-im-core 重导出，供本 crate 其他处使用
-pub use flare_im_contracts::message::{message_from_proto, message_to_proto};
+pub use flare_im_core_contracts::message::{message_from_proto, message_to_proto};
 
 /// 从 proto Event 转为领域 Event（common::Event 无 tenant_id/operator_id，由 metadata 注入，此处填空）
 pub fn event_from_proto(p: &flare_proto::common::Event) -> Event {
@@ -455,7 +455,9 @@ pub fn message_command_from_proto(
 ) -> crate::application::commands::ProcessStoreMessageCommand {
     use crate::application::commands::ProcessStoreMessageCommand;
     let payload =
-        flare_im_contracts::abstractions::storage_payload::StorageMessagePayload::from_message(msg);
+        flare_im_core_contracts::abstractions::storage_payload::StorageMessagePayload::from_message(
+            msg,
+        );
     let message = payload.message.as_ref().map(message_from_proto);
     ProcessStoreMessageCommand {
         conversation_id: payload.conversation_id,
@@ -471,7 +473,7 @@ pub fn message_command_from_proto(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use flare_im_contracts::utils::Context;
+    use flare_im_core_contracts::utils::Context;
     use std::sync::Arc;
 
     fn operation_event() -> Event {

@@ -13,7 +13,7 @@ pub(super) fn runtime_authorization(
     pool: Option<&Arc<PgPool>>,
 ) -> Result<PluginRouteBook> {
     use base64::Engine;
-    use flare_im_capability_core::plugin::invocation::PluginCallSigner;
+    use flare_im_core_capability_core::plugin::invocation::PluginCallSigner;
     let signer = match std::env::var("FLARE_PLUGIN_CALL_SIGNING_KEY") {
         Ok(raw) => {
             let seed: [u8; 32] = base64::engine::general_purpose::STANDARD
@@ -126,7 +126,7 @@ fn capability_signer() -> Result<Option<flare_server_core::SignedContextSigner>>
 fn capability_signer_from(key: &str) -> Result<flare_server_core::SignedContextSigner> {
     // The key is Capability's own: a Cell key every component holds would let any of them post
     // plugin cards or publish shared state.
-    if optional_env(flare_im_service_kit::push_delivery::INTERNAL_CTX_PRIVATE_KEY_ENV)?
+    if optional_env(flare_im_core_service_kit::push_delivery::INTERNAL_CTX_PRIVATE_KEY_ENV)?
         .is_some_and(|cell| cell == key)
     {
         return Err(FlareError::system(
@@ -134,7 +134,9 @@ fn capability_signer_from(key: &str) -> Result<flare_server_core::SignedContextS
         ));
     }
     flare_server_core::SignedContextSigner::from_private_key(key)
-        .and_then(|signer| signer.with_kid(flare_im_service_kit::plugin_platform::CARD_POST_KID))
+        .and_then(|signer| {
+            signer.with_kid(flare_im_core_service_kit::plugin_platform::CARD_POST_KID)
+        })
         .map_err(|_| FlareError::system("invalid FLARE_CAPABILITY_CTX_PRIVATE_KEY"))
 }
 
@@ -148,7 +150,7 @@ fn card_delivery()
     };
     let authority_ok = |value: &str| {
         value.starts_with("discovery://") && value.len() > "discovery://".len()
-            || flare_im_capability_core::plugin::runtime::valid_grpc_authority(value)
+            || flare_im_core_capability_core::plugin::runtime::valid_grpc_authority(value)
     };
     if !authority_ok(&ingest) {
         return Err(FlareError::system("invalid FLARE_PLUGIN_CARD_INGEST_URL"));
@@ -160,7 +162,7 @@ fn card_delivery()
         })?;
     let post_signer = capability_signer_from(&key)?;
     let read_signer =
-        flare_im_service_kit::signed_read::service_signer_from_env("plugin card routing")?
+        flare_im_core_service_kit::signed_read::service_signer_from_env("plugin card routing")?
             .ok_or_else(|| {
                 FlareError::system("plugin card posting needs FLARE_INTERNAL_CTX_PRIVATE_KEY")
             })?;
@@ -193,7 +195,7 @@ fn plugin_state_publisher(
         Err(_) => return Err(FlareError::system("invalid FLARE_PLUGIN_STATE_EVENT_URL")),
     };
     if !(authority.starts_with("discovery://") && authority.len() > "discovery://".len()
-        || flare_im_capability_core::plugin::runtime::valid_grpc_authority(&authority))
+        || flare_im_core_capability_core::plugin::runtime::valid_grpc_authority(&authority))
     {
         return Err(FlareError::system("invalid FLARE_PLUGIN_STATE_EVENT_URL"));
     }

@@ -39,7 +39,7 @@ use crate::infrastructure::push_display::{
 };
 use crate::infrastructure::push_text::fit_utf16;
 use crate::infrastructure::vendor_http;
-use flare_im_contracts::{Ctx, DevicePushToken};
+use flare_im_core_contracts::{Ctx, DevicePushToken};
 use flare_im_notify_rules::text::Lang;
 use flare_proto::PushTaskEnvelope;
 use flare_proto::common::PushDisposition;

@@ -11,8 +11,8 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
-use flare_im_contracts::Ctx;
-use flare_im_message_pipeline::rpc::ConversationRpcClient;
+use flare_im_core_contracts::Ctx;
+use flare_im_core_message_pipeline::rpc::ConversationRpcClient;
 use flare_server_core::context::Context;
 use moka::future::Cache;
 

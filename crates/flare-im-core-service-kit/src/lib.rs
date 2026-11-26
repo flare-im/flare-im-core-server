@@ -1,0 +1,74 @@
+//! Runtime service kit for Flare IM server processes.
+
+pub mod audit_effects;
+pub mod clients;
+pub mod config;
+pub mod consumer_retry;
+pub mod control_auth;
+pub mod credential_projection;
+pub mod discovery;
+pub mod env_registry;
+pub mod gateway;
+pub mod gateway_auth;
+pub mod health;
+pub mod metrics;
+pub mod push_delivery;
+pub mod push_provenance;
+pub mod push_trace;
+pub mod redis_connection;
+pub mod roster_policy;
+pub mod runtime;
+pub mod sequence_floor;
+pub mod service_helper;
+pub mod signed_read;
+pub mod staff_context;
+pub mod tenant_kick_fence;
+pub mod tenant_notice;
+pub mod tenant_runtime;
+pub mod tracing;
+pub mod trusted_integration;
+
+pub use flare_im_core_contracts::{Ctx, service_names};
+pub use flare_server_core::TopicEventBus;
+pub use flare_server_core::discovery::{
+    ServiceClient, ServiceDiscover, ServiceDiscoverUpdater, ServiceInstance, ServiceRegistry,
+};
+pub use flare_server_core::{Config, RegistryConfig, ServerConfig, ServiceConfig};
+
+pub use clients::{AdminGrpcClients, GrpcClients};
+pub use config::{
+    AccessGatewayServiceConfig, AdminGatewayServiceConfig, ApiGatewayServiceConfig,
+    CapabilityServiceConfig, ConfigManager, ConversationServiceConfig, FlareAppConfig,
+    JetStreamClusterConfig, KafkaClusterConfig, MediaServiceConfig, MessageIngestServiceConfig,
+    MessageOrchestratorServiceConfig, MetricsPolicyConfig, MqBackendConfig, ObjectStoreConfig,
+    PostgresInstanceConfig, PushProxyServiceConfig, RedisPoolConfig, ServiceEndpointConfig,
+    ServiceMetricsSection, ServiceRuntimeConfig, SessionPolicyConfig, SignalingOnlineServiceConfig,
+    SignalingRouteServiceConfig, StorageReaderServiceConfig, StorageWriterServiceConfig,
+    SyncOrchestratorServiceConfig, app_config, load_config, load_config_with_validation,
+};
+pub use discovery::{
+    BackendType, ChannelService, Discover, DiscoveryBackend, DiscoveryConfig, DiscoveryFactory,
+    HealthCheckConfig, InstanceMetadata, LoadBalanceStrategy, NamespaceConfig, Registry, TagFilter,
+    Updater, VersionConfig, build_gateway_router_from_app_config,
+    connect_grpc_channel_from_app_config, connect_grpc_channel_lazy_from_app_config,
+    default_static_grpc_fallback, get_discovered_channel_with_timeout, init_from_app_config,
+    init_from_config, init_from_registry_config, register_service_from_config,
+    register_service_from_registry_config, register_service_only,
+};
+pub use gateway::{GatewayRouter, GatewayRouterConfig, GatewayRouterTrait};
+pub use gateway_auth::{
+    APP_ID_HEADER, auth_error_response, authenticate_http_request, build_validation_request,
+    extract_bearer_token, header_value, inject_principal,
+};
+pub use runtime::{
+    ImServiceRuntimePlan, background_service_runtime, build_background_service_runtime,
+    build_service_runtime_plan, load_app_config_from_env, resolve_config_path,
+};
+pub use service_helper::ServiceHelper;
+pub use tenant_runtime::{
+    TenantAccessPolicy, TenantLookup, TenantRuntimeCache, TenantRuntimeCacheOptions,
+    TenantRuntimeSource,
+};
+pub use tracing::{TracingGuard, init_tracing_from_config};
+pub mod platform_send;
+pub mod plugin_platform;

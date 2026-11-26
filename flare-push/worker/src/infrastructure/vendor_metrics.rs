@@ -14,7 +14,7 @@ use crate::domain::vendor_delivery::{FailureReason, Vendor};
 use crate::domain::vendor_policy::BreakerState;
 
 fn register<C: prometheus::core::Collector + Clone + 'static>(collector: C) -> C {
-    let _ = flare_im_service_kit::metrics::REGISTRY.register(Box::new(collector.clone()));
+    let _ = flare_im_core_service_kit::metrics::REGISTRY.register(Box::new(collector.clone()));
     collector
 }
 
@@ -121,7 +121,7 @@ pub fn record_sent(vendor: Vendor, app_version: &str, receipt_capable: bool) {
         counter
             .with_label_values(&[
                 vendor.as_str(),
-                flare_im_service_kit::metrics::app_version_label(app_version),
+                flare_im_core_service_kit::metrics::app_version_label(app_version),
                 if receipt_capable { "true" } else { "false" },
             ])
             .inc();

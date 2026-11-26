@@ -4,15 +4,15 @@ use std::{collections::HashMap, env};
 
 use super::notify::NotifyGateSettings;
 
-use flare_im_contracts::constants::groups::PUSH_SERVER_CONSUMER_GROUP_DEFAULT;
-use flare_im_contracts::constants::topics::{
+use flare_im_core_contracts::constants::groups::PUSH_SERVER_CONSUMER_GROUP_DEFAULT;
+use flare_im_core_contracts::constants::topics::{
     TOPIC_PUSH_DLQ, TOPIC_PUSH_ENVELOPE, TOPIC_PUSH_EVENTS, TOPIC_PUSH_MESSAGES,
     TOPIC_PUSH_OFFLINE, TOPIC_PUSH_OFFLINE_BULK, TOPIC_PUSH_OFFLINE_GROUP, TOPIC_PUSH_ONLINE,
 };
-use flare_im_contracts::domain::push_binding::PUSH_BINDING_INACTIVE_DAYS_DEFAULT;
-use flare_im_contracts::utils::normalize_tenant_id;
-use flare_im_service_kit::config::{FlareAppConfig, ServiceEndpointConfig};
-use flare_im_service_kit::push_trace::PushTraceConfig;
+use flare_im_core_contracts::domain::push_binding::PUSH_BINDING_INACTIVE_DAYS_DEFAULT;
+use flare_im_core_contracts::utils::normalize_tenant_id;
+use flare_im_core_service_kit::config::{FlareAppConfig, ServiceEndpointConfig};
+use flare_im_core_service_kit::push_trace::PushTraceConfig;
 use flare_server_core::mq::kafka::{KafkaConsumerConfig, KafkaProducerConfig};
 use flare_server_core::mq::nats::{
     NatsConsumerConfig, NatsProducerConfig, NatsStreamSpec, default_stream_specs,
@@ -240,10 +240,14 @@ impl PushServerConfig {
             .filter(|value| !value.trim().is_empty())
             .or_else(|| app.redis_profile("push").map(|profile| profile.url.clone()))
             .unwrap_or_else(|| "redis://127.0.0.1:6379".to_string());
-        let notify =
-            NotifyGateSettings::load(&flare_im_service_kit::resolve_config_path(), gate_redis_url);
-        let trace =
-            PushTraceConfig::load(&flare_im_service_kit::resolve_config_path(), "push_server");
+        let notify = NotifyGateSettings::load(
+            &flare_im_core_service_kit::resolve_config_path(),
+            gate_redis_url,
+        );
+        let trace = PushTraceConfig::load(
+            &flare_im_core_service_kit::resolve_config_path(),
+            "push_server",
+        );
 
         Self {
             mq_backend,

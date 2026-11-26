@@ -21,7 +21,7 @@ use crate::application::admin_messages::{
     build_storage_message_export_request, build_storage_search_request,
     build_storage_write_ledger_request,
 };
-use flare_im_service_kit::{
+use flare_im_core_service_kit::{
     clients::{AdminGrpcClients, CapabilityDownstreamConfig},
     gateway::GatewaySettings,
 };
@@ -391,7 +391,7 @@ pub async fn admin_get_message(
         let sequence = i64::try_from(response.message.conversation_seq).map_err(|_| {
             GatewayError::bad_request("ADMIN_MESSAGE_SEQUENCE_INVALID", "invalid message sequence")
         })?;
-        let caller = flare_im_service_kit::clients::MediaCaller::staff(staff.ctx().clone())
+        let caller = flare_im_core_service_kit::clients::MediaCaller::staff(staff.ctx().clone())
             .map_err(|_| {
                 GatewayError(
                     flare_server_core::error::ErrorBuilder::new(
@@ -591,7 +591,7 @@ pub async fn admin_export_messages(
 /// 的身份元数据。
 async fn storage_reader(
     clients: &AdminGrpcClients,
-) -> flare_im_service_kit::clients::StorageReaderServiceClientWrapper {
+) -> flare_im_core_service_kit::clients::StorageReaderServiceClientWrapper {
     clients.storage_reader.lock().await.clone()
 }
 
@@ -1307,7 +1307,7 @@ mod tests {
     };
     use super::*;
     use flare_core_base::context::keys;
-    use flare_im_service_kit::gateway::{
+    use flare_im_core_service_kit::gateway::{
         GatewayGrpcConfig, GatewaySettings, RateLimitConfig, ServerConfig, TracingConfig,
     };
     use flare_server_core::auth::{AuthProviderConfig, AuthProviderMode};

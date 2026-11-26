@@ -14,10 +14,10 @@ name = "flare-capability"
 path = "cmd/main.rs"
 
 [dependencies]
-flare-im-contracts = { workspace = true }
-flare-im-service-kit = { workspace = true }
-flare-im-hooks = { workspace = true }
-flare-im-capability-core = { workspace = true }
+flare-im-core-contracts = { workspace = true }
+flare-im-core-service-kit = { workspace = true }
+flare-im-core-hooks = { workspace = true }
+flare-im-core-capability-core = { workspace = true }
 flare-core-base = { version = "1.0.3", path = "../../flare-im-server-runtime/flare-core-base" }
 flare-proto = { workspace = true }
 flare-grpc-proto = { workspace = true }
@@ -57,7 +57,7 @@ semver = "1"
 redis = { workspace = true }
 [dev-dependencies]
 # Plugin shared state end to end on PostgreSQL (plugin_state_pg_tests): Orchestrator, Writer, Reader.
-flare-im-message-pipeline = { workspace = true }
+flare-im-core-message-pipeline = { workspace = true }
 flare-orchestrator = { path = "../flare-orchestrator" }
 flare-storage-reader = { path = "../flare-storage/reader" }
 flare-storage-writer = { path = "../flare-storage/writer" }

@@ -16,7 +16,7 @@ Hook 更新现在真正保存名称；数字 ID 删除直接按不可变 ID 删�
 
 ## 持久投递
 
-`flare-im-service-kit::audit_effects::durable` 提供源事务入队与独立发布。Capability 装配正常数据库池及 `FLARE_AUDIT_NATS_URL`，启动与停机由现有服务生命周期管理，无额外常驻容器。
+`flare-im-core-service-kit::audit_effects::durable` 提供源事务入队与独立发布。Capability 装配正常数据库池及 `FLARE_AUDIT_NATS_URL`，启动与停机由现有服务生命周期管理，无额外常驻容器。
 
 每次锁一条到期未投递行，`FOR UPDATE SKIP LOCKED`；发布等待最多两秒，失败持久退避至最多60秒。只有 Broker ACK 后才写 delivered；取消、进程退出或提交失败可再次投递相同 event UUID 和相同存储字节。消费端继续幂等聚合。定时清理只处理30天前已投递行，批次最多256，未投递证据不按TTL丢弃。配置未启用 Broker 时不启动发布任务，但源事务仍留队列；已配置却启动连接失败则启动报错。
 

@@ -1,10 +1,12 @@
 use std::{collections::HashMap, env};
 
-use flare_im_contracts::constants::groups::MESSAGE_INGEST_MAIN_GROUP_DEFAULT;
-use flare_im_contracts::constants::topics::{TOPIC_MESSAGE_MAIN_DLQ, TOPIC_MESSAGE_MAIN_RETRY_5S};
-use flare_im_contracts::utils::normalize_tenant_id;
-use flare_im_service_kit::config::FlareAppConfig;
-use flare_im_service_kit::metrics::MetricsEndpointConfig;
+use flare_im_core_contracts::constants::groups::MESSAGE_INGEST_MAIN_GROUP_DEFAULT;
+use flare_im_core_contracts::constants::topics::{
+    TOPIC_MESSAGE_MAIN_DLQ, TOPIC_MESSAGE_MAIN_RETRY_5S,
+};
+use flare_im_core_contracts::utils::normalize_tenant_id;
+use flare_im_core_service_kit::config::FlareAppConfig;
+use flare_im_core_service_kit::metrics::MetricsEndpointConfig;
 use flare_server_core::mq::kafka::{KafkaConsumerConfig, KafkaProducerConfig};
 use flare_server_core::mq::nats::{
     NatsConsumerConfig, NatsProducerConfig, NatsStreamSpec, default_stream_specs,
@@ -145,7 +147,7 @@ fn parse_bool(raw: Option<String>) -> Option<bool> {
 
 fn kafka_brokers_from_env_or_profile(
     env_name: &str,
-    profile: Option<&flare_im_service_kit::config::KafkaClusterConfig>,
+    profile: Option<&flare_im_core_service_kit::config::KafkaClusterConfig>,
 ) -> Vec<String> {
     parse_csv_strings(env::var(env_name).ok())
         .into_iter()

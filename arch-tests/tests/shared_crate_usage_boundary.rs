@@ -32,10 +32,10 @@ fn extracted_core_crates_have_runtime_owners() {
         .collect::<Vec<_>>();
 
     for (crate_name, expected_owner_hint) in [
-        ("flare-im-capability-core", "flare-capability"),
-        ("flare-im-message-pipeline", "flare-message-ingest"),
-        ("flare-im-hooks", "flare-message-ingest"),
-        ("flare-im-seq", "flare-message-ingest"),
+        ("flare-im-core-capability-core", "flare-capability"),
+        ("flare-im-core-message-pipeline", "flare-message-ingest"),
+        ("flare-im-core-hooks", "flare-message-ingest"),
+        ("flare-im-core-seq", "flare-message-ingest"),
     ] {
         let owners = manifests
             .iter()

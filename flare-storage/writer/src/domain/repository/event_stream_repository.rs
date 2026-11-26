@@ -1,7 +1,7 @@
 //! 事件流仓储（Port）- 使用领域 Event，不依赖 proto
 
 use crate::domain::model::Event;
-use flare_im_contracts::Ctx;
+use flare_im_core_contracts::Ctx;
 use flare_server_core::error::Result;
 
 /// 事件流中与待应用事件同一位置 `(tenant_id, conversation_id, seq)` 上已有的事件与它的关系。

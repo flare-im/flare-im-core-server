@@ -10,7 +10,7 @@ use crate::application::handler::admin_dispatch::{
     AdminPluginResult, PLUGIN_ADMIN_QUERY_OPERATION,
 };
 use crate::infrastructure::capability::InMemoryCapabilityGrants;
-use flare_im_capability_core::plugin::staff_reauth::{
+use flare_im_core_capability_core::plugin::staff_reauth::{
     MAX_STAFF_REAUTH_TOKEN_BYTES, STAFF_REAUTH_HEADER,
 };
 use std::time::Duration;

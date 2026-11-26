@@ -17,7 +17,7 @@ use tokio::io::AsyncReadExt;
 use crate::config::settings::normalize_optional_url;
 use crate::domain::model::{ObjectStat, UploadContext, UploadedPartRecord};
 use crate::domain::repository::MediaObjectRepository;
-use flare_im_service_kit::config::ObjectStoreConfig;
+use flare_im_core_service_kit::config::ObjectStoreConfig;
 
 #[derive(Clone)]
 pub struct S3ObjectStore {
@@ -522,7 +522,7 @@ impl MediaObjectRepository for S3ObjectStore {
         self.presign_object_with_response_headers(
             object_path,
             expires_in,
-            &flare_im_contracts::media_response::MediaResponseHeaders::default(),
+            &flare_im_core_contracts::media_response::MediaResponseHeaders::default(),
         )
         .await
     }
@@ -531,7 +531,7 @@ impl MediaObjectRepository for S3ObjectStore {
         &self,
         object_path: &str,
         expires_in: i64,
-        headers: &flare_im_contracts::media_response::MediaResponseHeaders,
+        headers: &flare_im_core_contracts::media_response::MediaResponseHeaders,
     ) -> Result<String> {
         let presigned = self
             .presign_client
@@ -998,7 +998,7 @@ mod tenant_key_tests {
 
     #[tokio::test]
     async fn get_presign_binds_download_response_overrides_and_keeps_inline_unchanged() {
-        use flare_im_contracts::media_response::MediaResponseHeaders;
+        use flare_im_core_contracts::media_response::MediaResponseHeaders;
         let store = store();
         let inline = store
             .presign_object("tenant-a/photo.png", 60)

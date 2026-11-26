@@ -1,6 +1,6 @@
 use super::*;
 use crate::domain::offline_delivery::OfflinePushExecutor;
-use flare_im_contracts::Ctx;
+use flare_im_core_contracts::Ctx;
 use flare_proto::PushTaskEnvelope;
 use sha2::{Digest, Sha256};
 use std::{

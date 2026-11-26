@@ -20,7 +20,7 @@ pub struct OnlineServiceClient {
 }
 
 impl OnlineServiceClient {
-    /// 由 [`flare_im_service_kit::discovery::connect_grpc_channel_from_app_config`] 等得到的共享 Channel。
+    /// 由 [`flare_im_core_service_kit::discovery::connect_grpc_channel_from_app_config`] 等得到的共享 Channel。
     pub fn from_channel(channel: Channel) -> Self {
         Self {
             client: ProtoOnlineServiceClient::new(channel),

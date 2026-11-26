@@ -194,7 +194,7 @@ this SEC-07 patch):
    on protobuf map order or unsigned broker headers. Keep this keypair
    separate from the Cell gRPC context key.
 2. Change the authenticated emitters in
-   `crates/flare-im-message-pipeline/src/messaging/push_repository.rs` and
+   `crates/flare-im-core-message-pipeline/src/messaging/push_repository.rs` and
    `flare-push/proxy/src/infrastructure/mq_publisher.rs` to publish that record
    only after their ingress has established a verified tenant. Remove or lock
    down PushProxy's unused direct `publish_push_task` API. Inventory any WAL
@@ -230,10 +230,10 @@ cargo check -p flare-signaling-online -p flare-signaling-gateway -p flare-api-ga
 cargo test -p flare-signaling-online --lib
 # With an isolated Redis instance at FLARE_TEST_REDIS_URL:
 cargo test -p flare-signaling-online --lib admission_is_atomic_tenant_scoped_and_kicks_only_old_physical_connection -- --ignored
-cargo check -p flare-im-ack -p flare-storage-writer --all-targets
+cargo check -p flare-im-core-ack -p flare-storage-writer --all-targets
 cargo test -p flare-signaling-gateway --lib same_conversation_id
 cargo test -p flare-signaling-gateway --lib relay_rejects
-cargo test -p flare-im-service-kit --lib conversation_delivery_rejects_unsigned_tenant_metadata
+cargo test -p flare-im-core-service-kit --lib conversation_delivery_rejects_unsigned_tenant_metadata
 cargo test -p flare-push-worker --lib provenance_gate_tests
 cargo check -p flare-push-proxy -p flare-push-server --all-targets
 cargo test -p flare-push-proxy --lib identity_boundary_tests

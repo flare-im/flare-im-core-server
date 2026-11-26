@@ -54,7 +54,7 @@ async fn a_batch_is_located_in_one_read_by_server_id_within_the_tenant() {
         None,
         None,
     );
-    let ctx: flare_im_contracts::Ctx =
+    let ctx: flare_im_core_contracts::Ctx =
         Arc::new(flare_server_core::Context::with_request_id("locate").with_tenant_id(&tenant));
     let ids = |ids: &[&str]| ids.iter().map(|id| id.to_string()).collect::<Vec<_>>();
     let mut located = storage

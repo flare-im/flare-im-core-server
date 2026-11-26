@@ -1,6 +1,6 @@
 # Flare IM Core Configuration
 
-This directory is the single configuration root consumed by `flare-im-service-kit`.
+This directory is the single configuration root consumed by `flare-im-core-service-kit`.
 The project is still deployed as separate microservice binaries; this directory only gives them one shared, typed configuration source.
 
 ## Load Order

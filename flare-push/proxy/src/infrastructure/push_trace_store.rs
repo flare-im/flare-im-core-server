@@ -1,13 +1,13 @@
 //! 推送决策链的读取（管理员排障）：一条消息的全部记录，或一个用户最近的几条消息。
 //!
-//! 记录由 push-server、push-worker 与本服务按 `flare_im_contracts::push_trace` 的格式写在推送 Redis
+//! 记录由 push-server、push-worker 与本服务按 `flare_im_core_contracts::push_trace` 的格式写在推送 Redis
 //! （与设备绑定同一个实例）；这里只读。读不懂的记录跳过，过期的消息不出现。
 
 use std::sync::Arc;
 use std::time::Duration;
 
-use flare_im_contracts::push_trace::{PushTraceEntry, trace_index_key, trace_list_key};
-use flare_im_service_kit::redis_connection::SharedRedisConnection;
+use flare_im_core_contracts::push_trace::{PushTraceEntry, trace_index_key, trace_list_key};
+use flare_im_core_service_kit::redis_connection::SharedRedisConnection;
 
 /// 一次读取（含建连）的时限。管理员在等，慢了就报不可用。
 const READ_BUDGET: Duration = Duration::from_secs(3);
@@ -146,7 +146,7 @@ impl PushTraceStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use flare_im_contracts::push_trace::TraceStage;
+    use flare_im_core_contracts::push_trace::TraceStage;
 
     #[test]
     fn entries_are_sorted_by_time_and_unreadable_ones_skipped() {

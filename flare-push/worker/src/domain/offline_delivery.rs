@@ -1,7 +1,7 @@
 //! Offline delivery domain contracts.
 
 use async_trait::async_trait;
-use flare_im_contracts::{Ctx, DevicePushToken};
+use flare_im_core_contracts::{Ctx, DevicePushToken};
 use flare_proto::PushTaskEnvelope;
 use flare_proto::common::PushDisposition;
 use flare_server_core::{ErrorCode, FlareError};

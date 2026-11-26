@@ -1,4 +1,6 @@
-use flare_im_service_kit::config::{ObjectStoreConfig, PostgresInstanceConfig, RedisPoolConfig};
+use flare_im_core_service_kit::config::{
+    ObjectStoreConfig, PostgresInstanceConfig, RedisPoolConfig,
+};
 
 #[derive(Clone, Debug)]
 pub struct MediaConfig {
@@ -45,7 +47,7 @@ fn resolve_cdn_base_url(
 }
 
 impl MediaConfig {
-    pub fn from_app_config(app: &flare_im_service_kit::config::FlareAppConfig) -> Self {
+    pub fn from_app_config(app: &flare_im_core_service_kit::config::FlareAppConfig) -> Self {
         let service = app.media_service();
 
         let redis_profile = service
@@ -80,7 +82,9 @@ impl MediaConfig {
             .object_store
             .as_deref()
             .and_then(|name| {
-                flare_im_service_kit::config::ConfigManager::select_object_store_config(app, name)
+                flare_im_core_service_kit::config::ConfigManager::select_object_store_config(
+                    app, name,
+                )
             })
             .or_else(|| {
                 // 如果没有找到指定的配置，使用默认配置
@@ -172,7 +176,7 @@ impl MediaConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use flare_im_service_kit::config::FlareAppConfig;
+    use flare_im_core_service_kit::config::FlareAppConfig;
 
     /// 与 base.toml 同形：两处 `cdn_base_url` 都是 `${FLARE_S3_CDN_BASE_URL:-}` 展开后的值。
     fn app_config(service_cdn: &str, store_cdn: &str) -> FlareAppConfig {

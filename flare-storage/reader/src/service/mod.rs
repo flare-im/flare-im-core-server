@@ -1,4 +1,4 @@
-use flare_im_contracts::service_names::STORAGE_READER;
+use flare_im_core_contracts::service_names::STORAGE_READER;
 use flare_server_core::error::Result;
 use tracing::info;
 
@@ -12,9 +12,9 @@ pub struct ApplicationBootstrap;
 impl ApplicationBootstrap {
     /// 运行应用的主入口点
     pub async fn run() -> Result<()> {
-        let app_config = flare_im_service_kit::load_app_config_from_env();
+        let app_config = flare_im_core_service_kit::load_app_config_from_env();
         let service_config = app_config.storage_reader_service();
-        let runtime_plan = flare_im_service_kit::build_service_runtime_plan(
+        let runtime_plan = flare_im_core_service_kit::build_service_runtime_plan(
             app_config,
             &service_config.runtime,
             STORAGE_READER,
@@ -31,7 +31,7 @@ impl ApplicationBootstrap {
         // 读接口的身份边界：带 x-flare-ctx 就验签并以之为准，FLARE_REQUIRE_SIGNED_READ_CTX
         // 打开时拒绝未签名调用；管理检索只认转发的 Staff 上下文。
         let read_layer =
-            flare_im_service_kit::signed_read::signed_read_layer_from_env(STORAGE_READER)?;
+            flare_im_core_service_kit::signed_read::signed_read_layer_from_env(STORAGE_READER)?;
 
         // 运行服务
         Self::run_with_context(context, runtime_plan, read_layer).await
@@ -40,7 +40,7 @@ impl ApplicationBootstrap {
     /// 运行服务（带应用上下文）
     async fn run_with_context(
         context: ApplicationContext<MessageStorageType>,
-        runtime_plan: flare_im_service_kit::ImServiceRuntimePlan,
+        runtime_plan: flare_im_core_service_kit::ImServiceRuntimePlan,
         read_layer: flare_server_core::SignedFirstContextLayer,
     ) -> Result<()> {
         use tonic::transport::Server;
@@ -48,7 +48,7 @@ impl ApplicationBootstrap {
         let address = runtime_plan.address;
         let service_name = runtime_plan.service_name.clone();
         let grpc_metrics =
-            flare_im_service_kit::metrics::GrpcMetricsLayer::new(service_name.clone());
+            flare_im_core_service_kit::metrics::GrpcMetricsLayer::new(service_name.clone());
         let handler = context.handler.clone();
 
         info!(
@@ -93,7 +93,7 @@ impl ApplicationBootstrap {
         Ok(runtime
             .run_with_registration(|addr| {
                 Box::pin(async move {
-                    flare_im_service_kit::discovery::register_runtime_service_only(
+                    flare_im_core_service_kit::discovery::register_runtime_service_only(
                         &service_name,
                         addr,
                         None,

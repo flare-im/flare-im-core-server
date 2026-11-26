@@ -14,8 +14,8 @@ use ed25519_dalek::SigningKey;
 use ed25519_dalek::pkcs8::{EncodePrivateKey, EncodePublicKey};
 use flare_grpc_proto::push::push_service_server::{PushService, PushServiceServer};
 use flare_grpc_proto::push::*;
-use flare_im_service_kit::clients::*;
-use flare_im_service_kit::{
+use flare_im_core_service_kit::clients::*;
+use flare_im_core_service_kit::{
     gateway_auth::TenantRuntimeGuard,
     tenant_runtime::{TenantAccessPolicy, TenantRuntimeCache},
 };
@@ -103,8 +103,9 @@ impl FakePushProxy {
         if claims.actor_type != SignedActorType::User {
             return Err(tonic::Status::permission_denied("user actor required"));
         }
-        if !flare_im_contracts::domain::tenant::is_valid_tenant_id(&claims.tenant_id)
-            || flare_im_contracts::utils::normalize_tenant_id(&claims.tenant_id) != claims.tenant_id
+        if !flare_im_core_contracts::domain::tenant::is_valid_tenant_id(&claims.tenant_id)
+            || flare_im_core_contracts::utils::normalize_tenant_id(&claims.tenant_id)
+                != claims.tenant_id
         {
             return Err(tonic::Status::permission_denied(
                 "canonical signed tenant_id is required",

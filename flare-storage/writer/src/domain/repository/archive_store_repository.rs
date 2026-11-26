@@ -1,7 +1,7 @@
 //! 归档存储仓储（Port）- 使用领域类型，不依赖 proto
 
 use crate::domain::model::{Event, Message, PluginStatePayload};
-use flare_im_contracts::Ctx;
+use flare_im_core_contracts::Ctx;
 use flare_server_core::error::{FlareError, Result};
 
 /// What [`ArchiveStoreRepository::upsert_message_plugin_state`] did with a shared state.

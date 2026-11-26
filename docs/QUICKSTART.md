@@ -139,7 +139,7 @@ start:
 
 ### Plug in your business rules
 
-`crates/flare-im-hooks` runs the `message.pre_send` hook: allow, reject or rewrite a message
+`crates/flare-im-core-hooks` runs the `message.pre_send` hook: allow, reject or rewrite a message
 before it is stored. Content moderation and send permissions belong at this layer. See the
 [hook contract](HOOK-PLUGIN-CONTRACT.md).
 

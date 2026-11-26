@@ -16,8 +16,8 @@ use flare_grpc_proto::conversation::conversation_read_service_server::{
     ConversationReadService, ConversationReadServiceServer,
 };
 use flare_grpc_proto::conversation::*;
-use flare_im_service_kit::clients::*;
-use flare_im_service_kit::{
+use flare_im_core_service_kit::clients::*;
+use flare_im_core_service_kit::{
     gateway_auth::TenantRuntimeGuard,
     tenant_runtime::{TenantAccessPolicy, TenantRuntimeCache},
 };

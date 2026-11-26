@@ -5,8 +5,8 @@
 //! `TOPIC_PUSH_EVENTS`（inline `EVENT_MESSAGE` 或 pure ping）；仅推送、不经过主队列的
 //! 非持久/direct 场景仍可走 `TOPIC_PUSH_MESSAGES` 等。
 
-pub use flare_im_contracts::constants::topics::TOPIC_MESSAGE_MAIN;
-pub use flare_im_contracts::event::{
+pub use flare_im_core_contracts::constants::topics::TOPIC_MESSAGE_MAIN;
+pub use flare_im_core_contracts::event::{
     MqEnvelopeDecodeError, decode_mq_envelope, mq_envelope_for_main_queue_event,
     mq_envelope_for_main_queue_event_with_headers, mq_envelope_for_main_queue_message,
     mq_envelope_for_main_queue_message_with_headers,

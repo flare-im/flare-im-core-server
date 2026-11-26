@@ -1,9 +1,9 @@
 use super::*;
-use flare_im_capability_core::plugin::authorization::TenantPluginGrant;
-use flare_im_capability_core::plugin::runtime::{
+use flare_im_core_capability_core::plugin::authorization::TenantPluginGrant;
+use flare_im_core_capability_core::plugin::runtime::{
     ProjectedLifecycle, ProjectedPlugin, digest_bytes,
 };
-use flare_im_contracts::message::Message;
+use flare_im_core_contracts::message::Message;
 use flare_proto::common::{AppCardContent, CustomContent, TextContent};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -322,8 +322,16 @@ async fn invalid_cards_are_no_cards_and_failures_never_fail_the_read() {
 async fn wire_messages_inside_events_are_marked_the_same_way() {
     let source = Source::with_rules(poll_manifest()).bind("m-bound");
     let mut wire = [
-        flare_im_contracts::message::message_to_proto(&card("m-bound", "example.poll", "poll-1")),
-        flare_im_contracts::message::message_to_proto(&card("m-copy", "example.poll", "poll-1")),
+        flare_im_core_contracts::message::message_to_proto(&card(
+            "m-bound",
+            "example.poll",
+            "poll-1",
+        )),
+        flare_im_core_contracts::message::message_to_proto(&card(
+            "m-copy",
+            "example.poll",
+            "poll-1",
+        )),
     ];
     wire[0]
         .attributes

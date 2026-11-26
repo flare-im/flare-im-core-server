@@ -118,7 +118,7 @@ fn directory_loader_order_matches_documented_configuration_layers() {
     let root = workspace_root();
     // 配置加载逻辑按内聚分布在 config 模块的多个文件里（mod/types/services/loader），
     // 守卫扫描整个模块目录而不是写死单个文件——单文件路径在模块拆分时会变成盲区。
-    let config_src = root.join("crates/flare-im-service-kit/src/config");
+    let config_src = root.join("crates/flare-im-core-service-kit/src/config");
     let mut runtime = String::new();
     let mut sources: Vec<_> = fs::read_dir(&config_src)
         .expect("read config module dir")

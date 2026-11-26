@@ -114,7 +114,7 @@ flowchart TB
   这是接入自有用户体系的入口。
 
 业务规则同理：`message.pre_send` Hook 在消息落库之前放行、拒绝或改写，运行时在
-`crates/flare-im-hooks`。
+`crates/flare-im-core-hooks`。
 
 这与 Sendbird / Twilio Conversations 的「自带身份」模型一致，区别是
 Flare 可自托管、协议与核心可审计。边界详情见 [GOVERNANCE.md](.github/GOVERNANCE.md)。
@@ -188,7 +188,7 @@ flowchart LR
 | `flare-push/worker` | 执行离线推送任务和重试。 |
 | `flare-push/proxy` | 推送代理与边界适配。 |
 | `flare-capability` | Hook 控制面、能力发现、授权、RTC/SFU 等扩展能力。 |
-| `flare-im-capability-core` | 能力/插件共享契约：dispatch DTO、guard/resolver/RTC 端口、extension operation handler；不包含服务运行时。 |
+| `flare-im-core-capability-core` | 能力/插件共享契约：dispatch DTO、guard/resolver/RTC 端口、extension operation handler；不包含服务运行时。 |
 | `flare-media` | 上传、对象存储、媒体处理、引用计数。 |
 
 ## 持久消息发送链路

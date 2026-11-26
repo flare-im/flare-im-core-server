@@ -1,7 +1,7 @@
 //! Tenant config notices: subscribe to Redis `{namespace}:notice` (next to the kick channel
 //! `{namespace}:kick`) and forward each notice to this node's authenticated connections of its
 //! tenant, or of every tenant for `*`, as `DataPacket.tenant_notice`
-//! (`flare_im_service_kit::tenant_notice`).
+//! (`flare_im_core_service_kit::tenant_notice`).
 //!
 //! Capability publishes a notice once per version of a tenant's topic. Forwarding is best effort
 //! with bounded concurrency: a client that misses one re-reads on reconnect and when it returns to
@@ -15,8 +15,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use flare_core::server::connection::ConnectionManagerTrait;
-use flare_im_contracts::domain::tenant::is_valid_tenant_id;
-use flare_im_service_kit::tenant_notice::{
+use flare_im_core_contracts::domain::tenant::is_valid_tenant_id;
+use flare_im_core_service_kit::tenant_notice::{
     ALL_TENANTS, MAX_TENANT_NOTICE_BYTES, TenantNotice, notice_channel, spread_ms, valid_topic,
 };
 use futures::StreamExt;
@@ -113,7 +113,7 @@ fn parse_notice(payload: &str) -> Option<TenantNotice> {
     let notice: TenantNotice = serde_json::from_str(payload).ok()?;
     let tenant_ok = notice.tenant_wide()
         || (is_valid_tenant_id(&notice.tenant_id)
-            && flare_im_contracts::utils::normalize_tenant_id(&notice.tenant_id)
+            && flare_im_core_contracts::utils::normalize_tenant_id(&notice.tenant_id)
                 == notice.tenant_id);
     (tenant_ok && valid_topic(&notice.topic) && notice.version().is_some()).then_some(notice)
 }
@@ -176,7 +176,7 @@ impl NoticeForwarder {
             .map(|(tenant, chunk)| {
                 let (payload, push_port) = (payload.clone(), self.push_port.clone());
                 async move {
-                    let ctx: flare_im_contracts::Ctx =
+                    let ctx: flare_im_core_contracts::Ctx =
                         Arc::new(flare_server_core::Context::root().with_tenant_id(&tenant));
                     match push_port
                         .push_payload_to_connections(&ctx, &chunk, payload_type, payload)
@@ -209,7 +209,7 @@ impl NoticeForwarder {
 mod tests {
     use super::*;
     use flare_core::transport::connection::Connection;
-    use flare_im_contracts::Ctx;
+    use flare_im_core_contracts::Ctx;
     use flare_proto::common::{DataPacket, data_packet};
     use std::collections::HashMap;
     use std::sync::Mutex;
@@ -438,8 +438,8 @@ mod tests {
         let recorder = Arc::new(Recorder::default());
         let forwarder = forwarder(&manager, &recorder);
         for (topic, version) in [
-            (flare_im_service_kit::tenant_notice::ACCESS_TOPIC, 42),
-            (flare_im_service_kit::tenant_notice::RELEASE_TOPIC, 3),
+            (flare_im_core_service_kit::tenant_notice::ACCESS_TOPIC, 42),
+            (flare_im_core_service_kit::tenant_notice::RELEASE_TOPIC, 3),
         ] {
             let payload =
                 serde_json::to_string(&TenantNotice::new("app-a", topic, version)).unwrap();

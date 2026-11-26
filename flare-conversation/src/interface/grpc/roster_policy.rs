@@ -1,16 +1,14 @@
 use flare_core::common::conversation::{
     generate_group_conversation_id, is_group_chat_conversation,
 };
-use flare_im_service_kit::roster_policy::{
+use flare_im_core_service_kit::roster_policy::{
     RosterVisibility, check_channels, trusted_internal_reader,
 };
 use flare_server_core::{context::Context, error::grpc::IntoGrpc};
 use tonic::Status;
 
 use super::ConversationGrpcHandler;
-use crate::domain::model::{
-    ConversationSummary, ConversationType, EXTERNAL_GROUP_ROSTER_BUSINESS_TYPE,
-};
+use crate::domain::model::{ConversationSummary, ConversationType};
 
 // Legacy rows can carry a missing or mismatched route. A provider answer
 // about another group's channel does not authorize this conversation.
@@ -45,7 +43,12 @@ impl ConversationGrpcHandler {
         }
         let Some((channel_id, explicitly_external)) = self
             .query_handler
-            .external_roster_channel(ctx, conversation_id, self.roster_policy_endpoint.is_some())
+            .external_roster_channel(
+                ctx,
+                conversation_id,
+                &self.external_roster_business_types,
+                self.roster_policy_endpoint.is_some(),
+            )
             .await
             .into_grpc()?
         else {
@@ -75,7 +78,11 @@ impl ConversationGrpcHandler {
             return;
         }
         let explicitly_external = |row: &ConversationSummary| {
-            row.business_type.as_deref() == Some(EXTERNAL_GROUP_ROSTER_BUSINESS_TYPE)
+            row.business_type.as_deref().is_some_and(|kind| {
+                self.external_roster_business_types
+                    .iter()
+                    .any(|t| t == kind)
+            })
         };
         let needs_policy_check = |row: &ConversationSummary| {
             explicitly_external(row)

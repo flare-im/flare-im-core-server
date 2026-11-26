@@ -3,13 +3,13 @@
 //! 连接与稳定性相关项（max_connections、heartbeat、auth_timeout、send_timeout）对接 flare-core
 //! ServerConfig，便于扩容连接数与调优消息收发稳定性；可通过环境变量覆盖。
 
-use flare_im_contracts::utils::normalize_tenant_id;
-use flare_im_service_kit::config::{
+use flare_im_core_contracts::utils::normalize_tenant_id;
+use flare_im_core_service_kit::config::{
     AccessGatewayServiceConfig, AuthProviderConfig, FlareAppConfig, RedisPoolConfig,
     TrustedTokenIssuerConfig,
 };
-use flare_im_service_kit::gateway::require_secure_token_secret;
-use flare_im_service_kit::tenant_runtime::TenantAccessPolicy;
+use flare_im_core_service_kit::gateway::require_secure_token_secret;
+use flare_im_core_service_kit::tenant_runtime::TenantAccessPolicy;
 use flare_server_core::auth::AuthProviderMode;
 use flare_server_core::error::{ErrorBuilder, ErrorCode, FlareError, Result};
 
@@ -28,7 +28,7 @@ pub struct AccessGatewayConfig {
     /// wire.rs 里只打了一句 "Prometheus metrics initialized" 日志，
     /// 没有像 ingest/orchestrator/storage-writer 那样起 serve_prometheus_metrics，
     /// 于是整个网关侧观测面（连接数、推送成功/失败/耗时）无处可读。
-    pub metrics: flare_im_service_kit::metrics::MetricsEndpointConfig,
+    pub metrics: flare_im_core_service_kit::metrics::MetricsEndpointConfig,
     pub auth_provider: AuthProviderConfig,
     pub token_secret: Option<String>,
     pub token_issuer: String,
@@ -312,8 +312,9 @@ impl AccessGatewayConfig {
                 .unwrap_or(19183);
             let path = std::env::var("ACCESS_GATEWAY_METRICS_PATH")
                 .unwrap_or_else(|_| "/metrics".to_string());
-            let mut cfg = flare_im_service_kit::metrics::MetricsEndpointConfig::new(address, port)
-                .with_path(path);
+            let mut cfg =
+                flare_im_core_service_kit::metrics::MetricsEndpointConfig::new(address, port)
+                    .with_path(path);
             cfg.enabled = enabled;
             cfg
         };

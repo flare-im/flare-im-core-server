@@ -9,8 +9,8 @@
 
 use flare_grpc_proto::push::push_service_client::PushServiceClient;
 use flare_grpc_proto::push::{ReportDeviceHandoffRequest, RevokeDeviceBindingsRequest};
-use flare_im_contracts::service_names::SIGNALING_ONLINE;
-use flare_im_service_kit::discovery::{
+use flare_im_core_contracts::service_names::SIGNALING_ONLINE;
+use flare_im_core_service_kit::discovery::{
     DISCOVERY_ROUTE_PREFIX, invalidate_static_channel_on_transport_failure, resolve_grpc_channel,
 };
 use flare_proto::common::{DeviceHandoff, DeviceHandoffCause};

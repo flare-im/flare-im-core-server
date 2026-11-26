@@ -17,7 +17,7 @@
 
 use std::fmt::Write as _;
 
-use flare_im_contracts::domain::push_policy::conversation_collapse_key;
+use flare_im_core_contracts::domain::push_policy::conversation_collapse_key;
 
 use crate::domain::model::{DueKind, GateDevice, GateSlotKey, WaveKey};
 

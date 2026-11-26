@@ -62,7 +62,7 @@ and default or weak passwords are refused.
 the password policy and prints the plan without opening any connection.
 
 The sender and recipient must already be friends in the fixture tenant
-(Core's PreSend Hook asks Social), e.g. the two users an HTTP-mode run of
+(Core's PreSend Hook asks the business system), e.g. the two users an HTTP-mode run of
 smoke_message_flow.sh reports.
 
 Exit status: 0 pass (or dry run), 1 smoke failed, 2 invalid settings.

@@ -6,8 +6,8 @@ use std::sync::Arc;
 
 use flare_core::common::ErrorCode;
 use flare_core::common::error::{FlareError, Result};
-use flare_im_contracts::Ctx;
-use flare_im_service_kit::tenant_runtime::TenantRuntimeCache;
+use flare_im_core_contracts::Ctx;
+use flare_im_core_service_kit::tenant_runtime::TenantRuntimeCache;
 use flare_proto::common::sync::Payload as SyncPayload;
 use flare_proto::common::{Sync, SyncRes};
 

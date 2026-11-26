@@ -14,7 +14,7 @@ use flare_capability::infrastructure::persistence::{
 };
 use flare_grpc_proto::control::TenantStatus as ProtoStatus;
 use flare_grpc_proto::control::{CoreQuota, TenantProjectionUpsert, TenantQuota as ProtoQuota};
-use flare_im_contracts::domain::tenant::TenantStatus;
+use flare_im_core_contracts::domain::tenant::TenantStatus;
 use sqlx::postgres::PgPoolOptions;
 
 const ENV_DATABASE_URL: &str = "FLARE_TENANT_TEST_DATABASE_URL";

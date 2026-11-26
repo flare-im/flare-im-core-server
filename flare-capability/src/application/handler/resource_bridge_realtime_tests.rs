@@ -5,14 +5,14 @@ use crate::domain::capability::{CapabilityError, Result};
 use crate::domain::repository::realtime_delivery::{RealtimePacket, RealtimePacketDelivery};
 use crate::domain::repository::{PluginAuthorizationReader, resource_access::*};
 use crate::infrastructure::capability::InMemoryCapabilityGrants;
-use flare_im_capability_core::plugin::invocation::{
+use flare_im_core_capability_core::plugin::invocation::{
     PluginCallClaims, PluginCallSigner, PluginCallVerifier, PluginRuntimeClaims,
     PluginRuntimeSigner, PluginRuntimeVerifier, PluginStaffCallClaims,
 };
-use flare_im_capability_core::plugin::resource::{
+use flare_im_core_capability_core::plugin::resource::{
     HostCapability, MembersCheckView, ResourceRequest,
 };
-use flare_im_capability_core::plugin::runtime::{PluginRuntimeSnapshot, digest_bytes};
+use flare_im_core_capability_core::plugin::runtime::{PluginRuntimeSnapshot, digest_bytes};
 use serde_json::{Value, json};
 use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex};
@@ -43,9 +43,9 @@ fn realtime_manifest() -> String {
 }
 
 fn snapshot() -> PluginRuntimeSnapshot {
-    use flare_im_capability_core::plugin::authorization::TenantPluginGrant;
-    use flare_im_capability_core::plugin::manifest::PluginManifest;
-    use flare_im_capability_core::plugin::runtime::*;
+    use flare_im_core_capability_core::plugin::authorization::TenantPluginGrant;
+    use flare_im_core_capability_core::plugin::manifest::PluginManifest;
+    use flare_im_core_capability_core::plugin::runtime::*;
     let raw = realtime_manifest();
     let manifest = PluginManifest::from_json(raw.as_bytes()).unwrap();
     let digest = digest_bytes(raw.as_bytes());

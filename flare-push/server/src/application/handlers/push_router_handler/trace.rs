@@ -1,5 +1,5 @@
 //! 推送决策链：路由、交接、决策、闸门、建任务与修正，各在做出结论的地方记一条（格式与键见
-//! `flare_im_contracts::push_trace`）。
+//! `flare_im_core_contracts::push_trace`）。
 //!
 //! - 记录只进写入端的有界队列，不等 Redis、不会失败；写入端关掉时不拼记录。
 //! - 每条都带 `conv`。键是离线任务带给设备的那个 `message_id`：要提示的那条消息的服务端 ID，
@@ -9,9 +9,9 @@
 
 use std::collections::BTreeSet;
 
-use flare_im_contracts::push_trace::{PushTraceEntry, TraceStage, trace_key};
+use flare_im_core_contracts::push_trace::{PushTraceEntry, TraceStage, trace_key};
+use flare_im_core_service_kit::push_trace::PushTraceRecorder;
 use flare_im_notify_rules::{DecideInput, Decision, SlotAction};
-use flare_im_service_kit::push_trace::PushTraceRecorder;
 
 use super::*;
 use crate::application::notify_gate::Admission;

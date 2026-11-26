@@ -19,7 +19,7 @@ use std::time::Duration;
 
 use flare_grpc_proto::conversation::ListConversationParticipantsRequest;
 use flare_grpc_proto::conversation::conversation_read_service_client::ConversationReadServiceClient;
-use flare_im_contracts::Ctx;
+use flare_im_core_contracts::Ctx;
 use flare_server_core::SignedContextSigner;
 use flare_server_core::error::{ErrorBuilder, ErrorCode, FlareError, Result};
 use tonic::transport::Channel;
@@ -72,9 +72,9 @@ impl ConversationMembershipRepository for ConversationReadMembership {
             .signer
             .as_ref()
             .ok_or_else(|| unavailable("the orchestrator has no Cell signing key"))?;
-        let token = flare_im_service_kit::signed_read::sign_service_read(
+        let token = flare_im_core_service_kit::signed_read::sign_service_read(
             signer,
-            flare_im_contracts::service_names::ORCHESTRATOR,
+            flare_im_core_contracts::service_names::ORCHESTRATOR,
             tenant_id,
             ctx.request_id(),
         )?;
@@ -673,7 +673,7 @@ mod tests {
         );
         for (actor_type, actor, tenant, _) in &seen {
             assert_eq!(*actor_type, flare_server_core::SignedActorType::Service);
-            assert_eq!(actor, flare_im_contracts::service_names::ORCHESTRATOR);
+            assert_eq!(actor, flare_im_core_contracts::service_names::ORCHESTRATOR);
             assert_eq!(tenant, "tenant-a");
         }
     }

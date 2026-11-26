@@ -154,8 +154,8 @@ impl ConversationSubscriptionRegistry {
 }
 
 fn canonical_tenant(tenant_id: &str) -> bool {
-    flare_im_contracts::domain::tenant::is_valid_tenant_id(tenant_id)
-        && flare_im_contracts::utils::normalize_tenant_id(tenant_id) == tenant_id
+    flare_im_core_contracts::domain::tenant::is_valid_tenant_id(tenant_id)
+        && flare_im_core_contracts::utils::normalize_tenant_id(tenant_id) == tenant_id
 }
 
 #[cfg(test)]

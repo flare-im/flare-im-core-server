@@ -7,9 +7,9 @@ use std::sync::Arc;
 
 use flare_grpc_proto::capability::tenant_notice_service_server::TenantNoticeService;
 use flare_grpc_proto::capability::{PublishTenantNoticeRequest, PublishTenantNoticeResponse};
-use flare_im_contracts::domain::tenant::is_valid_tenant_id;
-use flare_im_contracts::utils::normalize_tenant_id;
-use flare_im_service_kit::tenant_notice::ALL_TENANTS;
+use flare_im_core_contracts::domain::tenant::is_valid_tenant_id;
+use flare_im_core_contracts::utils::normalize_tenant_id;
+use flare_im_core_service_kit::tenant_notice::ALL_TENANTS;
 use flare_server_core::auth::{SignedActorType, SignedContextVerifier};
 use flare_server_core::grpc::middleware::signed_context::{
     VerifiedContext, verify_signed_context_metadata,

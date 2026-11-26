@@ -8,7 +8,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use flare_grpc_proto::message::SendMessageResponse;
 use flare_grpc_proto::signaling::router::{RouteMessageRequest, RouteOptions};
-use flare_im_contracts::Ctx;
+use flare_im_core_contracts::Ctx;
 use flare_proto::common::{
     ErrorCode, Message, MessageSource, SendAccepted, SendAck, SendAckDurability, send_ack,
 };

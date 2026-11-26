@@ -1,7 +1,7 @@
 //! Hook 写入时的校验：控制面把关，存进去却加载不了的行不让写。错误只带 Hook 名与头名，不带任何取值。
 
 use crate::domain::model::{HookConfigItem, HookTransportConfig, LoggableName};
-use flare_im_hooks::hooks::adapters::is_reserved_webhook_header;
+use flare_im_core_hooks::hooks::adapters::is_reserved_webhook_header;
 use flare_server_core::error::{ErrorBuilder, ErrorCode, Result as FlareResult};
 
 fn rejected(

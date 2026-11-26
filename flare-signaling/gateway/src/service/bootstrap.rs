@@ -2,8 +2,8 @@
 
 use crate::config::PortConfig;
 use crate::service::startup::start_services;
-use flare_im_contracts::service_names::ACCESS_GATEWAY;
-use flare_im_service_kit::FlareAppConfig;
+use flare_im_core_contracts::service_names::ACCESS_GATEWAY;
+use flare_im_core_service_kit::FlareAppConfig;
 use flare_server_core::error::Result;
 use tracing::{error, info};
 
@@ -15,9 +15,9 @@ pub struct ApplicationBootstrap;
 impl ApplicationBootstrap {
     /// 运行应用的主入口点
     pub async fn run() -> Result<()> {
-        let config_path = flare_im_service_kit::resolve_config_path();
+        let config_path = flare_im_core_service_kit::resolve_config_path();
         info!(config_path = %config_path, "Loading configuration");
-        let app_config = flare_im_service_kit::load_app_config_from_env();
+        let app_config = flare_im_core_service_kit::load_app_config_from_env();
 
         // 创建应用上下文
         info!("开始创建应用上下文...");

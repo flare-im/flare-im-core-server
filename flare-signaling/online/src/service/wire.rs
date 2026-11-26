@@ -21,7 +21,7 @@ use crate::infrastructure::persistence::redis::{
     RedisPresenceWatcher, RedisSubscriptionRepository,
 };
 use crate::interface::grpc::OnlineHandler;
-use flare_im_service_kit::tenant_runtime::TenantRuntimeCache;
+use flare_im_core_service_kit::tenant_runtime::TenantRuntimeCache;
 use flare_server_core::SignedContextVerifier;
 use flare_server_core::error::{ErrorCode, Result, map_infra_error};
 
@@ -59,7 +59,7 @@ pub struct ApplicationContext {
     pub command_delivery: Option<(
         Arc<RedisConversationRepository>,
         Arc<sqlx::PgPool>,
-        flare_im_service_kit::audit_effects::AuditEffects,
+        flare_im_core_service_kit::audit_effects::AuditEffects,
     )>,
 }
 
@@ -73,7 +73,7 @@ pub struct ApplicationContext {
 /// # 返回
 /// * `ApplicationContext` - 构建好的应用上下文
 pub async fn initialize(
-    app_config: &flare_im_service_kit::config::FlareAppConfig,
+    app_config: &flare_im_core_service_kit::config::FlareAppConfig,
 ) -> Result<ApplicationContext> {
     // 1. 加载在线服务配置
     let online_config = Arc::new(OnlineConfig::from_app_config(app_config).map_err(|e| {
@@ -116,7 +116,8 @@ pub async fn initialize(
         Some((
             conversation_repository.clone(),
             pool,
-            flare_im_service_kit::audit_effects::AuditEffects::from_env("signaling-online").await?,
+            flare_im_core_service_kit::audit_effects::AuditEffects::from_env("signaling-online")
+                .await?,
         ))
     } else {
         None
@@ -141,7 +142,7 @@ pub async fn initialize(
         match online_config.push_proxy_url.as_deref() {
             Some(url) => {
                 let signer =
-                    flare_im_service_kit::signed_read::service_signer_from_env("signaling-online")?
+                    flare_im_core_service_kit::signed_read::service_signer_from_env("signaling-online")?
                         .ok_or_else(|| {
                             flare_server_core::error::FlareError::system(
                                 "SIGNALING_ONLINE_PUSH_PROXY_URL requires the internal context private key: Online calls the push proxy as itself",
@@ -218,7 +219,7 @@ pub async fn initialize(
             redis_client.as_ref().clone(),
         )),
         command_handler.clone(),
-        Arc::new(flare_im_service_kit::metrics::OnlineSweeperMetrics::new()),
+        Arc::new(flare_im_core_service_kit::metrics::OnlineSweeperMetrics::new()),
     )
     .with_handoff_queue(handoff_queue);
 
@@ -228,7 +229,7 @@ pub async fn initialize(
     // 6. 构建 OnlineService Handler（interface::grpc，仅编排 application handlers）
     // 平台公钥只验 KickTenant 的调度器断言；员工经 admin-gateway 转发的 Staff 上下文用 Cell 公钥集验。
     let control_verifier =
-        flare_im_service_kit::control_auth::PlatformAssertionVerifier::from_env().map_err(
+        flare_im_core_service_kit::control_auth::PlatformAssertionVerifier::from_env().map_err(
             |_| flare_server_core::error::FlareError::system("invalid FLARE_PLATFORM_PUBLIC_KEY"),
         )?;
     if control_verifier.is_none() {
@@ -251,7 +252,9 @@ pub async fn initialize(
     let staff_verifier = identity_verifier
         .is_some()
         .then(|| {
-            flare_im_service_kit::staff_context::admin_staff_verifier_from_env("signaling-online")
+            flare_im_core_service_kit::staff_context::admin_staff_verifier_from_env(
+                "signaling-online",
+            )
         })
         .transpose()?;
     let online_handler = OnlineHandler::new(
@@ -263,7 +266,10 @@ pub async fn initialize(
     .with_control_verifier(control_verifier)
     .with_tenant_kick_fence(tenant_runtime.kick_fence())
     .with_identity_verifier(identity_verifier)
-    .with_staff_verifier(staff_verifier);
+    .with_staff_verifier(staff_verifier)
+    .with_trusted_integrations(
+        flare_im_core_service_kit::trusted_integration::TrustedIntegrationPrincipals::from_env(),
+    );
 
     Ok(ApplicationContext {
         online_handler,

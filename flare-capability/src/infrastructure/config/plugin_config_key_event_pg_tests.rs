@@ -4,7 +4,7 @@ use crate::domain::{
     repository::plugin_registry::PluginRegistryRepository,
 };
 use crate::infrastructure::persistence::postgres_plugin_registry::PostgresPluginRegistry;
-use flare_im_capability_core::plugin::{
+use flare_im_core_capability_core::plugin::{
     PluginManifest,
     runtime::{configuration_digest, digest_bytes},
 };
@@ -137,7 +137,7 @@ async fn event_activation_secret_record_delivery_keeps_the_accepted_backlog() {
     let after: i64 = row.get("event_active_since_ms");
     use crate::domain::repository::PluginAuthorizationReader;
     use crate::infrastructure::persistence::postgres_plugin_authorization::PostgresPluginAuthorization;
-    use flare_im_capability_core::plugin::{
+    use flare_im_core_capability_core::plugin::{
         authorization::TenantPluginGrant,
         runtime::{PluginProjection, ProjectedLifecycle, ProjectedPlugin},
     };

@@ -61,7 +61,7 @@ fn removed_call_crates_and_modules_stay_removed() {
         "crates/flare-call",
         "flare-signaling/gateway/src/call_signal",
         "flare-storage/writer/src/call",
-        "crates/flare-im-capability-core/src/rtc.rs",
+        "crates/flare-im-core-capability-core/src/rtc.rs",
         "flare-capability/src/domain/capability/rtc.rs",
         "flare-capability/src/infrastructure/capability/internal",
     ] {

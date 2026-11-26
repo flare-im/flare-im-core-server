@@ -47,7 +47,7 @@ Flare IM **能力服务**：**Hook 控制面**（配置、校验、统计和保�
 
 ## Hook 控制面
 
-Hook 在 Message Ingest 里运行：`flare-im-hooks` 是唯一的运行时，调用链、适配器、熔断、时限和执行记录
+Hook 在 Message Ingest 里运行：`flare-im-core-hooks` 是唯一的运行时，调用链、适配器、熔断、时限和执行记录
 都在那里。本服务是控制面，不执行 Hook，所以 Capability 故障不影响发送。
 
 配置在 `hook_configs` 表（结构见 `deploy/init.sql`）。`tenant_id` 有值的行属于这个应用，为空的行是平台

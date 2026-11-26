@@ -9,7 +9,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 
-use flare_im_contracts::Ctx;
+use flare_im_core_contracts::Ctx;
 use flare_message_ingest::application::handlers::{WalReplayHandler, WalReplayPublisher};
 use flare_message_ingest::domain::repository::{WalPendingMessage, WalRepository};
 use flare_message_ingest::domain::{MessageProfile, MessageSubmission, PersistenceMode};

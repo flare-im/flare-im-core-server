@@ -8,9 +8,9 @@ use flare_grpc_proto::push::{
     PushCapabilityRequest, PushCustomRequest, PushMessageRequest, PushNotificationRequest,
     PushOptions as GrpcPushOptions,
 };
-use flare_im_contracts::Ctx;
-use flare_im_contracts::constants::topics::TOPIC_PUSH_HANDOFF;
-use flare_im_contracts::event::mq_envelope_for_main_queue_message_with_headers;
+use flare_im_core_contracts::Ctx;
+use flare_im_core_contracts::constants::topics::TOPIC_PUSH_HANDOFF;
+use flare_im_core_contracts::event::mq_envelope_for_main_queue_message_with_headers;
 use flare_proto::common::{
     CustomPayload, DeviceHandoff, NotificationPayload, PushEnvelope, PushOptions, PushPayloadKind,
     PushTargetType, push_envelope,
@@ -408,8 +408,8 @@ fn base_envelope(
 fn required_push_tenant(ctx: &Ctx) -> Result<String> {
     ctx.tenant_id()
         .filter(|tenant_id| {
-            flare_im_contracts::domain::tenant::is_valid_tenant_id(tenant_id)
-                && flare_im_contracts::utils::normalize_tenant_id(tenant_id) == *tenant_id
+            flare_im_core_contracts::domain::tenant::is_valid_tenant_id(tenant_id)
+                && flare_im_core_contracts::utils::normalize_tenant_id(tenant_id) == *tenant_id
         })
         .map(ToString::to_string)
         .ok_or_else(|| {

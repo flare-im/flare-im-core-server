@@ -1,8 +1,10 @@
 //! Conversation Read gRPC 客户端池（统一读扩散：登录时拉取用户会话列表用于 eager 订阅）。
 
 use flare_grpc_proto::conversation::conversation_read_service_client::ConversationReadServiceClient;
-use flare_im_contracts::service_names::{ACCESS_GATEWAY, CONVERSATION, get_service_name};
-use flare_im_service_kit::discovery::{connect_grpc_channel_resilient, connect_static_channel};
+use flare_im_core_contracts::service_names::{ACCESS_GATEWAY, CONVERSATION, get_service_name};
+use flare_im_core_service_kit::discovery::{
+    connect_grpc_channel_resilient, connect_static_channel,
+};
 use flare_server_core::error::{ErrorBuilder, ErrorCode, Result};
 use tokio::sync::Mutex;
 use tonic::transport::Channel;
@@ -45,7 +47,7 @@ impl ConversationReadGrpcPool {
     pub(crate) fn user_read_request<T>(
         &self,
         payload: T,
-        tx: &flare_im_contracts::Ctx,
+        tx: &flare_im_core_contracts::Ctx,
     ) -> Result<tonic::Request<T>> {
         crate::infrastructure::connection_context::signed_connection_read(
             payload,
@@ -87,7 +89,7 @@ impl ConversationReadGrpcPool {
         let ctx = Context::root()
             .with_tenant_id(tenant_id)
             .with_actor(ActorContext::new(&actor_id).with_type(ActorType::Service));
-        let token = flare_im_service_kit::signed_read::sign_service_read(
+        let token = flare_im_core_service_kit::signed_read::sign_service_read(
             signer,
             &actor_id,
             tenant_id,
@@ -129,7 +131,7 @@ impl ConversationReadGrpcPool {
     /// Service/System actor 跳过成员鉴权（仅按 tenant + conversation 范围读取），保留 tenant 作用域。
     pub async fn list_participants(
         &self,
-        tx: &flare_im_contracts::Ctx,
+        tx: &flare_im_core_contracts::Ctx,
         conversation_id: &str,
     ) -> Result<Vec<String>> {
         use flare_grpc_proto::conversation::ListConversationParticipantsRequest;
@@ -175,7 +177,7 @@ impl ConversationReadGrpcPool {
 impl crate::domain::ports::ConversationParticipantSource for ConversationReadGrpcPool {
     async fn list_participants(
         &self,
-        tx: &flare_im_contracts::Ctx,
+        tx: &flare_im_core_contracts::Ctx,
         conversation_id: &str,
     ) -> Result<Vec<String>> {
         ConversationReadGrpcPool::list_participants(self, tx, conversation_id).await

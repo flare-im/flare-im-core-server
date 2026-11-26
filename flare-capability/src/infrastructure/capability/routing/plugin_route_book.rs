@@ -5,14 +5,14 @@
 use std::sync::Arc;
 
 use flare_grpc_proto::capability::RegisteredPluginInstance;
-use flare_im_capability_core::plugin::manifest::PLUGIN_API_VERSION;
+use flare_im_core_capability_core::plugin::manifest::PLUGIN_API_VERSION;
 use flare_server_core::error::Result;
 
 #[derive(Clone, Default)]
 pub struct PluginRouteBook {
     pub(crate) authorization: Option<Arc<dyn crate::domain::repository::PluginAuthorizationReader>>,
     pub(crate) invocation_signer:
-        Option<Arc<flare_im_capability_core::plugin::invocation::PluginCallSigner>>,
+        Option<Arc<flare_im_core_capability_core::plugin::invocation::PluginCallSigner>>,
     /// Plugin entity shared state publishing (call results and the bridge write); `None` without
     /// a database or an Orchestrator authority: shared state is then never published.
     pub(crate) state_publisher:
@@ -40,7 +40,7 @@ impl PluginRouteBook {
     pub fn with_runtime_authorization(
         mut self,
         reader: Arc<dyn crate::domain::repository::PluginAuthorizationReader>,
-        signer: Option<Arc<flare_im_capability_core::plugin::invocation::PluginCallSigner>>,
+        signer: Option<Arc<flare_im_core_capability_core::plugin::invocation::PluginCallSigner>>,
     ) -> Self {
         self.authorization = Some(reader);
         self.invocation_signer = signer;

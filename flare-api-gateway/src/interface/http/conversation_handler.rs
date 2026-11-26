@@ -13,7 +13,7 @@ use flare_grpc_proto::conversation::{
     ListConversationParticipantsRequest, ListConversationsRequest, ManageParticipantsRequest,
     ParticipantRoleUpdate,
 };
-use flare_im_service_kit::clients::GrpcClients;
+use flare_im_core_service_kit::clients::GrpcClients;
 use flare_server_core::{
     AuthenticatedPrincipal, SignedActorType, SignedContextIdentity,
     context::{ActorContext, ActorType, Context, Ctx},
@@ -33,13 +33,13 @@ pub(super) fn conversation_reader(
     let tenant_id = principal
         .tenant_id
         .as_deref()
-        .map(flare_im_contracts::utils::normalize_tenant_id)
+        .map(flare_im_core_contracts::utils::normalize_tenant_id)
         .ok_or_else(|| {
             GatewayError::bad_request("TENANT_REQUIRED", "authenticated tenant required")
         })?;
     if user_id.is_empty()
         || principal.has_gateway_admin_scope()
-        || !flare_im_contracts::domain::tenant::is_valid_tenant_id(&tenant_id)
+        || !flare_im_core_contracts::domain::tenant::is_valid_tenant_id(&tenant_id)
     {
         return Err(GatewayError::bad_request(
             "USER_REQUIRED",

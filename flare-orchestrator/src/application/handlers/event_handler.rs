@@ -13,10 +13,10 @@
 
 use std::sync::Arc;
 
-use flare_im_contracts::Ctx;
-use flare_im_contracts::utils::normalize_optional_tenant_id;
-use flare_im_message_pipeline::{MqPushRepository, PushRepository};
-use flare_im_seq::SequenceAllocator;
+use flare_im_core_contracts::Ctx;
+use flare_im_core_contracts::utils::normalize_optional_tenant_id;
+use flare_im_core_message_pipeline::{MqPushRepository, PushRepository};
+use flare_im_core_seq::SequenceAllocator;
 use flare_proto::common::Event;
 use tracing::instrument;
 
@@ -255,7 +255,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::{event_tenant, parse_event_slow_log_ms};
-    use flare_im_contracts::Ctx;
+    use flare_im_core_contracts::Ctx;
     use flare_server_core::Context;
     use std::sync::Arc;
 
@@ -303,8 +303,8 @@ mod read_ack_admission_tests {
     };
     use crate::domain::service::EventDomainService;
     use crate::domain::service::event_domain_service::SequenceAllocatorPort;
-    use flare_im_contracts::Ctx;
-    use flare_im_message_pipeline::{ConversationType, PushRepository};
+    use flare_im_core_contracts::Ctx;
+    use flare_im_core_message_pipeline::{ConversationType, PushRepository};
     use flare_proto::common::{
         Event, EventType, Message, PushEnvelope, ReadReceiptEvent, event::Payload,
     };
@@ -648,7 +648,7 @@ mod read_ack_admission_tests {
     /// Capability publishes plugin shared state with its own signed system context.
     fn system_ctx(request_id: &str) -> Ctx {
         use ed25519_dalek::pkcs8::{EncodePrivateKey, EncodePublicKey};
-        use flare_im_service_kit::plugin_platform::{
+        use flare_im_core_service_kit::plugin_platform::{
             CARD_POST_KID, STATE_PUBLISH_ROLE, STATE_PUBLISHER_ID,
         };
         let key = ed25519_dalek::SigningKey::from_bytes(&[29; 32]);

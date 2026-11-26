@@ -5,8 +5,8 @@ use async_trait::async_trait;
 use redis::aio::ConnectionManager;
 
 use crate::domain::repository::{ConversationChange, UserSyncIndexRepository};
-use flare_im_contracts::Ctx;
-use flare_im_contracts::utils::normalize_optional_tenant_id;
+use flare_im_core_contracts::Ctx;
+use flare_im_core_contracts::utils::normalize_optional_tenant_id;
 use flare_server_core::error::{FlareError, Result};
 
 /// 单个 Redis pipeline 里最多塞多少个用户的 EVAL。
@@ -500,7 +500,7 @@ mod tests {
     /// 缺租户的上下文不再读写租户 "0" 的同步索引键（W11-T）；显式租户 "0" 照常。
     #[test]
     fn index_tenant_must_come_from_the_context() {
-        use flare_im_contracts::Ctx;
+        use flare_im_core_contracts::Ctx;
         use flare_server_core::Context;
         use std::sync::Arc;
         for missing in [

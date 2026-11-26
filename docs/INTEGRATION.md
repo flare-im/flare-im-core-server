@@ -301,6 +301,21 @@ and [`examples/hook_audit_log.rs`](../examples/hook_audit_log.rs).
 > message path down with it — but **whether a timeout allows or rejects depends on how you
 > configure it**, and that is worth confirming before production.
 
+### Business integration settings
+
+A business system that runs on Core reaches it through generic contracts only; Core names no
+business service, event or conversation type. The deployment states the business side:
+
+| Setting | What it grants |
+|---|---|
+| `FLARE_TRUSTED_INTEGRATION_PRINCIPALS` | Comma-separated signed `Service` actors trusted to operate on any message of their tenant for a user (recall, edit, delete), purge a conversation's history, revoke a user's identity sessions, and send system messages and notifications without the user PreSend. Empty (default): none. |
+| `FLARE_EXTERNAL_ROSTER_BUSINESS_TYPES` | Comma-separated conversation `business_type`s whose rosters the business system manages; their identity views are disclosed only as `CONVERSATION_ROSTER_POLICY_GRPC_URL` allows. Empty (default): none. |
+| `MESSAGE_INGEST_HOOKS_CONFIG` | Path of the business system's own Hook registration file. Core ships only the empty `hooks.core.toml`. |
+
+A notice that has no conversation yet goes to the recipient's user inbox,
+`inbox:<user_id>`: delivered online to that user's connections, it takes no conversation seq and
+never appears in the conversation list.
+
 > Don't want to build these? Identity and social features (friends, group governance,
 > moments) exist as a commercial layer speaking the same protocol; the interfaces above do
 > not change.

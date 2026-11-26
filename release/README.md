@@ -419,8 +419,8 @@ flare-im-deploy 单机模板在 Core 的 Compose `environment` 里把 Admin Gate
 `FLARE_ADMIN_GATEWAY_GRPC_*_SERVICE_URL`（media、conversation、online、storage reader、
 capability、push proxy）直接设成上表地址，preflight 核对它们。
 
-启用 Social PreSend Hook 时，`config/hooks.social.toml` 的
-`discovery://flare-im-hook` **不能**用于该模式：Message Ingest 会在
+启用业务 PreSend Hook 时（Core 不带业务 Hook，业务服务端自己的注册文件，如
+`flare-im-server/deploy/core-hooks.toml`），其中的 `discovery://flare-im-hook` **不能**用于该模式：Message Ingest 会在
 连接 Redis/MQ 前拒绝启动。部署方必须提供已审核、指向 Social 私网
 `flare-im-hook` 的独立 Hook 配置文件，并把路径传给
 `MESSAGE_INGEST_HOOKS_CONFIG`。`flare-im-deploy/templates/compose/single/hooks.social.static.toml`

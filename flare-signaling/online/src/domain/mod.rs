@@ -1,7 +1,7 @@
 //! 领域层模块
 //!
 //! 与 flare-storage 一致：model、repository、service；online 扩展 aggregate、event、value_object。
-//! connection_event_publisher 与 flare_im_contracts Connection BC 对齐，可选发布 ConnectionEvent。
+//! connection_event_publisher 与 flare_im_core_contracts Connection BC 对齐，可选发布 ConnectionEvent。
 //! device_handoff 是网关失联时把设备交接给推送通道的出站端口；push_binding 是服务端有意结束
 //! 会话时吊销推送绑定的出口与出站端口。
 

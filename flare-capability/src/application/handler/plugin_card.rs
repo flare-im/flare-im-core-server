@@ -38,12 +38,12 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use flare_im_capability_core::plugin::PluginManifest;
-use flare_im_capability_core::plugin::manifest::{
+use flare_im_core_capability_core::plugin::PluginManifest;
+use flare_im_core_capability_core::plugin::manifest::{
     UNBOUND_REASON_POST_FAILED, UiContribution, UiContributionKind,
 };
-use flare_im_capability_core::plugin::ui::{MAX_PLUGIN_DISPLAY_NAME_BYTES, PluginMessage};
-use flare_im_service_kit::plugin_platform::{
+use flare_im_core_capability_core::plugin::ui::{MAX_PLUGIN_DISPLAY_NAME_BYTES, PluginMessage};
+use flare_im_core_service_kit::plugin_platform::{
     PLUGIN_CARD_NOT_POSTED, PLUGIN_CARD_PAYLOAD_SCHEMA, PLUGIN_CARD_TYPE, PLUGIN_MESSAGE_RECALLED,
 };
 use flare_proto::common::message_content::Content;
@@ -124,7 +124,7 @@ pub fn card_client_msg_id(
     let digest = hex::encode(hasher.finalize());
     format!(
         "{}{}",
-        flare_im_service_kit::plugin_platform::CARD_CLIENT_MSG_ID_PREFIX,
+        flare_im_core_service_kit::plugin_platform::CARD_CLIENT_MSG_ID_PREFIX,
         &digest[..32]
     )
 }

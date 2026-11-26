@@ -11,7 +11,7 @@ use crate::domain::repository::plugin_state::PluginStateEventSink;
 use crate::infrastructure::capability::plugin_channel::resolve_plugin_channel;
 use flare_grpc_proto::message::ExecuteEventRequest;
 use flare_grpc_proto::message::message_event_service_client::MessageEventServiceClient;
-use flare_im_service_kit::plugin_platform::{STATE_PUBLISH_ROLE, STATE_PUBLISHER_ID};
+use flare_im_core_service_kit::plugin_platform::{STATE_PUBLISH_ROLE, STATE_PUBLISHER_ID};
 use flare_proto::common::{Event, EventType, PluginStateEvent, event::Payload};
 use flare_server_core::error::{FlareError, Result};
 use flare_server_core::{SignedActorType, SignedContextIdentity, SignedContextSigner};
@@ -92,7 +92,7 @@ impl PluginStateEventSink for GrpcPluginStateEvents {
 #[cfg(test)]
 pub(crate) fn verified_publisher_context(tenant_id: &str) -> flare_server_core::context::Ctx {
     use ed25519_dalek::pkcs8::{EncodePrivateKey, EncodePublicKey};
-    use flare_im_service_kit::plugin_platform::CARD_POST_KID;
+    use flare_im_core_service_kit::plugin_platform::CARD_POST_KID;
     let key = ed25519_dalek::SigningKey::from_bytes(&[37; 32]);
     let signer =
         SignedContextSigner::from_private_key(&key.to_pkcs8_pem(Default::default()).unwrap())

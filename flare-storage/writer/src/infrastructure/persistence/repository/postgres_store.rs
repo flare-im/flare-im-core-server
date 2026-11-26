@@ -1,6 +1,6 @@
 use base64::Engine;
-use flare_im_contracts::Ctx;
-use flare_im_contracts::utils::normalize_tenant_id;
+use flare_im_core_contracts::Ctx;
+use flare_im_core_contracts::utils::normalize_tenant_id;
 use flare_proto::common::{
     ContentVisibility, MessageContent, MessageRetentionLifecycle, MessageRetentionPolicy,
     MessageRetentionState, RetentionMode,
@@ -291,7 +291,8 @@ impl PostgresMessageStore {
             .collect();
         extra.insert("tenant_id".to_string(), row.tenant_id.clone());
 
-        let reaction_states = flare_im_contracts::message::reaction_states_from_extra(&extra_value);
+        let reaction_states =
+            flare_im_core_contracts::message::reaction_states_from_extra(&extra_value);
         let msg = Message {
             server_id: row.server_id,
             conversation_id: row.conversation_id,
@@ -845,7 +846,7 @@ impl PostgresMessageStore {
         })?;
 
         if let Some(proof) =
-            ctx.get_data::<flare_im_service_kit::audit_effects::write_proof::VerifiedWrite>()
+            ctx.get_data::<flare_im_core_service_kit::audit_effects::write_proof::VerifiedWrite>()
         {
             proof
                 .record(
@@ -1673,7 +1674,7 @@ impl PostgresMessageStore {
             // 执行批量插入
             match query_builder.build().execute(&mut *tx).await {
                 Ok(_) => {
-                    if let Some(proof)=ctx.get_data::<flare_im_service_kit::audit_effects::write_proof::VerifiedWrite>() {
+                    if let Some(proof)=ctx.get_data::<flare_im_core_service_kit::audit_effects::write_proof::VerifiedWrite>() {
                         for row in &rows_to_insert {proof.record(&mut tx,&row.0,&row.1,&row.2).await.map_err(|_|flare_server_core::error::FlareError::system("machine commit audit unavailable"))?;}
                     }
                     // 提交事务

@@ -1,6 +1,6 @@
 //! 网关租约：本网关每 5s 在 Online 会话 Redis 里续一次 `gw:lease:{gateway_id}`（TTL 15s）并登记进
 //! `gw:known`。进程被 `kill -9` 或主机宕机时租约随 TTL 消失，Online 的清扫器据此按正常断开清掉
-//! 这台网关的连接，推送路由也不再往它投递（约定见 `flare_im_service_kit::gateway::lease`）。
+//! 这台网关的连接，推送路由也不再往它投递（约定见 `flare_im_core_service_kit::gateway::lease`）。
 //!
 //! 网关 ID 是稳定的（重启不变），所以启动时要先把上一个进程遗留的连接集合改名成孤儿网关交给
 //! 清扫器：崩溃后几秒内就重启的话，旧租约还没过期就被新进程续上，清扫器永远看不到它缺失，
@@ -10,11 +10,11 @@ use std::future::Future;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use flare_im_service_kit::gateway::lease::{
+use flare_im_core_service_kit::gateway::lease::{
     GatewayLease, KNOWN_GATEWAYS_KEY, LEASE_RENEW_INTERVAL, LEASE_TTL_SECS, conns_key, lease_key,
     orphan_gateway_id,
 };
-use flare_im_service_kit::redis_connection::{RedisConnectionLimits, SharedRedisConnection};
+use flare_im_core_service_kit::redis_connection::{RedisConnectionLimits, SharedRedisConnection};
 use tokio::sync::oneshot;
 use tracing::{error, info, warn};
 

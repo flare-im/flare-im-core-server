@@ -92,7 +92,7 @@ ttl_seconds = 86400
 # 生产运行时 Kafka 与 JetStream 二选一，不做同链路双写。
 default_backend = "nats"
 
-# JetStream 事件总线：各服务通过 config/services/*.toml 引用 profile，Subject 见 flare_im_contracts::constants::topics
+# JetStream 事件总线：各服务通过 config/services/*.toml 引用 profile，Subject 见 flare_im_core_contracts::constants::topics
 [jetstream.push]
 url = "${FLARE_NATS_URL:-nats://127.0.0.1:24222}"
 client_id = "flare-im"

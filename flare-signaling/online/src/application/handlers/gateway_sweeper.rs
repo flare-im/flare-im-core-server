@@ -19,10 +19,10 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use flare_grpc_proto::signaling::online::LogoutRequest;
-use flare_im_service_kit::gateway::lease::{
+use flare_im_core_service_kit::gateway::lease::{
     LEASE_RENEW_INTERVAL, LEASE_TTL_SECS, base_gateway_id, parse_connection_member,
 };
-use flare_im_service_kit::metrics::OnlineSweeperMetrics;
+use flare_im_core_service_kit::metrics::OnlineSweeperMetrics;
 use flare_server_core::context::Context;
 use flare_server_core::error::Result;
 use futures_util::StreamExt;
@@ -479,7 +479,7 @@ mod tests {
     use flare_grpc_proto::signaling::online::{
         DeviceConflictStrategy, PresenceEvent, UserPresenceEvent,
     };
-    use flare_im_service_kit::gateway::lease::{connection_member, orphan_gateway_id};
+    use flare_im_core_service_kit::gateway::lease::{connection_member, orphan_gateway_id};
 
     use super::*;
     use crate::application::handlers::handoff_dispatcher::{

@@ -12,7 +12,7 @@ use flare_grpc_proto::control::{
     self, tenant_projection_client::TenantProjectionClient,
     tenant_projection_server::TenantProjectionServer,
 };
-use flare_im_service_kit::{
+use flare_im_core_service_kit::{
     control_auth::*,
     credential_projection::PostgresCredentialReader,
     tenant_runtime::{PgTenantRuntimeSource, TenantRuntimeSource},

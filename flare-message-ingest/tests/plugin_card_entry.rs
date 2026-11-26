@@ -17,13 +17,13 @@ use std::sync::{Arc, Mutex};
 
 use ed25519_dalek::SigningKey;
 use ed25519_dalek::pkcs8::{EncodePrivateKey, EncodePublicKey};
-use flare_im_contracts::Ctx;
-use flare_im_hooks::hooks::{HookDispatcher, HookRegistry};
-use flare_im_hooks::{HookMetadata, HookSelector, MessageDraft, PreSendDecision, PreSendHook};
-use flare_im_message_pipeline::MqPushRepository;
-use flare_im_seq::SequenceAllocator;
-use flare_im_service_kit::metrics::MessageOrchestratorMetrics;
-use flare_im_service_kit::plugin_platform;
+use flare_im_core_contracts::Ctx;
+use flare_im_core_hooks::hooks::{HookDispatcher, HookRegistry};
+use flare_im_core_hooks::{HookMetadata, HookSelector, MessageDraft, PreSendDecision, PreSendHook};
+use flare_im_core_message_pipeline::MqPushRepository;
+use flare_im_core_seq::SequenceAllocator;
+use flare_im_core_service_kit::metrics::MessageOrchestratorMetrics;
+use flare_im_core_service_kit::plugin_platform;
 use flare_message_ingest::application::MessageIngestHandler;
 use flare_message_ingest::application::commands::SendMessageCommand;
 use flare_message_ingest::application::extension::{ExtensionOrchestrator, ExtensionRouting};
@@ -294,7 +294,7 @@ impl PreSendHook for RewritingHook {
             }
             Rewrite::Refuse => {
                 return PreSendDecision::Reject {
-                    error: flare_im_hooks::pre_send_rejection(
+                    error: flare_im_core_hooks::pre_send_rejection(
                         flare_server_core::error::ErrorBuilder::new(
                             ErrorCode::OperationFailed,
                             "muted",

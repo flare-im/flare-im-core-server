@@ -15,11 +15,11 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 
-use flare_im_capability_core::plugin::PluginManifest;
-use flare_im_capability_core::plugin::manifest::{UiContribution, UiContributionKind};
-use flare_im_capability_core::plugin::runtime::{ManifestCache, PluginProjection};
-use flare_im_capability_core::plugin::ui::PluginMessage;
-use flare_im_contracts::Ctx;
+use flare_im_core_capability_core::plugin::PluginManifest;
+use flare_im_core_capability_core::plugin::manifest::{UiContribution, UiContributionKind};
+use flare_im_core_capability_core::plugin::runtime::{ManifestCache, PluginProjection};
+use flare_im_core_capability_core::plugin::ui::PluginMessage;
+use flare_im_core_contracts::Ctx;
 use flare_proto::common::message_content::Content;
 use flare_server_core::error::{ErrorCode, Result, map_infra_error};
 use sqlx::{Pool, Postgres};
@@ -319,8 +319,8 @@ impl PluginEntityBindingRepository for PostgresPluginEntityBindings {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use flare_im_capability_core::plugin::authorization::TenantPluginGrant;
-    use flare_im_capability_core::plugin::runtime::{
+    use flare_im_core_capability_core::plugin::authorization::TenantPluginGrant;
+    use flare_im_core_capability_core::plugin::runtime::{
         ProjectedLifecycle, ProjectedPlugin, digest_bytes,
     };
     use flare_proto::common::{AppCardContent, MessageContent};

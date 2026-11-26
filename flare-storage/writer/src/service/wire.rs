@@ -19,8 +19,8 @@ use crate::infrastructure::persistence::repository::redis_cache::RedisHotCacheRe
 use crate::infrastructure::persistence::repository::redis_wal_cleanup::RedisWalCleanupRepository;
 use crate::interface::messaging::{MessageCreatedConsumerFactory, MessageEventsConsumerFactory};
 
-use flare_im_service_kit::metrics::StorageWriterMetrics;
-use flare_im_service_kit::redis_connection::SharedRedisConnection;
+use flare_im_core_service_kit::metrics::StorageWriterMetrics;
+use flare_im_core_service_kit::redis_connection::SharedRedisConnection;
 use flare_server_core::mq::consumer::dispatcher::Dispatcher;
 use flare_server_core::mq::consumer::{ConsumerConfig, MessageHandler, TopicDispatcher};
 use flare_server_core::mq::consumer::{
@@ -86,7 +86,7 @@ fn storage_failure_policy_for_backend(backend: &str) -> StorageFailurePolicy {
 /// storage-writer 消费者配置。
 ///
 /// NATS 后端没有重试 topic，落库失败靠 JetStream 原生重投：数据库、归档存储暂时不可用时
-/// handler 报可重试错误，按 [`flare_im_service_kit::consumer_retry`] 的退避延迟重投，12 次重试的
+/// handler 报可重试错误，按 [`flare_im_core_service_kit::consumer_retry`] 的退避延迟重投，12 次重试的
 /// 等待合计 135 s，之后仍失败才进 DLQ。默认的 3 次立即重投会在数据库重启的同一瞬间用完，已
 /// 受理的消息随即进 DLQ。Kafka 后端走重试 topic（`message_retry_delay_ms`），不变。
 pub(crate) fn storage_consumer_config(config: &StorageWriterConfig) -> ConsumerConfig {
@@ -97,14 +97,14 @@ pub(crate) fn storage_consumer_config(config: &StorageWriterConfig) -> ConsumerC
     if storage_failure_policy_for_backend(config.mq_backend.as_str()).retry_topic_enabled {
         consumer
     } else {
-        flare_im_service_kit::consumer_retry::with_downstream_outage_retry(consumer)
+        flare_im_core_service_kit::consumer_retry::with_downstream_outage_retry(consumer)
     }
 }
 
 pub struct ApplicationContext {
     pub audit_delivery: Option<(
         Arc<sqlx::PgPool>,
-        flare_im_service_kit::audit_effects::AuditEffects,
+        flare_im_core_service_kit::audit_effects::AuditEffects,
     )>,
     pub config: Arc<StorageWriterConfig>,
     pub consumer_config: ConsumerConfig,
@@ -112,14 +112,14 @@ pub struct ApplicationContext {
     pub retry_forwarder_dispatcher: Option<Arc<dyn Dispatcher>>,
     pub failure_publishers: ConsumerFailurePublishers,
     /// 用量预聚合（`messages.persisted`）；启动层把它的 flush 循环挂进运行时。
-    pub usage: flare_im_usage::UsageReporter,
+    pub usage: flare_im_core_usage::UsageReporter,
     /// 发送幂等账本的保留期清理（与归档同一个连接池）；启动层把清理任务挂进运行时。
     pub idempotency_ledger: Arc<PostgresMessageStore>,
     pub metrics: Arc<StorageWriterMetrics>,
 }
 
 pub async fn initialize(
-    app_config: &flare_im_service_kit::config::FlareAppConfig,
+    app_config: &flare_im_core_service_kit::config::FlareAppConfig,
 ) -> Result<ApplicationContext> {
     let config = Arc::new(
         StorageWriterConfig::from_app_config(app_config)
@@ -165,7 +165,7 @@ pub async fn initialize(
             })?,
     );
 
-    let usage = flare_im_usage::UsageReporter::from_env("flare-storage-writer").await?;
+    let usage = flare_im_core_usage::UsageReporter::from_env("flare-storage-writer").await?;
 
     // 使用具体类型创建 domain_service
     let write_ledger_repo: Arc<dyn MessageWriteLedgerRepository> = archive_repo.clone();
@@ -199,7 +199,7 @@ pub async fn initialize(
 
     let message_event_handler = MessageCreatedConsumerFactory::create_handler(command_handler)?;
     let publisher =
-        flare_im_service_kit::audit_effects::AuditEffects::from_env("storage-writer").await?;
+        flare_im_core_service_kit::audit_effects::AuditEffects::from_env("storage-writer").await?;
     let audit_delivery = publisher
         .enabled()
         .then(|| (Arc::new(archive_repo.pool().clone()), publisher));
@@ -405,7 +405,7 @@ mod tests {
             postgres_idle_timeout_seconds: 1,
             postgres_max_lifetime_seconds: 1,
             media_service_endpoint: None,
-            metrics: flare_im_service_kit::metrics::MetricsEndpointConfig::new("127.0.0.1", 0),
+            metrics: flare_im_core_service_kit::metrics::MetricsEndpointConfig::new("127.0.0.1", 0),
         }
     }
 
@@ -419,7 +419,7 @@ mod tests {
         let config = writer_config("nats");
         let consumer = storage_consumer_config(&config);
         let max_deliver = config.max_deliver();
-        let window = flare_im_service_kit::consumer_retry::check_downstream_outage_retry(
+        let window = flare_im_core_service_kit::consumer_retry::check_downstream_outage_retry(
             &consumer,
             max_deliver,
         )

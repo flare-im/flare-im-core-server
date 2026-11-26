@@ -8,9 +8,11 @@ use flare_grpc_proto::signaling::online::{
     LoginResponse, LogoutRequest, LogoutResponse, OnlineStatus, ReportDeviceStateRequest,
     ReportDeviceStateResponse,
 };
-use flare_im_contracts::ConnectionEvent;
-use flare_im_contracts::domain::tenant::is_valid_tenant_id;
-use flare_im_service_kit::tenant_runtime::{TenantAccessPolicy, TenantLookup, TenantRuntimeCache};
+use flare_im_core_contracts::ConnectionEvent;
+use flare_im_core_contracts::domain::tenant::is_valid_tenant_id;
+use flare_im_core_service_kit::tenant_runtime::{
+    TenantAccessPolicy, TenantLookup, TenantRuntimeCache,
+};
 use flare_server_core::context::Context;
 use flare_server_core::error::{ErrorCode, Result, map_infra_error};
 use flare_server_core::flare_err;
@@ -714,8 +716,10 @@ pub type DefaultOnlineStatusService =
 mod tests {
     use super::*;
     use crate::domain::repository::EvictionCause;
-    use flare_im_contracts::domain::tenant::{TenantRuntimeSnapshot, TenantStatus};
-    use flare_im_service_kit::tenant_runtime::{TenantRuntimeCacheOptions, TenantRuntimeSource};
+    use flare_im_core_contracts::domain::tenant::{TenantRuntimeSnapshot, TenantStatus};
+    use flare_im_core_service_kit::tenant_runtime::{
+        TenantRuntimeCacheOptions, TenantRuntimeSource,
+    };
 
     struct OneTenant(TenantStatus);
 

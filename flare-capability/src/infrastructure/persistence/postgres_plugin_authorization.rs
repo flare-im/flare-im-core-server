@@ -10,8 +10,8 @@ use crate::domain::plugin::{
 };
 use crate::domain::{model::TenantProjectionOutcome, repository::PluginAuthorizationReader};
 use dashmap::DashMap;
-use flare_im_capability_core::plugin::PluginManifest;
-use flare_im_capability_core::plugin::runtime::{
+use flare_im_core_capability_core::plugin::PluginManifest;
+use flare_im_core_capability_core::plugin::runtime::{
     ManifestCache, PluginProjection, PluginRuntimeSnapshot,
 };
 use flare_server_core::error::{FlareError, Result};

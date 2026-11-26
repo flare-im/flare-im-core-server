@@ -8,9 +8,9 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use flare_grpc_proto::push::{PushMessageRequest, PushOptions};
-use flare_im_contracts::Ctx;
-use flare_im_contracts::constants::topics::{TOPIC_PUSH_HANDOFF, TOPIC_PUSH_MESSAGES};
-use flare_im_contracts::event::types::types;
+use flare_im_core_contracts::Ctx;
+use flare_im_core_contracts::constants::topics::{TOPIC_PUSH_HANDOFF, TOPIC_PUSH_MESSAGES};
+use flare_im_core_contracts::event::types::types;
 use flare_proto::common::message_content::Content;
 use flare_proto::common::{
     ConversationType, DeviceHandoff, DeviceHandoffCause, DeviceHandoffItem, Message,

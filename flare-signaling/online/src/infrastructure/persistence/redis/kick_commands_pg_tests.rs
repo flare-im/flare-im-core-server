@@ -5,7 +5,7 @@ use ed25519_dalek::{
     SigningKey,
     pkcs8::{EncodePrivateKey, EncodePublicKey},
 };
-use flare_im_service_kit::audit_effects::durable::StaffAudit;
+use flare_im_core_service_kit::audit_effects::durable::StaffAudit;
 use flare_server_core::{
     SignedActorType, SignedContextIdentity, SignedContextSigner, SignedContextVerifier,
 };
@@ -28,7 +28,7 @@ impl Drop for OwnedRedis {
         let _ = std::fs::remove_dir_all(&self.root);
     }
 }
-fn staff() -> flare_im_contracts::Ctx {
+fn staff() -> flare_im_core_contracts::Ctx {
     let key = SigningKey::from_bytes(&[88; 32]);
     let signer =
         SignedContextSigner::from_private_key(&key.to_pkcs8_pem(Default::default()).unwrap())
@@ -55,7 +55,7 @@ fn staff() -> flare_im_contracts::Ctx {
         .unwrap();
     let mut r = tonic::Request::new(());
     flare_server_core::set_signed_context_token(&mut r, &token).unwrap();
-    flare_im_service_kit::staff_context::verify_staff_metadata(
+    flare_im_core_service_kit::staff_context::verify_staff_metadata(
         r.metadata(),
         &verifier,
         "core:users:kick",
@@ -158,7 +158,7 @@ async fn check_commands(pool: Arc<PgPool>, client: Arc<redis::Client>, url: Stri
         presence_prefix: "owned:presence".into(),
         redis_ttl_seconds: 3600,
         tenant_runtime_postgres_url: None,
-        tenant_policy: flare_im_service_kit::tenant_runtime::TenantAccessPolicy::Lenient,
+        tenant_policy: flare_im_core_service_kit::tenant_runtime::TenantAccessPolicy::Lenient,
         max_online_devices_per_user: 10,
         push_proxy_url: None,
     });
@@ -385,7 +385,7 @@ async fn check_identity_commands(pool: Arc<PgPool>, client: Arc<redis::Client>, 
         presence_prefix: "owned:presence".into(),
         redis_ttl_seconds: 3600,
         tenant_runtime_postgres_url: None,
-        tenant_policy: flare_im_service_kit::tenant_runtime::TenantAccessPolicy::Lenient,
+        tenant_policy: flare_im_core_service_kit::tenant_runtime::TenantAccessPolicy::Lenient,
         max_online_devices_per_user: 10,
         push_proxy_url: None,
     });
@@ -449,6 +449,7 @@ async fn check_identity_commands(pool: Arc<PgPool>, client: Arc<redis::Client>, 
             &originals,
             100,
             "fixed-identity-intent",
+            "business-integration",
             "owned-key"
         )
         .await
@@ -490,6 +491,7 @@ async fn check_identity_commands(pool: Arc<PgPool>, client: Arc<redis::Client>, 
             &originals,
             100,
             "fixed-identity-intent",
+            "business-integration",
             "owned-key"
         )
         .await
@@ -503,6 +505,7 @@ async fn check_identity_commands(pool: Arc<PgPool>, client: Arc<redis::Client>, 
             &originals,
             100,
             "fixed-identity-intent",
+            "business-integration",
             "owned-key"
         )
         .await
@@ -536,7 +539,7 @@ async fn check_identity_commands(pool: Arc<PgPool>, client: Arc<redis::Client>, 
     assert_eq!(evidence.len(), 2);
     for row in evidence {
         assert_eq!(row["actor_type"], "service");
-        assert_eq!(row["actor_id"], "flare-im-bridge");
+        assert_eq!(row["actor_id"], "business-integration");
         assert_eq!(row["credential_id"], "internal-key:owned-key");
         assert_eq!(row["request_id"], "fixed-identity-intent", "owned-key");
     }
@@ -585,6 +588,7 @@ async fn check_identity_commands(pool: Arc<PgPool>, client: Arc<redis::Client>, 
             &originals,
             100,
             "fixed-identity-intent",
+            "business-integration",
             "owned-key"
         )
         .await

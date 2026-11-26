@@ -214,6 +214,19 @@ WebHook、本地插件。契约与配置方式见 [`flare-capability/README.md`]
 > Hook 有超时控制（默认 5s），你的接口挂了不会把消息链路一起拖死 ——
 > 但**超时的默认行为是放行还是拒绝，取决于你怎么配**，上生产前务必确认这一项。
 
+### 业务集成配置
+
+跑在 Core 之上的业务系统只经通用契约接入；Core 不写死任何业务服务、事件或会话类型，由部署声明：
+
+| 配置 | 授予什么 |
+|---|---|
+| `FLARE_TRUSTED_INTEGRATION_PRINCIPALS` | 受信的签名 `Service` 身份（逗号分隔）：可代用户操作本租户任意消息（撤回、编辑、删除）、清除会话历史、吊销用户身份会话、发系统消息与通知（不走用户 PreSend）。默认空：没有。 |
+| `FLARE_EXTERNAL_ROSTER_BUSINESS_TYPES` | 名单由业务系统管理的会话 `business_type`（逗号分隔）：这些会话的身份视图只按 `CONVERSATION_ROSTER_POLICY_GRPC_URL` 的答复放行。默认空：没有。 |
+| `MESSAGE_INGEST_HOOKS_CONFIG` | 业务系统自己的 Hook 注册文件路径。Core 只带空的 `hooks.core.toml`。 |
+
+还没有会话的通知发到收件人的用户收件箱 `inbox:<user_id>`：只在线投递给该用户的连接，
+不占会话 seq，也不出现在会话列表里。
+
 > 不想自己实现这些？身份与社交业务（好友、群治理、朋友圈）有现成的商业版本，
 > 与开源部分同一套协议，接口不变。
 

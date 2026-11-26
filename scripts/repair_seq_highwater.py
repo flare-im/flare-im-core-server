@@ -4,7 +4,7 @@
 背景
     seq 分配以 Redis 计数器为高水位。Redis 被 flush / 实例重启 / key 丢失后，缺失 key 的
     INCR 从 1 重新计数，而持久化历史(Postgres)仍保留旧的更高 seq —— 新消息拿到低于历史的
-    seq，客户端按 seq 升序渲染时被插到历史中间(见 flare-im-seq 的 floor 自愈)。
+    seq，客户端按 seq 升序渲染时被插到历史中间(见 flare-im-core-seq 的 floor 自愈)。
 
     代码侧修复(①)在 ingest 首次触达会话时以存储权威 max_seq 作 floor。本脚本用于**运行中、
     尚未部署 ① 的后端**：把每个会话的 Redis seq key 抬到 Postgres 的 MAX(seq)，只升不降，

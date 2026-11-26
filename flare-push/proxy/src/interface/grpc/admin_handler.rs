@@ -10,8 +10,8 @@ use flare_grpc_proto::push::push_admin_service_server::PushAdminService;
 use flare_grpc_proto::push::{
     AdminQueryPushTraceRequest, AdminQueryPushTraceResponse, PushTraceEntryView, PushTraceView,
 };
-use flare_im_contracts::push_trace::trace_key;
-use flare_im_service_kit::staff_context::require_staff;
+use flare_im_core_contracts::push_trace::trace_key;
+use flare_im_core_service_kit::staff_context::require_staff;
 use flare_server_core::SignedContextVerifier;
 use flare_server_core::auth::core_admin::permission::USERS_READ;
 use tonic::{Request, Response, Status};
@@ -133,7 +133,7 @@ impl PushAdminService for PushAdminHandler {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use flare_im_contracts::push_trace::{PushTraceEntry, TraceStage};
+    use flare_im_core_contracts::push_trace::{PushTraceEntry, TraceStage};
 
     #[test]
     fn the_limit_defaults_to_twenty_and_stops_at_fifty() {

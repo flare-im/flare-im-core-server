@@ -3,8 +3,8 @@ use std::sync::Arc;
 
 use flare_grpc_proto::signaling::online::online_service_client::OnlineServiceClient;
 use flare_grpc_proto::signaling::online::{BatchGetUserPresenceRequest, UserPresence};
-use flare_im_contracts::Ctx;
-use flare_im_service_kit::discovery::{
+use flare_im_core_contracts::Ctx;
+use flare_im_core_service_kit::discovery::{
     invalidate_static_channel_on_transport_failure, resolve_grpc_channel,
 };
 use flare_proto::common::{DeviceAppState, DeviceAttention};
@@ -163,8 +163,8 @@ fn require_tenant(ctx: &Ctx) -> Result<&str> {
         )
         .build_error()
     })?;
-    if !flare_im_contracts::domain::tenant::is_valid_tenant_id(tenant_id)
-        || flare_im_contracts::utils::normalize_tenant_id(tenant_id) != tenant_id
+    if !flare_im_core_contracts::domain::tenant::is_valid_tenant_id(tenant_id)
+        || flare_im_core_contracts::utils::normalize_tenant_id(tenant_id) != tenant_id
     {
         return Err(
             ErrorBuilder::new(ErrorCode::PermissionDenied, "non-canonical push tenant")
@@ -709,7 +709,7 @@ mod online_index_scan_tests {
 #[cfg(test)]
 mod online_grpc_channel_tests {
     use super::*;
-    use flare_im_service_kit::discovery::is_static_channel_cached;
+    use flare_im_core_service_kit::discovery::is_static_channel_cached;
 
     fn grpc_backend_config(endpoint: &str) -> PushServerConfig {
         PushServerConfig {

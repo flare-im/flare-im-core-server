@@ -15,10 +15,13 @@ use std::future::Future;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use flare_im_contracts::Ctx;
-use flare_im_service_kit::metrics::MessageOrchestratorMetrics;
-use flare_im_service_kit::tenant_runtime::{TenantAccessPolicy, TenantLookup, TenantRuntimeCache};
-use flare_im_usage::UsageRecorder;
+use flare_im_core_contracts::Ctx;
+use flare_im_core_service_kit::metrics::MessageOrchestratorMetrics;
+use flare_im_core_service_kit::tenant_runtime::{
+    TenantAccessPolicy, TenantLookup, TenantRuntimeCache,
+};
+use flare_im_core_service_kit::trusted_integration::TrustedIntegrationPrincipals;
+use flare_im_core_usage::UsageRecorder;
 use flare_proto::common::{
     ContentVisibility, MessageRetentionPolicy, RetentionMode, RetentionTrigger, SendAckDurability,
 };
@@ -73,6 +76,8 @@ pub struct MessageIngestHandler {
     send_publish_timeout: Option<Duration>,
     /// 用量计数点（`messages.accepted`）：broker 确认接受后按租户与消息类别计一次。
     usage: UsageRecorder,
+    /// 部署信任的业务集成服务身份：它们发的系统消息与通知不走用户 PreSend。
+    trusted_integrations: TrustedIntegrationPrincipals,
 }
 
 impl MessageIngestHandler {
@@ -95,6 +100,7 @@ impl MessageIngestHandler {
             tenant_policy: TenantAccessPolicy::Lenient,
             send_publish_timeout: None,
             usage: UsageRecorder::disabled(),
+            trusted_integrations: TrustedIntegrationPrincipals::default(),
         }
     }
 
@@ -129,6 +135,11 @@ impl MessageIngestHandler {
 
     pub fn with_send_rate_limiter(mut self, limiter: Arc<SendRateLimiter>) -> Self {
         self.send_rate_limiter = Some(limiter);
+        self
+    }
+
+    pub fn with_trusted_integrations(mut self, trusted: TrustedIntegrationPrincipals) -> Self {
+        self.trusted_integrations = trusted;
         self
     }
 
@@ -202,11 +213,13 @@ impl MessageIngestHandler {
     }
 
     /// The signed request digest of a platform card post (see
-    /// [`flare_im_service_kit::plugin_platform::card_post_request_id`]); `None` for any other send.
+    /// [`flare_im_core_service_kit::plugin_platform::card_post_request_id`]); `None` for any other send.
     fn card_post_fingerprint(ctx: &Ctx) -> Option<String> {
         ctx.get_data::<VerifiedContext>()
             .and_then(|verified| verified.claims())
-            .filter(|claims| flare_im_service_kit::plugin_platform::is_card_post_context(claims))
+            .filter(|claims| {
+                flare_im_core_service_kit::plugin_platform::is_card_post_context(claims)
+            })
             .map(|claims| claims.request_id.clone())
     }
 
@@ -419,7 +432,7 @@ impl MessageIngestHandler {
         let Some(tenant) = ctx.tenant_id() else {
             return;
         };
-        let tenant = flare_im_contracts::utils::normalize_tenant_id(tenant);
+        let tenant = flare_im_core_contracts::utils::normalize_tenant_id(tenant);
         let key = if client_id.is_empty() {
             &outcome.message_id
         } else {
@@ -618,13 +631,13 @@ impl MessageIngestHandler {
         };
         let Some(reason) = policy.reason(
             message.created_at,
-            flare_im_contracts::utils::current_millis(),
+            flare_im_core_contracts::utils::current_millis(),
         ) else {
             return Ok(None);
         };
         let start = Instant::now();
         // Writer 按归一化后的租户入账（消息头租户经 normalize），这里同样归一。
-        let tenant_id = flare_im_contracts::utils::normalize_tenant_id(tenant_id);
+        let tenant_id = flare_im_core_contracts::utils::normalize_tenant_id(tenant_id);
         let found = tokio::time::timeout(
             LEDGER_LOOKUP_TIMEOUT,
             ledger.find(
@@ -736,8 +749,8 @@ impl MessageIngestHandler {
         .await?;
 
         // 2. 执行 PreSend Hook（经统一扩展编排器）
-        // Social Bridge system/notification messages have a verified Service
-        // provenance. They do not represent a user pre-send action; the Social
+        // System/notification messages of a trusted business integration service have a
+        // verified Service provenance. They do not represent a user pre-send action; a business
         // PreSend hook only accepts signed User callers. Never infer this
         // bypass from message.source or attributes supplied by the client.
         let execute_user_pre_send = !ctx
@@ -745,8 +758,10 @@ impl MessageIngestHandler {
             .and_then(|verified| verified.claims())
             .is_some_and(|claims| {
                 claims.actor_type == SignedActorType::Service
-                    && (claims.actor_id == "flare-im-bridge"
-                        || flare_im_service_kit::platform_send::is_platform_system_sender(claims))
+                    && (self.trusted_integrations.contains(&claims.actor_id)
+                        || flare_im_core_service_kit::platform_send::is_platform_system_sender(
+                            claims,
+                        ))
             });
         // A platform card post was verified as exactly this message; keep it to restore after the
         // hook (see `after_pre_send`). Other sends only keep their conversation.
@@ -780,8 +795,8 @@ impl MessageIngestHandler {
             )
             .await?;
 
-        // 4. 确保会话存在（Social SyncSignal 内部路由 `sync:{owner}` 仅在线推送，不落会话表）
-        if !flare_im_contracts::constants::sync_inbox::is_sync_inbox_conversation_id(
+        // 4. 确保会话存在（用户收件箱 `inbox:<user_id>` 不是真实会话，仅在线推送，不落会话表）
+        if !flare_im_core_contracts::constants::user_inbox::is_user_inbox_conversation_id(
             &submission.message.conversation_id,
         ) {
             let ensure_request =
@@ -1165,13 +1180,13 @@ impl Drop for IdempotencyReservation {
 /// - Any other message keeps its conversation (a hook moving it would deliver it where its sender
 ///   was never checked) and must not have become a plugin card ([`PLUGIN_CARD_PLATFORM_ONLY`]).
 ///
-/// [`PLUGIN_CARD_PLATFORM_ONLY`]: flare_im_service_kit::plugin_platform::PLUGIN_CARD_PLATFORM_ONLY
+/// [`PLUGIN_CARD_PLATFORM_ONLY`]: flare_im_core_service_kit::plugin_platform::PLUGIN_CARD_PLATFORM_ONLY
 fn after_pre_send(
     hooked: flare_proto::common::Message,
     card_post: Option<flare_proto::common::Message>,
     conversation_id: &str,
 ) -> Result<flare_proto::common::Message> {
-    use flare_im_service_kit::plugin_platform;
+    use flare_im_core_service_kit::plugin_platform;
     if let Some(signed) = card_post {
         return Ok(signed);
     }
@@ -1379,9 +1394,9 @@ mod tests {
         );
     }
 
-    fn known(status: flare_im_contracts::domain::tenant::TenantStatus) -> TenantLookup {
+    fn known(status: flare_im_core_contracts::domain::tenant::TenantStatus) -> TenantLookup {
         TenantLookup::Known(Arc::new(
-            flare_im_contracts::domain::tenant::TenantRuntimeSnapshot {
+            flare_im_core_contracts::domain::tenant::TenantRuntimeSnapshot {
                 tenant_id: "tenant-a".to_string(),
                 status,
                 quota: Default::default(),
@@ -1393,7 +1408,7 @@ mod tests {
     /// 停用 / 删除中的租户、严格策略下没有投影的租户：确定的租户结论，`TENANT_UNAVAILABLE`。
     #[test]
     fn tenant_gate_rejects_unavailable_tenants_with_a_typed_reason() {
-        use flare_im_contracts::domain::tenant::TenantStatus;
+        use flare_im_core_contracts::domain::tenant::TenantStatus;
         for (lookup, policy) in [
             (known(TenantStatus::Suspended), TenantAccessPolicy::Lenient),
             (known(TenantStatus::Suspended), TenantAccessPolicy::Strict),
@@ -1445,7 +1460,7 @@ mod tests {
 
     #[test]
     fn tenant_gate_admits_active_and_lenient_cases() {
-        use flare_im_contracts::domain::tenant::TenantStatus;
+        use flare_im_core_contracts::domain::tenant::TenantStatus;
         for (lookup, policy) in [
             (known(TenantStatus::Active), TenantAccessPolicy::Strict),
             (TenantLookup::Unknown, TenantAccessPolicy::Lenient),

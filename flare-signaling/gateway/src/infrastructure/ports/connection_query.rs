@@ -7,7 +7,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use flare_core::server::DeviceOwner;
 use flare_core::server::connection::ConnectionManagerTrait;
-use flare_im_contracts::Ctx;
+use flare_im_core_contracts::Ctx;
 use flare_server_core::error::{ErrorBuilder, ErrorCode, Result};
 
 use super::connection_port::core_info_to_domain;
@@ -101,7 +101,7 @@ fn required_tenant(tx: &Ctx) -> Result<&str> {
         )
         .build_error()
     })?;
-    if !flare_im_contracts::domain::tenant::is_valid_tenant_id(tenant_id) {
+    if !flare_im_core_contracts::domain::tenant::is_valid_tenant_id(tenant_id) {
         return Err(ErrorBuilder::new(
             ErrorCode::PermissionDenied,
             "invalid connection query tenant",

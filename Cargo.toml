@@ -3,14 +3,14 @@ members = [
     # 可运行示例：不进 workspace 就无法 cargo run --example
     "examples",
     # IM shared crates - explicit dependency boundaries
-    "crates/flare-im-contracts",
-    "crates/flare-im-service-kit",
-    "crates/flare-im-message-pipeline",
-    "crates/flare-im-seq",
-    "crates/flare-im-ack",
-    "crates/flare-im-hooks",
-    "crates/flare-im-capability-core",
-    "crates/flare-im-usage",
+    "crates/flare-im-core-contracts",
+    "crates/flare-im-core-service-kit",
+    "crates/flare-im-core-message-pipeline",
+    "crates/flare-im-core-seq",
+    "crates/flare-im-core-ack",
+    "crates/flare-im-core-hooks",
+    "crates/flare-im-core-capability-core",
+    "crates/flare-im-core-usage",
     
     # 通信核心层 - 统一网关
     "flare-api-gateway",
@@ -149,14 +149,14 @@ flare-core-messaging = { version = "1.1.1", path = "../flare-im-server-runtime/f
 flare-core-runtime = { version = "1.1.1", path = "../flare-im-server-runtime/flare-core-runtime" }
 
 # Flare IM shared crates
-flare-im-contracts = { version = "1.0.3", path = "crates/flare-im-contracts" }
-flare-im-service-kit = { version = "1.0.3", path = "crates/flare-im-service-kit" }
-flare-im-message-pipeline = { version = "1.0.3", path = "crates/flare-im-message-pipeline" }
-flare-im-seq = { version = "1.0.3", path = "crates/flare-im-seq" }
-flare-im-ack = { version = "1.0.3", path = "crates/flare-im-ack" }
-flare-im-hooks = { version = "1.0.3", path = "crates/flare-im-hooks" }
-flare-im-capability-core = { version = "1.0.3", path = "crates/flare-im-capability-core" }
-flare-im-usage = { version = "1.0.3", path = "crates/flare-im-usage" }
+flare-im-core-contracts = { version = "1.0.3", path = "crates/flare-im-core-contracts" }
+flare-im-core-service-kit = { version = "1.0.3", path = "crates/flare-im-core-service-kit" }
+flare-im-core-message-pipeline = { version = "1.0.3", path = "crates/flare-im-core-message-pipeline" }
+flare-im-core-seq = { version = "1.0.3", path = "crates/flare-im-core-seq" }
+flare-im-core-ack = { version = "1.0.3", path = "crates/flare-im-core-ack" }
+flare-im-core-hooks = { version = "1.0.3", path = "crates/flare-im-core-hooks" }
+flare-im-core-capability-core = { version = "1.0.3", path = "crates/flare-im-core-capability-core" }
+flare-im-core-usage = { version = "1.0.3", path = "crates/flare-im-core-usage" }
 
 
 # Flare Proto

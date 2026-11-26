@@ -12,7 +12,7 @@ use ed25519_dalek::SigningKey;
 use ed25519_dalek::pkcs8::{EncodePrivateKey, EncodePublicKey};
 use flare_grpc_proto::media::media_service_client::MediaServiceClient;
 use flare_grpc_proto::media::{GetFileInfoRequest, UploadFileMetadata};
-use flare_im_service_kit::clients::{MediaCaller, MediaServiceClientWrapper};
+use flare_im_core_service_kit::clients::{MediaCaller, MediaServiceClientWrapper};
 use flare_server_core::context::Context;
 use flare_server_core::{
     SignedActorType, SignedContextIdentity, SignedContextSigner, set_signed_context_token,

@@ -1,9 +1,9 @@
 //! Online build distribution read from the token store Redis, where every access gateway writes
-//! its own counts every 30 s (see `flare_im_service_kit::gateway::connection_builds`).
+//! its own counts every 30 s (see `flare_im_core_service_kit::gateway::connection_builds`).
 
 use crate::domain::repository::connection_builds::{ConnectionBuildStats, ConnectionBuildSummary};
-use flare_im_service_kit::gateway::connection_builds::read_tenant_builds;
-use flare_im_service_kit::redis_connection::{RedisConnectionLimits, SharedRedisConnection};
+use flare_im_core_service_kit::gateway::connection_builds::read_tenant_builds;
+use flare_im_core_service_kit::redis_connection::{RedisConnectionLimits, SharedRedisConnection};
 use flare_server_core::error::{FlareError, Result};
 
 pub struct RedisConnectionBuildStats {

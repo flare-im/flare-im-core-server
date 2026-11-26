@@ -15,7 +15,7 @@ use flare_grpc_proto::push::AdminQueryPushTraceRequest;
 use flare_grpc_proto::signaling::online::{
     AdminGetUserPresenceRequest, AdminListUserDevicesRequest, KickDeviceRequest, KickTenantRequest,
 };
-use flare_im_service_kit::clients::{
+use flare_im_core_service_kit::clients::{
     AdminGrpcClients, CapabilityAdminClientWrapper, CapabilityDownstreamConfig,
 };
 use flare_server_core::{

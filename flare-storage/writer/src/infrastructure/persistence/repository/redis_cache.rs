@@ -1,9 +1,9 @@
 use std::sync::Arc;
 
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
-use flare_im_contracts::Ctx;
-use flare_im_contracts::utils::normalize_optional_tenant_id;
-use flare_im_service_kit::redis_connection::{SharedRedisConnection, redis_error_code};
+use flare_im_core_contracts::Ctx;
+use flare_im_core_contracts::utils::normalize_optional_tenant_id;
+use flare_im_core_service_kit::redis_connection::{SharedRedisConnection, redis_error_code};
 use flare_server_core::error::{ErrorCode, FlareError, Result, map_infra_error};
 use prost::Message as _;
 use redis::{AsyncCommands, RedisError, aio::ConnectionManager};
@@ -98,11 +98,11 @@ impl RedisHotCacheRepository {
     }
 
     fn message_key(tenant_id: &str, conversation_id: &str, message_id: &str) -> String {
-        flare_im_contracts::message_cache_key(tenant_id, conversation_id, message_id)
+        flare_im_core_contracts::message_cache_key(tenant_id, conversation_id, message_id)
     }
 
     fn tail_key(tenant_id: &str, conversation_id: &str) -> String {
-        flare_im_contracts::message_tail_key(tenant_id, conversation_id)
+        flare_im_core_contracts::message_tail_key(tenant_id, conversation_id)
     }
 }
 
@@ -270,7 +270,7 @@ impl HotCacheRepository for RedisHotCacheRepository {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use flare_im_service_kit::redis_connection::RedisConnectionLimits;
+    use flare_im_core_service_kit::redis_connection::RedisConnectionLimits;
 
     #[test]
     fn hot_cache_keys_are_tenant_scoped() {
@@ -287,13 +287,15 @@ mod tests {
     /// 缺租户的上下文不写进租户 "0" 的缓存键（W11-T）；显式租户 "0" 照常。
     #[test]
     fn hot_cache_tenant_must_come_from_the_context() {
-        let missing: Ctx = std::sync::Arc::new(flare_im_contracts::utils::Context::default());
+        let missing: Ctx = std::sync::Arc::new(flare_im_core_contracts::utils::Context::default());
         assert!(RedisHotCacheRepository::tenant_id(&missing).is_err());
-        let blank: Ctx =
-            std::sync::Arc::new(flare_im_contracts::utils::Context::default().with_tenant_id(" "));
+        let blank: Ctx = std::sync::Arc::new(
+            flare_im_core_contracts::utils::Context::default().with_tenant_id(" "),
+        );
         assert!(RedisHotCacheRepository::tenant_id(&blank).is_err());
-        let zero: Ctx =
-            std::sync::Arc::new(flare_im_contracts::utils::Context::default().with_tenant_id("0"));
+        let zero: Ctx = std::sync::Arc::new(
+            flare_im_core_contracts::utils::Context::default().with_tenant_id("0"),
+        );
         assert_eq!(RedisHotCacheRepository::tenant_id(&zero).unwrap(), "0");
     }
 
@@ -440,7 +442,7 @@ mod tests {
     #[tokio::test]
     async fn hot_cache_writes_classify_redis_replies() {
         let ctx: Ctx =
-            Arc::new(flare_im_contracts::utils::Context::default().with_tenant_id("tenant-a"));
+            Arc::new(flare_im_core_contracts::utils::Context::default().with_tenant_id("tenant-a"));
         let message = crate::domain::model::Message {
             server_id: "m1".into(),
             conversation_id: "conv-a".into(),
@@ -488,7 +490,7 @@ mod tests {
     #[tokio::test]
     async fn a_hot_cache_write_to_an_unreachable_redis_fails_within_the_bound() {
         let ctx: Ctx =
-            Arc::new(flare_im_contracts::utils::Context::default().with_tenant_id("tenant-a"));
+            Arc::new(flare_im_core_contracts::utils::Context::default().with_tenant_id("tenant-a"));
         let message = crate::domain::model::Message {
             server_id: "m1".into(),
             conversation_id: "conv-a".into(),

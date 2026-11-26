@@ -1,4 +1,4 @@
-//! Core 服务进程的日志与 trace 只经 `flare_im_service_kit::tracing::init_tracing_from_config`
+//! Core 服务进程的日志与 trace 只经 `flare_im_core_service_kit::tracing::init_tracing_from_config`
 //! 初始化：`[logging]`、`RUST_LOG`、`FLARE_LOG_FORMAT`、`OTEL_EXPORTER_OTLP_ENDPOINT` 在每个服务上
 //! 含义一致。漏接的服务没有全局 subscriber，日志全部丢弃、也不导出 trace。
 use std::fs;
@@ -57,7 +57,7 @@ fn every_service_binary_initializes_tracing_through_service_kit() {
             for forbidden in ["tracing_subscriber", "set_global_default"] {
                 if source.contains(forbidden) {
                     violations.push(format!(
-                        "{path} sets up its own subscriber via `{forbidden}`; call flare_im_service_kit::tracing::init_tracing_from_config instead"
+                        "{path} sets up its own subscriber via `{forbidden}`; call flare_im_core_service_kit::tracing::init_tracing_from_config instead"
                     ));
                 }
             }

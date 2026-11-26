@@ -10,7 +10,7 @@ use flare_grpc_proto::access_gateway::{
     DeliverToConversationRequest, PushAckResponse, PushNotificationResponse, PushResponse,
     PushResult, UserPushResult,
 };
-use flare_im_contracts::Ctx;
+use flare_im_core_contracts::Ctx;
 use prost::Message as ProstMessage;
 use prost_types::Timestamp;
 use tracing::instrument;

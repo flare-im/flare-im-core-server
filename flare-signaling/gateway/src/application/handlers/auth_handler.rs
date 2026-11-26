@@ -2,8 +2,10 @@ use async_trait::async_trait;
 use flare_core::common::DeviceInfo;
 use flare_core::common::constants::metadata_keys;
 use flare_core::server::{AuthResult, Authenticator};
-use flare_im_contracts::utils::{normalize_optional_tenant_id, normalize_tenant_id};
-use flare_im_service_kit::tenant_runtime::{TenantAccessPolicy, TenantLookup, TenantRuntimeCache};
+use flare_im_core_contracts::utils::{normalize_optional_tenant_id, normalize_tenant_id};
+use flare_im_core_service_kit::tenant_runtime::{
+    TenantAccessPolicy, TenantLookup, TenantRuntimeCache,
+};
 use flare_server_core::auth::{
     AuthError, AuthenticatedPrincipal, TokenValidationRequest, TokenValidator,
 };
@@ -49,7 +51,7 @@ pub struct AuthHandler {
     /// 租户投影：token 合法后再看租户能不能接入。
     tenant_runtime: TenantRuntimeCache,
     tenant_policy: TenantAccessPolicy,
-    metrics: Option<Arc<flare_im_service_kit::metrics::AccessGatewayMetrics>>,
+    metrics: Option<Arc<flare_im_core_service_kit::metrics::AccessGatewayMetrics>>,
 }
 
 impl AuthHandler {
@@ -85,7 +87,7 @@ impl AuthHandler {
     #[must_use]
     pub fn with_metrics(
         mut self,
-        metrics: Arc<flare_im_service_kit::metrics::AccessGatewayMetrics>,
+        metrics: Arc<flare_im_core_service_kit::metrics::AccessGatewayMetrics>,
     ) -> Self {
         self.metrics = Some(metrics);
         self
@@ -336,7 +338,7 @@ impl Authenticator for AuthHandler {
                     user_metadata.insert(METADATA_KEY_DEVICE_ID.to_string(), device_id);
                 }
 
-                // Only the authenticated provider response may establish a Social sid.
+                // Only the authenticated provider response may establish an identity session id.
                 // CONNECT/device metadata is never consulted for this binding.
                 if principal
                     .metadata
@@ -408,10 +410,12 @@ mod tests {
     use super::*;
     use crate::constants::METADATA_KEY_TENANT_ID;
     use flare_core::common::DevicePlatform;
-    use flare_im_contracts::domain::tenant::{
+    use flare_im_core_contracts::domain::tenant::{
         TenantClientPolicy, TenantRuntimeSnapshot, TenantStatus,
     };
-    use flare_im_service_kit::tenant_runtime::{TenantRuntimeCacheOptions, TenantRuntimeSource};
+    use flare_im_core_service_kit::tenant_runtime::{
+        TenantRuntimeCacheOptions, TenantRuntimeSource,
+    };
     use flare_server_core::auth::{AuthError, AuthenticatedPrincipal};
     use std::sync::Mutex;
 
@@ -865,7 +869,7 @@ mod tests {
     /// 采用率的分子分母：上报的 serial 与投影比较后计入对应的桶。
     #[tokio::test]
     async fn reported_serials_are_counted_against_the_projection() {
-        let metrics = Arc::new(flare_im_service_kit::metrics::AccessGatewayMetrics::new());
+        let metrics = Arc::new(flare_im_core_service_kit::metrics::AccessGatewayMetrics::new());
         let handler = handler(
             Some(principal(None)),
             projected(&[("tenant-a", 42)]),
@@ -879,7 +883,7 @@ mod tests {
             (None, "unreported"),
             (Some("not-a-number"), "unreported"),
         ] {
-            let label = flare_im_service_kit::metrics::tenant_label("tenant-a");
+            let label = flare_im_core_service_kit::metrics::tenant_label("tenant-a");
             let counter = metrics
                 .connect_access_serial_total
                 .with_label_values(&[label, state]);
@@ -906,7 +910,7 @@ mod tests {
             &self,
             tenant_id: &str,
         ) -> Result<Option<TenantClientPolicy>, String> {
-            use flare_im_contracts::domain::tenant::{ClientBuildPolicy, ClientBuildRange};
+            use flare_im_core_contracts::domain::tenant::{ClientBuildPolicy, ClientBuildRange};
             Ok((tenant_id == "tenant-a").then(|| TenantClientPolicy {
                 tenant_id: tenant_id.to_string(),
                 version: 1,
@@ -937,7 +941,7 @@ mod tests {
     /// 没有策略的平台（ios）和没有发布清单的平台（鸿蒙）放行。
     #[tokio::test]
     async fn the_version_gate_refuses_old_and_blocked_builds() {
-        let metrics = Arc::new(flare_im_service_kit::metrics::AccessGatewayMetrics::new());
+        let metrics = Arc::new(flare_im_core_service_kit::metrics::AccessGatewayMetrics::new());
         let handler = handler(
             Some(principal(None)),
             TenantRuntimeCache::with_source(

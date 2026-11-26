@@ -42,8 +42,8 @@
 use std::sync::{Arc, LazyLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use flare_im_contracts::domain::push_binding::APNS_ENVIRONMENT_SANDBOX;
-use flare_im_contracts::{Ctx, DevicePushToken};
+use flare_im_core_contracts::domain::push_binding::APNS_ENVIRONMENT_SANDBOX;
+use flare_im_core_contracts::{Ctx, DevicePushToken};
 use flare_im_notify_rules::text::Lang;
 use flare_proto::PushTaskEnvelope;
 use flare_server_core::error::{ErrorCode, FlareError};
@@ -84,7 +84,7 @@ static APNS_BINDING_REJECTED: LazyLock<Option<IntCounterVec>> = LazyLock::new(||
         &["reason"],
     )
     .ok()?;
-    let _ = flare_im_service_kit::metrics::REGISTRY.register(Box::new(counter.clone()));
+    let _ = flare_im_core_service_kit::metrics::REGISTRY.register(Box::new(counter.clone()));
     Some(counter)
 });
 

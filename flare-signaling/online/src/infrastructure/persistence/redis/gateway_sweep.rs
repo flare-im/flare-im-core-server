@@ -1,12 +1,12 @@
 //! 网关宕机清扫的 Redis 实现：单例锁、`gw:known` / `gw:lease:*` / `gw:conns:*`
-//! （键名约定见 `flare_im_service_kit::gateway::lease`）。与会话哈希同一个 Redis。
+//! （键名约定见 `flare_im_core_service_kit::gateway::lease`）。与会话哈希同一个 Redis。
 
 use std::time::Duration;
 
-use flare_im_service_kit::gateway::lease::{
+use flare_im_core_service_kit::gateway::lease::{
     KNOWN_GATEWAYS_KEY, conns_key as gateway_conns_key, lease_key,
 };
-use flare_im_service_kit::redis_connection::{
+use flare_im_core_service_kit::redis_connection::{
     RedisConnectionLimits, SharedRedisConnection, redis_error_code,
 };
 use flare_server_core::error::{ErrorBuilder, ErrorCode, FlareError, Result};
@@ -194,7 +194,7 @@ impl GatewaySweepRepository for RedisGatewaySweepRepository {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use flare_im_service_kit::gateway::lease::connection_member;
+    use flare_im_core_service_kit::gateway::lease::connection_member;
 
     /// 清扫器从会话记录里读应用状态：`parking` 与 `deferred` 的提示都归推送通道，清扫时不交接；
     /// 没有这个字段的记录是前台。

@@ -8,18 +8,20 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use flare_im_contracts::service_names::{CONVERSATION, MESSAGE_INGEST, STORAGE_READER};
-use flare_im_hooks::hooks::adapters::DefaultHookFactory;
-use flare_im_hooks::hooks::execution::{
+use flare_im_core_contracts::service_names::{CONVERSATION, MESSAGE_INGEST, STORAGE_READER};
+use flare_im_core_hooks::hooks::adapters::DefaultHookFactory;
+use flare_im_core_hooks::hooks::execution::{
     HookExecutionBuffer, HookExecutionGuard, HookExecutionMetrics, HookExecutionObserver,
     HookExecutionSink, HookRuntimeSettings, MetricsOnlyHookExecutions,
 };
-use flare_im_hooks::hooks::{
+use flare_im_core_hooks::hooks::{
     HookConfig, HookConfigLoader, HookConfigReloader, HookConfigStore, HookDispatcher, HookRegistry,
 };
-use flare_im_message_pipeline::{ConversationClient, MqPushRepository, RecipientRepositoryImpl};
-use flare_im_seq::SequenceAllocator;
-use flare_im_service_kit::metrics::MessageOrchestratorMetrics;
+use flare_im_core_message_pipeline::{
+    ConversationClient, MqPushRepository, RecipientRepositoryImpl,
+};
+use flare_im_core_seq::SequenceAllocator;
+use flare_im_core_service_kit::metrics::MessageOrchestratorMetrics;
 use flare_server_core::auth::{
     INTERNAL_CTX_PUBLIC_KEY_ENV, INTERNAL_CTX_PUBLIC_KEYS_ENV, KeySet, SignedContextVerifier,
 };
@@ -48,7 +50,7 @@ pub struct ApplicationContext {
     pub wal_replay_handler: Arc<WalReplayHandler>,
     pub config: Arc<MessageIngestConfig>,
     /// 用量预聚合（`messages.accepted`）；启动层把它的 flush 循环挂进运行时。
-    pub usage: flare_im_usage::UsageReporter,
+    pub usage: flare_im_core_usage::UsageReporter,
     /// Hook 配置热加载与执行记录写入；启动层把它们挂进运行时。
     pub hook_tasks: HookBackgroundTasks,
 }
@@ -69,14 +71,14 @@ pub struct HookExecutionWriter {
 
 /// 构建应用上下文。
 pub async fn initialize(
-    app_config: &flare_im_service_kit::config::FlareAppConfig,
+    app_config: &flare_im_core_service_kit::config::FlareAppConfig,
 ) -> Result<ApplicationContext> {
     let config = Arc::new(MessageIngestConfig::from_app_config(app_config));
     initialize_with_config(app_config, config).await
 }
 
 async fn initialize_with_config(
-    app_config: &flare_im_service_kit::config::FlareAppConfig,
+    app_config: &flare_im_core_service_kit::config::FlareAppConfig,
     config: Arc<MessageIngestConfig>,
 ) -> Result<ApplicationContext> {
     // Validate the deployment policy before any I/O: a broken explicit policy path must fail
@@ -96,11 +98,11 @@ async fn initialize_with_config(
         .as_deref()
         .unwrap_or(CONVERSATION);
     let conversation_channel =
-        flare_im_service_kit::discovery::connect_grpc_channel_lazy_from_app_config(
+        flare_im_core_service_kit::discovery::connect_grpc_channel_lazy_from_app_config(
             app_config,
             CONVERSATION,
             conversation_service_type,
-            flare_im_service_kit::discovery::default_static_grpc_fallback(
+            flare_im_core_service_kit::discovery::default_static_grpc_fallback(
                 conversation_service_type,
             ),
         )
@@ -129,24 +131,28 @@ async fn initialize_with_config(
     // 懒连接失败仅告警并退化为普通 INCR（绝不比现状更差），不阻断摄入服务启动。
     // floor 是摄入自己按租户与会话做的读：持有 Cell 私钥时以摄入的 Service 身份为消息租户签名，
     // 不再转发可能属于另一租户的入站签名；私钥存在但无效时启动失败。
-    let floor_signer = flare_im_service_kit::signed_read::service_signer_from_env(MESSAGE_INGEST)?;
+    let floor_signer =
+        flare_im_core_service_kit::signed_read::service_signer_from_env(MESSAGE_INGEST)?;
     if floor_signer.is_none() {
         tracing::warn!(
             "FLARE_INTERNAL_CTX_PRIVATE_KEY is missing: seq floor reads forward the inbound signature or go unsigned"
         );
     }
-    let floor_channel = flare_im_service_kit::discovery::connect_grpc_channel_lazy_from_app_config(
-        app_config,
-        STORAGE_READER,
-        STORAGE_READER,
-        flare_im_service_kit::discovery::default_static_grpc_fallback(STORAGE_READER),
-    )
-    .map_err(|e| {
-        flare_server_core::error::FlareError::system(format!("sequence floor reader: {e}"))
-    })?;
+    let floor_channel =
+        flare_im_core_service_kit::discovery::connect_grpc_channel_lazy_from_app_config(
+            app_config,
+            STORAGE_READER,
+            STORAGE_READER,
+            flare_im_core_service_kit::discovery::default_static_grpc_fallback(STORAGE_READER),
+        )
+        .map_err(|e| {
+            flare_server_core::error::FlareError::system(format!("sequence floor reader: {e}"))
+        })?;
     let sequence_allocator = sequence_allocator.with_floor_provider(Arc::new(
-        flare_im_service_kit::sequence_floor::StorageSeqFloorProvider::from_channel(floor_channel)
-            .with_service_signer(floor_signer, MESSAGE_INGEST),
+        flare_im_core_service_kit::sequence_floor::StorageSeqFloorProvider::from_channel(
+            floor_channel,
+        )
+        .with_service_signer(floor_signer, MESSAGE_INGEST),
     ));
 
     let message_ingest_service = Arc::new(MessageIngestService::new(
@@ -165,7 +171,7 @@ async fn initialize_with_config(
             config.default_tenant_id.clone(),
         )
         .with_write_verifier(
-            flare_im_service_kit::audit_effects::write_proof::ProofVerifier::from_env()
+            flare_im_core_service_kit::audit_effects::write_proof::ProofVerifier::from_env()
                 .map_err(flare_server_core::error::FlareError::system)?,
         ),
     );
@@ -231,22 +237,22 @@ async fn initialize_with_config(
     .with_idempotency(idempotency_store);
     // 租户运行时投影（tenants 表）：发送限流的 tenant 阈值先取投影 quota.core.send_qps。
     let tenant_runtime = match config.tenant_runtime_postgres_url.as_deref() {
-        Some(url) => flare_im_service_kit::tenant_runtime::TenantRuntimeCache::connect(url, 2)
+        Some(url) => flare_im_core_service_kit::tenant_runtime::TenantRuntimeCache::connect(url, 2)
             .await
             .map_err(flare_server_core::error::FlareError::system)?,
         None => {
             tracing::info!(
                 "tenant runtime database not configured; send quotas fall back to global rate limits"
             );
-            flare_im_service_kit::tenant_runtime::TenantRuntimeCache::disabled()
+            flare_im_core_service_kit::tenant_runtime::TenantRuntimeCache::disabled()
         }
     };
-    let tenant_policy = flare_im_service_kit::tenant_runtime::TenantAccessPolicy::from_env(
+    let tenant_policy = flare_im_core_service_kit::tenant_runtime::TenantAccessPolicy::from_env(
         "MESSAGE_INGEST_TENANT_POLICY",
     )
     .map_err(flare_server_core::error::FlareError::system)?
     .unwrap_or_default();
-    if tenant_policy == flare_im_service_kit::tenant_runtime::TenantAccessPolicy::Strict
+    if tenant_policy == flare_im_core_service_kit::tenant_runtime::TenantAccessPolicy::Strict
         && !tenant_runtime.is_enabled()
     {
         return Err(flare_server_core::error::FlareError::system(
@@ -312,8 +318,14 @@ async fn initialize_with_config(
             std::time::Duration::from_millis(config.send_publish_timeout_ms),
         );
     }
-    let usage = flare_im_usage::UsageReporter::from_env("flare-message-ingest").await?;
-    let message_ingest_handler = Arc::new(message_ingest_handler.with_usage(usage.recorder()));
+    let usage = flare_im_core_usage::UsageReporter::from_env("flare-message-ingest").await?;
+    let trusted_integrations =
+        flare_im_core_service_kit::trusted_integration::TrustedIntegrationPrincipals::from_env();
+    let message_ingest_handler = Arc::new(
+        message_ingest_handler
+            .with_usage(usage.recorder())
+            .with_trusted_integrations(trusted_integrations.clone()),
+    );
 
     let message_verifier = send_verifier(
         std::env::var(INTERNAL_CTX_PUBLIC_KEYS_ENV).ok().as_deref(),
@@ -325,7 +337,8 @@ async fn initialize_with_config(
         );
     }
     let message_send_grpc =
-        MessageSendGrpcHandler::new(message_ingest_handler, ingest_metrics, message_verifier);
+        MessageSendGrpcHandler::new(message_ingest_handler, ingest_metrics, message_verifier)
+            .with_trusted_integrations(trusted_integrations);
 
     tracing::info!(
         service = MESSAGE_INGEST,
@@ -542,7 +555,7 @@ async fn build_hook_runtime(
 mod hook_startup_tests {
     use std::collections::HashMap;
 
-    use flare_im_hooks::hooks::{HookDefinition, HookTransportConfig};
+    use flare_im_core_hooks::hooks::{HookDefinition, HookTransportConfig};
 
     use super::*;
 
@@ -580,7 +593,7 @@ mod hook_startup_tests {
     fn static_mode_rejects_discovery_hooks_but_accepts_explicit_uri() {
         let mut config = HookConfig::default();
         config.pre_send.push(HookDefinition {
-            name: "social-policy-pre-send".into(),
+            name: "policy-pre-send".into(),
             transport: HookTransportConfig::Grpc {
                 endpoint: "discovery://flare-im-hook".into(),
                 metadata: HashMap::new(),
@@ -596,7 +609,7 @@ mod hook_startup_tests {
             "{error}"
         );
         config.pre_send[0].transport = HookTransportConfig::Grpc {
-            endpoint: "http://social-hook.internal:50210".into(),
+            endpoint: "http://policy-hook.internal:50210".into(),
             metadata: HashMap::new(),
         };
         assert!(validate_static_hook_routes(&config, true).is_ok());
@@ -628,8 +641,11 @@ mod hook_startup_tests {
     }
 
     #[test]
-    fn shipped_social_profile_requires_static_endpoint_override() {
-        let profile = concat!(env!("CARGO_MANIFEST_DIR"), "/../config/hooks.social.toml");
+    fn a_discovery_profile_requires_static_endpoint_override() {
+        let profile = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../crates/flare-im-core-hooks/tests/fixtures/mandatory_pre_send.toml"
+        );
         let config = HookConfigLoader::new()
             .add_candidate(profile)
             .load()
@@ -639,7 +655,7 @@ mod hook_startup_tests {
     }
 
     #[test]
-    fn the_deployment_gate_rejects_a_discovery_social_hook_in_static_mode() {
+    fn the_deployment_gate_rejects_a_discovery_hook_in_static_mode() {
         let app_config = toml::from_str(
             r#"
             [service]
@@ -652,17 +668,19 @@ mod hook_startup_tests {
         )
         .unwrap();
         let mut config = MessageIngestConfig::from_app_config(&app_config);
-        config.hook_config =
-            Some(concat!(env!("CARGO_MANIFEST_DIR"), "/../config/hooks.social.toml").into());
+        config.hook_config = Some(
+            concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../crates/flare-im-core-hooks/tests/fixtures/mandatory_pre_send.toml"
+            )
+            .into(),
+        );
         config.hook_config_dir = None;
         let error = match load_deployment_hooks(&config, true) {
-            Ok(_) => panic!("a discovery Social hook must fail the static gate"),
+            Ok(_) => panic!("a discovery hook must fail the static gate"),
             Err(error) => error,
         };
-        assert!(
-            error.to_string().contains("social-policy-pre-send"),
-            "{error}"
-        );
+        assert!(error.to_string().contains("policy-pre-send"), "{error}");
     }
 
     #[test]

@@ -1,6 +1,6 @@
 //! 出站读请求的身份。
 
-use flare_im_contracts::Ctx;
+use flare_im_core_contracts::Ctx;
 
 /// 调用方元数据，另把记录的签名身份（broker-isolated 下每条记录都以本服务身份重新签过）原样
 /// 转发：会话服务与 Storage Reader 的读接口以签名为准，服务身份按租户读取。记录没有签名时只带

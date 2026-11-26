@@ -18,6 +18,7 @@ use flare_grpc_proto::conversation::conversation_internal_read_service_server::C
 use flare_grpc_proto::conversation::conversation_read_service_server::ConversationReadServiceServer;
 use flare_grpc_proto::conversation::message_read_receipt_service_server::MessageReadReceiptServiceServer;
 use flare_grpc_proto::conversation::user_notification_settings_service_server::UserNotificationSettingsServiceServer;
+use flare_im_core_service_kit::trusted_integration::TrustedIntegrationPrincipals;
 use flare_server_core::auth::SignedContextVerifier;
 use flare_server_core::{SignedActorType, SignedFirstContextLayer, SignedFirstContextService};
 
@@ -31,6 +32,10 @@ pub struct ConversationGrpcHandler {
     /// fail closed，见 [`manage_service::authorize_purge_history`]。
     pub(crate) purge_verifier: Option<SignedContextVerifier>,
     pub(crate) roster_policy_endpoint: Option<String>,
+    /// 部署信任的业务集成服务身份（`FLARE_TRUSTED_INTEGRATION_PRINCIPALS`）：只有它们能清除历史。
+    pub(crate) trusted_integrations: TrustedIntegrationPrincipals,
+    /// 名单由业务系统管理的会话 business_type（`FLARE_EXTERNAL_ROSTER_BUSINESS_TYPES`）。
+    pub(crate) external_roster_business_types: Vec<String>,
 }
 
 impl ConversationGrpcHandler {
@@ -43,6 +48,8 @@ impl ConversationGrpcHandler {
             query_handler,
             purge_verifier: None,
             roster_policy_endpoint: None,
+            trusted_integrations: TrustedIntegrationPrincipals::default(),
+            external_roster_business_types: Vec::new(),
         }
     }
 
@@ -52,13 +59,25 @@ impl ConversationGrpcHandler {
         self
     }
 
+    /// 设置部署信任的业务集成服务身份。
+    pub fn with_trusted_integrations(mut self, trusted: TrustedIntegrationPrincipals) -> Self {
+        self.trusted_integrations = trusted;
+        self
+    }
+
+    /// 设置名单由业务系统管理的会话 business_type。
+    pub fn with_external_roster_business_types(mut self, business_types: Vec<String>) -> Self {
+        self.external_roster_business_types = business_types;
+        self
+    }
+
     pub fn with_roster_policy_endpoint(mut self, endpoint: Option<String>) -> Self {
         self.roster_policy_endpoint = endpoint;
         self
     }
 }
 
-/// 套上读接口身份边界的 `ConversationReadService`（见 `flare_im_service_kit::signed_read`）：
+/// 套上读接口身份边界的 `ConversationReadService`（见 `flare_im_core_service_kit::signed_read`）：
 /// 带签名的 `x-flare-ctx` 决定租户与身份——网关代签的用户、租户管理员，或 Cell 内服务（服务按
 /// 租户与会话读成员，不要求是成员）；与签名不一致的裸 `x-tenant-id`、`x-user-id` 一律拒绝。
 /// 只有边界不要求签名时，未签名调用才按元数据取身份。

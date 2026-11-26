@@ -22,7 +22,7 @@ async fn insert_message(
     tenant: &str,
     conversation: &str,
     seq: i64,
-    message: &flare_im_contracts::message::Message,
+    message: &flare_im_core_contracts::message::Message,
     extra: serde_json::Value,
 ) {
     let content = message
@@ -132,7 +132,7 @@ async fn reads_mark_the_copies_of_a_bound_card_and_only_them() {
         None,
     );
     let handler = MessageStorageQueryHandler::new(Arc::new(storage));
-    let ctx: flare_im_contracts::Ctx = Arc::new(
+    let ctx: flare_im_core_contracts::Ctx = Arc::new(
         flare_server_core::Context::with_request_id("pcm-read")
             .with_tenant_id(&tenant)
             .with_user_id("alice"),

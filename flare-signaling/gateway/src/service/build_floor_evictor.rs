@@ -30,9 +30,9 @@ use flare_core::common::link::upgrade_required_command;
 use flare_core::common::protocol::{Reliability, frame_with_system_command};
 use flare_core::server::connection::{ConnectionManagerTrait, TraitConnectionInfo};
 use flare_core::transport::connection::Connection;
-use flare_im_service_kit::metrics::AccessGatewayMetrics;
-use flare_im_service_kit::tenant_notice::{ACCESS_TOPIC, ALL_TENANTS, RELEASE_TOPIC};
-use flare_im_service_kit::tenant_runtime::TenantRuntimeCache;
+use flare_im_core_service_kit::metrics::AccessGatewayMetrics;
+use flare_im_core_service_kit::tenant_notice::{ACCESS_TOPIC, ALL_TENANTS, RELEASE_TOPIC};
+use flare_im_core_service_kit::tenant_runtime::TenantRuntimeCache;
 use tokio::sync::Mutex;
 use tracing::{debug, info, warn};
 
@@ -382,10 +382,12 @@ mod tests {
     use async_trait::async_trait;
     use flare_core::common::DevicePlatform;
     use flare_core::common::device::DeviceInfo;
-    use flare_im_contracts::domain::tenant::{
+    use flare_im_core_contracts::domain::tenant::{
         ClientBuildPolicy, TenantClientPolicy, TenantRuntimeSnapshot,
     };
-    use flare_im_service_kit::tenant_runtime::{TenantRuntimeCacheOptions, TenantRuntimeSource};
+    use flare_im_core_service_kit::tenant_runtime::{
+        TenantRuntimeCacheOptions, TenantRuntimeSource,
+    };
     use std::collections::HashMap;
 
     #[test]
@@ -452,7 +454,7 @@ mod tests {
         assert!(is_client_policy_topic(ACCESS_TOPIC));
         assert!(is_client_policy_topic(RELEASE_TOPIC));
         assert!(!is_client_policy_topic(
-            flare_im_service_kit::tenant_notice::PLUGIN_CATALOG_TOPIC
+            flare_im_core_service_kit::tenant_notice::PLUGIN_CATALOG_TOPIC
         ));
         assert!(!is_client_policy_topic("social.features"));
     }

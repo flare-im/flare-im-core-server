@@ -11,8 +11,8 @@ use flare_grpc_proto::conversation::conversation_internal_read_service_client::C
 use flare_grpc_proto::conversation::{
     ListRecentUnreadConversationsRequest, RecentUnreadConversation,
 };
-use flare_im_contracts::Ctx;
-use flare_im_contracts::service_names::{CONVERSATION, get_service_name};
+use flare_im_core_contracts::Ctx;
+use flare_im_core_contracts::service_names::{CONVERSATION, get_service_name};
 use flare_server_core::error::{ErrorCode, FlareError};
 use tokio::sync::Mutex;
 use tonic::transport::Channel;
@@ -72,11 +72,12 @@ impl ConversationRecentUnread {
             return Ok(ConversationInternalReadServiceClient::new(channel.clone()));
         }
         let name = get_service_name(CONVERSATION);
-        let fallback = flare_im_service_kit::discovery::default_static_grpc_fallback(&name);
-        let channel =
-            flare_im_service_kit::discovery::connect_grpc_channel_with_fallback(&name, fallback)
-                .await
-                .map_err(|e| unavailable(format!("connect {name}: {e}")))?;
+        let fallback = flare_im_core_service_kit::discovery::default_static_grpc_fallback(&name);
+        let channel = flare_im_core_service_kit::discovery::connect_grpc_channel_with_fallback(
+            &name, fallback,
+        )
+        .await
+        .map_err(|e| unavailable(format!("connect {name}: {e}")))?;
         *guard = Some(channel.clone());
         Ok(ConversationInternalReadServiceClient::new(channel))
     }

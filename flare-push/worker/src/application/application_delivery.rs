@@ -1,7 +1,7 @@
 //! The attested application's identity selects its own provider credentials.
 use crate::application::binding_delivery::DeviceBindingsDelivery;
 use crate::domain::offline_delivery::{DeviceTokenRepository, OfflinePushExecutor};
-use flare_im_contracts::{Ctx, DevicePushToken};
+use flare_im_core_contracts::{Ctx, DevicePushToken};
 use flare_proto::PushTaskEnvelope;
 use flare_server_core::{ErrorCode, FlareError};
 use std::{collections::HashMap, sync::Arc};

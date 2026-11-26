@@ -4,7 +4,7 @@ pub mod message_operation_policy;
 pub mod user_sync_compensation_worker;
 
 pub use event_domain_service::{EventAdmission, EventDomainService, ReadWatermarkClaim};
-pub use flare_im_message_pipeline::{
+pub use flare_im_core_message_pipeline::{
     CompositeEventValidationStrategy, CompositeMessageValidationStrategy,
     EventRequiredFieldsValidationStrategy, EventTypeValidationStrategy, EventValidationStrategy,
     HookExecutionContext, HookExecutionService, MessageRequiredFieldsValidationStrategy,
@@ -16,4 +16,4 @@ pub use message_operation_policy::MessageOperationPolicy;
 pub use user_sync_compensation_worker::UserSyncCompensationWorker;
 
 // Re-export shared hook builders.
-pub use flare_im_message_pipeline::hook::builder::*;
+pub use flare_im_core_message_pipeline::hook::builder::*;

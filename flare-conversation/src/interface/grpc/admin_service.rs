@@ -11,7 +11,7 @@ use flare_grpc_proto::conversation::{
     AdminGetConversationRequest, AdminGetConversationResponse, AdminListConversationsRequest,
     AdminListConversationsResponse, AdminListParticipantsRequest, AdminListParticipantsResponse,
 };
-use flare_im_service_kit::staff_context::{VerifiedStaff, require_staff};
+use flare_im_core_service_kit::staff_context::{VerifiedStaff, require_staff};
 use flare_proto::common::ConversationDetail;
 use flare_server_core::SignedContextVerifier;
 use flare_server_core::auth::core_admin::permission::CONVERSATIONS_READ;
@@ -157,7 +157,7 @@ mod tests {
     use chrono::Utc;
     use ed25519_dalek::SigningKey;
     use ed25519_dalek::pkcs8::{EncodePrivateKey, EncodePublicKey};
-    use flare_im_service_kit::control_auth::{CORE_PROJECTION_AUDIENCE, PLATFORM_ISSUER};
+    use flare_im_core_service_kit::control_auth::{CORE_PROJECTION_AUDIENCE, PLATFORM_ISSUER};
     use flare_server_core::auth::{KeySet, kid};
     use flare_server_core::error::Result as FlareResult;
     use flare_server_core::{SignedActorType, SignedContextIdentity, SignedContextSigner};

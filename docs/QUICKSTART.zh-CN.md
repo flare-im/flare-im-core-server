@@ -128,7 +128,7 @@ NEGOTIATION_HOST=localhost:60051 \
 
 ### 接入你的业务规则
 
-`crates/flare-im-hooks` 运行 `message.pre_send` Hook：消息落库之前放行、拒绝或改写。敏感词校验、
+`crates/flare-im-core-hooks` 运行 `message.pre_send` Hook：消息落库之前放行、拒绝或改写。敏感词校验、
 发送权限都在这一层，见 [Hook 合同](HOOK-PLUGIN-CONTRACT.md)。
 
 ---

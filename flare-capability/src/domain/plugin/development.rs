@@ -13,10 +13,10 @@
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
-use flare_im_capability_core::plugin::PluginManifest;
-use flare_im_capability_core::plugin::authorization::TenantPluginGrant;
-use flare_im_capability_core::plugin::manifest::PluginKind;
-use flare_im_capability_core::plugin::runtime::{
+use flare_im_core_capability_core::plugin::PluginManifest;
+use flare_im_core_capability_core::plugin::authorization::TenantPluginGrant;
+use flare_im_core_capability_core::plugin::manifest::PluginKind;
+use flare_im_core_capability_core::plugin::runtime::{
     PluginDeployment, PluginProjection, ProjectedLifecycle, ProjectedPlugin, configuration_digest,
     digest_bytes,
 };

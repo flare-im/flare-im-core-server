@@ -4,13 +4,15 @@ use crate::{
     domain::repository::{PluginAuthorizationReader, resource_access::*},
     infrastructure::capability::InMemoryCapabilityGrants,
 };
-use flare_im_capability_core::plugin::{
+use flare_im_core_capability_core::plugin::{
     PluginManifest,
     authorization::TenantPluginGrant,
     invocation::{PluginCallClaims, PluginCallSigner},
     runtime::*,
 };
-use flare_im_capability_core::plugin::{invocation::PluginCallVerifier, resource::ResourceRequest};
+use flare_im_core_capability_core::plugin::{
+    invocation::PluginCallVerifier, resource::ResourceRequest,
+};
 use serde_json::Value;
 use serde_json::json;
 use std::sync::Arc;
@@ -303,14 +305,14 @@ async fn dedicated_bridge_rpc_rejects_cell_identity_and_duplicate_tickets() {
         .unwrap();
     let mut request = tonic::Request::new(body.clone());
     request.metadata_mut().insert(
-        flare_im_capability_core::plugin::invocation::PLUGIN_CALL_HEADER,
+        flare_im_core_capability_core::plugin::invocation::PLUGIN_CALL_HEADER,
         token.parse().unwrap(),
     );
     assert!(client.call(request).await.unwrap().into_inner().ok);
     let mut duplicate = tonic::Request::new(body);
     for _ in 0..2 {
         duplicate.metadata_mut().append(
-            flare_im_capability_core::plugin::invocation::PLUGIN_CALL_HEADER,
+            flare_im_core_capability_core::plugin::invocation::PLUGIN_CALL_HEADER,
             token.parse().unwrap(),
         );
     }
@@ -324,8 +326,8 @@ async fn dedicated_bridge_rpc_rejects_cell_identity_and_duplicate_tickets() {
 
 #[tokio::test]
 async fn signed_events_read_only_their_actor_membership_as_core_and_recheck_scopes() {
-    use flare_im_capability_core::plugin::event::*;
-    use flare_im_capability_core::plugin::resource::HostCapability;
+    use flare_im_core_capability_core::plugin::event::*;
+    use flare_im_core_capability_core::plugin::resource::HostCapability;
     struct EventBackend(AtomicUsize);
     #[async_trait::async_trait]
     impl ResourceAccessBackend for EventBackend {

@@ -23,7 +23,7 @@ use flare_grpc_proto::control::{
     tenant_projection_client::TenantProjectionClient,
     tenant_projection_server::TenantProjectionServer,
 };
-use flare_im_service_kit::{
+use flare_im_core_service_kit::{
     control_auth::{
         CORE_PROJECTION_AUDIENCE, PLATFORM_ISSUER, PROJECTION_WORKER_SUBJECT,
         PlatformAssertionVerifier,

@@ -46,7 +46,7 @@ impl flare_grpc_proto::message::message_send_service_server::MessageSendService 
             .unwrap();
         assert_eq!(claims.tenant_id, "app-a");
         assert_eq!(claims.actor_id, "sa-native");
-        assert!(flare_im_service_kit::platform_send::is_platform_system_sender(claims));
+        assert!(flare_im_core_service_kit::platform_send::is_platform_system_sender(claims));
         self.1.lock().unwrap().push(claims.request_id.clone());
         let value = request.into_inner();
         self.0.lock().unwrap().push(value);
@@ -67,7 +67,7 @@ async fn system_write_uses_api_key_machine_context_and_preserves_retry_identity(
         .unwrap();
     let mut keys = flare_server_core::auth::KeySet::empty();
     keys.insert(
-        flare_im_service_kit::platform_send::PLATFORM_API_KID,
+        flare_im_core_service_kit::platform_send::PLATFORM_API_KID,
         &public,
     )
     .unwrap();
@@ -87,7 +87,7 @@ async fn system_write_uses_api_key_machine_context_and_preserves_retry_identity(
             .serve_with_incoming(tonic::transport::server::TcpIncoming::from(listener)),
     );
     let (mut sender, token, _) = state(
-        flare_im_service_kit::platform_send::SYSTEM_MESSAGE_SCOPE,
+        flare_im_core_service_kit::platform_send::SYSTEM_MESSAGE_SCOPE,
         Some(TenantStatus::Active),
         false,
         false,
@@ -170,13 +170,13 @@ async fn system_write_uses_api_key_machine_context_and_preserves_retry_identity(
             )
             .with_credential_id(key.key_id())
             .with_roles(vec![
-                flare_im_service_kit::platform_send::SYSTEM_MESSAGE_SCOPE.into(),
+                flare_im_core_service_kit::platform_send::SYSTEM_MESSAGE_SCOPE.into(),
             ]),
         )
         .unwrap();
     let mut with_origin = post(&token, path, &payload);
     with_origin.headers_mut().insert(
-        flare_im_service_kit::platform_send::ORIGIN_CONTEXT_HEADER,
+        flare_im_core_service_kit::platform_send::ORIGIN_CONTEXT_HEADER,
         origin.parse().unwrap(),
     );
     assert_eq!(
@@ -193,7 +193,7 @@ async fn system_write_uses_api_key_machine_context_and_preserves_retry_identity(
     );
     let mut forged_origin = post(&token, path, &payload);
     forged_origin.headers_mut().insert(
-        flare_im_service_kit::platform_send::ORIGIN_CONTEXT_HEADER,
+        flare_im_core_service_kit::platform_send::ORIGIN_CONTEXT_HEADER,
         "attacker-request-id".parse().unwrap(),
     );
     assert_eq!(

@@ -18,9 +18,9 @@ flare-proto = { workspace = true }
 flare-grpc-proto = { workspace = true }
 # 通知文案模板（与客户端引擎共用一份）；提示规则也在这个 crate 里
 flare-im-notify-rules = { version = "0.1.0", path = "../../../flare-im-notify-rules" }
-flare-im-contracts = { workspace = true }
-flare-im-service-kit = { workspace = true }
-flare-im-usage = { workspace = true }
+flare-im-core-contracts = { workspace = true }
+flare-im-core-service-kit = { workspace = true }
+flare-im-core-usage = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
@@ -53,7 +53,7 @@ unicode-segmentation = "1.13"
 regex = "1.12"
 
 [dev-dependencies]
-# 测试里为模拟的 broker 记录签发认证上下文（与 flare-im-service-kit 同一版本与特性）
+# 测试里为模拟的 broker 记录签发认证上下文（与 flare-im-core-service-kit 同一版本与特性）
 ed25519-dalek = { version = "2", features = ["pkcs8", "pem"] }
 # 厂商令牌测试现生成 APNs（P-256）与 FCM（RSA）测试密钥；aws-lc 已随 rustls 在依赖树里
 aws-lc-rs = "1"

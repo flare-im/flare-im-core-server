@@ -17,9 +17,9 @@ use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use flare_im_contracts::Ctx;
-use flare_im_service_kit::metrics::PushWorkerMetrics;
-use flare_im_usage::{PushOutcome, UsageRecorder};
+use flare_im_core_contracts::Ctx;
+use flare_im_core_service_kit::metrics::PushWorkerMetrics;
+use flare_im_core_usage::{PushOutcome, UsageRecorder};
 use flare_proto::PushTaskEnvelope;
 use flare_server_core::FlareError;
 use flare_server_core::mq::consumer::{ConsumerError, Message, MessageHandler, MessageResult};
@@ -396,11 +396,11 @@ impl OfflinePushConsumerFactory {
     }
 
     pub fn topic() -> &'static str {
-        flare_im_contracts::constants::topics::TOPIC_PUSH_OFFLINE
+        flare_im_core_contracts::constants::topics::TOPIC_PUSH_OFFLINE
     }
 
     pub fn consumer_group() -> &'static str {
-        flare_im_contracts::constants::groups::PUSH_WORKER_GROUP_DEFAULT
+        flare_im_core_contracts::constants::groups::PUSH_WORKER_GROUP_DEFAULT
     }
 }
 

@@ -22,7 +22,7 @@ pub async fn start_services(
 ) -> Result<()> {
     use flare_core_runtime::RuntimeConfig;
     use flare_grpc_proto::access_gateway::access_gateway_server::AccessGatewayServer;
-    use flare_im_contracts::service_names::ACCESS_GATEWAY;
+    use flare_im_core_contracts::service_names::ACCESS_GATEWAY;
     use flare_server_core::middleware::ContextLayer;
     use tonic::transport::Server;
 
@@ -45,7 +45,7 @@ pub async fn start_services(
 
     // 就绪探针挂在指标端口（`/readyz`）：注册完成才就绪；停机一开始转 503，指标端口一直开到
     // 长连接服务器关完连接（`drained`），负载均衡在排空期间探测到的是 503 而不是连接被拒。
-    let readiness = Arc::new(flare_im_service_kit::health::Readiness::from_env(
+    let readiness = Arc::new(flare_im_core_service_kit::health::Readiness::from_env(
         ACCESS_GATEWAY,
     ));
     let (drained_tx, drained_rx) = tokio::sync::watch::channel(false);
@@ -79,12 +79,12 @@ pub async fn start_services(
     // 创建 ServiceRuntime（使用简化模式 + 服务注册）。指标端点随共享运行时挂载：
     // 网关此前只在 wire.rs 打了一句 "Prometheus metrics initialized"，却从没真正起
     // serve_prometheus_metrics，连接数、推送成功/失败/耗时注册了却无处可读。
-    let grpc_metrics = flare_im_service_kit::metrics::GrpcMetricsLayer::new(ACCESS_GATEWAY);
-    let runtime = flare_im_service_kit::ImServiceRuntimePlan {
+    let grpc_metrics = flare_im_core_service_kit::metrics::GrpcMetricsLayer::new(ACCESS_GATEWAY);
+    let runtime = flare_im_core_service_kit::ImServiceRuntimePlan {
         service_name: ACCESS_GATEWAY.to_string(),
         address: grpc_addr,
         // 指标端口由下面带 `/readyz` 的出口接管，这里不再单独起一个。
-        metrics: flare_im_service_kit::metrics::MetricsEndpointConfig::disabled(),
+        metrics: flare_im_core_service_kit::metrics::MetricsEndpointConfig::disabled(),
     }
     .service_runtime()
     .with_config(config)
@@ -150,7 +150,7 @@ pub async fn start_services(
             Ok(())
         }
     });
-    let runtime = flare_im_service_kit::metrics::attach_metrics_endpoint_with_readiness(
+    let runtime = flare_im_core_service_kit::metrics::attach_metrics_endpoint_with_readiness(
         runtime,
         ACCESS_GATEWAY,
         metrics_config,
@@ -188,7 +188,7 @@ pub async fn start_services(
 
             Box::pin(async move {
                 let registry =
-                    flare_im_service_kit::discovery::register_runtime_service_only_with_metadata(
+                    flare_im_core_service_kit::discovery::register_runtime_service_only_with_metadata(
                         ACCESS_GATEWAY,
                         addr,
                         Some(gateway_id_clone.clone()),

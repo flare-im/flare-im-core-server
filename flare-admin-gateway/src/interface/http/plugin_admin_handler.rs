@@ -15,7 +15,7 @@
 //! id of the staff member's intent from it: a retry of one action after an unknown outcome is a
 //! new request carrying the same command id, and the plugin runs the command once.
 use axum::{Json, extract::Extension, http::HeaderMap};
-use flare_im_service_kit::clients::AdminGrpcClients;
+use flare_im_core_service_kit::clients::AdminGrpcClients;
 use flare_server_core::{
     AuthenticatedPrincipal,
     error::{ErrorBuilder, ErrorCode},

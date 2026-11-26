@@ -11,6 +11,7 @@ shared_env = [
   "SERVICE_ADVERTISE_HOST", "SERVICE_HEARTBEAT_INTERVAL",
   "DATABASE_URL", "REDIS_URL", "NATS_URL", "GRPC_CONNECT_TIMEOUT_SECS",
   "GRPC_REQUEST_TIMEOUT_SECS", "FLARE_EVENT_SLOW_LOG_MS", "FLARE_SYNC_SLOW_LOG_MS",
+  "FLARE_TRUSTED_INTEGRATION_PRINCIPALS",
 ]
 shared_env_prefixes = ["TRACING_"]
 # Do not silently fall back to the config's localhost/dev infrastructure values.
@@ -114,11 +115,12 @@ name = "conversation"
 command = "/usr/local/bin/flare-conversation"
 inherit_env_prefixes = ["CONVERSATION_"]
 # The Cell key set verifies the Staff context Admin Gateway forwards (every admin read fails
-# closed without it), the flare-im-bridge service context of PurgeConversationHistory, and
+# closed without it), the trusted integration service context of PurgeConversationHistory, and
 # the x-flare-ctx of the read service, which with FLARE_REQUIRE_SIGNED_READ_CTX refuses
 # unsigned reads.
 inherit_env = [
   "FLARE_INTERNAL_CTX_PUBLIC_KEY", "FLARE_INTERNAL_CTX_PUBLIC_KEYS", "FLARE_REQUIRE_SIGNED_READ_CTX",
+  "FLARE_EXTERNAL_ROSTER_BUSINESS_TYPES",
 ]
 required_env = ["FLARE_INTERNAL_CTX_PUBLIC_KEY"]
 tcp_health = "127.0.0.1:50090"
@@ -218,7 +220,7 @@ FLARE_REQUIRE_SIGNED_READ_CTX = "true"
 name = "push-server"
 command = "/usr/local/bin/flare-push-server"
 # Started only when the deployment enforces broker provenance (see
-# flare_im_service_kit::push_delivery) and says so with this switch; otherwise the
+# flare_im_core_service_kit::push_delivery) and says so with this switch; otherwise the
 # default all-service supervisor would crash-loop on the paused Push consumer.
 enabled_if_env = "PUSH_SERVER_DELIVERY_READY"
 inherit_env_prefixes = ["PUSH_SERVER_"]
@@ -317,11 +319,11 @@ GRPC_PORT = "60060"
 [[services]]
 name = "admin-gateway"
 command = "/usr/local/bin/flare-admin-gateway"
-# Started only when the deployment enables the Core admin surface (the Social gateway admin
+# Started only when the deployment enables the Core admin surface (the business gateway admin
 # partition is its only caller).
 enabled_if_env = "FLARE_ADMIN_GATEWAY_ENABLED"
 inherit_env_prefixes = ["FLARE_ADMIN_GATEWAY_"]
-# Verifies the Staff context the Social gateway admin partition signs (Cell key set, Staff
+# Verifies the Staff context the business gateway admin partition signs (Cell key set, Staff
 # pinned to kid=gateway); re-signs the verified staff as kid=admin-gateway for Media; publishes
 # flare.audit.effect.v1 to FLARE_AUDIT_NATS_URL when set (unset: not audited, one warning).
 inherit_env = [

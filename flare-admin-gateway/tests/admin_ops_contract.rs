@@ -542,7 +542,7 @@ async fn whole_user_kick_passes_the_downstream_code_gates() {
         .unwrap()
         .connect_lazy();
     let mut online =
-        flare_im_service_kit::clients::OnlineServiceClientWrapper::from_channel(channel);
+        flare_im_core_service_kit::clients::OnlineServiceClientWrapper::from_channel(channel);
     let presence = online
         .admin_get_user_presence(
             &token,

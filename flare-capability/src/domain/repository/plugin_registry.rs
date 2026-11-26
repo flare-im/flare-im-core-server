@@ -6,7 +6,7 @@ use crate::domain::plugin::{
     PluginVersionDetail, ReconcileRow, RegistryResult, RuntimePatch, VersionFilter, VersionKey,
     VersionStateChange, WebBundleApproval, WebBundleAttachment, WebBundleFilter, WebBundleRef,
 };
-use flare_im_capability_core::plugin::PluginManifest;
+use flare_im_core_capability_core::plugin::PluginManifest;
 use std::sync::Arc;
 
 /// Where a page of [`PluginRegistryRepository::reconcile_page`] resumes: `updated_at`, application,

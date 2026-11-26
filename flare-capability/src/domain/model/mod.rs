@@ -1,6 +1,6 @@
 //! # Hook 控制面领域模型
 //!
-//! 配置、校验与查询。运行时在 `flare_im_hooks`，嵌在 Ingest 里。
+//! 配置、校验与查询。运行时在 `flare_im_core_hooks`，嵌在 Ingest 里。
 
 use std::collections::HashMap;
 
@@ -14,8 +14,8 @@ pub mod tenant_runtime;
 pub use client_policy::{
     ClientPolicyNotice, ClientPolicyRecord, ClientPolicyValidationError, ClientPolicyWatermarks,
 };
-pub use flare_im_hooks::hooks::execution::HOOK_CIRCUIT_OPEN_CODE;
-pub use flare_im_hooks::hooks::{
+pub use flare_im_core_hooks::hooks::execution::HOOK_CIRCUIT_OPEN_CODE;
+pub use flare_im_core_hooks::hooks::{
     HookSelectorConfig, LoggableName, MAX_HOOK_NAME_CHARS, validate_hook_name,
 };
 pub use hook_execution::{
@@ -166,9 +166,9 @@ impl std::fmt::Debug for HookTransportConfig {
 }
 
 /// `CapabilityService/Administer` 的 `hook_config.create` 能否登记 `hook_type`；不能时返回原因
-/// （只含类型名）。点位目录在 `flare_im_hooks`，现在只有发送前一个。
+/// （只含类型名）。点位目录在 `flare_im_core_hooks`，现在只有发送前一个。
 pub fn administrable_hook_type(hook_type: &str) -> Result<(), String> {
-    if flare_im_hooks::hooks::HOOK_POINTS
+    if flare_im_core_hooks::hooks::HOOK_POINTS
         .iter()
         .any(|point| point.hook_type == hook_type)
     {
@@ -176,7 +176,7 @@ pub fn administrable_hook_type(hook_type: &str) -> Result<(), String> {
     }
     Err(format!(
         "unknown hook_type {hook_type:?}: the only hook point is {:?}",
-        flare_im_hooks::hooks::PRE_SEND_HOOK_TYPE
+        flare_im_core_hooks::hooks::PRE_SEND_HOOK_TYPE
     ))
 }
 

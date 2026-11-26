@@ -3,9 +3,9 @@ use crate::application::handler::plugin_state::tests::{
     MemoryBindings, POLL_MANIFEST, poll_snapshot, with_manifest,
 };
 use crate::application::handler::plugin_test_server::PluginServer;
-use flare_im_capability_core::plugin::PluginManifest;
-use flare_im_capability_core::plugin::invocation::PluginCallVerifier;
-use flare_im_capability_core::plugin::runtime::PluginRuntimeSnapshot;
+use flare_im_core_capability_core::plugin::PluginManifest;
+use flare_im_core_capability_core::plugin::invocation::PluginCallVerifier;
+use flare_im_core_capability_core::plugin::runtime::PluginRuntimeSnapshot;
 use serde_json::Value;
 use std::sync::Mutex;
 

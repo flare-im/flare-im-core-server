@@ -209,14 +209,15 @@ impl PostgresConversationRepository {
         &self,
         ctx: &flare_server_core::context::Context,
         conversation_id: &str,
+        external_business_types: &[String],
         provider_configured: bool,
     ) -> Result<Option<(String, bool)>> {
         sqlx::query_as(
-            "SELECT channel_id, business_type = $3 FROM conversations WHERE tenant_id = $1 AND conversation_id = $2 AND (business_type = $3 OR $4)",
+            "SELECT channel_id, business_type = ANY($3) FROM conversations WHERE tenant_id = $1 AND conversation_id = $2 AND (business_type = ANY($3) OR $4)",
         )
         .bind(required_tenant(ctx)?)
         .bind(conversation_id)
-        .bind(crate::domain::model::EXTERNAL_GROUP_ROSTER_BUSINESS_TYPE)
+        .bind(external_business_types)
         .bind(provider_configured)
         .fetch_optional(&*self.pool)
         .await

@@ -1,7 +1,7 @@
 //! gRPC 侧通用辅助：上下文提取、领域错误映射。
 //!
 //! 管理面鉴权不在这里：员工经 admin-gateway 转发的 Staff `x-flare-ctx` 由各 RPC 用
-//! `flare_im_service_kit::staff_context::require_staff` 按权限码复核（见 `capability/service.rs`
+//! `flare_im_core_service_kit::staff_context::require_staff` 按权限码复核（见 `capability/service.rs`
 //! 与 `capability_admin.rs`）；平台断言只剩租户投影的 worker（`tenant_projection.rs`）。
 
 use std::sync::Arc;
@@ -12,7 +12,7 @@ use tonic::{Request, Status};
 use crate::domain::capability::CapabilityError;
 
 /// 从 metadata 取 `Ctx`；缺失时生成带新 `request_id` 的上下文（与 `ContextLayer::allow_missing` 配合）。
-pub fn ctx_allow_missing<T>(req: &Request<T>) -> flare_im_contracts::Ctx {
+pub fn ctx_allow_missing<T>(req: &Request<T>) -> flare_im_core_contracts::Ctx {
     flare_server_core::middleware::get_context(req)
         .cloned()
         .unwrap_or_else(|| {

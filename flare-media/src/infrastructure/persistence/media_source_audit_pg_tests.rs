@@ -20,7 +20,7 @@ use ed25519_dalek::{
 use flare_grpc_proto::media::{
     CleanupOrphanedAssetsRequest, media_service_client::MediaServiceClient,
 };
-use flare_im_service_kit::audit_effects::durable::StaffAudit;
+use flare_im_core_service_kit::audit_effects::durable::StaffAudit;
 use flare_server_core::{
     SignedActorType, SignedContextIdentity, SignedContextSigner, SignedContextVerifier,
     context::{Context, Ctx},
@@ -298,7 +298,7 @@ async fn check_cleanup(pool: Arc<PgPool>, root: PathBuf) {
 
     // Cancel/dropped owner claim has neither a metadata deletion nor an audit commit.
     let carrier = request("app-a", "core:medias:write", false);
-    let verified = flare_im_service_kit::staff_context::verify_staff_metadata(
+    let verified = flare_im_core_service_kit::staff_context::verify_staff_metadata(
         carrier.metadata(),
         &keys().1,
         "core:medias:write",
@@ -424,7 +424,7 @@ async fn application_media_ownership_and_source_audit_commit_atomically() {
         use crate::domain::model::{MediaOwnerKind, MediaPurpose};
         let store = PostgresMetadataStore { pool: pool.clone() };
         let carrier = request("app-a", "core:medias:write", false);
-        let verified = flare_im_service_kit::staff_context::verify_staff_metadata(carrier.metadata(), &keys().1, "core:medias:write").unwrap();
+        let verified = flare_im_core_service_kit::staff_context::verify_staff_metadata(carrier.metadata(), &keys().1, "core:medias:write").unwrap();
         let ctx = verified.ctx;
         let mut asset = MediaFileMetadata { file_id: "application-avatar".into(), owner_id: Some("app-a".into()), owner_kind: MediaOwnerKind::Application, purpose: MediaPurpose::Avatar, mime_type: "image/png".into(), file_size: 123, ..Default::default() };
         store.save_metadata(&ctx, &asset).staff_audit(&ctx, "flare-media").await.unwrap();

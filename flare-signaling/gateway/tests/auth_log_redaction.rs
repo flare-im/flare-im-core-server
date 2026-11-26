@@ -12,7 +12,7 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use flare_core::common::{DeviceInfo, DevicePlatform};
 use flare_core::server::Authenticator;
-use flare_im_service_kit::tenant_runtime::{TenantAccessPolicy, TenantRuntimeCache};
+use flare_im_core_service_kit::tenant_runtime::{TenantAccessPolicy, TenantRuntimeCache};
 use flare_server_core::auth::{
     AuthError, AuthenticatedPrincipal, TokenValidationRequest, TokenValidator,
 };

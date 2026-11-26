@@ -1,6 +1,6 @@
 //! 进程级 **启动配置**（Composition Root 输入 DTO，非领域模型）。
 //!
-//! 与 `flare_im_service_kit::config::CapabilityServiceConfig`（全局应用配置中的片段）区分：此处仅描述 **flare-capability 二进制** 的本地覆盖项。
+//! 与 `flare_im_core_service_kit::config::CapabilityServiceConfig`（全局应用配置中的片段）区分：此处仅描述 **flare-capability 二进制** 的本地覆盖项。
 
 /// `flare-capability` 进程启动配置。
 #[derive(Debug, Clone)]
@@ -40,7 +40,7 @@ impl Default for CapabilityServiceConfig {
             postgres_idle_timeout_seconds: 300,
             postgres_max_lifetime_seconds: 1800,
             notice_redis_url: None,
-            notice_channel: flare_im_service_kit::tenant_notice::notice_channel("flare"),
+            notice_channel: flare_im_core_service_kit::tenant_notice::notice_channel("flare"),
             notice_publishers: crate::domain::model::NoticePublishers::default(),
         }
     }

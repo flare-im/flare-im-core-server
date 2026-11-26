@@ -19,8 +19,8 @@ use flare_grpc_proto::message::message_event_service_server::{
     MessageEventService, MessageEventServiceServer,
 };
 use flare_grpc_proto::message::*;
-use flare_im_service_kit::clients::*;
-use flare_im_service_kit::{
+use flare_im_core_service_kit::clients::*;
+use flare_im_core_service_kit::{
     gateway_auth::TenantRuntimeGuard,
     tenant_runtime::{TenantAccessPolicy, TenantRuntimeCache},
 };

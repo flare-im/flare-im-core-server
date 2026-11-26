@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
-use flare_im_contracts::wal_pending_index_key;
+use flare_im_core_contracts::wal_pending_index_key;
 use flare_server_core::error::Result;
 use prost::Message;
 use redis::AsyncCommands;
@@ -509,7 +509,7 @@ impl WalRepository for RedisWalRepository {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use flare_im_contracts::utils::TimelineMetadata;
+    use flare_im_core_contracts::utils::TimelineMetadata;
     use flare_proto::common::Message as ProtoMessage;
 
     fn repository_with_wal_key(wal_hash_key: Option<String>) -> RedisWalRepository {

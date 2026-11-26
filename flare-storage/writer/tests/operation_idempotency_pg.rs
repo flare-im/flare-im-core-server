@@ -11,9 +11,9 @@
 
 use std::sync::Arc;
 
-use flare_im_contracts::Ctx;
-use flare_im_contracts::utils::Context;
-use flare_im_service_kit::metrics::StorageWriterMetrics;
+use flare_im_core_contracts::Ctx;
+use flare_im_core_contracts::utils::Context;
+use flare_im_core_service_kit::metrics::StorageWriterMetrics;
 use flare_server_core::error::ErrorCode;
 use flare_storage_writer::application::commands::ProcessEventCommand;
 use flare_storage_writer::application::handlers::MessageOperationCommandHandler;

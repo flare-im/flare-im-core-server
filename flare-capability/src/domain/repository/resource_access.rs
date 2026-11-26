@@ -1,7 +1,7 @@
 //! Host reads remain behind domain-owned APIs. No plugin can supply a tenant,
 //! actor, credential or backend URL in a resource request.
 use crate::domain::capability::Result;
-use flare_im_capability_core::plugin::resource::ResourceRequest;
+use flare_im_core_capability_core::plugin::resource::ResourceRequest;
 use serde_json::Value;
 use std::collections::BTreeSet;
 

@@ -5,8 +5,8 @@ use flare_grpc_proto::capability::{
     GenericRequest, PluginRuntimeInspectRequest, PluginTenantState,
     extension_plugin_client::ExtensionPluginClient, plugin_runtime_client::PluginRuntimeClient,
 };
-use flare_im_capability_core::plugin::data::{DataRequest, OPERATION as DATA_OPERATION};
-use flare_im_capability_core::plugin::invocation::PLUGIN_CALL_HEADER;
+use flare_im_core_capability_core::plugin::data::{DataRequest, OPERATION as DATA_OPERATION};
+use flare_im_core_capability_core::plugin::invocation::PLUGIN_CALL_HEADER;
 use serde_json::Value;
 use tonic::metadata::MetadataValue;
 use tonic::transport::{Channel, Endpoint};

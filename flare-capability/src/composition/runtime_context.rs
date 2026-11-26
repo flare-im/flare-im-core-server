@@ -22,7 +22,7 @@ pub struct ApplicationContext {
     /// Source-owned queue delivery, independent of IM ordering. Disabled broker retains rows.
     pub audit_delivery: Option<(
         Arc<sqlx::PgPool>,
-        flare_im_service_kit::audit_effects::AuditEffects,
+        flare_im_core_service_kit::audit_effects::AuditEffects,
     )>,
     /// Hook 配置治理（写路径）；供 `CapabilityService.Administer` 与内部复用。
     pub hook_governance: Option<Arc<HookServiceServer>>,

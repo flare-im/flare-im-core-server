@@ -11,7 +11,7 @@ use axum::{
     http::HeaderMap,
 };
 use flare_grpc_proto::media::*;
-use flare_im_service_kit::clients::AdminGrpcClients;
+use flare_im_core_service_kit::clients::AdminGrpcClients;
 use flare_server_core::{
     AuthenticatedPrincipal,
     http::{ApiResponse, HttpApiError, Result},

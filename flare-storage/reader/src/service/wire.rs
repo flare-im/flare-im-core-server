@@ -12,7 +12,7 @@ use crate::infrastructure::persistence::optimized_postgres_store::OptimizedPostg
 use crate::infrastructure::persistence::postgres_base::PostgresBaseStorage;
 use crate::infrastructure::persistence::redis_cache::RedisMessageCache;
 use crate::interface::grpc::StorageReaderGrpcHandler;
-use flare_im_service_kit::redis_connection::SharedRedisConnection;
+use flare_im_core_service_kit::redis_connection::SharedRedisConnection;
 
 // 类型别名，简化泛型参数
 pub type MessageStorageType = OptimizedPostgresMessageStorageImpl;
@@ -27,7 +27,7 @@ where
     pub handler: StorageReaderGrpcHandler<M>,
     pub audit_delivery: (
         Arc<sqlx::PgPool>,
-        flare_im_service_kit::audit_effects::AuditEffects,
+        flare_im_core_service_kit::audit_effects::AuditEffects,
     ),
 }
 
@@ -41,7 +41,7 @@ where
 /// # 返回
 /// * `ApplicationContext` - 构建好的应用上下文
 pub async fn initialize(
-    app_config: &flare_im_service_kit::config::FlareAppConfig,
+    app_config: &flare_im_core_service_kit::config::FlareAppConfig,
 ) -> Result<ApplicationContext<MessageStorageType>> {
     // 1. 加载存储读取器配置
     let config = Arc::new(
@@ -88,7 +88,7 @@ pub async fn initialize(
     };
     let audit_delivery = (
         Arc::new(pool.clone()),
-        flare_im_service_kit::audit_effects::AuditEffects::from_env("storage-reader").await?,
+        flare_im_core_service_kit::audit_effects::AuditEffects::from_env("storage-reader").await?,
     );
     let postgres_base_storage = PostgresBaseStorage::from_pool_and_cache(pool, cache.clone())
         .await
@@ -109,7 +109,9 @@ pub async fn initialize(
     //    验签（Staff 钉死 kid=gateway）；没配公钥时这些 RPC 一律 UNAUTHENTICATED（其余 RPC 不受影响）。
     let staff_verifier = match flare_server_core::SignedContextVerifier::from_env_optional() {
         Ok(Some(_)) => Some(
-            flare_im_service_kit::staff_context::admin_staff_verifier_from_env("storage-reader")?,
+            flare_im_core_service_kit::staff_context::admin_staff_verifier_from_env(
+                "storage-reader",
+            )?,
         ),
         Ok(None) => {
             tracing::warn!(

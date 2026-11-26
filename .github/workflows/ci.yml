@@ -104,7 +104,7 @@ jobs:
         run: cargo test --workspace
 
       - name: Sequence recovery against isolated Redis
-        run: cargo test -p flare-im-seq --test recovery -- --ignored
+        run: cargo test -p flare-im-core-seq --test recovery -- --ignored
 
   # 供应链审计与主流程解耦：advisory DB 每天在变，
   # 不该因为上游新披露的 CVE 就让无关的功能 PR 变红。

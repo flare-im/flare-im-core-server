@@ -9,8 +9,8 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use flare_im_hooks::hooks::execution::{HookExecutionRecord, HookExecutionSink};
-use flare_im_hooks::hooks::{
+use flare_im_core_hooks::hooks::execution::{HookExecutionRecord, HookExecutionSink};
+use flare_im_core_hooks::hooks::{
     DeploymentHookSummary, HookConfigStore, HookScope, HookScopeChange, PRE_SEND_HOOK_TYPE,
     StoredHook,
 };
@@ -290,7 +290,7 @@ mod tests {
     #[tokio::test]
     #[ignore = "requires FLARE_HOOK_STORE_TEST_DATABASE_URL: a disposable flare_hook_store_test_* Core database at the latest migration"]
     async fn the_store_reads_scopes_and_writes_executions_on_postgres() {
-        use flare_im_hooks::hooks::execution::HookExecutionOutcome;
+        use flare_im_core_hooks::hooks::execution::HookExecutionOutcome;
         use std::time::{Duration, SystemTime};
 
         let url = std::env::var("FLARE_HOOK_STORE_TEST_DATABASE_URL").expect("database url");

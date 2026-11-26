@@ -9,7 +9,7 @@ use flare_grpc_proto::conversation::{
     GetConversationDetailRequest, ListConversationParticipantsRequest,
     conversation_read_service_client::ConversationReadServiceClient,
 };
-use flare_im_capability_core::plugin::resource::*;
+use flare_im_core_capability_core::plugin::resource::*;
 use flare_server_core::{
     SignedActorType, SignedContextIdentity, SignedContextSigner, set_signed_context_token,
 };

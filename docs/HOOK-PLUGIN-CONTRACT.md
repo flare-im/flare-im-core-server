@@ -29,7 +29,7 @@ is raw JSON. Decode it with prost using the `type_url` below.
 `type_url` is the suffix above prefixed with `type.googleapis.com/`. Answer any other `operation`
 by allowing it, so a point added later does not stop your traffic.
 
-The point catalog lives in `flare-im-hooks`. A new point is added at the command that needs
+The point catalog lives in `flare-im-core-hooks`. A new point is added at the command that needs
 interception; the runtime and the control plane do not change.
 
 ## 3. A hook allows, rejects or rewrites
@@ -218,7 +218,7 @@ def verify_hook(secret: bytes, raw_body: bytes, signature: str) -> bool:
         return False
 ```
 
-Rust receivers can call `flare_im_hooks::hooks::adapters::verify_webhook_signature`
+Rust receivers can call `flare_im_core_hooks::hooks::adapters::verify_webhook_signature`
 (with `WEBHOOK_SIGNATURE_TOLERANCE_SECS`, 300 s), which applies the same checks.
 
 Timestamp validation limits replay lifetime; receivers should additionally deduplicate

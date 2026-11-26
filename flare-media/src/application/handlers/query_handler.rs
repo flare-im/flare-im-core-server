@@ -103,7 +103,7 @@ impl MediaQueryHandler {
                 300
             };
         }
-        let headers = flare_im_contracts::media_response::MediaResponseHeaders::from_request(
+        let headers = flare_im_core_contracts::media_response::MediaResponseHeaders::from_request(
             &request.response_headers,
         )?;
         let message = (!request.conversation_id.is_empty() || request.message_seq != 0)

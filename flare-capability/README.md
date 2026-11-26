@@ -47,7 +47,7 @@ The `ExtensionPlugin` router (`flare.capability.v1.ExtensionPlugin/Call`) sits b
 
 ## Hook control plane
 
-Hooks run in Message Ingest: `flare-im-hooks` is the one runtime, with the call chain, adapters,
+Hooks run in Message Ingest: `flare-im-core-hooks` is the one runtime, with the call chain, adapters,
 circuit breakers, time limits and execution records. This service is the control plane and does not
 run hooks, so a Capability outage does not affect sending.
 

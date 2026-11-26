@@ -1,4 +1,4 @@
-//! Read-only, transport-owned message inspection. No Social policy or client URLs.
+//! Read-only, transport-owned message inspection. No business policy or client URLs.
 use flare_proto::common::{
     ContentVisibility, ImageInfo, Message, MessageRetentionLifecycle, MessageStatus,
     message_content::Content,

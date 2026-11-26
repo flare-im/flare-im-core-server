@@ -13,7 +13,7 @@ use axum::extract::{Request, State};
 use axum::http::{HeaderValue, header::RETRY_AFTER};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
-use flare_im_service_kit::gateway::RateLimitConfig;
+use flare_im_core_service_kit::gateway::RateLimitConfig;
 use flare_server_core::error::{ErrorBuilder, ErrorCode};
 use flare_server_core::http::HttpApiError;
 

@@ -17,7 +17,7 @@
 //! - **Composition**（`composition`）：进程组合根 — `process_config` / `runtime_context` / **`wiring`**（`initialize` 总装）/ `bootstrap`；[`ApplicationBootstrap`](crate::composition::ApplicationBootstrap)、[`init_capability_extension_stack`](crate::composition::init_capability_extension_stack)。
 //!
 //!
-//! Hook 只有一个运行时，在 Message Ingest 里（`flare_im_hooks`）。这里是 Hook 的控制面：配置 CRUD、
+//! Hook 只有一个运行时，在 Message Ingest 里（`flare_im_core_hooks`）。这里是 Hook 的控制面：配置 CRUD、
 //! 统计、执行记录查询经 **`CapabilityService.Administer`**，保留期清理在后台。
 
 pub mod application;
@@ -27,7 +27,7 @@ pub mod domain;
 pub mod infrastructure;
 pub mod interface;
 
-pub use flare_im_capability_core as capability_core;
+pub use flare_im_core_capability_core as capability_core;
 
 pub use application::queries::{HookIntegrationChannelDoc, list_hook_integration_channels};
 pub use composition::{

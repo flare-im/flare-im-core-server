@@ -1,4 +1,4 @@
-//! 平台 Hook（`/platform/hooks/**`，Social 分区的 `/admin/v1/hooks/**`）：经 Capability 的
+//! 平台 Hook（`/platform/hooks/**`，业务网关 admin 分区的 `/admin/v1/hooks/**`）：经 Capability 的
 //! `CapabilityService.Administer` 读写 `tenant_id` 为空的配置，读部署摘要和点位目录，调用一次目标做
 //! 测试。
 //!
@@ -10,7 +10,7 @@ use flare_grpc_proto::capability::{
     ListHookPointsResponse, ListHookProfilesRequest, ListHookProfilesResponse,
     TestHookConfigResponse,
 };
-use flare_im_service_kit::clients::AdminGrpcClients;
+use flare_im_core_service_kit::clients::AdminGrpcClients;
 use flare_server_core::{
     AuthenticatedPrincipal,
     http::{ApiResponse, HttpApiError, Result},

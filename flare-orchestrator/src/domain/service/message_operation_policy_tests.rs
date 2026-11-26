@@ -187,6 +187,9 @@ fn stored(
     }
 }
 
+/// The business integration service the fixture's deployment trusts.
+const INTEGRATION: &str = "business-integration";
+
 struct Fixture {
     policy: MessageOperationPolicy,
     messages: Arc<Messages>,
@@ -240,6 +243,7 @@ fn fixture() -> Fixture {
     Fixture {
         policy: MessageOperationPolicy::new(Some(messages.clone()))
             .with_members(Some(members.clone()))
+            .with_trusted_integrations(TrustedIntegrationPrincipals::parse(INTEGRATION))
             .with_clock(|| NOW),
         messages,
         members,
@@ -384,7 +388,7 @@ async fn trusted_services_recall_with_a_reason_and_unsigned_system_metadata_is_n
     let f = fixture();
     for ctx in [
         signed_as(SignedActorType::System, "flare-scheduler"),
-        signed_as(SignedActorType::Service, "flare-im-bridge"),
+        signed_as(SignedActorType::Service, INTEGRATION),
     ] {
         // Any member's message, past the sender window, with a reason.
         f.policy
@@ -458,7 +462,7 @@ async fn edits_are_the_senders_on_text_only_and_never_touch_a_plugin_card() {
     for target in ["m-card", "m-custom-card"] {
         for ctx in [
             alice.clone(),
-            signed_as(SignedActorType::Service, "flare-im-bridge"),
+            signed_as(SignedActorType::Service, INTEGRATION),
         ] {
             let error = refused(&f.policy, &ctx, edit(target, text("x"))).await;
             assert_eq!(
@@ -544,7 +548,7 @@ async fn deletes_follow_their_scope() {
         .expect("sender global delete");
     f.policy
         .authorize(
-            &signed_as(SignedActorType::Service, "flare-im-bridge"),
+            &signed_as(SignedActorType::Service, INTEGRATION),
             "tenant-a",
             global(),
         )
@@ -908,7 +912,7 @@ async fn only_members_operate_and_only_the_operator_is_looked_up() {
     let before = f.members.asked().len();
     for ctx in [
         signed_as(SignedActorType::System, "flare-scheduler"),
-        signed_as(SignedActorType::Service, "flare-im-bridge"),
+        signed_as(SignedActorType::Service, INTEGRATION),
     ] {
         f.policy
             .authorize(&ctx, "tenant-a", recall("m-alice", "moderation"))
@@ -1021,7 +1025,7 @@ async fn a_receipts_messages_must_belong_to_its_conversation() {
 
     let error = refused(&f.policy, &alice, receipt(&["m-alice", "m-elsewhere"])).await;
     assert_eq!(reason_of(&error), reason::CONVERSATION_MISMATCH);
-    let trusted = signed_as(SignedActorType::Service, "flare-im-bridge");
+    let trusted = signed_as(SignedActorType::Service, INTEGRATION);
     let mut for_alice = receipt(&["m-elsewhere"]);
     if let Some(Payload::Read(read)) = for_alice.payload.as_mut() {
         read.user_id = "alice".into();

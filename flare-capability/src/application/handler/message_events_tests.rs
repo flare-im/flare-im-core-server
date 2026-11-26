@@ -1,6 +1,6 @@
 use super::*;
 use crate::infrastructure::capability::InMemoryCapabilityGrants;
-use flare_im_capability_core::plugin::{
+use flare_im_core_capability_core::plugin::{
     PluginManifest,
     authorization::TenantPluginGrant,
     invocation::PluginCallVerifier,
@@ -24,7 +24,7 @@ fn message(source: MessageSource) -> Message {
             .with_tenant_id("app")
             .with_user_id("member"),
     );
-    let headers = flare_im_contracts::context_to_mq_metadata(&ctx);
+    let headers = flare_im_core_contracts::context_to_mq_metadata(&ctx);
     let envelope = MqEnvelope {
         envelope_id: "envelope-1".into(),
         conversation_id: "group".into(),

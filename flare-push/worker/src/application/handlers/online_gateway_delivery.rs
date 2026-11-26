@@ -12,11 +12,11 @@ use flare_grpc_proto::access_gateway::{
 };
 use flare_grpc_proto::signaling::online::DeviceInfo;
 use flare_grpc_proto::signaling::router::PushStrategy;
-use flare_im_contracts::Ctx;
+use flare_im_core_contracts::Ctx;
 use flare_proto::common::{Event, Message};
 use flare_server_core::error::{ErrorCode, FlareError, Result, map_infra_error};
 
-use flare_im_service_kit::gateway::{GatewayRouter, GatewayRouterTrait};
+use flare_im_core_service_kit::gateway::{GatewayRouter, GatewayRouterTrait};
 
 use crate::domain::model::GatewayPushTarget;
 use crate::domain::push_routing::{
@@ -74,8 +74,8 @@ impl GatewayPushExecutor {
         let tenant_id = core
             .tenant_id()
             .ok_or_else(|| FlareError::system("push device lookup requires tenant"))?;
-        if !flare_im_contracts::domain::tenant::is_valid_tenant_id(tenant_id)
-            || flare_im_contracts::utils::normalize_tenant_id(tenant_id) != tenant_id
+        if !flare_im_core_contracts::domain::tenant::is_valid_tenant_id(tenant_id)
+            || flare_im_core_contracts::utils::normalize_tenant_id(tenant_id) != tenant_id
         {
             return Err(FlareError::system("invalid push device lookup tenant"));
         }
@@ -504,7 +504,7 @@ mod tests {
     struct DeadGateways(&'static [&'static str]);
 
     #[async_trait::async_trait]
-    impl flare_im_service_kit::gateway::lease::GatewayLeaseSource for DeadGateways {
+    impl flare_im_core_service_kit::gateway::lease::GatewayLeaseSource for DeadGateways {
         async fn lookup(&self, gateway_id: &str) -> redis::RedisResult<(bool, bool)> {
             Ok((true, !self.0.contains(&gateway_id)))
         }
@@ -529,9 +529,9 @@ mod tests {
         assert_eq!(kept.len(), 3, "no probe: every device stays routable");
 
         router.attach_lease_probe(Arc::new(
-            flare_im_service_kit::gateway::lease::GatewayLeaseProbe::new(
+            flare_im_core_service_kit::gateway::lease::GatewayLeaseProbe::new(
                 Arc::new(DeadGateways(&["gw-dead"])),
-                flare_im_service_kit::gateway::lease::LEASE_PROBE_CACHE_TTL,
+                flare_im_core_service_kit::gateway::lease::LEASE_PROBE_CACHE_TTL,
             ),
         ));
         let kept = retain_routable_targets(&router, targets).await;

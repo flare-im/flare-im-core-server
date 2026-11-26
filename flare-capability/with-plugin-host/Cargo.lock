@@ -838,10 +838,10 @@ dependencies = [
  "flare-core-base",
  "flare-core-runtime",
  "flare-grpc-proto",
- "flare-im-capability-core",
- "flare-im-contracts",
- "flare-im-hooks",
- "flare-im-service-kit",
+ "flare-im-core-capability-core",
+ "flare-im-core-contracts",
+ "flare-im-core-hooks",
+ "flare-im-core-service-kit",
  "flare-proto",
  "flare-server-core",
  "futures-util",
@@ -1068,7 +1068,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "flare-im-capability-core"
+name = "flare-im-core-capability-core"
 version = "1.0.3"
 dependencies = [
  "async-trait",
@@ -1082,7 +1082,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "flare-im-contracts"
+name = "flare-im-core-contracts"
 version = "1.0.3"
 dependencies = [
  "async-trait",
@@ -1102,7 +1102,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "flare-im-hooks"
+name = "flare-im-core-hooks"
 version = "1.0.3"
 dependencies = [
  "arc-swap",
@@ -1110,8 +1110,8 @@ dependencies = [
  "base64",
  "flare-core-base",
  "flare-grpc-proto",
- "flare-im-contracts",
- "flare-im-service-kit",
+ "flare-im-core-contracts",
+ "flare-im-core-service-kit",
  "flare-proto",
  "flare-server-core",
  "hex",
@@ -1133,7 +1133,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "flare-im-seq"
+name = "flare-im-core-seq"
 version = "1.0.3"
 dependencies = [
  "flare-server-core",
@@ -1143,7 +1143,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "flare-im-service-kit"
+name = "flare-im-core-service-kit"
 version = "1.0.3"
 dependencies = [
  "anyhow",
@@ -1158,8 +1158,8 @@ dependencies = [
  "flare-core-base",
  "flare-core-runtime",
  "flare-grpc-proto",
- "flare-im-contracts",
- "flare-im-seq",
+ "flare-im-core-contracts",
+ "flare-im-core-seq",
  "flare-plugin-protocol",
  "flare-proto",
  "flare-server-core",

@@ -8,7 +8,7 @@
 use std::sync::Arc;
 
 use flare_core::common::error::{FlareError, Result};
-use flare_im_contracts::Ctx;
+use flare_im_core_contracts::Ctx;
 use flare_proto::common::ack::Payload as AckPayload;
 use tracing::instrument;
 

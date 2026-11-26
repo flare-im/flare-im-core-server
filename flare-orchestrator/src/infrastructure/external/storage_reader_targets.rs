@@ -9,7 +9,7 @@ use std::time::Duration;
 use flare_grpc_proto::storage::storage_message_lookup_service_client::StorageMessageLookupServiceClient;
 use flare_grpc_proto::storage::storage_reader_service_client::StorageReaderServiceClient;
 use flare_grpc_proto::storage::{GetMessageRequest, LocateMessagesRequest};
-use flare_im_contracts::Ctx;
+use flare_im_core_contracts::Ctx;
 use flare_proto::common::Message;
 use flare_server_core::SignedContextSigner;
 use flare_server_core::error::{ErrorBuilder, ErrorCode, FlareError, Result};
@@ -54,9 +54,9 @@ impl StorageReaderMessageTargets {
             .signer
             .as_ref()
             .ok_or_else(|| unavailable("the orchestrator has no Cell signing key"))?;
-        let token = flare_im_service_kit::signed_read::sign_service_read(
+        let token = flare_im_core_service_kit::signed_read::sign_service_read(
             signer,
-            flare_im_contracts::service_names::ORCHESTRATOR,
+            flare_im_core_contracts::service_names::ORCHESTRATOR,
             tenant_id,
             ctx.request_id(),
         )?;
@@ -261,7 +261,7 @@ mod tests {
         assert_eq!(seen[0].3, ids(&["m-here", "m-there", "ghost"]));
         for (actor_type, actor, tenant, _) in &seen {
             assert_eq!(*actor_type, flare_server_core::SignedActorType::Service);
-            assert_eq!(actor, flare_im_contracts::service_names::ORCHESTRATOR);
+            assert_eq!(actor, flare_im_core_contracts::service_names::ORCHESTRATOR);
             assert_eq!(tenant, "tenant-a");
         }
 

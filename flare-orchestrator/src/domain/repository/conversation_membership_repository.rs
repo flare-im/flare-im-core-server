@@ -1,6 +1,6 @@
 //! Whether a user is a member of a conversation, read before a user's event is sequenced so that
 //! only members react, pin, mark, read, edit or recall in it.
-use flare_im_contracts::Ctx;
+use flare_im_core_contracts::Ctx;
 use flare_server_core::error::Result;
 
 /// How recent a membership answer has to be.

@@ -5,8 +5,8 @@ use ed25519_dalek::{
     SigningKey,
     pkcs8::{EncodePrivateKey, EncodePublicKey},
 };
-use flare_im_service_kit::audit_effects::write_proof::{HEADER, ProofSigner, ProofVerifier};
-use flare_im_service_kit::platform_send::{PLATFORM_API_KID, SYSTEM_MESSAGE_SCOPE};
+use flare_im_core_service_kit::audit_effects::write_proof::{HEADER, ProofSigner, ProofVerifier};
+use flare_im_core_service_kit::platform_send::{PLATFORM_API_KID, SYSTEM_MESSAGE_SCOPE};
 use flare_proto::common::{MessageContent, SystemContent, message_content::Content};
 use flare_server_core::context::Context;
 use flare_server_core::mq::consumer::{ContentType, MessageContext};
@@ -95,7 +95,7 @@ fn queued(message: &flare_proto::common::Message, token: &str) -> Message {
         ("x-tenant-id".into(), "app-a".into()),
         (HEADER.into(), token.into()),
     ]);
-    let envelope = flare_im_contracts::event::mq_envelope_for_main_queue_message_with_headers(
+    let envelope = flare_im_core_contracts::event::mq_envelope_for_main_queue_message_with_headers(
         message,
         vec![],
         headers.clone(),
@@ -143,7 +143,7 @@ fn proof_binds_maps_content_actor_and_app_and_rejects_unsigned_machine_queue_mes
     assert!(
         decoded
             .ctx
-            .get_data::<flare_im_service_kit::audit_effects::write_proof::VerifiedWrite>()
+            .get_data::<flare_im_core_service_kit::audit_effects::write_proof::VerifiedWrite>()
             .is_some()
     );
 }
@@ -209,7 +209,7 @@ async fn archive_claims_conversation_scoped_receipts_in_an_initializer_built_dat
             MessageCreatedHandler::decode_store_message(&queued(m, &token), Some(&verifier))
                 .unwrap()
                 .unwrap();
-        let domain = flare_im_contracts::message::message_from_proto(m);
+        let domain = flare_im_core_contracts::message::message_from_proto(m);
         store.store_archive(&decoded.ctx, &domain).await.unwrap();
     }
     let stored: Vec<(String, String)> = sqlx::query_as(
@@ -276,7 +276,7 @@ async fn check_archive(pool: PgPool) {
             .unwrap()
     };
     let d = prepare("committed");
-    let domain = flare_im_contracts::message::message_from_proto(&message("committed"));
+    let domain = flare_im_core_contracts::message::message_from_proto(&message("committed"));
     store.store_archive(&d.ctx, &domain).await.unwrap();
     store.store_archive(&d.ctx, &domain).await.unwrap();
     assert_eq!(
@@ -306,7 +306,7 @@ async fn check_archive(pool: PgPool) {
     assert!(!event.to_string().contains("secret body"));
     sqlx::raw_sql("CREATE FUNCTION reject_audit() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'owned audit fault'; END $$; CREATE TRIGGER reject_audit BEFORE INSERT ON core_audit_outbox FOR EACH ROW EXECUTE FUNCTION reject_audit()").execute(&pool).await.unwrap();
     let d = prepare("rollback");
-    let m = flare_im_contracts::message::message_from_proto(&message("rollback"));
+    let m = flare_im_core_contracts::message::message_from_proto(&message("rollback"));
     assert!(store.store_archive(&d.ctx, &m).await.is_err());
     assert_eq!(
         sqlx::query_scalar::<_, i64>("SELECT count(*) FROM messages WHERE server_id='rollback'")

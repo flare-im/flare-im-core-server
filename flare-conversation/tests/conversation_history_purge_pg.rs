@@ -674,12 +674,15 @@ async fn redis_invalidator_removes_only_purged_messages_from_reader_cache() {
         let mut pipe = redis::pipe();
         for (seq, id) in ["m1", "m2", "m3", "m4"].iter().enumerate() {
             pipe.cmd("ZADD")
-                .arg(flare_im_contracts::message_tail_key(&tenant, conversation))
+                .arg(flare_im_core_contracts::message_tail_key(
+                    &tenant,
+                    conversation,
+                ))
                 .arg(seq as i64 + 1)
                 .arg(*id)
                 .ignore();
             pipe.cmd("SET")
-                .arg(flare_im_contracts::message_cache_key(
+                .arg(flare_im_core_contracts::message_cache_key(
                     &tenant,
                     conversation,
                     id,
@@ -708,7 +711,7 @@ async fn redis_invalidator_removes_only_purged_messages_from_reader_cache() {
             .unwrap();
     }
 
-    let tail = |tenant: &str| flare_im_contracts::message_tail_key(tenant, conversation);
+    let tail = |tenant: &str| flare_im_core_contracts::message_tail_key(tenant, conversation);
     let remaining: Vec<String> = redis::cmd("ZRANGE")
         .arg(tail(&tenant))
         .arg(0)
@@ -719,7 +722,7 @@ async fn redis_invalidator_removes_only_purged_messages_from_reader_cache() {
     assert_eq!(remaining, vec!["m3", "m4"]);
     for (id, expected) in [("m1", 0), ("m2", 0), ("m3", 1), ("m4", 1)] {
         let exists: i64 = redis::cmd("EXISTS")
-            .arg(flare_im_contracts::message_cache_key(
+            .arg(flare_im_core_contracts::message_cache_key(
                 &tenant,
                 conversation,
                 id,
@@ -739,7 +742,7 @@ async fn redis_invalidator_removes_only_purged_messages_from_reader_cache() {
     let mut cleanup: Vec<String> = vec![tail(&tenant), tail(&other_tenant)];
     for owner in [&tenant, &other_tenant] {
         for id in ["m1", "m2", "m3", "m4"] {
-            cleanup.push(flare_im_contracts::message_cache_key(
+            cleanup.push(flare_im_core_contracts::message_cache_key(
                 owner,
                 conversation,
                 id,

@@ -27,7 +27,7 @@ use crate::infrastructure::persistence::event_stream_row::proto_event_from_event
 use crate::infrastructure::persistence::plugin_card_bindings::PostgresPluginCardBindings;
 use crate::infrastructure::persistence::postgres_base::PostgresBaseStorage;
 use crate::infrastructure::persistence::redis_cache::RedisMessageCache;
-use flare_im_contracts::Ctx;
+use flare_im_core_contracts::Ctx;
 use flare_proto::common::event::Payload as ProtoEventPayload;
 use flare_proto::common::{ContentVisibility, Event as ProtoEvent, MessageStatus};
 
@@ -1874,7 +1874,7 @@ impl MessageStorage for OptimizedPostgresMessageStorageImpl {
         .execute(&mut *tx)
         .await?;
         if inserted.rows_affected() > 0 {
-            flare_im_service_kit::audit_effects::durable::record(&mut tx, &draft.tenant_id, "message_export", &draft.task_id, "enqueue").await?;
+            flare_im_core_service_kit::audit_effects::durable::record(&mut tx, &draft.tenant_id, "message_export", &draft.task_id, "enqueue").await?;
         }
         tx.commit().await?;
         Ok::<_, sqlx::Error>(())
@@ -2433,7 +2433,7 @@ mod tests {
     use super::{CONVERSATION_EVENT_HIGH_WATER_SQL, OptimizedPostgresMessageStorageImpl};
     use crate::domain::repository::message_storage::MessageStorage;
     use crate::infrastructure::persistence::postgres_base::PostgresBaseStorage;
-    use flare_im_contracts::Ctx;
+    use flare_im_core_contracts::Ctx;
     use flare_server_core::context::Context;
     use flare_server_core::error::{ErrorCode, FlareError, Result};
 

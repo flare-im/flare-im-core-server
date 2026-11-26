@@ -10,8 +10,8 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use flare_grpc_proto::push::ReportDeviceHandoffRequest;
-use flare_im_contracts::service_names::ACCESS_GATEWAY;
-use flare_im_service_kit::metrics::AccessGatewayMetrics;
+use flare_im_core_contracts::service_names::ACCESS_GATEWAY;
+use flare_im_core_service_kit::metrics::AccessGatewayMetrics;
 use flare_proto::common::DeviceHandoff;
 use flare_server_core::client::request_with_context;
 use flare_server_core::context::{ActorContext, ActorType, Context};

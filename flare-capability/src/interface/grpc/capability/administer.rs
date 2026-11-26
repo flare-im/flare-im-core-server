@@ -15,8 +15,8 @@ use flare_grpc_proto::capability::{
     QueryHookExecutionsRequest, SetHookStatusRequest, TestHookConfigRequest,
     UpdateHookConfigRequest,
 };
-use flare_im_service_kit::audit_effects::durable::StaffAudit;
-use flare_im_service_kit::staff_context::VerifiedStaff;
+use flare_im_core_service_kit::audit_effects::durable::StaffAudit;
+use flare_im_core_service_kit::staff_context::VerifiedStaff;
 use flare_server_core::auth::core_admin::PLATFORM_SCOPE_TENANT;
 use flare_server_core::auth::core_admin::permission::{HOOKS_PLATFORM_WRITE, HOOKS_WRITE};
 use prost::Message;
@@ -429,7 +429,7 @@ fn test_staff(
     let mut metadata = tonic::metadata::MetadataMap::new();
     metadata.insert("x-flare-ctx", token.parse().unwrap());
     HookAdministrator::from_staff(
-        &flare_im_service_kit::staff_context::verify_staff_metadata(
+        &flare_im_core_service_kit::staff_context::verify_staff_metadata(
             &metadata, &verifier, permission,
         )
         .unwrap(),

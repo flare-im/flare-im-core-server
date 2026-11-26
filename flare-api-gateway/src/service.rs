@@ -1,6 +1,6 @@
 use axum::extract::DefaultBodyLimit;
 use flare_core_runtime::ServiceRuntime;
-use flare_im_service_kit::{
+use flare_im_core_service_kit::{
     clients::GrpcClients,
     gateway::{GatewayEnvScope, GatewaySettings, require_secure_token_secret},
     gateway_auth::TenantRuntimeGuard,
@@ -36,9 +36,10 @@ pub struct ApplicationBootstrap;
 
 impl ApplicationBootstrap {
     pub async fn run() -> Result<()> {
-        let app_config = flare_im_service_kit::load_config(Some("config"));
-        let _tracing =
-            flare_im_service_kit::tracing::init_tracing_from_config(Some(app_config.logging()))?;
+        let app_config = flare_im_core_service_kit::load_config(Some("config"));
+        let _tracing = flare_im_core_service_kit::tracing::init_tracing_from_config(Some(
+            app_config.logging(),
+        ))?;
 
         let settings = GatewaySettings::from_env_for(GatewayEnvScope::Api)?;
         let platform =
@@ -50,7 +51,7 @@ impl ApplicationBootstrap {
             settings.auth.dev_issue,
         )?;
         let gateway_config = app_config.api_gateway_service();
-        let address: SocketAddr = flare_im_service_kit::ServiceHelper::parse_server_addr(
+        let address: SocketAddr = flare_im_core_service_kit::ServiceHelper::parse_server_addr(
             app_config,
             &gateway_config.runtime,
             API_GATEWAY,
@@ -260,7 +261,7 @@ impl ApplicationBootstrap {
         };
 
         // 用量预聚合（`api.calls`）：记录器以 Extension 交给鉴权中间件，flush 循环挂进运行时。
-        let usage = flare_im_usage::UsageReporter::from_env("flare-api-gateway").await?;
+        let usage = flare_im_core_usage::UsageReporter::from_env("flare-api-gateway").await?;
 
         // 限流在指标层之内：被拒的请求也计入 HTTP 指标。
         let capability_user_client =
@@ -269,7 +270,7 @@ impl ApplicationBootstrap {
             )?;
         let app = with_request_rate_limit(create_public_router(clients), &settings.rate_limit)
             .layer(axum::Extension(capability_user_client))
-            .layer(flare_im_service_kit::metrics::HttpMetricsLayer::new(
+            .layer(flare_im_core_service_kit::metrics::HttpMetricsLayer::new(
                 API_GATEWAY,
             ))
             // FLARE_API_GATEWAY_SERVER_MAX_BODY_SIZE，缺省 16 MiB（与以前写死的值相同）。
@@ -295,12 +296,12 @@ impl ApplicationBootstrap {
         };
         // 就绪探针：上面的下游客户端、令牌与租户投影都已装配好，监听建立后即就绪；
         // `<API_GATEWAY>_HEALTH_TARGETS` 声明的依赖不可达时不就绪。
-        let readiness = Arc::new(flare_im_service_kit::health::Readiness::from_env(
+        let readiness = Arc::new(flare_im_core_service_kit::health::Readiness::from_env(
             API_GATEWAY,
         ));
         let app = crate::interface::http::with_readiness_probe(app, readiness.clone());
 
-        let runtime = flare_im_service_kit::health::attach_runtime_health_checks(
+        let runtime = flare_im_core_service_kit::health::attach_runtime_health_checks(
             ServiceRuntime::new(API_GATEWAY)
                 .with_address(address)
                 .with_config(
@@ -334,17 +335,20 @@ impl ApplicationBootstrap {
                 }),
             API_GATEWAY,
         );
-        let metrics = flare_im_service_kit::metrics::MetricsEndpointConfig::from_section(
+        let metrics = flare_im_core_service_kit::metrics::MetricsEndpointConfig::from_section(
             API_GATEWAY,
             gateway_config.runtime.metrics.as_ref(),
         )?;
-        let runtime =
-            flare_im_service_kit::metrics::attach_metrics_endpoint(runtime, API_GATEWAY, metrics);
+        let runtime = flare_im_core_service_kit::metrics::attach_metrics_endpoint(
+            runtime,
+            API_GATEWAY,
+            metrics,
+        );
 
         Ok(runtime
             .run_with_registration(|addr| {
                 Box::pin(async move {
-                    flare_im_service_kit::discovery::register_runtime_service_only(
+                    flare_im_core_service_kit::discovery::register_runtime_service_only(
                         API_GATEWAY,
                         addr,
                         None,

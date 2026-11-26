@@ -6,8 +6,8 @@
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use flare_im_contracts::push_trace::{PushTraceEntry, TraceStage, trace_key};
-use flare_im_service_kit::push_trace::PushTraceRecorder;
+use flare_im_core_contracts::push_trace::{PushTraceEntry, TraceStage, trace_key};
+use flare_im_core_service_kit::push_trace::PushTraceRecorder;
 use flare_proto::PushTaskEnvelope;
 
 use crate::domain::vendor_delivery::{Vendor, app_version_label, trace_code};

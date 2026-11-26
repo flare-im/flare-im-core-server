@@ -6,7 +6,7 @@ use crate::application::dto::{
     CreateReferenceHttpResponse, DeleteReferenceHttpResponse, ListReferencesHttpResponse,
 };
 use flare_grpc_proto::media::*;
-use flare_im_service_kit::clients::GrpcClients;
+use flare_im_core_service_kit::clients::GrpcClients;
 use flare_server_core::http::{ApiResponse, Result};
 
 use super::errors::media_rpc_error;

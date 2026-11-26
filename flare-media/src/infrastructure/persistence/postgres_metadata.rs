@@ -3,7 +3,7 @@ use std::str::FromStr;
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
-use flare_im_service_kit::config::PostgresInstanceConfig;
+use flare_im_core_service_kit::config::PostgresInstanceConfig;
 use flare_server_core::error::{ErrorCode, FlareError, Result, map_infra_error};
 use serde_json::Value;
 use sqlx::postgres::PgPoolOptions;
@@ -295,7 +295,7 @@ impl MediaMetadataStore for PostgresMetadataStore {
                     sqlx::query("INSERT INTO media_read_grants(tenant_id,file_id,user_id) VALUES($1,$2,$3)")
                         .bind(app).bind(file_id).bind(user).execute(&mut *tx).await?;
                 }
-                flare_im_service_kit::audit_effects::durable::record(&mut tx,app,"media_read_grants",file_id,"replace").await?;
+                flare_im_core_service_kit::audit_effects::durable::record(&mut tx,app,"media_read_grants",file_id,"replace").await?;
             }
             tx.commit().await?;
             Ok(true)
@@ -422,7 +422,7 @@ impl MediaMetadataStore for PostgresMetadataStore {
                 "failed to persist media metadata",
             )
         })?;
-        flare_im_service_kit::audit_effects::durable::record(
+        flare_im_core_service_kit::audit_effects::durable::record(
             &mut tx,
             tenant_id,
             "media_assets",
@@ -699,7 +699,7 @@ impl MediaMetadataStore for PostgresMetadataStore {
         }
         // Enqueue before touching object storage. Evidence and metadata deletion remain
         // uncommitted until claim.commit(); a failed audit tail prevents external deletion.
-        flare_im_service_kit::audit_effects::durable::record(
+        flare_im_core_service_kit::audit_effects::durable::record(
             &mut tx,
             tenant_id,
             "media_asset_metadata",

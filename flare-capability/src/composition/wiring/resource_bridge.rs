@@ -10,7 +10,7 @@ use crate::{
     },
     interface::grpc::resource_bridge::PluginHostBridgeGrpc,
 };
-use flare_im_capability_core::plugin::invocation::PluginRuntimeVerifier;
+use flare_im_core_capability_core::plugin::invocation::PluginRuntimeVerifier;
 use flare_server_core::error::{FlareError, Result};
 use std::{path::Path, sync::Arc, time::Duration};
 use tokio::io::AsyncReadExt;
@@ -90,9 +90,9 @@ pub async fn compose(
         Err(std::env::VarError::NotPresent) => None,
         Err(_) => return Err(invalid()),
     };
-    if !flare_im_capability_core::plugin::runtime::valid_grpc_authority(&conversation)
+    if !flare_im_core_capability_core::plugin::runtime::valid_grpc_authority(&conversation)
         || social.as_ref().is_some_and(|url| {
-            !flare_im_capability_core::plugin::runtime::valid_grpc_authority(url)
+            !flare_im_core_capability_core::plugin::runtime::valid_grpc_authority(url)
         })
     {
         return Err(invalid());
@@ -101,7 +101,7 @@ pub async fn compose(
     let signer = routes.invocation_signer.as_ref().ok_or_else(invalid)?;
     let mut verifier = match std::env::var("FLARE_PLUGIN_CALL_PUBLIC_KEYS") {
         Ok(raw) => {
-            flare_im_capability_core::plugin::invocation::PluginCallVerifier::from_public_keys_json(
+            flare_im_core_capability_core::plugin::invocation::PluginCallVerifier::from_public_keys_json(
                 &raw,
             )
             .map_err(|_| invalid())?
@@ -113,7 +113,7 @@ pub async fn compose(
         .insert(signer.key_id().into(), signer.public_key())
         .map_err(|_| invalid())?;
     let service_signer = Arc::new(
-        flare_im_service_kit::signed_read::service_signer_from_env("plugin resource bridge")?
+        flare_im_core_service_kit::signed_read::service_signer_from_env("plugin resource bridge")?
             .ok_or_else(invalid)?,
     );
     let realtime = realtime_push(&service_signer)?;
@@ -179,7 +179,7 @@ fn realtime_push(
         Err(_) => return Err(FlareError::system("invalid FLARE_PLUGIN_REALTIME_PUSH_URL")),
     };
     if !(authority.starts_with("discovery://") && authority.len() > "discovery://".len()
-        || flare_im_capability_core::plugin::runtime::valid_grpc_authority(&authority))
+        || flare_im_core_capability_core::plugin::runtime::valid_grpc_authority(&authority))
     {
         return Err(FlareError::system("invalid FLARE_PLUGIN_REALTIME_PUSH_URL"));
     }

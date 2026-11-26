@@ -1,6 +1,6 @@
 //! 服务模块 - 包含服务启动、注册和管理相关功能
 
-use flare_im_contracts::service_names::STORAGE_WRITER;
+use flare_im_core_contracts::service_names::STORAGE_WRITER;
 use flare_server_core::error::Result;
 use tracing::info;
 
@@ -14,9 +14,9 @@ pub struct ApplicationBootstrap;
 impl ApplicationBootstrap {
     /// 运行应用的主入口点
     pub async fn run() -> Result<()> {
-        let app_config = flare_im_service_kit::load_app_config_from_env();
+        let app_config = flare_im_core_service_kit::load_app_config_from_env();
         let service_config = app_config.storage_writer_service();
-        let runtime = flare_im_service_kit::build_background_service_runtime(
+        let runtime = flare_im_core_service_kit::build_background_service_runtime(
             app_config,
             &service_config.runtime,
             STORAGE_WRITER,
@@ -37,7 +37,7 @@ impl ApplicationBootstrap {
     pub async fn run_with_context(context: ApplicationContext) -> Result<()> {
         Self::run_with_runtime(
             context,
-            flare_im_service_kit::background_service_runtime(STORAGE_WRITER),
+            flare_im_core_service_kit::background_service_runtime(STORAGE_WRITER),
         )
         .await
     }
@@ -85,7 +85,7 @@ impl ApplicationBootstrap {
             runtime = runtime.add_spawn_with_shutdown(
                 "storage-writer-metrics",
                 move |shutdown_rx| async move {
-                    flare_im_service_kit::metrics::serve_prometheus_metrics(
+                    flare_im_core_service_kit::metrics::serve_prometheus_metrics(
                         metrics_config,
                         shutdown_rx,
                     )

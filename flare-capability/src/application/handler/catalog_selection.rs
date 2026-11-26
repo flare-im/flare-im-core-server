@@ -12,11 +12,11 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
-use flare_im_capability_core::plugin::bundle::WebBundleDecl;
-use flare_im_capability_core::plugin::manifest::UiContribution;
-use flare_im_capability_core::plugin::runtime::PluginRuntimeSnapshot;
-use flare_im_capability_core::plugin::ui::ClientUiDescriptor;
-use flare_im_service_kit::metrics::REGISTRY;
+use flare_im_core_capability_core::plugin::bundle::WebBundleDecl;
+use flare_im_core_capability_core::plugin::manifest::UiContribution;
+use flare_im_core_capability_core::plugin::runtime::PluginRuntimeSnapshot;
+use flare_im_core_capability_core::plugin::ui::ClientUiDescriptor;
+use flare_im_core_service_kit::metrics::REGISTRY;
 use flare_server_core::error::{ErrorCode, FlareError};
 use once_cell::sync::Lazy;
 use prometheus::{IntCounterVec, Opts};
@@ -63,7 +63,7 @@ pub(crate) fn read_descriptor(
 }
 
 /// A contribution as one client gets it, with how it was chosen (`variant`, `fallback`,
-/// `upgrade`, `unsupported`; [`flare_im_capability_core::plugin::ui::Selected::outcome`]).
+/// `upgrade`, `unsupported`; [`flare_im_core_capability_core::plugin::ui::Selected::outcome`]).
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct SelectedContribution {
     pub contribution: UiContribution,

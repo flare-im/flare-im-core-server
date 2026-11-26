@@ -382,8 +382,8 @@ mod tests {
     /// 而不是收到终止会话的 KICKED `TENANT_UNAVAILABLE`。
     #[tokio::test]
     async fn a_projection_outage_reaches_the_gateway_as_a_transient_failure() {
-        use flare_im_contracts::domain::tenant::TenantRuntimeSnapshot;
-        use flare_im_service_kit::tenant_runtime::{
+        use flare_im_core_contracts::domain::tenant::TenantRuntimeSnapshot;
+        use flare_im_core_service_kit::tenant_runtime::{
             TenantAccessPolicy, TenantRuntimeCache, TenantRuntimeCacheOptions, TenantRuntimeSource,
         };
 

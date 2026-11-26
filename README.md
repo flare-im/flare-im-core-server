@@ -104,7 +104,7 @@ The **authentication contract itself is fully open source**. Two routes:
   point for plugging in your existing users.
 
 Business rules work the same way: a `message.pre_send` hook can allow, reject or rewrite a
-message before it is stored. The runtime is `crates/flare-im-hooks`.
+message before it is stored. The runtime is `crates/flare-im-core-hooks`.
 
 This is the same "bring your own identity" model as Sendbird or Twilio Conversations —
 the difference being that Flare is self-hostable and its protocol and core are auditable.

@@ -11,11 +11,11 @@
 //! while the database holds envelopes ([`PluginConfigCipher::check_sealed`]). Nothing here prints a
 //! key or a value.
 //!
-//! [`PluginManifest::secret_configuration_paths`]: flare_im_capability_core::plugin::PluginManifest::secret_configuration_paths
+//! [`PluginManifest::secret_configuration_paths`]: flare_im_core_capability_core::plugin::PluginManifest::secret_configuration_paths
 use aes_gcm::aead::{Aead, OsRng, Payload};
 use aes_gcm::{AeadCore, Aes256Gcm, KeyInit, Nonce};
 use base64::{Engine, engine::general_purpose::STANDARD};
-use flare_im_capability_core::plugin::configuration::SecretPath;
+use flare_im_core_capability_core::plugin::configuration::SecretPath;
 use flare_server_core::error::{FlareError, Result};
 use serde_json::{Map, Value, json};
 

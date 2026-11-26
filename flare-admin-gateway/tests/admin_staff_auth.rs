@@ -11,9 +11,9 @@ use common::*;
 use ed25519_dalek::SigningKey;
 use ed25519_dalek::pkcs8::{EncodePrivateKey, EncodePublicKey};
 use flare_admin_gateway::interface::http::create_admin_router;
-use flare_im_service_kit::audit_effects::AuditEffects;
-use flare_im_service_kit::control_auth::{CORE_PROJECTION_AUDIENCE, PLATFORM_ISSUER};
-use flare_im_service_kit::staff_context::admin_staff_verifier_from_sources;
+use flare_im_core_service_kit::audit_effects::AuditEffects;
+use flare_im_core_service_kit::control_auth::{CORE_PROJECTION_AUDIENCE, PLATFORM_ISSUER};
+use flare_im_core_service_kit::staff_context::admin_staff_verifier_from_sources;
 use flare_server_core::auth::kid;
 use flare_server_core::{
     SignedActorType, SignedContextIdentity, SignedContextSigner, TokenService,

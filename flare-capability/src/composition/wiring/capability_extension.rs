@@ -105,13 +105,12 @@ pub async fn init_capability_extension_stack(
         capability_grpc = capability_grpc.with_plugin_registry(
             repository,
             crate::infrastructure::config::plugin_publishers::publisher_trust_from_env()?,
-            flare_im_service_kit::control_auth::PlatformAssertionVerifier::from_env().map_err(
-                |_| {
+            flare_im_core_service_kit::control_auth::PlatformAssertionVerifier::from_env()
+                .map_err(|_| {
                     flare_server_core::error::FlareError::system(
                         "invalid FLARE_PLATFORM_PUBLIC_KEY",
                     )
-                },
-            )?,
+                })?,
             development,
             reconciler,
         );

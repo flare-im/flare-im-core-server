@@ -1,5 +1,5 @@
 //! API Key partition: local primary credentials, strict runtime admission, Service actor.
-//! No Control dependency, Social rules, end-user impersonation or business-table SQL.
+//! No Control dependency, business rules, end-user impersonation or business-table SQL.
 use axum::{
     Json, Router,
     body::{Body, to_bytes},
@@ -13,7 +13,7 @@ use flare_grpc_proto::conversation::{
     ListConversationParticipantsRequest, ListConversationParticipantsResponse,
     conversation_read_service_client::ConversationReadServiceClient,
 };
-use flare_im_service_kit::{
+use flare_im_core_service_kit::{
     credential_projection::{PostgresCredentialReader, connect_readonly_credential_pool},
     tenant_runtime::{TenantLookup, TenantRuntimeCache},
 };
@@ -72,7 +72,7 @@ impl PlatformConfig {
             .ok_or_else(|| FlareError::system("missing Platform API signing key"))?;
         let signer = SignedContextSigner::from_private_key(&material)
             .and_then(|signer| {
-                signer.with_kid(flare_im_service_kit::platform_send::PLATFORM_API_KID)
+                signer.with_kid(flare_im_core_service_kit::platform_send::PLATFORM_API_KID)
             })
             .map_err(|_| FlareError::system("invalid Platform API signing key"))?;
         Ok(Some(Self {
@@ -281,7 +281,7 @@ fn identifier(value: &str, app: bool) -> bool {
                 || matches!(b, b'_' | b'-')
                 || (!app && matches!(b, b'.' | b':' | b'@'))
         })
-        && (!app || value == flare_im_contracts::utils::normalize_tenant_id(value))
+        && (!app || value == flare_im_core_contracts::utils::normalize_tenant_id(value))
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -489,8 +489,12 @@ mod tests {
     use super::*;
     use async_trait::async_trait;
     use ed25519_dalek::{SigningKey, pkcs8::EncodePrivateKey};
-    use flare_im_contracts::domain::tenant::{TenantQuota, TenantRuntimeSnapshot, TenantStatus};
-    use flare_im_service_kit::tenant_runtime::{TenantRuntimeCacheOptions, TenantRuntimeSource};
+    use flare_im_core_contracts::domain::tenant::{
+        TenantQuota, TenantRuntimeSnapshot, TenantStatus,
+    };
+    use flare_im_core_service_kit::tenant_runtime::{
+        TenantRuntimeCacheOptions, TenantRuntimeSource,
+    };
     use flare_server_core::auth::{
         api_key::{ApiKeyKind, ApiKeyToken},
         credential_snapshot::CredentialKeyRecord,
@@ -580,7 +584,7 @@ mod tests {
             signer: Arc::new(
                 SignedContextSigner::from_private_key(&signing)
                     .unwrap()
-                    .with_kid(flare_im_service_kit::platform_send::PLATFORM_API_KID)
+                    .with_kid(flare_im_core_service_kit::platform_send::PLATFORM_API_KID)
                     .unwrap(),
             ),
             budget: CredentialRequestBudget::new(1),

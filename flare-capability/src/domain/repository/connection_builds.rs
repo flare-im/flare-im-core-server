@@ -1,7 +1,7 @@
 //! Port of the online build distribution: what the access gateways last reported for a tenant,
 //! summed over the gateways that are still alive.
 
-use flare_im_service_kit::gateway::connection_builds::ConnectionBuildRow;
+use flare_im_core_service_kit::gateway::connection_builds::ConnectionBuildRow;
 use flare_server_core::error::Result;
 
 /// A tenant's online connections by (platform, build), and how many gateways contributed.

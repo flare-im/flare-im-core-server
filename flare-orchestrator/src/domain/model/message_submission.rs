@@ -1,4 +1,4 @@
-use flare_im_contracts::utils::TimelineMetadata;
+use flare_im_core_contracts::utils::TimelineMetadata;
 use flare_proto::common::Message;
 
 #[derive(Clone, Debug)]

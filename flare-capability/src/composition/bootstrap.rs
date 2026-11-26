@@ -2,7 +2,7 @@
 //!
 //! 解析监听地址、调用 [`super::wiring::initialize`] 装配依赖，并注册 **gRPC + 运行时**。
 
-use flare_im_contracts::service_names::CAPABILITY;
+use flare_im_core_contracts::service_names::CAPABILITY;
 use flare_server_core::error::Result;
 use tracing::info;
 
@@ -21,9 +21,10 @@ impl ApplicationBootstrap {
 
     /// [`Self::run_from_env`] with what the binary adds, such as a plugin service router.
     pub async fn run_from_env_with(extensions: CapabilityExtensions) -> Result<()> {
-        let app_config = flare_im_service_kit::load_app_config_from_env();
-        let _tracing =
-            flare_im_service_kit::tracing::init_tracing_from_config(Some(app_config.logging()))?;
+        let app_config = flare_im_core_service_kit::load_app_config_from_env();
+        let _tracing = flare_im_core_service_kit::tracing::init_tracing_from_config(Some(
+            app_config.logging(),
+        ))?;
 
         let config = capability_config_from_env(app_config)?;
         info!(
@@ -42,9 +43,9 @@ impl ApplicationBootstrap {
         config: CapabilityServiceConfig,
         extensions: CapabilityExtensions,
     ) -> Result<()> {
-        let app_config = flare_im_service_kit::load_app_config_from_env();
+        let app_config = flare_im_core_service_kit::load_app_config_from_env();
         let cap_service = app_config.capability_service();
-        let runtime_plan = flare_im_service_kit::build_service_runtime_plan(
+        let runtime_plan = flare_im_core_service_kit::build_service_runtime_plan(
             app_config,
             &cap_service.runtime,
             CAPABILITY,
@@ -61,14 +62,14 @@ impl ApplicationBootstrap {
 
     async fn run_with_context(
         context: ApplicationContext,
-        runtime_plan: flare_im_service_kit::ImServiceRuntimePlan,
+        runtime_plan: flare_im_core_service_kit::ImServiceRuntimePlan,
     ) -> Result<()> {
         use tonic::transport::Server;
 
         let address = runtime_plan.address;
         let service_name = runtime_plan.service_name.clone();
         let grpc_metrics =
-            flare_im_service_kit::metrics::GrpcMetricsLayer::new(service_name.clone());
+            flare_im_core_service_kit::metrics::GrpcMetricsLayer::new(service_name.clone());
         info!(
             address = %address,
             port = %address.port(),
@@ -254,7 +255,7 @@ impl ApplicationBootstrap {
         runtime
             .run_with_registration(|addr| {
                 Box::pin(async move {
-                    flare_im_service_kit::discovery::register_runtime_service_only(
+                    flare_im_core_service_kit::discovery::register_runtime_service_only(
                         &service_name,
                         addr,
                         None,
@@ -292,7 +293,7 @@ fn resolve_database_url(
 }
 
 fn capability_config_from_env(
-    app_config: &flare_im_service_kit::FlareAppConfig,
+    app_config: &flare_im_core_service_kit::FlareAppConfig,
 ) -> Result<CapabilityServiceConfig> {
     let cap_service = app_config.capability_service();
     let postgres_profile = cap_service
@@ -350,7 +351,7 @@ fn capability_config_from_env(
             "invalid FLARE_TENANT_NOTICE_PUBLISHERS: {detail}"
         ))
     })?;
-    let notice_channel = flare_im_service_kit::tenant_notice::notice_channel(
+    let notice_channel = flare_im_core_service_kit::tenant_notice::notice_channel(
         token_store
             .and_then(|profile| profile.namespace.as_deref())
             .unwrap_or("flare"),

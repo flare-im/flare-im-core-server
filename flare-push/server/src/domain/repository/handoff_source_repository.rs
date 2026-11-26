@@ -4,7 +4,7 @@
 //! 连会话都不带，得向会话服务问出窗口内有新未读的会话。两者都只在交接时才读，
 //! 不在消息路由的路径上。
 
-use flare_im_contracts::Ctx;
+use flare_im_core_contracts::Ctx;
 use flare_proto::common::Message;
 use flare_server_core::error::FlareError;
 

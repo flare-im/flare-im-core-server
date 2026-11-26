@@ -2,10 +2,10 @@
 //!
 //! 核不解释 `settings_json`，只透传存进 `tenants.config`；核只执行 `quota.core`，其余配额原样存储。
 
-use flare_im_contracts::domain::tenant::{
+use flare_im_core_contracts::domain::tenant::{
     TenantCoreQuota, TenantQuota, TenantStatus, is_valid_tenant_id,
 };
-use flare_im_contracts::utils::normalize_tenant_id;
+use flare_im_core_contracts::utils::normalize_tenant_id;
 
 /// 一条待写入的租户投影。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -124,7 +124,7 @@ impl TenantProjectionRecord {
         })
     }
 
-    /// `tenants.quota` 列的 JSON 文本（固定 schema，与 Social 侧一致）。
+    /// `tenants.quota` 列的 JSON 文本（固定 schema，与业务侧一致）。
     pub fn quota_json(&self) -> String {
         serde_json::to_string(&self.quota).unwrap_or_else(|_| "{}".to_string())
     }

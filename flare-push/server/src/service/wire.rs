@@ -1,12 +1,12 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use flare_im_contracts::constants::topics::TOPIC_PUSH_HANDOFF;
-use flare_im_service_kit::metrics::PushServerMetrics;
-use flare_im_service_kit::push_delivery::{
+use flare_im_core_contracts::constants::topics::TOPIC_PUSH_HANDOFF;
+use flare_im_core_service_kit::metrics::PushServerMetrics;
+use flare_im_core_service_kit::push_delivery::{
     AttestedRecordHandler, BrokerRecordIdentity, PushDeliveryMode,
 };
-use flare_im_service_kit::push_trace::PushTraceRecorder;
+use flare_im_core_service_kit::push_trace::PushTraceRecorder;
 use flare_server_core::error::Result;
 use flare_server_core::mq::consumer::ConsumerConfig;
 use flare_server_core::mq::consumer::MessageHandler;
@@ -92,7 +92,7 @@ fn push_trace_recorder(config: &PushServerConfig) -> PushTraceRecorder {
 }
 
 pub async fn initialize(
-    app_config: &flare_im_service_kit::config::FlareAppConfig,
+    app_config: &flare_im_core_service_kit::config::FlareAppConfig,
     mode: PushDeliveryMode,
 ) -> Result<ApplicationContext> {
     let config = Arc::new(PushServerConfig::from_app_config(app_config));
@@ -192,10 +192,10 @@ pub async fn initialize(
 ///
 /// 路由失败（在线状态查不到、发布到 push-online/push-offline 失败）多是下游停机或重启引起的
 /// 暂时性失败，handler 报可重试错误，交给 JetStream 按
-/// [`flare_im_service_kit::consumer_retry`] 的退避延迟重投：12 次重试的等待合计 135 s，之后
+/// [`flare_im_core_service_kit::consumer_retry`] 的退避延迟重投：12 次重试的等待合计 135 s，之后
 /// 仍失败才进 `flare.im.dlq.push-server`。默认的 3 次立即重投会在下游停机的同一瞬间用完。
 pub(crate) fn push_server_consumer_config() -> ConsumerConfig {
-    flare_im_service_kit::consumer_retry::with_downstream_outage_retry(
+    flare_im_core_service_kit::consumer_retry::with_downstream_outage_retry(
         ConsumerConfig::default()
             .with_concurrency(64)
             .with_ordered(true),
@@ -232,7 +232,7 @@ mod wire_tests {
     fn push_server_retries_span_a_restart_window_inside_max_deliver() {
         let consumer = push_server_consumer_config();
         let max_deliver = push_server_nats_config().max_deliver();
-        let window = flare_im_service_kit::consumer_retry::check_downstream_outage_retry(
+        let window = flare_im_core_service_kit::consumer_retry::check_downstream_outage_retry(
             &consumer,
             max_deliver,
         )

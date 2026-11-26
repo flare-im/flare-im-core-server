@@ -6,8 +6,8 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
-use flare_im_capability_core::plugin::PluginManifest;
-use flare_im_capability_core::plugin::runtime::{ManifestCache, PluginProjection};
+use flare_im_core_capability_core::plugin::PluginManifest;
+use flare_im_core_capability_core::plugin::runtime::{ManifestCache, PluginProjection};
 use flare_server_core::error::{ErrorCode, Result, map_infra_error};
 use sqlx::{Pool, Postgres};
 

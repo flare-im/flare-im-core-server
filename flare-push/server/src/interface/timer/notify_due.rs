@@ -8,7 +8,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use flare_im_contracts::Ctx;
+use flare_im_core_contracts::Ctx;
 use flare_server_core::error::FlareError;
 use futures::stream::{self, StreamExt};
 use tokio::sync::oneshot;

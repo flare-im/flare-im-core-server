@@ -1,6 +1,6 @@
 //! Controlled test peer; not a vendor/phone or final system-stack fixture.
 use crate::domain::DeviceTokenRepository;
-use flare_im_contracts::{Ctx, DevicePushToken};
+use flare_im_core_contracts::{Ctx, DevicePushToken};
 use flare_proto::PushTaskEnvelope;
 use flare_server_core::FlareError;
 use std::collections::HashSet;

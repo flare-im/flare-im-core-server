@@ -40,7 +40,7 @@ HTTP Platform路由，不能称为CRED-02或九容器验收。接入时仍须独
 
 ## Gateway 读取 adapter 的基础层归属
 
-只读本库主库 adapter 移入 `flare-im-service-kit::credential_projection`，Capability
+只读本库主库 adapter 移入 `flare-im-core-service-kit::credential_projection`，Capability
 接收仓储委托同一个实现。API Gateway 无须导入 Capability writer，Core 不依赖
 Social/Control 实现；SQL、MVCC与验证逻辑、0010账本不改。实际独占 PG/gRPC
 十一条RPC、Key缓存吊销/重启/坏行及并发回归复跑通过；service-kit/capability lib

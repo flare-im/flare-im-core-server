@@ -1,7 +1,7 @@
 //! 命令处理器（编排层）- 轻量级，只负责编排领域服务
 
-use flare_im_contracts::Ctx;
-use flare_im_service_kit::metrics::StorageWriterMetrics;
+use flare_im_core_contracts::Ctx;
+use flare_im_core_service_kit::metrics::StorageWriterMetrics;
 use flare_server_core::error::{ErrorCode, Result, map_infra_error};
 use std::sync::Arc;
 use std::time::Instant;
@@ -115,7 +115,7 @@ where
                 .observe(total_duration.as_secs_f64());
             self.metrics
                 .messages_persisted_total
-                .with_label_values(&[flare_im_service_kit::metrics::tenant_label(
+                .with_label_values(&[flare_im_core_service_kit::metrics::tenant_label(
                     tenant_id.as_str(),
                 )])
                 .inc();
@@ -222,8 +222,8 @@ mod tests {
         AckPublisher, ArchiveStoreRepository, EventStreamRepository, HotCacheRepository,
         WalCleanupRepository,
     };
-    use flare_im_contracts::message::Message;
-    use flare_im_contracts::utils::Context;
+    use flare_im_core_contracts::message::Message;
+    use flare_im_core_contracts::utils::Context;
     use flare_server_core::error::Result as AnyhowResult;
     use std::collections::HashMap;
     use std::sync::atomic::{AtomicUsize, Ordering};

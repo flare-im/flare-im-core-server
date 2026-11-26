@@ -8,10 +8,10 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use flare_im_contracts::domain::push_binding::{
+use flare_im_core_contracts::domain::push_binding::{
     push_binding_inactive, push_binding_last_active_ms,
 };
-use flare_im_contracts::{Ctx, device_push_token_registry_key};
+use flare_im_core_contracts::{Ctx, device_push_token_registry_key};
 use flare_server_core::error::{ErrorCode, FlareError};
 use redis::aio::ConnectionManager;
 
@@ -404,7 +404,8 @@ mod tests {
 
     const NOW: i64 = 1_800_000_000_000;
     const DAY: i64 = 86_400_000;
-    const DAYS: u32 = flare_im_contracts::domain::push_binding::PUSH_BINDING_INACTIVE_DAYS_DEFAULT;
+    const DAYS: u32 =
+        flare_im_core_contracts::domain::push_binding::PUSH_BINDING_INACTIVE_DAYS_DEFAULT;
 
     /// 一条刚登记、没核对过的绑定记录。
     fn record(registered_at_ms: i64, last_seen_ms: i64) -> String {

@@ -7,7 +7,7 @@
 pub trait TenantProjectionRepository: Send + Sync {
     async fn replace_plugins(
         &self,
-        _projection: &flare_im_capability_core::plugin::runtime::PluginProjection,
+        _projection: &flare_im_core_capability_core::plugin::runtime::PluginProjection,
     ) -> flare_server_core::error::Result<crate::domain::model::TenantProjectionOutcome> {
         Err(flare_server_core::error::FlareError::system(
             "plugin projection store unavailable",
@@ -66,8 +66,9 @@ pub struct PluginEventDirectory {
     /// preventing other bindings from receiving the event.
     pub unavailable_grants: std::collections::BTreeSet<String>,
     /// Current routing facts. `None` cannot erase a desired subscription.
-    pub routes:
-        Option<std::sync::Arc<flare_im_capability_core::plugin::runtime::PluginRuntimeSnapshot>>,
+    pub routes: Option<
+        std::sync::Arc<flare_im_core_capability_core::plugin::runtime::PluginRuntimeSnapshot>,
+    >,
 }
 
 #[async_trait::async_trait]
@@ -84,7 +85,9 @@ pub trait PluginAuthorizationReader: Send + Sync {
         &self,
         tenant: &str,
     ) -> flare_server_core::error::Result<
-        Option<std::sync::Arc<flare_im_capability_core::plugin::runtime::PluginRuntimeSnapshot>>,
+        Option<
+            std::sync::Arc<flare_im_core_capability_core::plugin::runtime::PluginRuntimeSnapshot>,
+        >,
     >;
     /// Whether the application has a plugin projection its control plane stopped renewing:
     /// `plugin_snapshot` then answers `None`, yet nothing was uninstalled. Clients are told

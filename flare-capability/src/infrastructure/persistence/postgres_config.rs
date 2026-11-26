@@ -1,7 +1,7 @@
 //! # Hook配置PostgreSQL持久化
 //!
 //! 控制面的写入与查询。每次写入在同一事务里递增 `hook_config_versions`，Ingest 约每秒查一次、只取
-//! 变了的范围（见 `flare_im_hooks::hooks::HookConfigReloader`）。
+//! 变了的范围（见 `flare_im_core_hooks::hooks::HookConfigReloader`）。
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -225,7 +225,7 @@ impl PostgresHookConfigRepository {
             .await
             .map_err(write_error)?;
 
-        flare_im_service_kit::audit_effects::durable::record(
+        flare_im_core_service_kit::audit_effects::durable::record(
             &mut tx,
             tenant_id.unwrap_or("platform"),
             "hook_config",
@@ -383,7 +383,7 @@ impl PostgresHookConfigRepository {
         .map_err(write_error)?;
 
         if let Some(tenant) = &tenant {
-            flare_im_service_kit::audit_effects::durable::record(
+            flare_im_core_service_kit::audit_effects::durable::record(
                 &mut tx,
                 tenant.as_deref().unwrap_or("platform"),
                 "hook_config",
@@ -430,7 +430,7 @@ impl PostgresHookConfigRepository {
         .map_err(write_error)?;
 
         if let Some(tenant) = &tenant {
-            flare_im_service_kit::audit_effects::durable::record(
+            flare_im_core_service_kit::audit_effects::durable::record(
                 &mut tx,
                 tenant.as_deref().unwrap_or("platform"),
                 "hook_config",
@@ -472,7 +472,7 @@ impl PostgresHookConfigRepository {
         .map_err(write_error)?;
 
         if let Some(id) = id {
-            flare_im_service_kit::audit_effects::durable::record(
+            flare_im_core_service_kit::audit_effects::durable::record(
                 &mut tx,
                 tenant_id.unwrap_or("platform"),
                 "hook_config",
@@ -500,7 +500,7 @@ impl PostgresHookConfigRepository {
         .await
         .map_err(write_error)?;
         if let Some(tenant) = &tenant {
-            flare_im_service_kit::audit_effects::durable::record(
+            flare_im_core_service_kit::audit_effects::durable::record(
                 &mut tx,
                 tenant.as_deref().unwrap_or("platform"),
                 "hook_config",

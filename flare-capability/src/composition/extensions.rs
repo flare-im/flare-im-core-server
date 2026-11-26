@@ -5,7 +5,7 @@
 //! here; Core still owns admission and keys, the router only receives them.
 use crate::application::handler::service_directory::ServiceDirectory;
 use crate::domain::repository::service_dispatch::PluginServiceDispatch;
-use flare_im_capability_core::plugin::invocation::{
+use flare_im_core_capability_core::plugin::invocation::{
     PluginCallSigner, PluginCallVerifier, PluginRuntimeVerifier,
 };
 use std::sync::Arc;

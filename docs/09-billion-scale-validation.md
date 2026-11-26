@@ -18,8 +18,8 @@
 
 ```bash
 cargo fmt --all -- --check
-cargo check -p flare-orchestrator -p flare-im-service-kit -p flare-im-message-pipeline -p flare-push-server -p flare-push-worker -p flare-signaling-gateway -p flare-conversation -p flare-dlq-replay -p flare-im-contracts
-cargo test -p flare-orchestrator -p flare-push-server -p flare-push-worker -p flare-signaling-gateway -p flare-conversation -p flare-im-message-pipeline -p flare-dlq-replay
+cargo check -p flare-orchestrator -p flare-im-core-service-kit -p flare-im-core-message-pipeline -p flare-push-server -p flare-push-worker -p flare-signaling-gateway -p flare-conversation -p flare-dlq-replay -p flare-im-core-contracts
+cargo test -p flare-orchestrator -p flare-push-server -p flare-push-worker -p flare-signaling-gateway -p flare-conversation -p flare-im-core-message-pipeline -p flare-dlq-replay
 cargo test -p flare-im-arch-tests
 ```
 

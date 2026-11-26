@@ -1,6 +1,6 @@
 use super::*;
-use flare_im_capability_core::plugin::manifest::ClientPlatform;
-use flare_im_capability_core::plugin::ui::{
+use flare_im_core_capability_core::plugin::manifest::ClientPlatform;
+use flare_im_core_capability_core::plugin::ui::{
     BundleRuntime, MAX_UI_DESCRIPTOR_BYTES, engine_vocabulary,
 };
 

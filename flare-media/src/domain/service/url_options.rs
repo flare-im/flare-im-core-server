@@ -1,5 +1,5 @@
 use super::*;
-use flare_im_contracts::media_response::MediaResponseHeaders;
+use flare_im_core_contracts::media_response::MediaResponseHeaders;
 
 impl MediaService {
     /// Apply response options only after the existing User/Staff and tenant

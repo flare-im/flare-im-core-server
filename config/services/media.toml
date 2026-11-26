@@ -17,7 +17,7 @@ admin_image_upload_max_pixels = 16777216
 admin_image_upload_max_dimension = 8192
 admin_image_upload_allowed_mime_types = ["image/png", "image/jpeg", "image/webp", "image/gif"]
 # Explicit signed Service actors allowed to validate/resolve application avatar assets.
-# Deployments enabling Social profile avatars must explicitly add their profile service actor.
+# Deployments enabling business profile avatars must explicitly add their profile service actor.
 application_media_validators = []
 local_storage_dir = "./data/media"
 # 本地文件回退统一走 flare-api-gateway 代理，避免客户端直连宿主机文件服务。

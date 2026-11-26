@@ -30,7 +30,7 @@ pub async fn require_media_identity(
                 })
         });
     if !valid {
-        return flare_im_service_kit::gateway_auth::auth_error_response(
+        return flare_im_core_service_kit::gateway_auth::auth_error_response(
             flare_server_core::AuthError::Forbidden(
                 "media requires a tenant-bound user identity".to_string(),
             ),

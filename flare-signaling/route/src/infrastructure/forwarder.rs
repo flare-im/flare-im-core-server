@@ -19,11 +19,11 @@ use flare_server_core::error::{ErrorBuilder, ErrorCode, map_infra_error};
 use tracing::{debug, info};
 
 use crate::domain::repository::{DefaultRouteRepository, RouteRepository};
-use flare_im_contracts::service_names::{MESSAGE_INGEST, MESSAGE_ORCHESTRATOR};
-use flare_im_contracts::utils::normalize_tenant_id;
-use flare_im_service_kit::ServiceClient;
-use flare_im_service_kit::config::ServicesConfig;
-use flare_im_service_kit::discovery::{
+use flare_im_core_contracts::service_names::{MESSAGE_INGEST, MESSAGE_ORCHESTRATOR};
+use flare_im_core_contracts::utils::normalize_tenant_id;
+use flare_im_core_service_kit::ServiceClient;
+use flare_im_core_service_kit::config::ServicesConfig;
+use flare_im_core_service_kit::discovery::{
     invalidate_static_channel_on_transport_failure, is_transport_failure, resolve_grpc_channel,
 };
 use flare_server_core::error::Result;
@@ -72,7 +72,7 @@ impl BusinessGrpcClients {
     }
 
     /// 静态地址的客户端：通道取自 service-kit 的静态通道（建连上限 2 s、HTTP/2 探活，见
-    /// [`flare_im_service_kit::discovery::StaticChannelPolicy`]），构造时不连下游。
+    /// [`flare_im_core_service_kit::discovery::StaticChannelPolicy`]），构造时不连下游。
     async fn from_static_authority(authority: &str) -> Result<Self> {
         let channel = resolve_grpc_channel(authority).await.map_err(|e| {
             map_infra_error(
@@ -354,8 +354,8 @@ impl MessageForwarder {
     ) -> Result<BusinessGrpcClients> {
         // 特殊处理：如果 SVID 是 svid.im，使用调用方指定的内部 IM 服务名
         if svid == svid::IM {
-            use flare_im_service_kit::config::app_config;
-            use flare_im_service_kit::discovery::create_discover_from_registry_config_with_filters;
+            use flare_im_core_service_kit::config::app_config;
+            use flare_im_core_service_kit::discovery::create_discover_from_registry_config_with_filters;
 
             let im_service = endpoint.to_string();
             let app_config = app_config();
@@ -432,8 +432,8 @@ impl MessageForwarder {
             return BusinessGrpcClients::from_static_authority(&format!("http://{endpoint}")).await;
         } else {
             // 服务名（通过服务发现，支持 SVID 过滤）
-            use flare_im_service_kit::config::app_config;
-            use flare_im_service_kit::discovery::create_discover_from_registry_config_with_filters;
+            use flare_im_core_service_kit::config::app_config;
+            use flare_im_core_service_kit::discovery::create_discover_from_registry_config_with_filters;
 
             let app_config = app_config();
 
@@ -463,7 +463,7 @@ impl MessageForwarder {
                 } else {
                     // 没有 SVID，使用普通的服务发现
                     let discover_result =
-                        flare_im_service_kit::discovery::create_discover(endpoint)
+                        flare_im_core_service_kit::discovery::create_discover(endpoint)
                             .await
                             .map_err(|e| {
                                 map_infra_error(
@@ -572,7 +572,7 @@ impl MessageForwarder {
 
         // 对于 svid.im，直接使用服务发现，不需要 RouteRepository
         let endpoint = if resolved_svid == svid::IM {
-            use flare_im_contracts::service_names::{MESSAGE_INGEST, get_service_name};
+            use flare_im_core_contracts::service_names::{MESSAGE_INGEST, get_service_name};
             get_service_name(MESSAGE_INGEST)
         } else {
             // 其他 SVID：从路由仓储解析端点
@@ -768,7 +768,7 @@ impl MessageForwarder {
     ) -> Result<(String, Vec<u8>)> {
         let resolved_svid = if svid.is_empty() { svid::IM } else { svid };
         let endpoint = if resolved_svid == svid::IM {
-            use flare_im_contracts::service_names::{MESSAGE_ORCHESTRATOR, get_service_name};
+            use flare_im_core_contracts::service_names::{MESSAGE_ORCHESTRATOR, get_service_name};
             get_service_name(MESSAGE_ORCHESTRATOR)
         } else {
             use crate::domain::model::Svid;
@@ -858,7 +858,7 @@ impl MessageForwarder {
 #[cfg(test)]
 mod static_im_endpoint_tests {
     use super::*;
-    use flare_im_service_kit::config::{
+    use flare_im_core_service_kit::config::{
         MessageIngestServiceConfig, MessageOrchestratorServiceConfig, ServiceEndpointConfig,
     };
 
@@ -931,7 +931,7 @@ mod business_channel_tests {
         SendCustomDataRequest, SendCustomDataResponse, SendSystemMessageRequest,
         SendSystemMessageResponse,
     };
-    use flare_im_service_kit::discovery::is_static_channel_cached;
+    use flare_im_core_service_kit::discovery::is_static_channel_cached;
     use tokio::net::TcpListener;
     use tokio::sync::oneshot;
     use tonic::{Request, Response, Status};

@@ -2,8 +2,8 @@
 
 use crate::application::commands::BurnDueMessagesCommand;
 use crate::domain::builder::build_burned_event;
-use flare_im_contracts::Ctx;
-use flare_im_contracts::utils::normalize_optional_tenant_id;
+use flare_im_core_contracts::Ctx;
+use flare_im_core_contracts::utils::normalize_optional_tenant_id;
 use flare_proto::common::Event;
 use flare_server_core::error::Result;
 use std::sync::Arc;

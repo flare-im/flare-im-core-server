@@ -23,12 +23,12 @@ use crate::domain::model::{
     MessageWriteLedgerQuery,
 };
 use crate::domain::repository::MessageStorage;
-use flare_im_contracts::utils::extract_seq_from_message;
-use flare_im_service_kit::audit_effects::durable::StaffAudit;
-use flare_im_service_kit::roster_policy::{
+use flare_im_core_contracts::utils::extract_seq_from_message;
+use flare_im_core_service_kit::audit_effects::durable::StaffAudit;
+use flare_im_core_service_kit::roster_policy::{
     check_channels, endpoint_from_env, trusted_internal_reader,
 };
-use flare_im_service_kit::staff_context::{VerifiedStaff, require_staff};
+use flare_im_core_service_kit::staff_context::{VerifiedStaff, require_staff};
 use flare_server_core::SignedContextVerifier;
 use flare_server_core::auth::core_admin::permission::{MESSAGES_EXPORT, MESSAGES_READ};
 use flare_server_core::context::keys;
@@ -174,24 +174,18 @@ fn group_notice_channel(message: &flare_proto::Message) -> Option<&str> {
                 message.channel_id.as_str()
             })
         }
+        // A group notice names its audience; the notification type is the business's own.
         Content::Notification(notice)
-            if matches!(
-                notice.notification_type.as_str(),
-                "social.group.member_joined"
-                    | "social.group.member_left"
-                    | "social.group.member_removed"
-                    | "social.group.member_muted"
-                    | "social.group.member_unmuted"
-                    | "social.group.member_roles_changed"
-                    | "social.group.owner_transferred"
-            ) =>
+            if notice.attributes.contains_key(GROUP_NOTICE_AUDIENCE)
+                && (message.conversation_type == ConversationType::Group as i32
+                    || notice.attributes.contains_key("group_id")) =>
         {
             Some(
                 notice
                     .attributes
                     .get("group_id")
                     .map(String::as_str)
-                    .unwrap_or_default(),
+                    .unwrap_or(message.channel_id.as_str()),
             )
         }
         _ => None,
@@ -263,7 +257,8 @@ fn protect_group_notice(
 
 /// Services that read a message by id to authorize an operation on it (see
 /// [`StorageReaderGrpcHandler::message_operation_ctx`]).
-pub const MESSAGE_OPERATION_READERS: [&str; 1] = [flare_im_contracts::service_names::ORCHESTRATOR];
+pub const MESSAGE_OPERATION_READERS: [&str; 1] =
+    [flare_im_core_contracts::service_names::ORCHESTRATOR];
 
 /// 请求号与追踪号的长度上限：更长的值不用（请求号另生成），只为关联日志，不是身份。
 const MAX_CORRELATION_ID_BYTES: usize = 128;
@@ -440,7 +435,7 @@ fn optional_ledger_timestamp(
 }
 
 fn message_write_ledger_query(
-    ctx: &flare_im_contracts::Ctx,
+    ctx: &flare_im_core_contracts::Ctx,
     req: QueryMessageWriteLedgerRequest,
 ) -> Result<MessageWriteLedgerQuery, Status> {
     let context_tenant_id = ctx
@@ -534,7 +529,7 @@ fn message_write_ledger_entry_to_proto(
 }
 
 fn message_export_task_draft(
-    ctx: &flare_im_contracts::Ctx,
+    ctx: &flare_im_core_contracts::Ctx,
     req: ExportMessagesRequest,
 ) -> Result<MessageExportTaskDraft, Status> {
     let tenant_id = ctx
@@ -1440,6 +1435,54 @@ mod tests {
         assert_eq!(notice.attributes["user_id"], "member-b");
     }
 
+    /// A notification is a group notice by its audience, whatever its business type.
+    #[test]
+    fn a_notification_with_an_audience_in_a_group_is_a_group_notice() {
+        use flare_proto::common::{
+            ConversationType, MessageContent, NotificationContent, message_content::Content,
+        };
+        let notification = |conversation_type: ConversationType, attributes: &[(&str, &str)]| {
+            flare_proto::Message {
+                conversation_type: conversation_type as i32,
+                channel_id: "c1".into(),
+                content: Some(MessageContent {
+                    content: Some(Content::Notification(NotificationContent {
+                        notification_type: "any.business.event".into(),
+                        attributes: attributes
+                            .iter()
+                            .map(|(k, v)| (k.to_string(), v.to_string()))
+                            .collect(),
+                        ..Default::default()
+                    })),
+                }),
+                ..Default::default()
+            }
+        };
+        let audience = (GROUP_NOTICE_AUDIENCE, r#"["member-a"]"#);
+        assert_eq!(
+            group_notice_channel(&notification(ConversationType::Group, &[audience])),
+            Some("c1")
+        );
+        assert_eq!(
+            group_notice_channel(&notification(
+                ConversationType::Single,
+                &[audience, ("group_id", "g1")]
+            )),
+            Some("g1")
+        );
+        assert_eq!(
+            group_notice_channel(&notification(ConversationType::Single, &[audience])),
+            None
+        );
+        assert_eq!(
+            group_notice_channel(&notification(
+                ConversationType::Group,
+                &[("group_id", "g1")]
+            )),
+            None
+        );
+    }
+
     #[test]
     fn message_event_pagination_is_bounded_and_cursor_is_offset() {
         let pagination = flare_proto::common::Pagination {
@@ -1547,7 +1590,7 @@ mod tests {
     use crate::infrastructure::persistence::postgres_base::PostgresBaseStorage;
     use ed25519_dalek::SigningKey;
     use ed25519_dalek::pkcs8::{EncodePrivateKey, EncodePublicKey};
-    use flare_im_service_kit::control_auth::{CORE_PROJECTION_AUDIENCE, PLATFORM_ISSUER};
+    use flare_im_core_service_kit::control_auth::{CORE_PROJECTION_AUDIENCE, PLATFORM_ISSUER};
     use flare_server_core::auth::{KeySet, kid};
     use flare_server_core::{SignedContextIdentity, SignedContextSigner};
 
@@ -1922,7 +1965,7 @@ mod tests {
             .unwrap_err();
         assert_eq!(status.code(), tonic::Code::PermissionDenied);
 
-        let staff = flare_im_service_kit::staff_context::require_staff(
+        let staff = flare_im_core_service_kit::staff_context::require_staff(
             &with_metadata((), &[("x-flare-ctx", read.as_str())]),
             &staff_verifier(),
             MESSAGES_READ,

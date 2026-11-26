@@ -13,15 +13,15 @@ use flare_grpc_proto::push::{
     ReportPushReceiptsRequest, ReportPushReceiptsResponse, RevokeDeviceBindingsRequest,
     RevokeDeviceBindingsResponse, RevokeDevicePushBindingRequest, RevokeDevicePushBindingResponse,
 };
-use flare_im_contracts::Ctx;
-use flare_im_contracts::DevicePushToken;
-use flare_im_contracts::domain::push_binding::{
+use flare_im_core_contracts::Ctx;
+use flare_im_core_contracts::DevicePushToken;
+use flare_im_core_contracts::domain::push_binding::{
     APNS_ENVIRONMENT_PRODUCTION, APNS_ENVIRONMENT_SANDBOX, PUSH_BINDING_CAPABILITIES,
 };
-use flare_im_contracts::push_trace::{PushTraceEntry, TraceStage, trace_key};
-use flare_im_contracts::service_names::{ACCESS_GATEWAY, SIGNALING_ONLINE};
-use flare_im_service_kit::metrics::{PushProxyMetrics, sanitized_app_version};
-use flare_im_service_kit::push_trace::PushTraceRecorder;
+use flare_im_core_contracts::push_trace::{PushTraceEntry, TraceStage, trace_key};
+use flare_im_core_contracts::service_names::{ACCESS_GATEWAY, SIGNALING_ONLINE};
+use flare_im_core_service_kit::metrics::{PushProxyMetrics, sanitized_app_version};
+use flare_im_core_service_kit::push_trace::PushTraceRecorder;
 use flare_proto::common::{DeviceHandoff, DeviceHandoffCause};
 use flare_server_core::auth::{SignedActorType, SignedContextClaims};
 use flare_server_core::grpc::middleware::signed_context::VerifiedContext;
@@ -479,8 +479,8 @@ fn binding_error(error: crate::infrastructure::BindingError) -> Status {
 fn require_tenant_id(ctx: &flare_server_core::context::Ctx) -> Result<String, Status> {
     ctx.tenant_id()
         .filter(|tenant_id| {
-            flare_im_contracts::domain::tenant::is_valid_tenant_id(tenant_id)
-                && flare_im_contracts::utils::normalize_tenant_id(tenant_id) == *tenant_id
+            flare_im_core_contracts::domain::tenant::is_valid_tenant_id(tenant_id)
+                && flare_im_core_contracts::utils::normalize_tenant_id(tenant_id) == *tenant_id
         })
         .map(ToString::to_string)
         .ok_or_else(|| Status::permission_denied("canonical signed tenant_id is required"))
@@ -504,8 +504,9 @@ fn validate_actor_claims(
     expected: SignedActorType,
 ) -> Result<(), Status> {
     if claims.actor_type != expected
-        || !flare_im_contracts::domain::tenant::is_valid_tenant_id(&claims.tenant_id)
-        || flare_im_contracts::utils::normalize_tenant_id(&claims.tenant_id) != claims.tenant_id
+        || !flare_im_core_contracts::domain::tenant::is_valid_tenant_id(&claims.tenant_id)
+        || flare_im_core_contracts::utils::normalize_tenant_id(&claims.tenant_id)
+            != claims.tenant_id
     {
         return Err(Status::permission_denied(
             "Push Proxy actor or tenant not permitted",
@@ -661,7 +662,7 @@ fn receipt_device_id(raw: &str) -> Result<&str, Status> {
 }
 
 /// 应用版本：至多 32 个 `[0-9A-Za-z._+-]` 字符，其余（含空）记为 `other`。决策链记这个值；
-/// 指标在此之上再限个数（`flare_im_service_kit::metrics::app_version_label`，每进程 64 个），
+/// 指标在此之上再限个数（`flare_im_core_service_kit::metrics::app_version_label`，每进程 64 个），
 /// 与 Push Worker 的发送计数同一份规则。
 fn receipt_app_version(raw: &str) -> &str {
     sanitized_app_version(raw)

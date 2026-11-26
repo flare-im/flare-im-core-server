@@ -27,8 +27,10 @@ impl PostgresCapabilityAuditLog {
         action: &'static str,
     ) -> sqlx::Result<()> {
         let mut tx = self.pool.begin().await?;
-        flare_im_service_kit::audit_effects::durable::record(&mut tx, app, aggregate, id, action)
-            .await?;
+        flare_im_core_service_kit::audit_effects::durable::record(
+            &mut tx, app, aggregate, id, action,
+        )
+        .await?;
         tx.commit().await
     }
 
@@ -49,8 +51,10 @@ impl PostgresCapabilityAuditLog {
         trace_id: Option<&str>,
     ) -> sqlx::Result<()> {
         let mut tx = self.pool.begin().await?;
-        flare_im_service_kit::audit_effects::durable::record(&mut tx, app, aggregate, id, action)
-            .await?;
+        flare_im_core_service_kit::audit_effects::durable::record(
+            &mut tx, app, aggregate, id, action,
+        )
+        .await?;
         sqlx::query(
             r#"
             INSERT INTO public.capability_audit_log (

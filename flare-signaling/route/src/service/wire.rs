@@ -4,7 +4,7 @@
 
 use std::sync::Arc;
 
-use flare_im_contracts::utils::normalize_tenant_id;
+use flare_im_core_contracts::utils::normalize_tenant_id;
 use flare_server_core::SignedContextVerifier;
 use flare_server_core::error::{AnyhowContext, Result};
 
@@ -23,7 +23,7 @@ pub struct ApplicationContext {
 
 /// 构建应用上下文
 pub async fn initialize(
-    app_config: &flare_im_service_kit::config::FlareAppConfig,
+    app_config: &flare_im_core_service_kit::config::FlareAppConfig,
 ) -> Result<ApplicationContext> {
     let route_config = Arc::new(
         RouteConfig::from_app_config(app_config)

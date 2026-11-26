@@ -76,6 +76,8 @@ x-flare-service: &flare-service
     # 服务读它（摄入、存储写入、推送 worker、媒体、API 网关、接入网关）。
     FLARE_USAGE_NATS_URL: ${FLARE_USAGE_NATS_URL:-}
     FLARE_USAGE_WINDOW_SECS: ${FLARE_USAGE_WINDOW_SECS:-}
+    # 部署信任的业务集成服务身份（逗号分隔）；留空则没有服务有代用户操作、清历史、吊销会话的权限。
+    FLARE_TRUSTED_INTEGRATION_PRINCIPALS: ${FLARE_TRUSTED_INTEGRATION_PRINCIPALS:-}
   depends_on:
     consul: {condition: service_started}
     postgres: {condition: service_started}
@@ -193,8 +195,10 @@ services:
       # 指向服务自己——注册成功、健康检查也过，跨服务调用却全部 tcp connect error。
       SERVICE_ADVERTISE_HOST: conversation
       CONVERSATION_ROSTER_POLICY_GRPC_URL: ${CONVERSATION_ROSTER_POLICY_GRPC_URL:-}
+      # 名单由业务系统管理的会话 business_type（逗号分隔），这些会话走上面的名单策略。
+      FLARE_EXTERNAL_ROSTER_BUSINESS_TYPES: ${FLARE_EXTERNAL_ROSTER_BUSINESS_TYPES:-}
       # 会话管理员只读接口校验 admin-gateway 转发的 Staff 上下文，PurgeConversationHistory 验
-      # flare-im-bridge 的服务签名，都用 Cell 公钥；不给公钥时一律 fail closed。
+      # 受信业务集成服务的服务签名，都用 Cell 公钥；不给公钥时一律 fail closed。
       FLARE_INTERNAL_CTX_PUBLIC_KEY: ${FLARE_INTERNAL_CTX_PUBLIC_KEY:?set the Cell Ed25519 public key}
     command: ["flare-conversation"]
 

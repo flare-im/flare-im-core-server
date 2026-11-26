@@ -12,7 +12,7 @@
 
 use std::sync::Arc;
 
-use flare_im_contracts::Ctx;
+use flare_im_core_contracts::Ctx;
 use flare_proto::common::{MqEnvelope, MqPayloadKind, mq_envelope};
 use tracing::instrument;
 

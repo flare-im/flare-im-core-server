@@ -6,7 +6,7 @@
 //! ([`crate::application::handler::service_directory::ServiceDirectory`]) and forwards the call
 //! to the providing plugin. A build without a router refuses every service call exactly like any
 //! other denied resource request.
-use flare_im_capability_core::plugin::service::PluginServiceResponse;
+use flare_im_core_capability_core::plugin::service::PluginServiceResponse;
 
 /// Why a routed service call has no answer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -1008,7 +1008,7 @@ fn tenant_key_encoding_is_injective_and_cannot_escape_its_segment() {
 }
 
 struct DownloadObjects {
-    captured: Mutex<Vec<flare_im_contracts::media_response::MediaResponseHeaders>>,
+    captured: Mutex<Vec<flare_im_core_contracts::media_response::MediaResponseHeaders>>,
 }
 #[async_trait::async_trait]
 impl crate::domain::repository::MediaObjectRepository for DownloadObjects {
@@ -1025,7 +1025,7 @@ impl crate::domain::repository::MediaObjectRepository for DownloadObjects {
         &self,
         _: &str,
         _: i64,
-        headers: &flare_im_contracts::media_response::MediaResponseHeaders,
+        headers: &flare_im_core_contracts::media_response::MediaResponseHeaders,
     ) -> Result<String> {
         self.captured.lock().unwrap().push(headers.clone());
         Ok("https://objects.test/download?X-Amz-Signature=unit-test".into())
@@ -1046,7 +1046,7 @@ impl crate::domain::repository::MediaObjectRepository for DownloadObjects {
 
 #[tokio::test]
 async fn download_options_preserve_application_authority_ttl_usage_and_inline_behavior() {
-    use flare_im_contracts::media_response::MediaResponseHeaders;
+    use flare_im_core_contracts::media_response::MediaResponseHeaders;
     let mut f = Fixture::new();
     let objects = Arc::new(DownloadObjects {
         captured: Mutex::new(Vec::new()),
@@ -1132,7 +1132,7 @@ async fn download_options_preserve_application_authority_ttl_usage_and_inline_be
 
 #[tokio::test]
 async fn local_download_options_keep_the_existing_authenticated_url_and_filename_rules() {
-    use flare_im_contracts::media_response::MediaResponseHeaders;
+    use flare_im_core_contracts::media_response::MediaResponseHeaders;
     let f = Fixture::new();
     attachment_fixture(&f).await;
     let reader = ctx("tenant-a", "bob");

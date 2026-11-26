@@ -62,8 +62,8 @@ flare-proto = { workspace = true }
 flare-grpc-proto = { workspace = true }
 flare-server-core = { workspace = true }
 flare-core-base = { workspace = true }
-flare-im-ack = { workspace = true }
-flare-im-capability-core = { workspace = true }
+flare-im-core-ack = { workspace = true }
+flare-im-core-capability-core = { workspace = true }
 
 tokio = { workspace = true }
 tracing = { workspace = true }

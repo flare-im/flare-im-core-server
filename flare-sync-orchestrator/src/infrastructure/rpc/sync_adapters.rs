@@ -19,12 +19,12 @@ use flare_grpc_proto::storage::{
     ConversationWindowTarget, GetConversationMessageHeadRequest, QueryConversationEventsRequest,
     QueryConversationsMessageWindowsRequest, QueryMessagesBySeqRequest,
 };
-use flare_im_contracts::Ctx;
-use flare_im_contracts::service_names::{CONVERSATION, STORAGE_READER, get_service_name};
-use flare_im_contracts::utils::normalize_optional_tenant_id;
-use flare_im_service_kit::config::FlareAppConfig;
+use flare_im_core_contracts::Ctx;
+use flare_im_core_contracts::service_names::{CONVERSATION, STORAGE_READER, get_service_name};
+use flare_im_core_contracts::utils::normalize_optional_tenant_id;
+use flare_im_core_service_kit::config::FlareAppConfig;
 #[cfg(test)]
-use flare_im_service_kit::config::ServiceRuntimeConfig;
+use flare_im_core_service_kit::config::ServiceRuntimeConfig;
 use flare_proto::Message;
 use flare_server_core::error::{ErrorBuilder, ErrorCode, FlareError};
 use redis::aio::ConnectionManager;
@@ -73,7 +73,7 @@ fn static_sync_endpoint(
         )
         .build_error());
     }
-    flare_im_service_kit::discovery::static_grpc_endpoint_from_app_config(app, service_name)
+    flare_im_core_service_kit::discovery::static_grpc_endpoint_from_app_config(app, service_name)
         .map(Some)
 }
 
@@ -88,7 +88,7 @@ impl GrpcSyncAdapters {
     }
 
     async fn create_channel(dependency: &str) -> Result<Channel, FlareError> {
-        let app = flare_im_service_kit::config::app_config();
+        let app = flare_im_core_service_kit::config::app_config();
         let service_name = get_service_name(dependency);
         Self::create_channel_with_config(app, app.uses_static_registry(), dependency, &service_name)
             .await
@@ -108,12 +108,13 @@ impl GrpcSyncAdapters {
 
         let channel = match static_endpoint.as_deref() {
             Some(endpoint) => {
-                flare_im_service_kit::discovery::connect_static_channel(endpoint).await
+                flare_im_core_service_kit::discovery::connect_static_channel(endpoint).await
             }
             None => {
-                let fallback =
-                    flare_im_service_kit::discovery::default_static_grpc_fallback(service_name);
-                flare_im_service_kit::discovery::connect_grpc_channel_with_fallback(
+                let fallback = flare_im_core_service_kit::discovery::default_static_grpc_fallback(
+                    service_name,
+                );
+                flare_im_core_service_kit::discovery::connect_grpc_channel_with_fallback(
                     service_name,
                     fallback,
                 )
@@ -562,7 +563,7 @@ impl ConversationVersionIndexPort for GrpcSyncAdapters {
 #[cfg(test)]
 mod tests {
     use super::GrpcSyncAdapters;
-    use flare_im_contracts::Ctx;
+    use flare_im_core_contracts::Ctx;
     use flare_server_core::Context;
     use std::sync::Arc;
 

@@ -6,14 +6,14 @@ use ed25519_dalek::{
     SigningKey,
     pkcs8::{EncodePrivateKey, EncodePublicKey},
 };
-use flare_im_service_kit::audit_effects::durable::StaffAudit;
+use flare_im_core_service_kit::audit_effects::durable::StaffAudit;
 use flare_server_core::{
     SignedActorType, SignedContextIdentity, SignedContextSigner, SignedContextVerifier,
 };
 use sqlx::{PgPool, postgres::PgConnectOptions};
 use std::str::FromStr;
 
-fn staff() -> flare_im_contracts::Ctx {
+fn staff() -> flare_im_core_contracts::Ctx {
     let key = SigningKey::from_bytes(&[89; 32]);
     let signer =
         SignedContextSigner::from_private_key(&key.to_pkcs8_pem(Default::default()).unwrap())
@@ -40,7 +40,7 @@ fn staff() -> flare_im_contracts::Ctx {
         .unwrap();
     let mut request = tonic::Request::new(());
     flare_server_core::set_signed_context_token(&mut request, &token).unwrap();
-    flare_im_service_kit::staff_context::verify_staff_metadata(
+    flare_im_core_service_kit::staff_context::verify_staff_metadata(
         request.metadata(),
         &verifier,
         "core:messages:export",

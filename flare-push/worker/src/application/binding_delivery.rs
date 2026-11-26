@@ -20,8 +20,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
-use flare_im_contracts::{Ctx, DevicePushToken};
-use flare_im_usage::{PushOutcome, UsageRecorder};
+use flare_im_core_contracts::{Ctx, DevicePushToken};
+use flare_im_core_usage::{PushOutcome, UsageRecorder};
 use flare_proto::PushTaskEnvelope;
 use flare_server_core::{ErrorCode, FlareError};
 

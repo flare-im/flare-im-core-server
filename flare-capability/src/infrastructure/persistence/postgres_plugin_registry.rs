@@ -3,9 +3,9 @@
 //! `plugin_registry_revisions`).
 use std::sync::Arc;
 
-use flare_im_capability_core::plugin::PluginManifest;
-use flare_im_capability_core::plugin::configuration::restore_secrets;
-use flare_im_capability_core::plugin::runtime::{
+use flare_im_core_capability_core::plugin::PluginManifest;
+use flare_im_core_capability_core::plugin::configuration::restore_secrets;
+use flare_im_core_capability_core::plugin::runtime::{
     ManifestCache, PluginDeployment, PluginProjection,
 };
 use sqlx::postgres::PgRow;

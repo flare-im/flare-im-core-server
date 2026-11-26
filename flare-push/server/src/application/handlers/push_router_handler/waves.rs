@@ -104,7 +104,7 @@ fn wave_placeholder(conversation_id: &str, newest: &WaveMessage) -> Message {
 
 /// 载荷里那条要提示的消息：与 [`alert_facts`] 取的是同一条。
 fn alerting_message(request: &access_gateway::PushEventRequest) -> Option<&Message> {
-    use flare_im_contracts::domain::push_policy::event_alert_class;
+    use flare_im_core_contracts::domain::push_policy::event_alert_class;
     request
         .events
         .iter()
@@ -559,7 +559,7 @@ impl PushRouterHandler {
             batch.newest.message_id.clone()
         };
         // 波次记在这一批最新一条消息的决策链上：枚举到的每位成员、每台设备各一条路由。
-        let trace_key = flare_im_contracts::push_trace::trace_key(
+        let trace_key = flare_im_core_contracts::push_trace::trace_key(
             &message_id,
             &emission.key.conversation_id,
             batch.newest.seq,

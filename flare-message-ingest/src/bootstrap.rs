@@ -2,7 +2,7 @@
 
 use std::time::Duration;
 
-use flare_im_contracts::service_names::MESSAGE_INGEST;
+use flare_im_core_contracts::service_names::MESSAGE_INGEST;
 use flare_server_core::error::{AnyhowContext, Result};
 use tracing::info;
 
@@ -14,9 +14,9 @@ pub struct ApplicationBootstrap;
 impl ApplicationBootstrap {
     /// 运行应用的主入口点
     pub async fn run() -> Result<()> {
-        let app_config = flare_im_service_kit::load_app_config_from_env();
+        let app_config = flare_im_core_service_kit::load_app_config_from_env();
         let service_config = app_config.message_ingest_service();
-        let runtime_plan = flare_im_service_kit::build_service_runtime_plan(
+        let runtime_plan = flare_im_core_service_kit::build_service_runtime_plan(
             app_config,
             &service_config.runtime,
             MESSAGE_INGEST,
@@ -35,7 +35,7 @@ impl ApplicationBootstrap {
 
     async fn run_with_context(
         context: wire::ApplicationContext,
-        runtime_plan: flare_im_service_kit::ImServiceRuntimePlan,
+        runtime_plan: flare_im_core_service_kit::ImServiceRuntimePlan,
     ) -> Result<()> {
         use flare_grpc_proto::message::message_send_service_server::MessageSendServiceServer;
         use tonic::transport::Server;
@@ -43,7 +43,7 @@ impl ApplicationBootstrap {
         let address = runtime_plan.address;
         let service_name = runtime_plan.service_name.clone();
         let grpc_metrics =
-            flare_im_service_kit::metrics::GrpcMetricsLayer::new(service_name.clone());
+            flare_im_core_service_kit::metrics::GrpcMetricsLayer::new(service_name.clone());
         let send_grpc = context.message_send_grpc.clone();
         let config = context.config.clone();
         let wal_replay_handler = context.wal_replay_handler.clone();
@@ -111,7 +111,7 @@ impl ApplicationBootstrap {
             service_runtime = service_runtime.add_spawn_with_shutdown(
                 "message-ingest-hook-execution-writer",
                 move |shutdown_rx| async move {
-                    flare_im_hooks::hooks::execution::run_writer(
+                    flare_im_core_hooks::hooks::execution::run_writer(
                         writer.buffer,
                         writer.sink,
                         writer.flush_interval,
@@ -128,7 +128,7 @@ impl ApplicationBootstrap {
             service_runtime = service_runtime.add_spawn_with_shutdown(
                 "message-ingest-metrics",
                 move |shutdown_rx| async move {
-                    flare_im_service_kit::metrics::serve_prometheus_metrics(
+                    flare_im_core_service_kit::metrics::serve_prometheus_metrics(
                         metrics_config,
                         shutdown_rx,
                     )
@@ -233,7 +233,7 @@ impl ApplicationBootstrap {
                 let metadata = metadata_clone.clone();
                 let service_name = service_name.clone();
                 Box::pin(async move {
-                    flare_im_service_kit::discovery::register_runtime_service_only_with_metadata(
+                    flare_im_core_service_kit::discovery::register_runtime_service_only_with_metadata(
                         &service_name,
                         addr,
                         None,

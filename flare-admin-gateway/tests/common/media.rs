@@ -20,7 +20,7 @@ use ed25519_dalek::pkcs8::{EncodePrivateKey, EncodePublicKey};
 use flare_admin_gateway::interface::http::create_admin_router;
 use flare_grpc_proto::media::media_service_server::{MediaService, MediaServiceServer};
 use flare_grpc_proto::media::*;
-use flare_im_service_kit::audit_effects::AuditEffects;
+use flare_im_core_service_kit::audit_effects::AuditEffects;
 use flare_server_core::auth::kid;
 use flare_server_core::grpc::middleware::signed_context::verify_signed_context_metadata;
 use flare_server_core::{

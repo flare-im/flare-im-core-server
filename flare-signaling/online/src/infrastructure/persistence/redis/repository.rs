@@ -276,14 +276,14 @@ enum AdmissionReply {
     Evicted(Vec<EvictedConnection>),
 }
 
-/// 网关连接集合 `gw:conns:{gateway_id}`（约定见 `flare_im_service_kit::gateway::lease`）。
+/// 网关连接集合 `gw:conns:{gateway_id}`（约定见 `flare_im_core_service_kit::gateway::lease`）。
 fn gateway_conns_key(gateway_id: &str) -> String {
-    flare_im_service_kit::gateway::lease::conns_key(gateway_id)
+    flare_im_core_service_kit::gateway::lease::conns_key(gateway_id)
 }
 
 /// 会话在网关连接集合里的成员：能定位回 `session:{tenant}:{user}` 里的那个字段。
 fn gateway_member(tenant_id: &str, user_id: &str, session_field: &str) -> String {
-    flare_im_service_kit::gateway::lease::connection_member(tenant_id, user_id, session_field)
+    flare_im_core_service_kit::gateway::lease::connection_member(tenant_id, user_id, session_field)
 }
 
 const UNINDEX_IF_ABSENT: &str = r#"
@@ -594,7 +594,7 @@ impl ConversationRepository for RedisConversationRepository {
                 .arg(max_devices)
                 .arg(tenant_session_member_prefix(session.user_id().as_str()))
                 .arg(session.user_id().as_str())
-                .arg(flare_im_service_kit::gateway::lease::CONNS_KEY_PREFIX);
+                .arg(flare_im_core_service_kit::gateway::lease::CONNS_KEY_PREFIX);
             let encoded: String = invocation.invoke_async(&mut conn).await.map_err(|e| {
                 flare_server_core::error::FlareError::system(format!(
                     "atomic session admission failed: {e}"
@@ -695,7 +695,7 @@ impl ConversationRepository for RedisConversationRepository {
                 "kick session mismatch"
             ));
         }
-        if let Some(evidence) = flare_im_service_kit::audit_effects::durable::pending_evidence(
+        if let Some(evidence) = flare_im_core_service_kit::audit_effects::durable::pending_evidence(
             tenant,
             "online_connection",
             &record.connection_id,
@@ -750,6 +750,7 @@ impl ConversationRepository for RedisConversationRepository {
         session_ids: &[String],
         cutoff_ms: i64,
         request_id: &str,
+        actor_id: &str,
         signing_key_id: &str,
     ) -> Result<u32> {
         let mut conn = self.connection().await?;
@@ -795,9 +796,9 @@ impl ConversationRepository for RedisConversationRepository {
                 // Security delivery requires the exact gateway receiver ACK, even
                 // without a Staff task scope. A PUBLISH count is never completion.
                 let evidence = serde_json::json!({
-                    "event":flare_im_service_kit::audit_effects::EFFECT_EVENT,
+                    "event":flare_im_core_service_kit::audit_effects::EFFECT_EVENT,
                     "request_id":request_id,"at_ms":chrono::Utc::now().timestamp_millis(),
-                    "scope":tenant,"source":"signaling-online","actor_id":"flare-im-bridge",
+                    "scope":tenant,"source":"signaling-online","actor_id":actor_id,
                     "actor_type":"service","credential_id":format!("internal-key:{signing_key_id}"),"permission":null,"aggregate":"online_connection",
                     "aggregate_id":record.connection_id,"action":"retire","outcome":"committed",
                 })
@@ -1306,7 +1307,7 @@ mod admission_tests {
             .arg(max_devices)
             .arg(tenant_session_member_prefix("shared-user"))
             .arg("shared-user")
-            .arg(flare_im_service_kit::gateway::lease::CONNS_KEY_PREFIX)
+            .arg(flare_im_core_service_kit::gateway::lease::CONNS_KEY_PREFIX)
             .invoke_async(conn)
             .await
             .unwrap();
@@ -2147,7 +2148,7 @@ mod tests {
             .arg(10)
             .arg(tenant_session_member_prefix("shared-user"))
             .arg("shared-user")
-            .arg(flare_im_service_kit::gateway::lease::CONNS_KEY_PREFIX)
+            .arg(flare_im_core_service_kit::gateway::lease::CONNS_KEY_PREFIX)
             .invoke_async(&mut conn)
             .await;
         assert!(denied.unwrap_err().to_string().contains("TOKEN_REVOKED"));

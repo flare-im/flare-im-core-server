@@ -14,7 +14,7 @@
 
 use std::sync::Arc;
 
-use flare_im_contracts::Ctx;
+use flare_im_core_contracts::Ctx;
 use sha2::{Digest, Sha256};
 
 use crate::domain::ports::IPushPort;
@@ -82,8 +82,8 @@ impl RealtimeControlRelay {
             return 0;
         }
         let Some(tenant_id) = tx.tenant_id().filter(|tenant| {
-            flare_im_contracts::domain::tenant::is_valid_tenant_id(tenant)
-                && flare_im_contracts::utils::normalize_tenant_id(tenant) == *tenant
+            flare_im_core_contracts::domain::tenant::is_valid_tenant_id(tenant)
+                && flare_im_core_contracts::utils::normalize_tenant_id(tenant) == *tenant
         }) else {
             return 0;
         };

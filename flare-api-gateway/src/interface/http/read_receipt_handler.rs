@@ -18,7 +18,7 @@ use flare_grpc_proto::conversation::{
     GetMessageReadSummariesRequest, ListMessageReadersRequest, MessageReadSummary,
     MessageReaderState,
 };
-use flare_im_service_kit::clients::GrpcClients;
+use flare_im_core_service_kit::clients::GrpcClients;
 use flare_server_core::{
     AuthenticatedPrincipal,
     error::{ErrorBuilder, ErrorCode, FlareError},

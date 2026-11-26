@@ -64,7 +64,7 @@ pub trait MediaObjectRepository: Send + Sync {
         &self,
         object_path: &str,
         expires_in: i64,
-        headers: &flare_im_contracts::media_response::MediaResponseHeaders,
+        headers: &flare_im_core_contracts::media_response::MediaResponseHeaders,
     ) -> Result<String> {
         if headers.is_empty() {
             return self.presign_object(object_path, expires_in).await;

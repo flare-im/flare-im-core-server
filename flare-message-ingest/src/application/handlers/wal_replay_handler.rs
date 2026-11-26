@@ -2,8 +2,8 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
-use flare_im_contracts::Ctx;
-use flare_im_contracts::utils::{TimelineMetadata, normalize_optional_tenant_id};
+use flare_im_core_contracts::Ctx;
+use flare_im_core_contracts::utils::{TimelineMetadata, normalize_optional_tenant_id};
 use flare_server_core::Context;
 use flare_server_core::error::Result;
 use tracing::instrument;
@@ -29,7 +29,7 @@ pub struct WalReplayReport {
 const QUARANTINE_REPORTED_CAPACITY: u64 = 10_000;
 
 pub struct WalReplayHandler {
-    write_verifier: Option<flare_im_service_kit::audit_effects::write_proof::ProofVerifier>,
+    write_verifier: Option<flare_im_core_service_kit::audit_effects::write_proof::ProofVerifier>,
     wal_repository: Arc<dyn WalRepository>,
     publisher: Arc<dyn WalReplayPublisher>,
     /// 显式配置的部署级默认租户（`MESSAGE_INGEST_DEFAULT_TENANT_ID`），只给没记租户的旧 WAL
@@ -79,7 +79,7 @@ impl WalReplayHandler {
 
     pub fn with_write_verifier(
         mut self,
-        verifier: Option<flare_im_service_kit::audit_effects::write_proof::ProofVerifier>,
+        verifier: Option<flare_im_core_service_kit::audit_effects::write_proof::ProofVerifier>,
     ) -> Self {
         self.write_verifier = verifier;
         self
@@ -139,7 +139,7 @@ impl WalReplayHandler {
                 continue;
             };
             let mut ctx = replay_ctx(&tenant_id);
-            if flare_im_service_kit::audit_effects::write_proof::requires_proof(&message)
+            if flare_im_core_service_kit::audit_effects::write_proof::requires_proof(&message)
                 || pending.write_proof.is_some()
             {
                 let recovered = self
@@ -364,7 +364,7 @@ mod tests {
     impl WalReplayPublisher for FakeReplayPublisher {
         fn push_wal_message<'a>(
             &'a self,
-            ctx: &'a flare_im_contracts::Ctx,
+            ctx: &'a flare_im_core_contracts::Ctx,
             submission: &'a MessageSubmission,
             _profile: &'a MessageProfile,
             persistence_mode: PersistenceMode,
@@ -672,7 +672,7 @@ mod tests {
             SigningKey,
             pkcs8::{EncodePrivateKey, EncodePublicKey},
         };
-        use flare_im_service_kit::{
+        use flare_im_core_service_kit::{
             audit_effects::write_proof::{HEADER, ProofSigner, ProofVerifier, queue_headers},
             platform_send::{PLATFORM_API_KID, SYSTEM_MESSAGE_SCOPE},
         };
@@ -683,7 +683,7 @@ mod tests {
         impl WalReplayPublisher for ProofPublisher {
             fn push_wal_message<'a>(
                 &'a self,
-                ctx: &'a flare_im_contracts::Ctx,
+                ctx: &'a flare_im_core_contracts::Ctx,
                 submission: &'a MessageSubmission,
                 _: &'a MessageProfile,
                 _: PersistenceMode,

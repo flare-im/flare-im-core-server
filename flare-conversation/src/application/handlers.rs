@@ -345,10 +345,16 @@ impl ConversationQueryHandler {
         &self,
         ctx: &Context,
         conversation_id: &str,
+        external_business_types: &[String],
         provider_configured: bool,
     ) -> Result<Option<(String, bool)>> {
         self.conversation_repo
-            .external_roster_channel(ctx, conversation_id, provider_configured)
+            .external_roster_channel(
+                ctx,
+                conversation_id,
+                external_business_types,
+                provider_configured,
+            )
             .await
     }
 

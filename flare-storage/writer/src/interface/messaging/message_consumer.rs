@@ -14,8 +14,8 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use flare_im_contracts::utils::normalize_optional_tenant_id;
-use flare_im_contracts::{Ctx, context_from_mq_metadata};
+use flare_im_core_contracts::utils::normalize_optional_tenant_id;
+use flare_im_core_contracts::{Ctx, context_from_mq_metadata};
 use flare_proto::common::{MqEnvelope, MqPayloadKind, mq_envelope};
 use flare_server_core::mq::consumer::{ConsumerError, Message, MessageHandler, MessageResult};
 use tracing::instrument;
@@ -49,7 +49,7 @@ type MessagePersistenceHandler = MessagePersistenceCommandHandler<
 pub struct MessageCreatedHandler {
     /// 消息持久化处理器（应用层）
     persistence_handler: Arc<MessagePersistenceHandler>,
-    write_verifier: Option<flare_im_service_kit::audit_effects::write_proof::ProofVerifier>,
+    write_verifier: Option<flare_im_core_service_kit::audit_effects::write_proof::ProofVerifier>,
 }
 
 struct DecodedStoreMessage {
@@ -81,7 +81,7 @@ impl MessageCreatedHandler {
 
     pub fn with_write_verifier(
         mut self,
-        verifier: Option<flare_im_service_kit::audit_effects::write_proof::ProofVerifier>,
+        verifier: Option<flare_im_core_service_kit::audit_effects::write_proof::ProofVerifier>,
     ) -> Self {
         self.write_verifier = verifier;
         self
@@ -89,7 +89,7 @@ impl MessageCreatedHandler {
 
     fn decode_store_message(
         message: &Message,
-        verifier: Option<&flare_im_service_kit::audit_effects::write_proof::ProofVerifier>,
+        verifier: Option<&flare_im_core_service_kit::audit_effects::write_proof::ProofVerifier>,
     ) -> Result<Option<DecodedStoreMessage>, ConsumerError> {
         let envelope = message.decode_protobuf::<MqEnvelope>().map_err(|e| {
             tracing::error!(
@@ -134,7 +134,7 @@ impl MessageCreatedHandler {
         for (key, value) in &envelope.headers {
             merged_headers.insert(key.clone(), value.clone());
         }
-        use flare_im_service_kit::audit_effects::write_proof::{HEADER, requires_proof};
+        use flare_im_core_service_kit::audit_effects::write_proof::{HEADER, requires_proof};
         let proof = merged_headers.remove(HEADER);
         let mut ctx = context_from_mq_metadata(&merged_headers);
 
@@ -183,7 +183,7 @@ impl MessageCreatedHandler {
     fn batch_group_key(decoded: &DecodedStoreMessage) -> (String, Option<String>) {
         if let Some(proof) = decoded
             .ctx
-            .get_data::<flare_im_service_kit::audit_effects::write_proof::VerifiedWrite>(
+            .get_data::<flare_im_core_service_kit::audit_effects::write_proof::VerifiedWrite>(
         ) {
             return (decoded.tenant_id.clone(), Some(proof.group_key().into()));
         }
@@ -366,11 +366,14 @@ impl MessageCreatedConsumerFactory {
     pub fn create_handler(
         persistence_handler: Arc<MessagePersistenceHandler>,
     ) -> flare_server_core::error::Result<Arc<dyn MessageHandler>> {
-        let verifier = flare_im_service_kit::audit_effects::write_proof::ProofVerifier::from_env()
-            .map_err(flare_server_core::error::FlareError::system)?
-            .ok_or_else(|| {
-                flare_server_core::error::FlareError::system("writer proof public key is required")
-            })?;
+        let verifier =
+            flare_im_core_service_kit::audit_effects::write_proof::ProofVerifier::from_env()
+                .map_err(flare_server_core::error::FlareError::system)?
+                .ok_or_else(|| {
+                    flare_server_core::error::FlareError::system(
+                        "writer proof public key is required",
+                    )
+                })?;
         Ok(Arc::new(
             MessageCreatedHandler::new(persistence_handler).with_write_verifier(Some(verifier)),
         ))
@@ -381,7 +384,7 @@ impl MessageCreatedConsumerFactory {
     /// # 返回
     /// - `&'static str`: 主题名称
     pub fn topic() -> &'static str {
-        flare_im_contracts::constants::topics::TOPIC_MESSAGE_CREATED
+        flare_im_core_contracts::constants::topics::TOPIC_MESSAGE_CREATED
     }
 
     /// 获取消费者组名称
@@ -389,7 +392,7 @@ impl MessageCreatedConsumerFactory {
     /// # 返回
     /// - `&'static str`: 消费者组名称
     pub fn consumer_group() -> &'static str {
-        flare_im_contracts::constants::groups::STORAGE_GROUP_DEFAULT
+        flare_im_core_contracts::constants::groups::STORAGE_GROUP_DEFAULT
     }
 }
 
@@ -414,9 +417,9 @@ mod tests {
         WalCleanupRepository,
     };
     use crate::domain::service::MessagePersistenceDomainService;
-    use flare_im_contracts::context_to_mq_metadata;
-    use flare_im_contracts::event::mq_envelope_for_main_queue_message_with_headers;
-    use flare_im_contracts::utils::Context;
+    use flare_im_core_contracts::context_to_mq_metadata;
+    use flare_im_core_contracts::event::mq_envelope_for_main_queue_message_with_headers;
+    use flare_im_core_contracts::utils::Context;
     use flare_server_core::error::Result as FlareResult;
     use flare_server_core::mq::consumer::{ContentType, MessageContext};
     use prost::Message as _;
@@ -624,7 +627,7 @@ mod tests {
         >::new(None, None, None, None, None);
         Arc::new(MessagePersistenceCommandHandler::new(
             Arc::new(service),
-            Arc::new(flare_im_service_kit::metrics::StorageWriterMetrics::new()),
+            Arc::new(flare_im_core_service_kit::metrics::StorageWriterMetrics::new()),
         ))
     }
 

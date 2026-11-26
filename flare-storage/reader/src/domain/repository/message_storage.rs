@@ -22,7 +22,7 @@ use crate::domain::model::{
 };
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use flare_im_contracts::Ctx;
+use flare_im_core_contracts::Ctx;
 use flare_server_core::error::Result;
 use std::collections::HashMap;
 

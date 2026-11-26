@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use flare_im_contracts::utils::normalize_tenant_id;
+use flare_im_core_contracts::utils::normalize_tenant_id;
 use flare_server_core::error::AnyhowContext as _;
 use sqlx::PgPool;
 
@@ -197,7 +197,7 @@ impl CapabilityPolicyBackend for PostgresCapabilityPolicy {
         .execute(&mut *tx)
         .await
         .map_err(write_error)?;
-        flare_im_service_kit::audit_effects::durable::record(
+        flare_im_core_service_kit::audit_effects::durable::record(
             &mut tx,
             &tenant_id,
             "capability_switch",

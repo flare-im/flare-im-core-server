@@ -32,10 +32,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
-use flare_im_contracts::domain::push_policy::{
+use flare_im_core_contracts::domain::push_policy::{
     alert_class_needs_delivery_watch, event_alert_class, message_alert_class,
 };
-use flare_im_service_kit::metrics::AccessGatewayMetrics;
+use flare_im_core_service_kit::metrics::AccessGatewayMetrics;
 use flare_proto::common::event::Payload as EventPayload;
 use flare_proto::common::{
     ConversationAck, DeviceAppState, DeviceHandoff, DeviceHandoffCause, DeviceHandoffItem,

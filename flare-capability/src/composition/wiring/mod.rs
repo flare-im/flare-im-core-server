@@ -67,7 +67,7 @@ pub(crate) async fn initialize(
     // 租户投影只在有库时可用：没有库就没有 `tenants` 表可写，控制面推送会得到 Unimplemented 的路由缺席错误。
     // 投影只认平台 worker 的控制断言（FLARE_PLATFORM_PUBLIC_KEY）；员工不经这里。
     let platform_verifier =
-        flare_im_service_kit::control_auth::PlatformAssertionVerifier::from_env().map_err(
+        flare_im_core_service_kit::control_auth::PlatformAssertionVerifier::from_env().map_err(
             |_| flare_server_core::error::FlareError::system("invalid FLARE_PLATFORM_PUBLIC_KEY"),
         )?;
     if platform_verifier.is_none() {
@@ -124,7 +124,8 @@ pub(crate) async fn initialize(
         message_events::tasks(&plugin_routes, Arc::clone(&capability_policy)).await?;
     let audit_delivery = if let Some(pool) = db_pool {
         let publisher =
-            flare_im_service_kit::audit_effects::AuditEffects::from_env("flare-capability").await?;
+            flare_im_core_service_kit::audit_effects::AuditEffects::from_env("flare-capability")
+                .await?;
         if publisher.enabled() {
             Some((pool, publisher))
         } else {

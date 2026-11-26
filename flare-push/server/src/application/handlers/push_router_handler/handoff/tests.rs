@@ -1,7 +1,7 @@
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use flare_im_contracts::domain::push_policy::conversation_collapse_key;
+use flare_im_core_contracts::domain::push_policy::conversation_collapse_key;
 use flare_server_core::error::FlareError;
 
 use super::super::tests::{

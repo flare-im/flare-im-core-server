@@ -1,3 +1,3 @@
 //! Domain facade for capability catalog contracts.
 
-pub use flare_im_capability_core::CapabilityDescriptor;
+pub use flare_im_core_capability_core::CapabilityDescriptor;

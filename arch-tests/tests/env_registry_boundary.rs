@@ -5,8 +5,9 @@ use std::path::{Path, PathBuf};
 #[test]
 fn production_env_vars_are_registered() {
     let root = workspace_root();
-    let registry = fs::read_to_string(root.join("crates/flare-im-service-kit/src/env_registry.rs"))
-        .expect("read env registry");
+    let registry =
+        fs::read_to_string(root.join("crates/flare-im-core-service-kit/src/env_registry.rs"))
+            .expect("read env registry");
     let registered = registered_keys(&registry);
 
     let sources = rust_sources(&root);
@@ -36,7 +37,7 @@ fn production_env_vars_are_registered() {
 
     assert!(
         violations.is_empty(),
-        "production env vars must be listed in flare-im-service-kit::env_registry:\n{}",
+        "production env vars must be listed in flare-im-core-service-kit::env_registry:\n{}",
         violations.join("\n")
     );
 }

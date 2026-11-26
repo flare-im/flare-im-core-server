@@ -3,7 +3,7 @@
 //!
 //! A deny is effective the moment the projection arrives: resolving a snapshot never waits for the
 //! plugin. These rules only bring the plugin process in line, and keep its lease alive.
-use flare_im_capability_core::plugin::PluginManifest;
+use flare_im_core_capability_core::plugin::PluginManifest;
 use serde_json::Value;
 
 use super::{AppPluginState, RuntimePatch, StateLifecycle};
@@ -331,7 +331,7 @@ impl ReconcileRow {
 
 /// Lease of a delivered state: the host's maximum less the skew margin.
 const LEASE_MS: i64 =
-    flare_im_capability_core::plugin::runtime::MAX_PROJECTION_LEASE_MS - LEASE_SKEW_MARGIN_MS;
+    flare_im_core_capability_core::plugin::runtime::MAX_PROJECTION_LEASE_MS - LEASE_SKEW_MARGIN_MS;
 
 /// Whether the deployment may serve an enabled binding of `manifest`: a version that promises data
 /// export (`admin.lifecycle.uninstall.export`) needs a deployment reporting `flare.plugin.data.v1`.
@@ -343,7 +343,7 @@ pub fn check_protocols(manifest: &PluginManifest, reported: &[String]) -> Result
         .and_then(|admin| admin.lifecycle.as_ref())
         .and_then(|lifecycle| lifecycle.uninstall.as_ref())
         .is_some_and(|uninstall| uninstall.export);
-    let data = flare_im_capability_core::plugin::data::OPERATION;
+    let data = flare_im_core_capability_core::plugin::data::OPERATION;
     if exports && !reported.iter().any(|protocol| protocol == data) {
         return Err(format!(
             "the deployment does not serve {data}, which the version's data export needs"

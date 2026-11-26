@@ -1,6 +1,6 @@
 //! Domain facade for capability dispatch contracts.
 
-pub use flare_im_capability_core::{CapabilityDispatchCommand, CapabilityDispatchResult};
+pub use flare_im_core_capability_core::{CapabilityDispatchCommand, CapabilityDispatchResult};
 
 use super::error::{CapabilityError, Result};
 

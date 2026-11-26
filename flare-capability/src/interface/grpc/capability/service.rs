@@ -16,9 +16,9 @@ use flare_grpc_proto::capability::{
     ListRegisteredPluginsResponse, SetTenantCapabilitySwitchRequest,
     SetTenantCapabilitySwitchResponse,
 };
-use flare_im_contracts::utils::normalize_tenant_id;
-use flare_im_service_kit::audit_effects::durable::StaffAudit;
-use flare_im_service_kit::staff_context::{VerifiedStaff, require_staff, require_staff_any};
+use flare_im_core_contracts::utils::normalize_tenant_id;
+use flare_im_core_service_kit::audit_effects::durable::StaffAudit;
+use flare_im_core_service_kit::staff_context::{VerifiedStaff, require_staff, require_staff_any};
 use flare_server_core::SignedContextVerifier;
 use flare_server_core::auth::core_admin::permission::{
     CAPABILITIES_READ, CAPABILITIES_WRITE, HOOKS_PLATFORM_WRITE, HOOKS_READ, HOOKS_WRITE,
@@ -97,7 +97,7 @@ pub struct CapabilityGrpcServer {
     pub(super) plugin_registry: Option<Arc<super::plugin_registry::PluginRegistryApi>>,
     /// Verifies the platform worker on those operations, the same assertion as the projection.
     pub(super) platform_verifier:
-        Option<flare_im_service_kit::control_auth::PlatformAssertionVerifier>,
+        Option<flare_im_core_service_kit::control_auth::PlatformAssertionVerifier>,
 }
 
 impl CapabilityGrpcServer {
@@ -250,7 +250,7 @@ impl CapabilityGrpcServer {
             .as_ref()
             .ok_or_else(|| Status::unauthenticated("staff context verifier not configured"))?;
         let ctx = verify_signed_context_metadata(request.metadata(), verifier)?;
-        let claims = flare_im_service_kit::staff_context::staff_claims_of(&ctx)
+        let claims = flare_im_core_service_kit::staff_context::staff_claims_of(&ctx)
             .ok_or_else(|| Status::permission_denied("staff context required"))?
             .clone();
         if !claims

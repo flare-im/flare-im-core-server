@@ -2,9 +2,9 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use flare_im_capability_core::plugin::PluginManifest;
-use flare_im_capability_core::plugin::configuration::mask_secrets;
-use flare_im_capability_core::plugin::runtime::configuration_digest;
+use flare_im_core_capability_core::plugin::PluginManifest;
+use flare_im_core_capability_core::plugin::configuration::mask_secrets;
+use flare_im_core_capability_core::plugin::runtime::configuration_digest;
 use serde::Serialize;
 
 use crate::domain::plugin::{

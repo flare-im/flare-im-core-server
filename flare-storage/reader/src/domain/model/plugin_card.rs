@@ -21,10 +21,10 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use flare_im_capability_core::plugin::PluginManifest;
-use flare_im_capability_core::plugin::manifest::{UiContribution, UiContributionKind};
-use flare_im_capability_core::plugin::runtime::PluginProjection;
-use flare_im_capability_core::plugin::ui::PluginMessage;
+use flare_im_core_capability_core::plugin::PluginManifest;
+use flare_im_core_capability_core::plugin::manifest::{UiContribution, UiContributionKind};
+use flare_im_core_capability_core::plugin::runtime::PluginProjection;
+use flare_im_core_capability_core::plugin::ui::PluginMessage;
 use flare_proto::common::MessageContent;
 use flare_proto::common::message_content::Content;
 use flare_server_core::error::Result;
@@ -44,7 +44,7 @@ pub trait PluginCardCarrier: Send {
     fn attributes(&mut self) -> &mut HashMap<String, String>;
 }
 
-impl PluginCardCarrier for flare_im_contracts::message::Message {
+impl PluginCardCarrier for flare_im_core_contracts::message::Message {
     fn server_id(&self) -> &str {
         &self.server_id
     }

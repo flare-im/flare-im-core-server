@@ -12,7 +12,7 @@ use crate::application::dto::{
     FileInfoHttpResponse, GetFileUrlHttpRequest as GetFileUrlHttpRequestDto, GetFileUrlHttpResponse,
 };
 use flare_grpc_proto::media::*;
-use flare_im_service_kit::clients::GrpcClients;
+use flare_im_core_service_kit::clients::GrpcClients;
 use flare_server_core::error::{ErrorBuilder, ErrorCode};
 use flare_server_core::http::{ApiResponse, HttpApiError as GatewayError, Result};
 
@@ -140,8 +140,10 @@ pub async fn serve_file(
     .filter_map(|(name, value)| value.map(|value| (name.to_string(), value)))
     .collect();
     let mut response_options =
-        flare_im_contracts::media_response::MediaResponseHeaders::from_request(&requested_headers)
-            .map_err(media_rpc_error)?;
+        flare_im_core_contracts::media_response::MediaResponseHeaders::from_request(
+            &requested_headers,
+        )
+        .map_err(media_rpc_error)?;
     response_options
         .validate_content_type(&info.mime_type)
         .map_err(media_rpc_error)?;

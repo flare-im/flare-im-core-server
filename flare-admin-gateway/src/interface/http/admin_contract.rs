@@ -27,8 +27,8 @@ pub enum AuditReasonError {
 }
 
 /// 操作员的审计原因。线上格式是百分号编码的 UTF-8（控制台用 `encodeURIComponent` 编码，
-/// 头值因此是可见 ASCII，中文等非 ASCII 原因也能经浏览器与 Social 网关原样到达）；不含 `%`
-/// 的纯 ASCII 原因解码后不变。规则与 Social 网关 admin 分区一致：恰好一个头，原始值至多
+/// 头值因此是可见 ASCII，中文等非 ASCII 原因也能经浏览器与业务网关原样到达）；不含 `%`
+/// 的纯 ASCII 原因解码后不变。规则与业务网关 admin 分区一致：恰好一个头，原始值至多
 /// [`MAX_AUDIT_REASON_HEADER_BYTES`] 字节，解码后是合法 UTF-8 且至多 [`MAX_AUDIT_REASON_BYTES`]
 /// 字节，并按 `flare_server_core::auth::stated_reason` 校验：去掉首尾空白后含控制、格式或分隔
 /// 字符即拒（不替换）；没有可见字符与没带一样，返回 `None`；否则返回去掉首尾空白的解码值，

@@ -24,7 +24,7 @@ use super::ops_handler::{self, AdminCapability, AdminCapabilityDownstream};
 use super::platform_hooks_handler;
 use super::plugin_admin_handler;
 use super::plugin_registry_handler;
-use flare_im_service_kit::clients::AdminGrpcClients;
+use flare_im_core_service_kit::clients::AdminGrpcClients;
 
 #[allow(dead_code)]
 #[derive(OpenApi)]

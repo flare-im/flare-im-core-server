@@ -17,7 +17,7 @@ python3 - "$ROOT" <<'PY'
 import re, subprocess, sys, pathlib
 
 root = pathlib.Path(sys.argv[1])
-mod = root / "crates/flare-im-service-kit/src/metrics/mod.rs"
+mod = root / "crates/flare-im-core-service-kit/src/metrics/mod.rs"
 if not mod.exists():
     print("找不到 metrics 模块，跳过"); raise SystemExit(0)
 

@@ -2,15 +2,15 @@
 
 use std::{collections::HashMap, env, time::Duration};
 
-use flare_im_contracts::constants::groups::PUSH_WORKER_GROUP_DEFAULT;
-use flare_im_contracts::constants::topics::{
+use flare_im_core_contracts::constants::groups::PUSH_WORKER_GROUP_DEFAULT;
+use flare_im_core_contracts::constants::topics::{
     TOPIC_PUSH_DLQ, TOPIC_PUSH_OFFLINE, TOPIC_PUSH_OFFLINE_BULK, TOPIC_PUSH_OFFLINE_GROUP,
     TOPIC_PUSH_ONLINE,
 };
-use flare_im_service_kit::config::{
+use flare_im_core_service_kit::config::{
     FlareAppConfig, PushVendorGovernanceConfig, PushWorkerVendorsConfig,
 };
-use flare_im_service_kit::metrics::MetricsEndpointConfig;
+use flare_im_core_service_kit::metrics::MetricsEndpointConfig;
 use flare_server_core::error::{FlareError, Result};
 use flare_server_core::mq::kafka::{KafkaConsumerConfig, KafkaProducerConfig};
 use flare_server_core::mq::nats::{
@@ -340,7 +340,7 @@ impl PushWorkerConfig {
             .and_then(|value| value.trim().parse::<u32>().ok())
             .filter(|days| *days > 0)
             .unwrap_or(
-                flare_im_contracts::domain::push_binding::PUSH_BINDING_INACTIVE_DAYS_DEFAULT,
+                flare_im_core_contracts::domain::push_binding::PUSH_BINDING_INACTIVE_DAYS_DEFAULT,
             );
         reject_global_vendor_credentials()?;
         let binding_order =
@@ -723,7 +723,7 @@ mod tests {
     };
     use crate::domain::vendor_delivery::Vendor;
     use crate::domain::vendor_policy::VendorLimits;
-    use flare_im_service_kit::config::{PushVendorGovernanceConfig, PushWorkerVendorsConfig};
+    use flare_im_core_service_kit::config::{PushVendorGovernanceConfig, PushWorkerVendorsConfig};
 
     /// 没写的厂商与字段用缺省值；容量缺省跟速率走，最少调用数随窗口收小；越界的值拒绝启动。
     #[test]

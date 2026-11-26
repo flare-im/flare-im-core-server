@@ -90,7 +90,7 @@ flowchart TB
 - 消息上行：`flare-signaling/gateway` 将 send frame 转发到 `flare-signaling/route`，再进入 `flare-message-ingest`。
 - ACK / read / sync：在同一条长连接上承载对应 frame，服务端再转发到 route、conversation 或 sync-orchestrator。
 - 插件实时包：插件经宿主能力 `im.realtime.deliver` 向会话成员的全部在线连接下发 `DataPacket.capability`（不入库、至多一次）；音视频通话是托管插件 `flare.call`，呼叫状态与媒体都在插件侧，Core 不含通话专用代码，媒体流不进入 IM 消息主链。
-- 能力/插件契约：`flare-im-capability-core` 是共享 contract 来源；`flare-capability` 只负责运行时注册、授权、路由和 gRPC 服务实现。
+- 能力/插件契约：`flare-im-core-capability-core` 是共享 contract 来源；`flare-capability` 只负责运行时注册、授权、路由和 gRPC 服务实现。
 - 下行推送：push worker 向 online 查设备所在 gateway，经 GatewayRouter 直推该 gateway，由同一条长连接下发；不经过 route。
 
 `flare-api-gateway` 不作为客户端长连接入口；它是业务系统、三方系统和低频后台调用 Core typed API 的 HTTP facade。`flare-admin-gateway` 只服务管理面、审计和运维查询。若未来需要 HTTP/2 或 QUIC multiplexed stream，应优先保持同一个客户端接入网关进程，并在 transport 内隔离逻辑 stream，而不是让 core/signaling/admin 三个网关同时暴露客户端 WebSocket。

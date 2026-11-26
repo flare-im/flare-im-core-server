@@ -7,12 +7,12 @@ use flare_server_core::error::Result;
 use flare_server_core::mq::NatsConsumerConfig;
 use flare_server_core::{ErrorCode, FlareError};
 
-use flare_im_contracts::service_names::{ACCESS_GATEWAY, SIGNALING_ONLINE, get_service_name};
-use flare_im_service_kit::discovery::{
+use flare_im_core_contracts::service_names::{ACCESS_GATEWAY, SIGNALING_ONLINE, get_service_name};
+use flare_im_core_service_kit::discovery::{
     build_gateway_router_from_app_config, connect_grpc_channel_lazy_from_app_config,
 };
-use flare_im_service_kit::metrics::PushWorkerMetrics;
-use flare_im_service_kit::push_delivery::{
+use flare_im_core_service_kit::metrics::PushWorkerMetrics;
+use flare_im_core_service_kit::push_delivery::{
     AttestedRecordHandler, BrokerRecordIdentity, PushDeliveryMode,
 };
 use flare_server_core::mq::consumer::ConsumerConfig;
@@ -36,7 +36,7 @@ use crate::interface::messaging::offline_consumer::{
     OfflinePushConsumerFactory, UsageCountedExecutor,
 };
 use crate::interface::messaging::online_consumer::OnlinePushConsumerFactory;
-use flare_im_service_kit::push_trace::{PushTraceConfig, PushTraceRecorder};
+use flare_im_core_service_kit::push_trace::{PushTraceConfig, PushTraceRecorder};
 
 /// 一个消费者：它的形状、消费配置与只登记了它那个主题的分发器。
 pub struct ConsumerLane {
@@ -50,13 +50,13 @@ pub struct ApplicationContext {
     /// 在线投递与离线任务三条优先级通道，各一个消费者。
     pub consumers: Vec<ConsumerLane>,
     /// 用量预聚合（`push.attempts`）；启动层把它的 flush 循环挂进运行时。
-    pub usage: flare_im_usage::UsageReporter,
+    pub usage: flare_im_core_usage::UsageReporter,
     /// 厂商限流时攒下的提示（只在厂商后端时有）；启动层把它的交还循环挂进运行时。
     pub digest_coalescer: Option<Arc<DigestCoalescer>>,
 }
 
 pub async fn initialize(
-    app_config: &flare_im_service_kit::config::FlareAppConfig,
+    app_config: &flare_im_core_service_kit::config::FlareAppConfig,
     mode: PushDeliveryMode,
 ) -> Result<ApplicationContext> {
     let config = Arc::new(PushWorkerConfig::from_app_config(app_config)?);
@@ -103,7 +103,7 @@ pub async fn initialize(
     let online_handler = OnlinePushConsumerFactory::create_handler(gateway_push, dlq.clone());
 
     // 5.1 离线推送后端：开发期按生产目标显式选择，不做隐式降级。每个后端经用量计数包一层。
-    let usage = flare_im_usage::UsageReporter::from_env("flare-push-worker").await?;
+    let usage = flare_im_core_usage::UsageReporter::from_env("flare-push-worker").await?;
     let mut digest_coalescer = None;
     let offline_handler = match config.offline_delivery_backend {
         OfflineDeliveryBackend::Outbox => {

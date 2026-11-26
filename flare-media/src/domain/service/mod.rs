@@ -23,7 +23,7 @@ use crate::domain::repository::{
     LocalStoreRef, MetadataCacheRef, MetadataStoreRef, ObjectRepositoryRef, ReferenceStoreRef,
     UploadSessionStoreRef,
 };
-use flare_im_usage::UsageRecorder;
+use flare_im_core_usage::UsageRecorder;
 use flare_server_core::error::{ErrorCode, Result, map_context_error, map_infra_error};
 pub use reclaim::{
     UPLOAD_SESSION_RECLAIM_BATCH, UPLOAD_SESSION_RECLAIM_GRACE_SECONDS,

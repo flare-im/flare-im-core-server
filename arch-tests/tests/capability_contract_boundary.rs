@@ -4,7 +4,7 @@ use std::path::PathBuf;
 #[test]
 fn capability_contracts_are_owned_by_shared_core_crate() {
     let root = workspace_root();
-    let contract_root = root.join("crates/flare-im-capability-core/src");
+    let contract_root = root.join("crates/flare-im-core-capability-core/src");
 
     for required in [
         "error.rs",
@@ -32,8 +32,8 @@ fn capability_contracts_are_owned_by_shared_core_crate() {
     ] {
         let content = fs::read_to_string(root.join(facade)).expect("read capability facade");
         assert!(
-            content.contains("pub use flare_im_capability_core::"),
-            "{facade} must remain a compatibility facade over flare-im-capability-core"
+            content.contains("pub use flare_im_core_capability_core::"),
+            "{facade} must remain a compatibility facade over flare-im-core-capability-core"
         );
     }
 }

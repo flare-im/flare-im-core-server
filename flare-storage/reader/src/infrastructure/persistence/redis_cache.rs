@@ -5,7 +5,7 @@
 
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use chrono::{DateTime, Utc};
-use flare_im_service_kit::redis_connection::{SharedRedisConnection, redis_error_code};
+use flare_im_core_service_kit::redis_connection::{SharedRedisConnection, redis_error_code};
 use flare_server_core::error::{ErrorCode, FlareError, Result, map_infra_error};
 use prost::Message as ProstMessage;
 use redis::{AsyncCommands, RedisError, aio::ConnectionManager};
@@ -122,7 +122,7 @@ impl RedisMessageCache {
     }
 
     fn message_key(tenant_id: &str, conversation_id: &str, message_id: &str) -> String {
-        flare_im_contracts::message_cache_key(tenant_id, conversation_id, message_id)
+        flare_im_core_contracts::message_cache_key(tenant_id, conversation_id, message_id)
     }
 
     fn session_query_key(
@@ -139,7 +139,7 @@ impl RedisMessageCache {
     }
 
     fn tail_key(tenant_id: &str, conversation_id: &str) -> String {
-        flare_im_contracts::message_tail_key(tenant_id, conversation_id)
+        flare_im_core_contracts::message_tail_key(tenant_id, conversation_id)
     }
 
     /// 缓存单条消息
@@ -563,7 +563,7 @@ mod tests {
     /// PostgreSQL。修复前每次读都 `ConnectionManager::new`、用 redis 的默认退避，60 s 仍未返回。
     #[tokio::test]
     async fn a_cache_read_from_an_unreachable_redis_fails_within_the_bound() {
-        use flare_im_service_kit::redis_connection::RedisConnectionLimits;
+        use flare_im_core_service_kit::redis_connection::RedisConnectionLimits;
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let closed = listener.local_addr().unwrap();

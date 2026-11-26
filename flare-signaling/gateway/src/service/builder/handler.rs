@@ -14,7 +14,7 @@ use crate::infrastructure::ports::{
     RouterMessageCommandPort, SignalingRouteGrpcPool, StorageSyncGrpcPool, StorageSyncPort,
 };
 use crate::interface::link::LongConnectionHandler;
-use flare_im_service_kit::tenant_runtime::TenantRuntimeCache;
+use flare_im_core_service_kit::tenant_runtime::TenantRuntimeCache;
 use flare_server_core::auth::{
     AuthProviderConfig, AuthProviderMode, RedisTokenStore, TokenService, TokenValidator,
     TrustedIssuerConfig, build_http_hook_token_validator, build_token_validator,
@@ -26,7 +26,7 @@ type SharedAuthenticator = Arc<dyn flare_core::server::auth::Authenticator + Sen
 pub async fn build_authenticator(
     config: &AccessGatewayConfig,
     tenant_runtime: TenantRuntimeCache,
-    metrics: Arc<flare_im_service_kit::metrics::AccessGatewayMetrics>,
+    metrics: Arc<flare_im_core_service_kit::metrics::AccessGatewayMetrics>,
 ) -> flare_server_core::error::Result<SharedAuthenticator> {
     let core_tokens = match config.auth_provider.mode {
         AuthProviderMode::CoreJwt => Some(Arc::new(core_token_service(config)?)),

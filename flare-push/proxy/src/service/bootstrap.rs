@@ -5,7 +5,7 @@ use flare_server_core::{SignedContextLayer, SignedContextVerifier};
 use tracing::info;
 
 use crate::service::wire::{self, ApplicationContext};
-use flare_im_contracts::service_names::PUSH_PROXY;
+use flare_im_core_contracts::service_names::PUSH_PROXY;
 
 /// 应用启动器
 pub struct ApplicationBootstrap;
@@ -14,9 +14,9 @@ impl ApplicationBootstrap {
     /// 运行应用的主入口点
     pub async fn run() -> Result<()> {
         let verifier = push_proxy_identity_verifier()?;
-        let app_config = flare_im_service_kit::load_app_config_from_env();
+        let app_config = flare_im_core_service_kit::load_app_config_from_env();
         let service_config = app_config.push_proxy_service();
-        let runtime_plan = flare_im_service_kit::build_service_runtime_plan(
+        let runtime_plan = flare_im_core_service_kit::build_service_runtime_plan(
             app_config,
             &service_config.runtime,
             PUSH_PROXY,
@@ -31,7 +31,7 @@ impl ApplicationBootstrap {
 
     async fn run_with_context(
         context: ApplicationContext,
-        runtime_plan: flare_im_service_kit::ImServiceRuntimePlan,
+        runtime_plan: flare_im_core_service_kit::ImServiceRuntimePlan,
         verifier: SignedContextVerifier,
     ) -> Result<()> {
         use flare_grpc_proto::push::push_admin_service_server::PushAdminServiceServer;
@@ -42,7 +42,7 @@ impl ApplicationBootstrap {
         let address = runtime_plan.address;
         let service_name = runtime_plan.service_name.clone();
         let grpc_metrics =
-            flare_im_service_kit::metrics::GrpcMetricsLayer::new(service_name.clone());
+            flare_im_core_service_kit::metrics::GrpcMetricsLayer::new(service_name.clone());
         let handler = context.handler.clone();
         let admin_handler = context.admin_handler.clone();
         let address_clone = address;
@@ -72,7 +72,7 @@ impl ApplicationBootstrap {
         runtime
             .run_with_registration(|addr| {
                 Box::pin(async move {
-                    flare_im_service_kit::discovery::register_runtime_service_only(
+                    flare_im_core_service_kit::discovery::register_runtime_service_only(
                         &service_name,
                         addr,
                         None,

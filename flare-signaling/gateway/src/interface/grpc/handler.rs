@@ -18,7 +18,7 @@ use flare_grpc_proto::access_gateway::{
     PushCustomRequest, PushEventRequest, PushMessageRequest, PushNotificationRequest,
     PushNotificationResponse, PushResponse, PushResult, RelayRealtimeControlRequest,
 };
-use flare_im_contracts::Ctx;
+use flare_im_core_contracts::Ctx;
 use flare_proto::common::DataPacket;
 use flare_proto::common::data_packet::Payload as DataPayload;
 use flare_proto::common::realtime_control_packet::Payload as RealtimePayload;
@@ -84,8 +84,9 @@ impl AccessGatewayHandler {
 fn validate_push_producer_claims(claims: &SignedContextClaims) -> Result<(), Status> {
     if claims.actor_type != SignedActorType::Service
         || claims.actor_id != "flare-push-worker"
-        || !flare_im_contracts::domain::tenant::is_valid_tenant_id(&claims.tenant_id)
-        || flare_im_contracts::utils::normalize_tenant_id(&claims.tenant_id) != claims.tenant_id
+        || !flare_im_core_contracts::domain::tenant::is_valid_tenant_id(&claims.tenant_id)
+        || flare_im_core_contracts::utils::normalize_tenant_id(&claims.tenant_id)
+            != claims.tenant_id
     {
         return Err(Status::permission_denied(
             "gateway push producer not permitted",
@@ -157,8 +158,9 @@ fn validate_realtime_relay_body(
     if claims.actor_type != SignedActorType::User
         || claims.credential_id.as_deref() != Some("signaling-gateway")
         || claims.actor_id.is_empty()
-        || !flare_im_contracts::domain::tenant::is_valid_tenant_id(&claims.tenant_id)
-        || flare_im_contracts::utils::normalize_tenant_id(&claims.tenant_id) != claims.tenant_id
+        || !flare_im_core_contracts::domain::tenant::is_valid_tenant_id(&claims.tenant_id)
+        || flare_im_core_contracts::utils::normalize_tenant_id(&claims.tenant_id)
+            != claims.tenant_id
     {
         return Err(Status::permission_denied(
             "gateway relay identity not permitted",
@@ -450,8 +452,9 @@ impl AccessGateway for AccessGatewayHandler {
             .get_data::<VerifiedContext>()
             .and_then(|marker| marker.claims())
             .ok_or_else(|| Status::unauthenticated("signed gateway identity required"))?;
-        if !flare_im_contracts::domain::tenant::is_valid_tenant_id(&claims.tenant_id)
-            || claims.tenant_id != flare_im_contracts::utils::normalize_tenant_id(&claims.tenant_id)
+        if !flare_im_core_contracts::domain::tenant::is_valid_tenant_id(&claims.tenant_id)
+            || claims.tenant_id
+                != flare_im_core_contracts::utils::normalize_tenant_id(&claims.tenant_id)
             || (claims.actor_type == SignedActorType::User
                 && claims.actor_id != request.get_ref().user_id)
             || (claims.actor_type != SignedActorType::User

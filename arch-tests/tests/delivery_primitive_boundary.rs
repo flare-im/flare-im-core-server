@@ -56,7 +56,7 @@ fn large_conversation_fanout_uses_ping_without_inline_message_payload() {
     );
 
     let push_repository = fs::read_to_string(
-        root.join("crates/flare-im-message-pipeline/src/messaging/push_repository.rs"),
+        root.join("crates/flare-im-core-message-pipeline/src/messaging/push_repository.rs"),
     )
     .expect("read push repository");
     assert!(

@@ -12,7 +12,7 @@ use flare_grpc_proto::capability::{
     GetHookConfigResponse, GetHookStatisticsResponse, ListHookConfigsResponse,
     QueryHookExecutionsResponse, SetHookStatusResponse, UpdateHookConfigResponse,
 };
-use flare_im_service_kit::clients::{AdminGrpcClients, CapabilityAdminClientWrapper};
+use flare_im_core_service_kit::clients::{AdminGrpcClients, CapabilityAdminClientWrapper};
 use flare_server_core::{
     AuthenticatedPrincipal,
     error::{ErrorBuilder, ErrorCode},

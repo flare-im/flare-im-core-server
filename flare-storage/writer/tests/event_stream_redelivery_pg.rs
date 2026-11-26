@@ -8,8 +8,8 @@
 
 use std::sync::Arc;
 
-use flare_im_contracts::Ctx;
-use flare_im_contracts::utils::Context;
+use flare_im_core_contracts::Ctx;
+use flare_im_core_contracts::utils::Context;
 use flare_proto::common;
 use flare_storage_writer::domain::model::{
     Event, EventPayload, EventType, Message, PinPayload, ReactionPayload,

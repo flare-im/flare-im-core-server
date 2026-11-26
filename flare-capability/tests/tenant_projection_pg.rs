@@ -18,8 +18,8 @@ use flare_capability::domain::repository::TenantProjectionRepository;
 use flare_capability::infrastructure::persistence::PostgresTenantProjectionRepository;
 use flare_grpc_proto::control::TenantStatus as ProtoStatus;
 use flare_grpc_proto::control::{CoreQuota, TenantProjectionUpsert, TenantQuota as ProtoQuota};
-use flare_im_contracts::domain::tenant::TenantStatus;
-use flare_im_service_kit::tenant_runtime::{PgTenantRuntimeSource, TenantRuntimeSource};
+use flare_im_core_contracts::domain::tenant::TenantStatus;
+use flare_im_core_service_kit::tenant_runtime::{PgTenantRuntimeSource, TenantRuntimeSource};
 use sqlx::postgres::PgPoolOptions;
 
 const ENV_DATABASE_URL: &str = "FLARE_TENANT_TEST_DATABASE_URL";

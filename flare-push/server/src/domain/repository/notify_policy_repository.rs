@@ -9,7 +9,7 @@
 
 use std::collections::HashMap;
 
-use flare_im_contracts::Ctx;
+use flare_im_core_contracts::Ctx;
 use flare_server_core::error::FlareError;
 
 /// 一个成员在某会话下的通知偏好。

@@ -8,8 +8,8 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use flare_grpc_proto::access_gateway::RelayRealtimeControlRequest;
-use flare_im_contracts::Ctx;
-use flare_im_service_kit::gateway::GatewayRouter;
+use flare_im_core_contracts::Ctx;
+use flare_im_core_service_kit::gateway::GatewayRouter;
 use flare_server_core::{SignedActorType, SignedContextIdentity, SignedContextSigner};
 
 use crate::domain::service::IRealtimeBroadcastPort;

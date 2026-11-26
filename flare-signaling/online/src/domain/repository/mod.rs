@@ -84,6 +84,7 @@ pub trait ConversationRepository: Send + Sync {
     }
     /// Persist exact revoked authentication sessions before enumerating/kicking connections.
     /// Admission and tombstones share the same storage serialization boundary.
+    #[allow(clippy::too_many_arguments)]
     async fn revoke_identity_sessions(
         &self,
         _tenant: &str,
@@ -91,6 +92,7 @@ pub trait ConversationRepository: Send + Sync {
         _session_ids: &[String],
         _cutoff_ms: i64,
         _request_id: &str,
+        _actor_id: &str,
         _signing_key_id: &str,
     ) -> Result<u32> {
         Err(flare_server_core::flare_err!(
@@ -190,7 +192,7 @@ pub struct SessionOwner {
 }
 
 /// 网关宕机清扫所需的存储操作：单例锁、已知网关与租约、网关连接索引
-/// （约定见 `flare_im_service_kit::gateway::lease`）。
+/// （约定见 `flare_im_core_service_kit::gateway::lease`）。
 pub trait GatewaySweepRepository: Send + Sync {
     /// 抢占或续期清扫器单例锁（`SET NX PX` + 持有者续期）；返回本实例是否持有。
     async fn hold_sweeper_lock(&self, token: &str, ttl: std::time::Duration) -> Result<bool>;

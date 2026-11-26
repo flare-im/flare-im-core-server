@@ -40,7 +40,7 @@ pub struct ApplicationContext {
 /// 注意：由于 Rust 2024 原生 async fn 不支持 dyn 兼容性，
 /// 我们使用泛型 + 具体类型的方式，在编译期确定实现
 pub async fn initialize(
-    app_config: &flare_im_service_kit::config::FlareAppConfig,
+    app_config: &flare_im_core_service_kit::config::FlareAppConfig,
 ) -> Result<ApplicationContext> {
     // 1. 加载会话配置
     let conversation_config = Arc::new(ConversationConfig::from_app_config(app_config).map_err(
@@ -133,7 +133,7 @@ pub async fn initialize(
 
     // 6. 创建消息提供者（可选）
     let message_provider: Option<Arc<StorageReaderClient>> = {
-        use flare_im_contracts::service_names::{STORAGE_READER, get_service_name};
+        use flare_im_core_contracts::service_names::{STORAGE_READER, get_service_name};
         let storage_reader_service = get_service_name(STORAGE_READER);
         let explicit_url = storage_reader_url(
             std::env::var("CONVERSATION_STORAGE_READER_SERVICE_URL").ok(),
@@ -142,7 +142,7 @@ pub async fn initialize(
         let discover_name = storage_reader_service.clone();
         let provider =
             build_message_provider(explicit_url, storage_reader_service, async move || {
-                flare_im_service_kit::discovery::create_discover(&discover_name)
+                flare_im_core_service_kit::discovery::create_discover(&discover_name)
                     .await
                     .map_err(|e| {
                         ErrorBuilder::new(
@@ -183,7 +183,7 @@ pub async fn initialize(
     ));
 
     // 10. 构建 gRPC 处理器
-    // PurgeConversationHistory 逐 RPC 验 flare-im-bridge 的签名；没配公钥时该 RPC fail closed。
+    // PurgeConversationHistory 逐 RPC 验受信业务集成服务的签名；没配公钥时该 RPC fail closed。
     let purge_verifier = match std::env::var("FLARE_INTERNAL_CTX_PUBLIC_KEY") {
         Ok(material) => Some(
             SignedContextVerifier::from_public_key(&material).map_err(|_| {
@@ -201,21 +201,30 @@ pub async fn initialize(
             None
         }
     };
-    let roster_policy_endpoint = flare_im_service_kit::roster_policy::endpoint_from_env();
+    let roster_policy_endpoint = flare_im_core_service_kit::roster_policy::endpoint_from_env();
     if roster_policy_endpoint.is_none() {
         tracing::warn!(
-            "{} is unset; rosters of externally managed (Social) groups stay hidden",
-            flare_im_service_kit::roster_policy::ENDPOINT_ENV
+            "{} is unset; rosters of externally managed groups stay hidden",
+            flare_im_core_service_kit::roster_policy::ENDPOINT_ENV
         );
     }
     let grpc_handler = ConversationGrpcHandler::new(command_handler, query_handler)
         .with_purge_verifier(purge_verifier)
-        .with_roster_policy_endpoint(roster_policy_endpoint);
+        .with_trusted_integrations(
+            flare_im_core_service_kit::trusted_integration::TrustedIntegrationPrincipals::from_env(
+            ),
+        )
+        .with_roster_policy_endpoint(roster_policy_endpoint)
+        .with_external_roster_business_types(
+            flare_im_core_service_kit::roster_policy::external_business_types_from_env(),
+        );
     // 管理员只读只认网关 admin 分区签的 Staff `x-flare-ctx`（Cell 公钥集，Staff 钉死
     // kid=gateway）；没配公钥时 fail closed（UNAUTHENTICATED）。
     let staff_verifier = match SignedContextVerifier::from_env_optional() {
         Ok(Some(_)) => Some(
-            flare_im_service_kit::staff_context::admin_staff_verifier_from_env("conversation")?,
+            flare_im_core_service_kit::staff_context::admin_staff_verifier_from_env(
+                "conversation",
+            )?,
         ),
         Ok(None) => {
             tracing::warn!(
@@ -341,7 +350,7 @@ async fn build_message_provider<D>(
     discover: D,
 ) -> Result<StorageReaderClient>
 where
-    D: AsyncFnOnce() -> Result<Option<flare_im_service_kit::ServiceDiscover>>,
+    D: AsyncFnOnce() -> Result<Option<flare_im_core_service_kit::ServiceDiscover>>,
 {
     if let Some(url) = explicit_url {
         tracing::info!(url = %url, "Storage Reader at its explicit address; service discovery not used");
@@ -353,8 +362,8 @@ where
             flare_server_core::discovery::ServiceClient::new(discover),
         ),
         None => {
-            let url = flare_im_service_kit::discovery::default_static_grpc_fallback(
-                flare_im_contracts::service_names::STORAGE_READER,
+            let url = flare_im_core_service_kit::discovery::default_static_grpc_fallback(
+                flare_im_core_contracts::service_names::STORAGE_READER,
             );
             tracing::warn!(
                 url,
@@ -430,7 +439,7 @@ mod tests {
         let provider = build_message_provider(
             Some("http://127.0.0.1:60083".into()),
             "storage-reader".into(),
-            async || -> Result<Option<flare_im_service_kit::ServiceDiscover>> {
+            async || -> Result<Option<flare_im_core_service_kit::ServiceDiscover>> {
                 panic!("discovery must not run when the address is explicit")
             },
         )

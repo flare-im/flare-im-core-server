@@ -503,11 +503,11 @@ impl OnlinePushConsumerFactory {
     }
 
     pub fn topic() -> &'static str {
-        flare_im_contracts::constants::topics::TOPIC_PUSH_ONLINE
+        flare_im_core_contracts::constants::topics::TOPIC_PUSH_ONLINE
     }
 
     pub fn consumer_group() -> &'static str {
-        flare_im_contracts::constants::groups::PUSH_WORKER_GROUP_DEFAULT
+        flare_im_core_contracts::constants::groups::PUSH_WORKER_GROUP_DEFAULT
     }
 }
 
@@ -701,7 +701,7 @@ mod tests {
     impl flare_server_core::mq::producer::Producer for CountingProducer {
         async fn send(
             &self,
-            _ctx: &flare_im_contracts::Ctx,
+            _ctx: &flare_im_core_contracts::Ctx,
             _topic: &str,
             _key: Option<&str>,
             _payload: Vec<u8>,
@@ -713,7 +713,7 @@ mod tests {
 
         async fn send_batch(
             &self,
-            _ctx: &flare_im_contracts::Ctx,
+            _ctx: &flare_im_core_contracts::Ctx,
             _messages: Vec<flare_server_core::mq::producer::ProducerMessage>,
         ) -> std::result::Result<(), flare_server_core::mq::producer::ProducerError> {
             Ok(())
@@ -728,7 +728,7 @@ mod tests {
     /// 重投，不能把推送送进 DLQ；网关明确拒绝的仍进 DLQ。
     #[tokio::test]
     async fn gateway_connection_failure_is_nacked_not_dead_lettered() {
-        use flare_im_service_kit::gateway::{
+        use flare_im_core_service_kit::gateway::{
             GatewayRouter, GatewayRouterConfig, GatewayRouterTrait,
         };
 
@@ -813,7 +813,7 @@ mod tests {
         let handler = OnlinePushHandler::new(
             Arc::new(GatewayPushExecutor::new(
                 Arc::new(crate::infrastructure::rpc::OnlineServiceClient::from_channel(unused)),
-                flare_im_service_kit::gateway::GatewayRouter::new(Default::default()),
+                flare_im_core_service_kit::gateway::GatewayRouter::new(Default::default()),
             )),
             Arc::new(DlqPublisher::from_producer(
                 Arc::new(CountingProducer::default()),
@@ -893,8 +893,8 @@ mod redelivery_tests {
         DeliverToConversationRequest, GetUserConnectionsRequest, GetUserConnectionsResponse,
         PushAckResponse, PushNotificationResponse, PushResponse, RelayRealtimeControlRequest,
     };
-    use flare_im_service_kit::gateway::{GatewayRouter, GatewayRouterConfig};
-    use flare_im_service_kit::push_delivery::{
+    use flare_im_core_service_kit::gateway::{GatewayRouter, GatewayRouterConfig};
+    use flare_im_core_service_kit::push_delivery::{
         AttestedRecordHandler, BrokerRecordIdentity, PushDeliveryMode,
     };
     use flare_server_core::mq::consumer::{

@@ -4,7 +4,7 @@
 use std::future::Future;
 use std::pin::Pin;
 
-use flare_im_contracts::Ctx;
+use flare_im_core_contracts::Ctx;
 use flare_server_core::error::Result;
 
 use crate::domain::model::Message;

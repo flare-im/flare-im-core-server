@@ -33,8 +33,10 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use flare_im_capability_core::plugin::invocation::{PluginCallSigner, PluginSystemCallClaims};
-use flare_im_capability_core::plugin::manifest::{UNBOUND_REASON_POST_FAILED, UiContributionKind};
+use flare_im_core_capability_core::plugin::invocation::{PluginCallSigner, PluginSystemCallClaims};
+use flare_im_core_capability_core::plugin::manifest::{
+    UNBOUND_REASON_POST_FAILED, UiContributionKind,
+};
 use serde_json::json;
 
 use super::remote_dispatch::{PluginAnswer, PluginCall, call_plugin_answer};

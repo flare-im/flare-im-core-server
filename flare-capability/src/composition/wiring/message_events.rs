@@ -74,7 +74,7 @@ pub(super) async fn tasks(
     ) else {
         return Ok(Vec::new());
     };
-    let app = flare_im_service_kit::load_app_config_from_env();
+    let app = flare_im_core_service_kit::load_app_config_from_env();
     if app.mq.default_backend != "nats" {
         tracing::warn!("plugin event delivery requires the JetStream main stream");
         return Ok(Vec::new());
@@ -133,7 +133,7 @@ pub(crate) async fn build_tasks(
     dispatcher
         .register("flare.im.message.main".into(), handler)
         .map_err(|e| FlareError::system(format!("plugin event consumer: {e}")))?;
-    let consumer = flare_im_service_kit::consumer_retry::with_downstream_outage_retry(
+    let consumer = flare_im_core_service_kit::consumer_retry::with_downstream_outage_retry(
         ConsumerConfig::default()
             .with_concurrency(8)
             // Preserve each handler's DeadLetter classification. The generic batch

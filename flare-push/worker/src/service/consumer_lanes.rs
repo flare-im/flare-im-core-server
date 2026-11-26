@@ -199,7 +199,7 @@ impl KafkaConsumerConfig for LaneBrokerSettings {
 mod tests {
     use super::*;
     use crate::config::ConsumerConcurrency;
-    use flare_im_contracts::constants::topics::{
+    use flare_im_core_contracts::constants::topics::{
         TOPIC_PUSH_OFFLINE, TOPIC_PUSH_OFFLINE_BULK, TOPIC_PUSH_OFFLINE_GROUP, TOPIC_PUSH_ONLINE,
     };
 

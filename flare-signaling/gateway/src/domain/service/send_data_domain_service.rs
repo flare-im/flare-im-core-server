@@ -8,9 +8,9 @@ use std::time::{Duration, Instant};
 
 use flare_core::common::ErrorCode;
 use flare_core::common::error::{FlareError, Result};
-use flare_im_contracts::Ctx;
-use flare_im_contracts::constants::sync_inbox::{
-    is_sync_inbox_conversation_id, sync_inbox_conversation_id,
+use flare_im_core_contracts::Ctx;
+use flare_im_core_contracts::constants::user_inbox::{
+    is_user_inbox_conversation_id, user_inbox_conversation_id,
 };
 use flare_proto::common::data_packet::Payload as DataPayload;
 use flare_proto::common::realtime_control_packet::Payload as RealtimePayload;
@@ -246,9 +246,9 @@ impl SendDataDomainService {
         if conversation_id.is_empty() {
             return;
         }
-        // 用户的 sync 收件箱只承载服务端发的帧（如设置变更信号），客户端发往任何收件箱的实时帧
+        // 用户的 用户收件箱只承载服务端发的帧（如设置变更信号），客户端发往任何收件箱的实时帧
         // 一律丢弃：否则谁都能往别人的收件箱塞一帧冒充服务端。
-        if is_sync_inbox_conversation_id(&conversation_id) {
+        if is_user_inbox_conversation_id(&conversation_id) {
             return;
         }
         let Some(origin) = tx
@@ -257,7 +257,8 @@ impl SendDataDomainService {
             return;
         };
         let Some(tenant_id) = tx.tenant_id().filter(|tenant| {
-            !tenant.is_empty() && flare_im_contracts::utils::normalize_tenant_id(tenant) == *tenant
+            !tenant.is_empty()
+                && flare_im_core_contracts::utils::normalize_tenant_id(tenant) == *tenant
         }) else {
             return;
         };
@@ -338,7 +339,7 @@ impl SendDataDomainService {
         }
     }
 
-    /// 告诉该用户其余在线连接去重新读设置：在他自己的 sync 收件箱上发一帧
+    /// 告诉该用户其余在线连接去重新读设置：在他自己的 用户收件箱上发一帧
     /// `UserSettingsChanged`（本节点直转，排除发起写入的连接；再广播给其余网关节点）。只在线、
     /// 尽力而为，后台发送，不拖慢写入的应答；发不出去只记 trace，设置本身已经写成功。
     fn announce_settings_change(&self, tx: &Ctx, connection_id: &str, signal: UserSettingsChanged) {
@@ -350,7 +351,7 @@ impl SendDataDomainService {
         if tx.user_id() != Some(origin.user_id()) || tx.tenant_id() != Some(origin.tenant_id()) {
             return;
         }
-        let inbox = sync_inbox_conversation_id(origin.user_id());
+        let inbox = user_inbox_conversation_id(origin.user_id());
         let packet = settings_changed_packet(&inbox, &signal);
         let relay = self.relay.clone();
         let broadcast = self.broadcast.clone();
@@ -1006,14 +1007,14 @@ mod tests {
         (rc.conversation_id.unwrap_or_default(), signal)
     }
 
-    /// 改了用户级通知设置：该用户其余在线连接在自己的 sync 收件箱上收到一帧信号（发起写入的连接
+    /// 改了用户级通知设置：该用户其余在线连接在自己的 用户收件箱上收到一帧信号（发起写入的连接
     /// 与别的用户都收不到），同一帧广播给其余网关节点；写入的应答照常回给发起的连接。
     #[tokio::test]
     async fn a_notification_settings_write_tells_the_users_other_connections() {
         let registry = Arc::new(ConversationSubscriptionRegistry::new());
-        registry.join("t1", "sync:alice", "conn-a");
-        registry.join("t1", "sync:alice", "conn-b");
-        registry.join("t1", "sync:bob", "conn-bob");
+        registry.join("t1", "inbox:alice", "conn-a");
+        registry.join("t1", "inbox:alice", "conn-b");
+        registry.join("t1", "inbox:bob", "conn-bob");
         let (service, push, broadcast) =
             service_answering(registry, notification_settings_written(6));
         let ctx = authenticated_ctx("conn-a", "alice", "t1");
@@ -1042,14 +1043,14 @@ mod tests {
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].0, ["conn-b"]);
         let (inbox, signal) = decode_signal(&calls[0].2);
-        assert_eq!(inbox, "sync:alice");
+        assert_eq!(inbox, "inbox:alice");
         assert_eq!(signal.conversation_id, "");
         assert_eq!(signal.settings_version, 6);
         assert!(!signal.notify_all);
 
         let broadcasts = broadcast.calls.lock().expect("broadcast mutex poisoned");
         assert_eq!(broadcasts.len(), 1);
-        assert_eq!(broadcasts[0].0, "sync:alice");
+        assert_eq!(broadcasts[0].0, "inbox:alice");
         assert_eq!(broadcasts[0].1, calls[0].2);
     }
 
@@ -1057,8 +1058,8 @@ mod tests {
     #[tokio::test]
     async fn a_conversation_settings_write_signals_only_a_notify_all_change() {
         let registry = Arc::new(ConversationSubscriptionRegistry::new());
-        registry.join("t1", "sync:alice", "conn-a");
-        registry.join("t1", "sync:alice", "conn-b");
+        registry.join("t1", "inbox:alice", "conn-a");
+        registry.join("t1", "inbox:alice", "conn-b");
         let (service, push, broadcast) =
             service_answering(registry, conversation_settings_written(9));
         let ctx = authenticated_ctx("conn-a", "alice", "t1");
@@ -1102,7 +1103,7 @@ mod tests {
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].0, ["conn-b"]);
         let (inbox, signal) = decode_signal(&calls[0].2);
-        assert_eq!(inbox, "sync:alice");
+        assert_eq!(inbox, "inbox:alice");
         assert_eq!(signal.conversation_id, "2G1");
         assert_eq!(signal.settings_version, 9);
         assert!(signal.notify_all);
@@ -1112,7 +1113,7 @@ mod tests {
     #[tokio::test]
     async fn reading_notification_settings_signals_nothing() {
         let registry = Arc::new(ConversationSubscriptionRegistry::new());
-        registry.join("t1", "sync:alice", "conn-b");
+        registry.join("t1", "inbox:alice", "conn-b");
         let response = SyncRes {
             payload: Some(SyncResPayload::GetUserNotificationSettings(
                 flare_proto::common::GetUserNotificationSettingsSyncRes::default(),
@@ -1139,15 +1140,15 @@ mod tests {
         );
     }
 
-    /// 客户端不能往任何 sync 收件箱发实时帧（自己的也不行）：收件箱上的帧只能来自服务端。
+    /// 客户端不能往任何 用户收件箱发实时帧（自己的也不行）：收件箱上的帧只能来自服务端。
     #[tokio::test]
-    async fn clients_cannot_put_realtime_frames_into_a_sync_inbox() {
+    async fn clients_cannot_put_realtime_frames_into_a_user_inbox() {
         let registry = Arc::new(ConversationSubscriptionRegistry::new());
-        registry.join("t1", "sync:bob", "conn-bob");
-        registry.join("t1", "sync:alice", "conn-a2");
+        registry.join("t1", "inbox:bob", "conn-bob");
+        registry.join("t1", "inbox:alice", "conn-a2");
         let (service, push, broadcast) = service_with(registry);
         let ctx = authenticated_ctx("conn-a", "alice", "t1");
-        for inbox in ["sync:bob", "sync:alice"] {
+        for inbox in ["inbox:bob", "inbox:alice"] {
             let forged = UserSettingsChanged {
                 conversation_id: String::new(),
                 settings_version: 99,

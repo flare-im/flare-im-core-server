@@ -28,5 +28,5 @@ pub(crate) fn admin_staff_verifier_from_env(
     if internal_ctx_verifier_from_env(consumer)?.is_none() {
         return Ok(None);
     }
-    flare_im_service_kit::staff_context::admin_staff_verifier_from_env(consumer).map(Some)
+    flare_im_core_service_kit::staff_context::admin_staff_verifier_from_env(consumer).map(Some)
 }

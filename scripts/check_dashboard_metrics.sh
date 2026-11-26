@@ -184,7 +184,7 @@ for repo, base in source_roots:
             )
 
 # 默认注册表只有在 service-kit 合并它时才有出口；进程指标也来自那里（prometheus 的 process 特性，仅 Linux）。
-service_kit = root / "crates/flare-im-service-kit"
+service_kit = root / "crates/flare-im-core-service-kit"
 kit_manifest = (service_kit / "Cargo.toml").read_text()
 kit_metrics = strip_test_modules(strip_comments((service_kit / "src/metrics/mod.rs").read_text()))
 merges_default_registry = "prometheus::default_registry()" in kit_metrics

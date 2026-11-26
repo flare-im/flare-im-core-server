@@ -2,7 +2,7 @@
 //! the operation event is sequenced so it can be authorized against the message itself.
 use std::collections::HashMap;
 
-use flare_im_contracts::Ctx;
+use flare_im_core_contracts::Ctx;
 use flare_proto::common::Message;
 use flare_server_core::error::Result;
 

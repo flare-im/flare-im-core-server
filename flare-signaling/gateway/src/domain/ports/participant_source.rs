@@ -3,7 +3,7 @@
 //! 生产实现是会话服务的 gRPC 读池；抽成端口是为了让投递路径的订阅对账能在单测里被驱动。
 
 use async_trait::async_trait;
-use flare_im_contracts::Ctx;
+use flare_im_core_contracts::Ctx;
 use flare_server_core::error::Result;
 
 #[async_trait]

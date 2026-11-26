@@ -145,7 +145,7 @@ mod tests {
         assert_eq!(actual.grpc_port, 60060);
         assert_eq!(gateway["tcp_health"].as_str(), Some("127.0.0.1:60051"));
         assert_eq!(
-            flare_im_service_kit::discovery::STATIC_ACCESS_GATEWAY_GRPC_URI,
+            flare_im_core_service_kit::discovery::STATIC_ACCESS_GATEWAY_GRPC_URI,
             format!("http://127.0.0.1:{}", actual.grpc_port)
         );
     }

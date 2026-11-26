@@ -4,7 +4,7 @@
 //! 由后续 vendor adapter / 运营工具以消费组方式取走。写入失败返回可重试
 //! 错误（ServiceUnavailable），由 JetStream 重投保证任务不丢。
 
-use flare_im_contracts::Ctx;
+use flare_im_core_contracts::Ctx;
 use flare_proto::PushTaskEnvelope;
 use flare_server_core::error::{ErrorCode, FlareError};
 use flare_server_core::flare_err;

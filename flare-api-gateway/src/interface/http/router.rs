@@ -17,7 +17,7 @@ use super::presence_handler;
 use super::push_receipt_handler;
 use super::push_token_handler;
 use super::read_receipt_handler;
-use flare_im_service_kit::clients::GrpcClients;
+use flare_im_core_service_kit::clients::GrpcClients;
 use flare_server_core::http::HttpApiError;
 
 /// OpenAPI 文档定义（由 utoipa 过程宏消费，编译器视为未构造）
@@ -427,9 +427,9 @@ async fn route_not_found() -> HttpApiError {
 /// （`/health` 只说明进程活着）。挂在全部中间件之外：探针不计限流、不走鉴权。
 pub(crate) fn with_readiness_probe(
     router: Router,
-    readiness: Arc<flare_im_service_kit::health::Readiness>,
+    readiness: Arc<flare_im_core_service_kit::health::Readiness>,
 ) -> Router {
-    router.merge(flare_im_service_kit::health::readyz_router(readiness))
+    router.merge(flare_im_core_service_kit::health::readyz_router(readiness))
 }
 
 #[cfg(test)]
@@ -574,7 +574,7 @@ mod api_docs_tests {
     /// `/readyz`：启动完成才 200，进入停机转 503；`/health` 不受影响。
     #[tokio::test]
     async fn readyz_is_ready_after_startup_and_503_once_draining() {
-        let readiness = Arc::new(flare_im_service_kit::health::Readiness::default());
+        let readiness = Arc::new(flare_im_core_service_kit::health::Readiness::default());
         let app = with_readiness_probe(
             compose_router(Router::new().route("/api/v1/presence/stub", get(|| async { "stub" }))),
             readiness.clone(),

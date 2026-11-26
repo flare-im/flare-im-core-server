@@ -5,7 +5,7 @@ use std::path::PathBuf;
 fn sync_orchestrator_uses_shared_service_runtime_scaffold() {
     assert!(
         workspace_root()
-            .join("crates/flare-im-service-kit/src/runtime.rs")
+            .join("crates/flare-im-core-service-kit/src/runtime.rs")
             .is_file(),
         "service-kit must own the shared runtime assembly scaffold"
     );
@@ -191,7 +191,7 @@ fn assert_bootstrap_uses_runtime_scaffold(
 /// （mod/types/services/loader），守卫拼读整个模块目录——写死单文件路径
 /// 会在模块拆分时变成盲区（2026-11-24 拆分 mod.rs 时曾因此误报）。
 fn service_kit_config_model(root: &std::path::Path) -> String {
-    let config_src = root.join("crates/flare-im-service-kit/src/config");
+    let config_src = root.join("crates/flare-im-core-service-kit/src/config");
     let mut sources: Vec<_> = fs::read_dir(&config_src)
         .expect("read service-kit config module dir")
         .filter_map(|entry| entry.ok())

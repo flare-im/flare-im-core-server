@@ -1,11 +1,11 @@
 //! Tenant notices on the Redis channel `{namespace}:notice` of the token store, which every
-//! signaling gateway subscribes to (see `flare_im_service_kit::tenant_notice`). The last published
+//! signaling gateway subscribes to (see `flare_im_core_service_kit::tenant_notice`). The last published
 //! version of each tenant and topic sits next to the channel; one script compares, records and
 //! publishes, so retries and concurrent replicas announce a version once.
 use crate::domain::model::NoticeOutcome;
 use crate::domain::repository::tenant_notice::TenantNotices;
-use flare_im_service_kit::redis_connection::{RedisConnectionLimits, SharedRedisConnection};
-use flare_im_service_kit::tenant_notice::TenantNotice;
+use flare_im_core_service_kit::redis_connection::{RedisConnectionLimits, SharedRedisConnection};
+use flare_im_core_service_kit::tenant_notice::TenantNotice;
 use flare_server_core::error::{FlareError, Result};
 
 /// How long the last published version of a topic is remembered.

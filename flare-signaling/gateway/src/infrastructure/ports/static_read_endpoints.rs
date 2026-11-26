@@ -1,9 +1,9 @@
 //! Same-Cell static targets for the Gateway's internal gRPC pools.
 
-use flare_im_contracts::service_names::{
+use flare_im_core_contracts::service_names::{
     CONVERSATION, SIGNALING_ROUTE, STORAGE_READER, SYNC_ORCHESTRATOR,
 };
-use flare_im_service_kit::config::FlareAppConfig;
+use flare_im_core_service_kit::config::FlareAppConfig;
 use flare_server_core::error::Result;
 
 #[derive(Debug, Default)]
@@ -20,8 +20,10 @@ impl StaticReadEndpoints {
             return Ok(Self::default());
         }
         let endpoint = |dependency| {
-            flare_im_service_kit::discovery::static_grpc_endpoint_from_app_config(app, dependency)
-                .map(Some)
+            flare_im_core_service_kit::discovery::static_grpc_endpoint_from_app_config(
+                app, dependency,
+            )
+            .map(Some)
         };
         Ok(Self {
             conversation: endpoint(CONVERSATION)?,

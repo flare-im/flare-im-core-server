@@ -4,10 +4,10 @@
 //! not registered within it) is absent: lookups skip it and remove it with the same
 //! conditional removal a vendor-reported dead token gets.
 use crate::domain::DeviceTokenRepository;
-use flare_im_contracts::domain::push_binding::{
+use flare_im_core_contracts::domain::push_binding::{
     push_binding_inactive, push_binding_inactive_cutoff_ms,
 };
-use flare_im_contracts::{
+use flare_im_core_contracts::{
     Ctx, DevicePushToken, device_push_token_registry_field, device_push_token_registry_key,
 };
 use flare_proto::PushTaskEnvelope;
@@ -106,14 +106,16 @@ impl RedisDeviceTokenRepository {
             IO_BUDGET,
             redis::Script::new(REMOVE_OBSERVED)
                 .key(key)
-                .key(flare_im_contracts::domain::push_binding::push_binding_slot(
-                    &self.key_prefix,
-                    &token.tenant_id,
-                    &token.provider,
-                    &token.device_id,
-                ))
                 .key(
-                    flare_im_contracts::domain::push_binding::push_binding_command(
+                    flare_im_core_contracts::domain::push_binding::push_binding_slot(
+                        &self.key_prefix,
+                        &token.tenant_id,
+                        &token.provider,
+                        &token.device_id,
+                    ),
+                )
+                .key(
+                    flare_im_core_contracts::domain::push_binding::push_binding_command(
                         &self.key_prefix,
                         &token.registration_id,
                     ),
@@ -215,7 +217,7 @@ impl DeviceTokenRepository for RedisDeviceTokenRepository {
     async fn is_current(&self, token: &DevicePushToken) -> Result<bool, FlareError> {
         let mut conn = self.conn.clone();
         tokio::time::timeout(IO_BUDGET,redis::Script::new("local raw=redis.call('GET',KEYS[1]);if not raw then return 0 end local row=cjson.decode(raw);return row.registry and row.binding_id==ARGV[1] and row.user_id==ARGV[2] and 1 or 0")
-            .key(flare_im_contracts::domain::push_binding::push_binding_slot(&self.key_prefix,&token.tenant_id,&token.provider,&token.device_id)).arg(&token.registration_id).arg(&token.user_id).invoke_async::<bool>(&mut conn)).await.map_err(|_|unavailable())?.map_err(|_|unavailable())
+            .key(flare_im_core_contracts::domain::push_binding::push_binding_slot(&self.key_prefix,&token.tenant_id,&token.provider,&token.device_id)).arg(&token.registration_id).arg(&token.user_id).invoke_async::<bool>(&mut conn)).await.map_err(|_|unavailable())?.map_err(|_|unavailable())
     }
     async fn list_device_tokens(
         &self,
@@ -403,7 +405,7 @@ mod tests {
         let repo = RedisDeviceTokenRepository::connect(
             &url,
             "test:registry".into(),
-            flare_im_contracts::domain::push_binding::PUSH_BINDING_INACTIVE_DAYS_DEFAULT,
+            flare_im_core_contracts::domain::push_binding::PUSH_BINDING_INACTIVE_DAYS_DEFAULT,
         )
         .await
         .unwrap();
@@ -421,7 +423,7 @@ mod tests {
             &observed.user_id,
         );
         let field = device_push_token_registry_field(&observed.provider, &observed.device_id);
-        let slot = flare_im_contracts::domain::push_binding::push_binding_slot(
+        let slot = flare_im_core_contracts::domain::push_binding::push_binding_slot(
             &repo.key_prefix,
             &newer.tenant_id,
             &newer.provider,

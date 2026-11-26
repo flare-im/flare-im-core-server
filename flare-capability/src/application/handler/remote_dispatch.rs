@@ -22,7 +22,7 @@ use crate::domain::capability::{
 };
 use crate::infrastructure::capability::PluginRouteBook;
 use crate::infrastructure::capability::plugin_channel::resolve_plugin_channel;
-use flare_im_capability_core::plugin::{
+use flare_im_core_capability_core::plugin::{
     authorization::PluginInvocation, invocation::PluginCallClaims, resource::HostCapability,
 };
 
@@ -72,7 +72,7 @@ struct InvokedCall {
     result: CapabilityDispatchResult,
     tenant: String,
     /// The snapshot the call was authorized against, and the plugin's place in it.
-    snapshot: Arc<flare_im_capability_core::plugin::runtime::PluginRuntimeSnapshot>,
+    snapshot: Arc<flare_im_core_capability_core::plugin::runtime::PluginRuntimeSnapshot>,
     plugin: usize,
     declares_publish: bool,
 }
@@ -90,7 +90,7 @@ async fn no_projection(
 ) -> CapabilityError {
     match reader.plugin_projection_lapsed(tenant).await {
         Ok(false) => plugin_denied(
-            flare_im_service_kit::plugin_platform::PLUGIN_NOT_INSTALLED,
+            flare_im_core_service_kit::plugin_platform::PLUGIN_NOT_INSTALLED,
             "no plugin is installed for this application",
         ),
         Ok(true) => CapabilityError::System(LAPSED_PROJECTION.into()),
@@ -103,7 +103,7 @@ const LAPSED_PROJECTION: &str = "the plugin projection of this application lapse
 /// Operations a user ticket never invokes: the console's admin operations and the platform's
 /// lifecycle callbacks (`entityLifecycle.unbound`).
 pub(crate) fn restricted_operations(
-    manifest: &flare_im_capability_core::plugin::PluginManifest,
+    manifest: &flare_im_core_capability_core::plugin::PluginManifest,
 ) -> std::collections::BTreeSet<String> {
     let mut restricted = manifest.admin_operations();
     restricted.extend(manifest.service_operation_ids());
@@ -131,14 +131,14 @@ pub(crate) fn restricted_operations(
 /// permissions the installation approved: who may do what inside the plugin (members, roles) is
 /// the plugin's own rule, checked through the resource bridge. No per-user grant is read.
 async fn authorize_user_operation(
-    snapshot: &flare_im_capability_core::plugin::runtime::PluginRuntimeSnapshot,
+    snapshot: &flare_im_core_capability_core::plugin::runtime::PluginRuntimeSnapshot,
     tenant: &str,
     user: &str,
     operation: &str,
     policy: &Arc<dyn CapabilityPolicyBackend>,
     now: i64,
 ) -> Result<usize> {
-    use flare_im_service_kit::plugin_platform::{
+    use flare_im_core_service_kit::plugin_platform::{
         PLUGIN_DISABLED, PLUGIN_FEATURE_DISABLED, PLUGIN_NOT_INSTALLED, PLUGIN_PERMISSION_DENIED,
     };
     let mut denial = (
@@ -226,7 +226,7 @@ async fn invoke_authorized(
         .ok_or_else(|| denied(()))?
         .require_user_binding(&tenant, user, request_id)
         .map_err(|_| denied(()))?;
-    if req.capability_id == flare_im_capability_core::plugin::ui::UI_CATALOG_OPERATION {
+    if req.capability_id == flare_im_core_capability_core::plugin::ui::UI_CATALOG_OPERATION {
         let descriptor = super::catalog_selection::read_descriptor(
             req.payload.as_ref(),
             routes.catalog_selection.web_bundles(),
@@ -246,7 +246,7 @@ async fn invoke_authorized(
     let now = chrono::Utc::now().timestamp_millis();
     snapshot.validate(now).map_err(|_| {
         plugin_denied(
-            flare_im_service_kit::plugin_platform::PLUGIN_DISABLED,
+            flare_im_core_service_kit::plugin_platform::PLUGIN_DISABLED,
             "the plugin projection of this application lapsed",
         )
     })?;
@@ -390,11 +390,13 @@ async fn complete_call(
 async fn card_binding_guard(
     routes: &PluginRouteBook,
     tenant: &str,
-    manifest: &flare_im_capability_core::plugin::PluginManifest,
+    manifest: &flare_im_core_capability_core::plugin::PluginManifest,
     req: &CapabilityDispatchCommand,
     input: &Value,
 ) -> Result<()> {
-    use flare_im_service_kit::plugin_platform::{PLUGIN_CARD_UNBOUND, PLUGIN_MESSAGE_RECALLED};
+    use flare_im_core_service_kit::plugin_platform::{
+        PLUGIN_CARD_UNBOUND, PLUGIN_MESSAGE_RECALLED,
+    };
     let inputs = super::plugin_state::entity_inputs(manifest, &req.capability_id);
     if inputs.is_empty() {
         return Ok(());
@@ -455,7 +457,7 @@ fn publish_call_result(
     data: &Value,
 ) {
     use super::plugin_state::{PublishScope, PublishSource};
-    use flare_im_capability_core::plugin::state::SharedState;
+    use flare_im_core_capability_core::plugin::state::SharedState;
     let state = match SharedState::from_result(data) {
         Ok(None) => return,
         Ok(Some(state)) => state,
@@ -723,12 +725,12 @@ pub(crate) async fn call_plugin_answer(
         })?;
     credential.set_sensitive(true);
     grpc_req.metadata_mut().insert(
-        flare_im_capability_core::plugin::invocation::PLUGIN_CALL_HEADER,
+        flare_im_core_capability_core::plugin::invocation::PLUGIN_CALL_HEADER,
         credential,
     );
 
     if let Some(proof) = call.reauthentication_proof {
-        use flare_im_capability_core::plugin::staff_reauth::{
+        use flare_im_core_capability_core::plugin::staff_reauth::{
             STAFF_REAUTH_HEADER, valid_staff_reauth_token,
         };
         if call.user_id.is_some() || !valid_staff_reauth_token(proof) {
@@ -787,7 +789,7 @@ pub(crate) async fn call_plugin_answer(
 /// clients act on them (roll back a pending card, drop the catalog, retry), so a plugin must not
 /// be able to answer one.
 pub(crate) fn plugin_error_code(error_code: &str) -> &str {
-    use flare_im_service_kit::plugin_platform::{PLUGIN_REJECTED, is_error_code};
+    use flare_im_core_service_kit::plugin_platform::{PLUGIN_REJECTED, is_error_code};
     if is_error_code(error_code)
         && !error_code.starts_with("PLUGIN_")
         && !error_code.starts_with("CAPABILITY_")
@@ -915,10 +917,10 @@ async fn client_ui_catalog(
     request_id: &str,
     routes: &PluginRouteBook,
     policy: &Arc<dyn CapabilityPolicyBackend>,
-    descriptor: &flare_im_capability_core::plugin::ui::ClientUiDescriptor,
+    descriptor: &flare_im_core_capability_core::plugin::ui::ClientUiDescriptor,
 ) -> Result<CapabilityDispatchResult> {
     use super::catalog_selection::{CatalogSelectionMetrics, select_contributions};
-    use flare_im_capability_core::plugin::ui::{
+    use flare_im_core_capability_core::plugin::ui::{
         ClientPlugin, UI_CATALOG_OPERATION, UiActionTarget, UiCatalog, UiUnavailablePlugin,
         UiUnavailableReason,
     };
@@ -1023,7 +1025,7 @@ async fn client_ui_catalog(
                 .iter()
                 .filter(|operation| {
                     manifest.operation(operation).is_some_and(|op| {
-                        op.mode == flare_im_capability_core::plugin::manifest::OperationMode::Query
+                        op.mode == flare_im_core_capability_core::plugin::manifest::OperationMode::Query
                     })
                 })
                 .cloned()
@@ -1034,7 +1036,7 @@ async fn client_ui_catalog(
                     .iter()
                     .filter(|operation| {
                         manifest.operation(operation).is_some_and(|op|
-                    op.mode == flare_im_capability_core::plugin::manifest::OperationMode::Command
+                    op.mode == flare_im_core_capability_core::plugin::manifest::OperationMode::Command
                         && !schema_has_command_identity(&op.input_schema))
                     })
                     .cloned()
@@ -1124,7 +1126,8 @@ async fn client_ui_catalog(
                 .contributions
                 .iter()
                 .filter(|c| {
-                    c.kind == flare_im_capability_core::plugin::manifest::UiContributionKind::Page
+                    c.kind
+                        == flare_im_core_capability_core::plugin::manifest::UiContributionKind::Page
                 })
                 .map(|c| (plugin.plugin_id.clone(), c.id.clone()))
         })
@@ -1146,7 +1149,7 @@ async fn client_ui_catalog(
         if plugin
             .extensions
             .native_capabilities
-            .contains(&flare_im_capability_core::plugin::ui::NativeCapability::Reauthenticate)
+            .contains(&flare_im_core_capability_core::plugin::ui::NativeCapability::Reauthenticate)
         {
             plugin.transient_operations.extend(
                 authorized_transients
@@ -1186,11 +1189,11 @@ async fn client_ui_catalog(
 /// files' base (`files`) goes to Web and Tauri only; the other clients read the `.fwb` file.
 /// No bundle goes out that no contribution opens, so a client never fetches code it cannot reach.
 pub(crate) fn catalog_web_bundles(
-    contributions: &[flare_im_capability_core::plugin::manifest::UiContribution],
-    served: &[flare_im_capability_core::plugin::bundle::WebBundleDecl],
-    platform: flare_im_capability_core::plugin::manifest::ClientPlatform,
-) -> Vec<flare_im_capability_core::plugin::bundle::WebBundleDecl> {
-    use flare_im_capability_core::plugin::manifest::ClientPlatform;
+    contributions: &[flare_im_core_capability_core::plugin::manifest::UiContribution],
+    served: &[flare_im_core_capability_core::plugin::bundle::WebBundleDecl],
+    platform: flare_im_core_capability_core::plugin::manifest::ClientPlatform,
+) -> Vec<flare_im_core_capability_core::plugin::bundle::WebBundleDecl> {
+    use flare_im_core_capability_core::plugin::manifest::ClientPlatform;
     let opened: std::collections::BTreeSet<&str> = contributions
         .iter()
         .filter_map(|c| c.bundle.as_ref().map(|bundle| bundle.id.as_str()))
@@ -1213,8 +1216,8 @@ pub(crate) fn catalog_web_bundles(
 /// top-level keys the manifest marks `x-flare-client-visible` and to the protocol size limit. A
 /// subset outside those bounds is dropped (logged), never sent partially.
 fn client_configuration(
-    manifest: &flare_im_capability_core::plugin::PluginManifest,
-    projected: &flare_im_capability_core::plugin::runtime::ResolvedPlugin,
+    manifest: &flare_im_core_capability_core::plugin::PluginManifest,
+    projected: &flare_im_core_capability_core::plugin::runtime::ResolvedPlugin,
 ) -> serde_json::Map<String, Value> {
     if projected.client_configuration.is_empty() {
         return Default::default();

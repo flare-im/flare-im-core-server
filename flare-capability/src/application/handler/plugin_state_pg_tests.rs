@@ -13,13 +13,13 @@ use crate::infrastructure::adapters::plugin_state_events::{
     plugin_state_event, verified_publisher_context,
 };
 use crate::infrastructure::persistence::postgres_plugin_entity_bindings::PostgresPluginEntityBindings;
-use flare_im_capability_core::plugin::resource::EntityStatePublishOutcome;
-use flare_im_capability_core::plugin::runtime::{
+use flare_im_core_capability_core::plugin::resource::EntityStatePublishOutcome;
+use flare_im_core_capability_core::plugin::runtime::{
     PluginProjection, PluginRuntimeSnapshot, ProjectedLifecycle, ProjectedPlugin,
 };
-use flare_im_capability_core::plugin::state::SharedState;
-use flare_im_contracts::Ctx;
-use flare_im_message_pipeline::{ConversationType, PushRepository, RecipientRepository};
+use flare_im_core_capability_core::plugin::state::SharedState;
+use flare_im_core_contracts::Ctx;
+use flare_im_core_message_pipeline::{ConversationType, PushRepository, RecipientRepository};
 use flare_orchestrator::application::handlers::EventHandler;
 use flare_orchestrator::domain::service::EventDomainService;
 use flare_orchestrator::domain::service::event_domain_service::SequenceAllocatorPort;

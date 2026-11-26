@@ -5,7 +5,7 @@
 use std::sync::Arc;
 
 use flare_grpc_proto::access_gateway::PushOptions;
-use flare_im_contracts::Ctx;
+use flare_im_core_contracts::Ctx;
 use flare_proto::common::{
     CapabilityPacket, DataPacket, Event, EventEnvelope, EventEnvelopeDeliveryMode, Message,
     MessagePush, data_packet,
@@ -125,7 +125,7 @@ pub struct PushDomainService {
     participants_ttl: std::time::Duration,
     large_group_participants_ttl: std::time::Duration,
     /// 推送投递指标。这一组以前只有声明没有写入路径，见 record_push_result 的说明。
-    metrics: Arc<flare_im_service_kit::metrics::AccessGatewayMetrics>,
+    metrics: Arc<flare_im_core_service_kit::metrics::AccessGatewayMetrics>,
     /// 送达确认跟踪：消息 / 事件帧写出之前先过它，决定哪些连接真的要写、哪些内容要等确认。
     delivery_watch: Arc<DeliveryWatch>,
 }
@@ -147,7 +147,7 @@ impl PushDomainService {
         connection_query: Arc<dyn ConnectionQuery>,
         conversation_subscriptions: Arc<super::ConversationSubscriptionRegistry>,
         conversation_read: Arc<dyn ConversationParticipantSource>,
-        metrics: Arc<flare_im_service_kit::metrics::AccessGatewayMetrics>,
+        metrics: Arc<flare_im_core_service_kit::metrics::AccessGatewayMetrics>,
         delivery_watch: Arc<DeliveryWatch>,
     ) -> Self {
         Self {
@@ -193,9 +193,10 @@ impl PushDomainService {
         tenant_id: &str,
         conversation_id: &str,
     ) -> Result<Option<std::collections::HashSet<String>>> {
-        // sync 收件箱不是真实会话、没有成员行：订阅在连接建立时就做了，查成员必然 NOT_FOUND。
-        if flare_im_contracts::constants::sync_inbox::is_sync_inbox_conversation_id(conversation_id)
-        {
+        // 用户收件箱不是真实会话、没有成员行：订阅在连接建立时就做了，查成员必然 NOT_FOUND。
+        if flare_im_core_contracts::constants::user_inbox::is_user_inbox_conversation_id(
+            conversation_id,
+        ) {
             return Ok(None);
         }
         let current = self
@@ -348,8 +349,8 @@ impl PushDomainService {
         let tenant_id = tx
             .tenant_id()
             .filter(|tenant| {
-                flare_im_contracts::domain::tenant::is_valid_tenant_id(tenant)
-                    && flare_im_contracts::utils::normalize_tenant_id(tenant) == *tenant
+                flare_im_core_contracts::domain::tenant::is_valid_tenant_id(tenant)
+                    && flare_im_core_contracts::utils::normalize_tenant_id(tenant) == *tenant
             })
             .ok_or_else(|| {
                 ErrorBuilder::new(
@@ -1178,7 +1179,7 @@ mod tests {
             connection_query,
             Arc::new(crate::domain::service::ConversationSubscriptionRegistry::new()),
             Arc::new(crate::infrastructure::ports::ConversationReadGrpcPool::new()),
-            Arc::new(flare_im_service_kit::metrics::AccessGatewayMetrics::new()),
+            Arc::new(flare_im_core_service_kit::metrics::AccessGatewayMetrics::new()),
             detached(),
         );
         let ctx: Ctx = Arc::new(flare_server_core::Context::root().with_tenant_id("t1"));
@@ -1245,7 +1246,7 @@ mod tests {
             connection_query,
             Arc::new(crate::domain::service::ConversationSubscriptionRegistry::new()),
             Arc::new(crate::infrastructure::ports::ConversationReadGrpcPool::new()),
-            Arc::new(flare_im_service_kit::metrics::AccessGatewayMetrics::new()),
+            Arc::new(flare_im_core_service_kit::metrics::AccessGatewayMetrics::new()),
             detached(),
         );
         let user_ids = vec!["u1".to_string()];
@@ -1307,7 +1308,7 @@ mod tests {
             connection_query,
             subscriptions.clone(),
             Arc::new(crate::infrastructure::ports::ConversationReadGrpcPool::new()),
-            Arc::new(flare_im_service_kit::metrics::AccessGatewayMetrics::new()),
+            Arc::new(flare_im_core_service_kit::metrics::AccessGatewayMetrics::new()),
             detached(),
         );
         let ctx: Ctx = Arc::new(flare_server_core::Context::root());
@@ -1638,7 +1639,7 @@ mod tests {
             ])),
             Arc::new(crate::domain::service::ConversationSubscriptionRegistry::new()),
             Arc::new(crate::infrastructure::ports::ConversationReadGrpcPool::new()),
-            Arc::new(flare_im_service_kit::metrics::AccessGatewayMetrics::new()),
+            Arc::new(flare_im_core_service_kit::metrics::AccessGatewayMetrics::new()),
             detached(),
         );
         let packet = CapabilityPacket {
@@ -1695,7 +1696,7 @@ mod tests {
             )])),
             Arc::new(crate::domain::service::ConversationSubscriptionRegistry::new()),
             Arc::new(crate::infrastructure::ports::ConversationReadGrpcPool::new()),
-            Arc::new(flare_im_service_kit::metrics::AccessGatewayMetrics::new()),
+            Arc::new(flare_im_core_service_kit::metrics::AccessGatewayMetrics::new()),
             detached(),
         );
         let packet = CapabilityPacket {
@@ -1750,7 +1751,7 @@ mod tests {
                 connections.clone(),
                 subscriptions.clone(),
                 participants.clone(),
-                Arc::new(flare_im_service_kit::metrics::AccessGatewayMetrics::new()),
+                Arc::new(flare_im_core_service_kit::metrics::AccessGatewayMetrics::new()),
                 delivery.watch.clone(),
             )
             .with_participants_ttl(ttl, ttl);
@@ -2064,9 +2065,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn the_sync_inbox_is_delivered_without_a_member_lookup() {
+    async fn the_user_inbox_is_delivered_without_a_member_lookup() {
         let h = MemberHarness::new(UserConnections::default(), std::time::Duration::ZERO);
-        let inbox = flare_im_contracts::constants::sync_inbox::sync_inbox_conversation_id("u1");
+        let inbox =
+            flare_im_core_contracts::constants::user_inbox::user_inbox_conversation_id("u1");
         h.subscriptions.join("t1", &inbox, "c-u1");
 
         assert_eq!(h.deliver(&inbox).await, ["c-u1"]);
@@ -2287,7 +2289,7 @@ mod tests {
             Arc::new(TenantConnections(vec![connection("c1"), connection("c2")])),
             Arc::new(crate::domain::service::ConversationSubscriptionRegistry::new()),
             Arc::new(crate::infrastructure::ports::ConversationReadGrpcPool::new()),
-            Arc::new(flare_im_service_kit::metrics::AccessGatewayMetrics::new()),
+            Arc::new(flare_im_core_service_kit::metrics::AccessGatewayMetrics::new()),
             delivery.watch.clone(),
         );
         delivery

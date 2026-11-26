@@ -1,7 +1,7 @@
 //! 管理员只读的租户运行时视图：本进程 `tenants` 表里的一行（控制面投影或 init 预置行）。
 
 use chrono::{DateTime, Utc};
-use flare_im_contracts::domain::tenant::{TenantQuota, TenantStatus};
+use flare_im_core_contracts::domain::tenant::{TenantQuota, TenantStatus};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TenantRuntimeView {

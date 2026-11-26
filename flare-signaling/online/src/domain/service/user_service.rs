@@ -9,8 +9,8 @@ use flare_grpc_proto::signaling::online::{
     KickDeviceResponse, KickTenantRequest, KickTenantResponse, ListUserDevicesRequest,
     ListUserDevicesResponse, UserPresence,
 };
-use flare_im_contracts::domain::tenant::is_valid_tenant_id;
-use flare_im_contracts::utils::normalize_tenant_id;
+use flare_im_core_contracts::domain::tenant::is_valid_tenant_id;
+use flare_im_core_contracts::utils::normalize_tenant_id;
 use flare_server_core::error::{ErrorCode, Result, map_infra_error};
 use flare_server_core::flare_err;
 use prost_types::Timestamp;
@@ -302,6 +302,7 @@ impl<R: ConversationRepository + Send + Sync> UserService<R> {
     }
 
     /// Private identity-owner effect; no Staff impersonation or device-wide wildcard kick.
+    #[allow(clippy::too_many_arguments)]
     pub async fn revoke_identity_sessions(
         &self,
         tenant: &str,
@@ -309,6 +310,7 @@ impl<R: ConversationRepository + Send + Sync> UserService<R> {
         sessions: &[String],
         cutoff_ms: i64,
         request_id: &str,
+        actor_id: &str,
         signing_key_id: &str,
     ) -> Result<u32> {
         let received_at_ms = Utc::now().timestamp_millis();
@@ -329,6 +331,7 @@ impl<R: ConversationRepository + Send + Sync> UserService<R> {
                 sessions,
                 cutoff_ms,
                 request_id,
+                actor_id,
                 signing_key_id,
             )
             .await
@@ -759,6 +762,7 @@ mod tests {
             session_ids: &[String],
             cutoff_ms: i64,
             _request_id: &str,
+            _actor_id: &str,
             _signing_key_id: &str,
         ) -> Result<u32> {
             if *self.identity_revocation_pending.lock().unwrap() {
@@ -1250,7 +1254,7 @@ mod tests {
         let cutoff_ms = now_ms() + 1_000;
 
         let kicked = service
-            .revoke_identity_sessions("acme", "u1", &sessions, cutoff_ms, "req-1", "legacy")
+            .revoke_identity_sessions("acme", "u1", &sessions, cutoff_ms, "req-1", "svc", "legacy")
             .await
             .unwrap();
 
@@ -1288,7 +1292,7 @@ mod tests {
         let cutoff_ms = 1_700_000_000_000;
 
         service
-            .revoke_identity_sessions("acme", "u1", &[], cutoff_ms, "req-1", "legacy")
+            .revoke_identity_sessions("acme", "u1", &[], cutoff_ms, "req-1", "svc", "legacy")
             .await
             .unwrap();
 
@@ -1313,7 +1317,7 @@ mod tests {
 
         for _ in 0..2 {
             service
-                .revoke_identity_sessions("acme", "u1", &[], cutoff_ms, "req-1", "legacy")
+                .revoke_identity_sessions("acme", "u1", &[], cutoff_ms, "req-1", "svc", "legacy")
                 .await
                 .unwrap();
         }
@@ -1328,7 +1332,7 @@ mod tests {
 
         let before_ms = now_ms();
         service
-            .revoke_identity_sessions("acme", "u1", &[], 0, "req-1", "legacy")
+            .revoke_identity_sessions("acme", "u1", &[], 0, "req-1", "svc", "legacy")
             .await
             .unwrap();
         let after_ms = now_ms();
@@ -1359,6 +1363,7 @@ mod tests {
                 &["sid-old".to_string()],
                 cutoff_ms,
                 "req-1",
+                "svc",
                 "legacy",
             )
             .await;
@@ -1391,7 +1396,7 @@ mod tests {
         let missing = service.kick_device(kick("u1", "gone"), "acme").await;
         assert_eq!(missing.unwrap_err().code(), Some(ErrorCode::UserNotFound));
         let kicked = service
-            .revoke_identity_sessions("acme", "u1", &[], i64::MAX, "req-1", "legacy")
+            .revoke_identity_sessions("acme", "u1", &[], i64::MAX, "req-1", "svc", "legacy")
             .await
             .unwrap();
         // 剩下的 u1/d2 没有身份会话 ID，按截止时刻被结束。

@@ -1,4 +1,4 @@
-//! The admin boundary (v4 R3-2): one Staff `x-flare-ctx`, signed by the Social gateway admin
+//! The admin boundary (v4 R3-2): one Staff `x-flare-ctx`, signed by the business gateway admin
 //! partition with the Cell key registered as `kid=gateway`, is the only identity on
 //! `/api/v1/admin/**`.
 //!
@@ -20,8 +20,8 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use flare_core_base::context::keys;
-use flare_im_service_kit::gateway_auth::{auth_error_response, header_value};
-use flare_im_service_kit::staff_context::VerifiedStaff;
+use flare_im_core_service_kit::gateway_auth::{auth_error_response, header_value};
+use flare_im_core_service_kit::staff_context::VerifiedStaff;
 use flare_server_core::auth::core_admin::{self, CoreAdminRoute};
 use flare_server_core::grpc::middleware::signed_context::{
     SIGNED_CONTEXT_HEADER, verify_signed_context_metadata,

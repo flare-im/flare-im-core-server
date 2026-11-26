@@ -67,7 +67,7 @@ where
 mod tests {
     use super::*;
     use crate::domain::model::{EventPayload, EventType};
-    use flare_im_contracts::utils::Context;
+    use flare_im_core_contracts::utils::Context;
     use flare_server_core::error::Result as AnyhowResult;
     use std::sync::Arc;
 
@@ -76,7 +76,7 @@ mod tests {
     impl ArchiveStoreRepository for NoopArchiveRepository {
         async fn store_archive(
             &self,
-            _ctx: &flare_im_contracts::Ctx,
+            _ctx: &flare_im_core_contracts::Ctx,
             _message: &crate::domain::model::Message,
         ) -> AnyhowResult<()> {
             Ok(())
@@ -86,7 +86,7 @@ mod tests {
         // 否则会命中 trait 的“未实现即失败”默认体而提前出错。
         async fn record_message_read(
             &self,
-            _ctx: &flare_im_contracts::Ctx,
+            _ctx: &flare_im_core_contracts::Ctx,
             _tenant_id: &str,
             _message_id: &str,
             _user_id: &str,
@@ -96,7 +96,7 @@ mod tests {
 
         async fn append_event(
             &self,
-            _ctx: &flare_im_contracts::Ctx,
+            _ctx: &flare_im_core_contracts::Ctx,
             _tenant_id: &str,
             _message_id: &str,
             _event: &Event,
@@ -110,7 +110,7 @@ mod tests {
     impl EventStreamRepository for FailingEventStreamRepository {
         async fn append_event_to_stream(
             &self,
-            _ctx: &flare_im_contracts::Ctx,
+            _ctx: &flare_im_core_contracts::Ctx,
             _event: &Event,
         ) -> AnyhowResult<()> {
             Err(flare_server_core::error::FlareError::system(
@@ -120,14 +120,14 @@ mod tests {
 
         async fn match_stored_event(
             &self,
-            _ctx: &flare_im_contracts::Ctx,
+            _ctx: &flare_im_core_contracts::Ctx,
             _event: &crate::domain::model::Event,
         ) -> AnyhowResult<crate::domain::repository::StoredEventMatch> {
             Ok(crate::domain::repository::StoredEventMatch::Absent)
         }
     }
 
-    fn test_ctx() -> flare_im_contracts::Ctx {
+    fn test_ctx() -> flare_im_core_contracts::Ctx {
         Arc::new(Context::with_request_id("req-read-stream-test").with_tenant_id("tenant-a"))
     }
 
@@ -187,7 +187,7 @@ mod tests {
         impl EventStreamRepository for ConflictingEventStreamRepository {
             async fn append_event_to_stream(
                 &self,
-                _ctx: &flare_im_contracts::Ctx,
+                _ctx: &flare_im_core_contracts::Ctx,
                 _event: &Event,
             ) -> AnyhowResult<()> {
                 Err(flare_server_core::flare_err!(
@@ -198,7 +198,7 @@ mod tests {
 
             async fn match_stored_event(
                 &self,
-                _ctx: &flare_im_contracts::Ctx,
+                _ctx: &flare_im_core_contracts::Ctx,
                 _event: &crate::domain::model::Event,
             ) -> AnyhowResult<crate::domain::repository::StoredEventMatch> {
                 Ok(crate::domain::repository::StoredEventMatch::Absent)

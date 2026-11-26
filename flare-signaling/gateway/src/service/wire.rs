@@ -22,7 +22,7 @@ use crate::service::builder::{
     build_authenticator, build_long_connection_handler, build_long_connection_server,
 };
 use flare_core::server::connection::{ConnectionManager, ConnectionManagerTrait};
-use flare_im_service_kit::metrics::AccessGatewayMetrics;
+use flare_im_core_service_kit::metrics::AccessGatewayMetrics;
 use flare_server_core::Config;
 use flare_server_core::error::Result;
 use tokio::sync::Mutex;
@@ -49,16 +49,16 @@ pub struct ApplicationContext {
         Option<Arc<crate::service::connection_build_reporter::ConnectionBuildReporter>>,
     /// 指标端点配置。带进上下文是为了让 startup 能真正起 serve_prometheus_metrics
     /// —— 网关此前只注册指标、从不暴露。
-    pub metrics_config: flare_im_service_kit::metrics::MetricsEndpointConfig,
+    pub metrics_config: flare_im_core_service_kit::metrics::MetricsEndpointConfig,
     /// 用量预聚合（连接峰值、连接分钟、当日活跃用户）；startup 把 flush 循环挂进运行时。
-    pub usage: flare_im_usage::UsageReporter,
+    pub usage: flare_im_core_usage::UsageReporter,
 }
 
 /// 构建应用上下文
 ///
 /// 按照 Wire 风格的依赖顺序构建所有组件
 pub async fn initialize(
-    app_config: &flare_im_service_kit::config::FlareAppConfig,
+    app_config: &flare_im_core_service_kit::config::FlareAppConfig,
     runtime_config: &Config,
     port_config: PortConfig,
 ) -> Result<ApplicationContext> {
@@ -89,7 +89,7 @@ pub async fn initialize(
 
     // 4a. 网关租约：必须在长连接服务器开始接受连接（第 13 步）之前，把上一个进程遗留的连接集合
     // 交给 Online 清扫器、并写下第一份租约。没配 Online 会话 Redis 时不启用，行为与以前一致。
-    let lease = match flare_im_service_kit::gateway::lease::session_redis_url(app_config) {
+    let lease = match flare_im_core_service_kit::gateway::lease::session_redis_url(app_config) {
         Some(url) => {
             let counted = connection_manager.clone();
             match crate::service::gateway_lease::GatewayLeaseWriter::open(
@@ -249,12 +249,12 @@ pub async fn initialize(
             .with_signer(message_signer.clone()),
     );
 
-    let usage = flare_im_usage::UsageReporter::from_env("flare-signaling-gateway").await?;
+    let usage = flare_im_core_usage::UsageReporter::from_env("flare-signaling-gateway").await?;
     let connection_handler_app = Arc::new(
         ConnectionHandler::new(
             session_domain_service.clone(),
             metrics.clone(),
-            Arc::new(flare_im_contracts::abstractions::state::NoopConnectionStateNotifier),
+            Arc::new(flare_im_core_contracts::abstractions::state::NoopConnectionStateNotifier),
             connection_port.clone(),
             conversation_subscriptions.clone(),
             conversation_read_pool.clone(),
@@ -283,10 +283,10 @@ pub async fn initialize(
     // 广播给其余网关节点。会话订阅表是本节点局部的，不广播的话，对端在另一台网关上就永远看不到
     // 「正在输入」。没有注册中心时没有对等节点可广播，本地直转已经覆盖了全部在线订阅者。
     let realtime_broadcast: Arc<dyn crate::domain::service::IRealtimeBroadcastPort> = {
-        let service_name = flare_im_service_kit::service_names::get_service_name(
-            flare_im_service_kit::service_names::ACCESS_GATEWAY,
+        let service_name = flare_im_core_service_kit::service_names::get_service_name(
+            flare_im_core_service_kit::service_names::ACCESS_GATEWAY,
         );
-        match flare_im_service_kit::discovery::build_gateway_router_from_app_config(
+        match flare_im_core_service_kit::discovery::build_gateway_router_from_app_config(
             app_config,
             &service_name,
             None,
@@ -312,7 +312,7 @@ pub async fn initialize(
     // 8.6 租户运行时投影（tenants 表）：认证闸门 + sync 拉取配额共用一份缓存。
     // 没配库就退化为「不校验状态、配额回落全局」；strict 无库已在配置层拒绝启动。
     let tenant_runtime = match access_config.tenant_runtime_postgres_url.as_deref() {
-        Some(url) => flare_im_service_kit::tenant_runtime::TenantRuntimeCache::connect(url, 2)
+        Some(url) => flare_im_core_service_kit::tenant_runtime::TenantRuntimeCache::connect(url, 2)
             .await
             .map_err(flare_server_core::error::FlareError::system)?,
         None => {
@@ -320,7 +320,7 @@ pub async fn initialize(
                 policy = access_config.tenant_policy.as_str(),
                 "tenant runtime database not configured; tenant status is not enforced and quotas fall back to global limits"
             );
-            flare_im_service_kit::tenant_runtime::TenantRuntimeCache::disabled()
+            flare_im_core_service_kit::tenant_runtime::TenantRuntimeCache::disabled()
         }
     };
     info!(

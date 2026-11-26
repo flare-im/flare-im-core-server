@@ -10,8 +10,8 @@
 #
 # Hook 配置档（推荐专用脚本）：
 #   ./scripts/start_server_core.sh    — config/hooks.core.toml，不注册业务 Hook
-#   ./scripts/start_server_social.sh  — config/hooks.social.toml，需 flare-im-hook
-#   FLARE_HOOKS_PROFILE=core|social ./scripts/start_server.sh ...
+#   FLARE_HOOKS_PROFILE=core ./scripts/start_server.sh ...
+#   业务 Hook：MESSAGE_INGEST_HOOKS_CONFIG=<业务服务端的 Hook 注册文件> ./scripts/start_server.sh ...
 
 set -e
 
@@ -79,7 +79,7 @@ cleanup_launchctl_dev_labels
 echo -e "${GREEN}   ✓ 清理完成${NC}"
 echo ""
 
-# Hook 配置档（可选）：core=无业务 Hook，social=flare-im PreSend
+# Hook 配置档（可选）：core=无业务 Hook
 if [ -n "${FLARE_HOOKS_PROFILE:-}" ]; then
     # shellcheck source=lib/hooks_profile.sh
     source "$SCRIPT_DIR/lib/hooks_profile.sh"
@@ -304,7 +304,7 @@ load_write_proof_keys() {
 }
 
 # Push Server and Push Worker refuse to start until the deployment states how broker
-# records are protected (flare_im_service_kit::push_delivery), and broker-isolated needs a
+# records are protected (flare_im_core_service_kit::push_delivery), and broker-isolated needs a
 # NATS URL with credentials. Like release/supervise-core.toml, start them only when
 # PUSH_SERVER_DELIVERY_READY / PUSH_WORKER_DELIVERY_READY say the deployment is ready;
 # otherwise the launcher would stop at a paused consumer.
@@ -763,7 +763,7 @@ echo -e "${GREEN}🚀 启动 Flare IM Core 核心服务...${NC}"
 
 # 定义服务启动顺序（按照依赖关系排序）
 # 1. 基础服务：signaling-online（在线状态服务）、signaling-route（路由目录服务）
-# 2. 能力服务：capability（服务注册名 flare-capability，见 flare_im_contracts::service_names::CAPABILITY；包与二进制名均为 flare-capability）
+# 2. 能力服务：capability（服务注册名 flare-capability，见 flare_im_core_contracts::service_names::CAPABILITY；包与二进制名均为 flare-capability）
 # 3. 会话服务：conversation（会话管理服务）
 # 4. 消息摄入：message-ingest（发送 gRPC、seq、WAL、Pre/PostSend Hook）
 # 5. 消息编排：message-orchestrator（主消息流 fanout、消息操作事件）

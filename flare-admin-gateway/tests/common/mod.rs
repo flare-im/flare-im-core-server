@@ -66,13 +66,13 @@ use flare_grpc_proto::signaling::online::online_service_server::{
     OnlineService, OnlineServiceServer,
 };
 use flare_grpc_proto::signaling::online::*;
-use flare_im_service_kit::audit_effects::AuditEffects;
-use flare_im_service_kit::clients::{
+use flare_im_core_service_kit::audit_effects::AuditEffects;
+use flare_im_core_service_kit::clients::{
     AdminGrpcClients, CapabilityAdminClientWrapper, CapabilityDownstreamConfig,
     ConversationReadServiceClientWrapper, MediaServiceClientWrapper, OnlineServiceClientWrapper,
     PushAdminClientWrapper, StorageReaderServiceClientWrapper,
 };
-use flare_im_service_kit::staff_context::{
+use flare_im_core_service_kit::staff_context::{
     VerifiedStaff, admin_staff_verifier_from_sources, require_staff_any,
 };
 use flare_proto::common::{

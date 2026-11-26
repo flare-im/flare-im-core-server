@@ -3,8 +3,8 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
-use flare_im_contracts::constants::topics::TOPIC_CONVERSATION_ENSURE;
-use flare_im_contracts::event::mq_envelope_for_main_queue_event_with_headers;
+use flare_im_core_contracts::constants::topics::TOPIC_CONVERSATION_ENSURE;
+use flare_im_core_contracts::event::mq_envelope_for_main_queue_event_with_headers;
 use flare_proto::common::{CustomEvent, Event, EventType, event};
 use flare_server_core::context::{Context, Ctx};
 use flare_server_core::mq::producer::Producer;

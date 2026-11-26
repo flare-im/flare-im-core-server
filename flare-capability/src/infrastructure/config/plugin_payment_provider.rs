@@ -7,7 +7,7 @@
 //! default) means no deployment-named provider: no client can confirm a payment. The name is the
 //! platform's, never a manifest's, so publishing a plugin cannot make it the provider.
 
-use flare_im_capability_core::plugin::ui::{ClientPlugin, UiPaymentProvider};
+use flare_im_core_capability_core::plugin::ui::{ClientPlugin, UiPaymentProvider};
 
 pub const PLUGIN_PAYMENT_PROVIDER_ENV: &str = "FLARE_PLUGIN_PAYMENT_PROVIDER";
 

@@ -4,8 +4,10 @@ use crate::domain::capability::CapabilityError;
 use flare_grpc_proto::capability::{
     GenericRequest, GenericResponse, plugin_host_bridge_server::PluginHostBridge,
 };
-use flare_im_capability_core::plugin::invocation::{PLUGIN_CALL_HEADER, PLUGIN_RUNTIME_HEADER};
-use flare_im_service_kit::plugin_platform::{PLUGIN_CARD_UNBOUND, PLUGIN_MESSAGE_RECALLED};
+use flare_im_core_capability_core::plugin::invocation::{
+    PLUGIN_CALL_HEADER, PLUGIN_RUNTIME_HEADER,
+};
+use flare_im_core_service_kit::plugin_platform::{PLUGIN_CARD_UNBOUND, PLUGIN_MESSAGE_RECALLED};
 use std::sync::Arc;
 use tonic::{Request, Response, Status};
 

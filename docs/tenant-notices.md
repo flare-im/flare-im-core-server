@@ -8,7 +8,7 @@ feature snapshot, which drives the composer "+" panel layout.
 
 ## Model
 
-`TenantNotice { tenant_id, topic, version }` (`crates/flare-im-service-kit/src/tenant_notice.rs`).
+`TenantNotice { tenant_id, topic, version }` (`crates/flare-im-core-service-kit/src/tenant_notice.rs`).
 
 - `topic` names what changed: at most 64 bytes of `[a-z0-9._-]`. Topics under `flare.` are
   Core's (`flare.plugin.catalog`, `flare.access`, `flare.release`); every other topic belongs to

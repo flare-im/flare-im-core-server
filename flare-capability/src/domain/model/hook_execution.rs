@@ -1,5 +1,5 @@
 //! Hook 执行证据的查询模型：`hook_config.get_statistics` 与 `hook_config.query_executions` 读
-//! `hook_executions`。写入在 Ingest（见 `flare_im_hooks::hooks::execution`）。
+//! `hook_executions`。写入在 Ingest（见 `flare_im_core_hooks::hooks::execution`）。
 
 use std::collections::HashMap;
 use std::time::{Duration, SystemTime};

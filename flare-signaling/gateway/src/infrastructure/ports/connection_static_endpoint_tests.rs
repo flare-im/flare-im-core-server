@@ -108,7 +108,7 @@ impl OnlineService for LoopbackOnline {
     }
 }
 
-fn configured(address: &str, port: u16) -> flare_im_service_kit::config::FlareAppConfig {
+fn configured(address: &str, port: u16) -> flare_im_core_service_kit::config::FlareAppConfig {
     let mut base: toml::Value =
         toml::from_str(include_str!("../../../../../config/base.toml")).unwrap();
     let service: toml::Value = toml::from_str(&format!(

@@ -13,9 +13,9 @@
 use std::str::FromStr;
 use std::sync::Arc;
 
-use flare_im_contracts::Ctx;
-use flare_im_contracts::message::Message;
-use flare_im_contracts::utils::Context;
+use flare_im_core_contracts::Ctx;
+use flare_im_core_contracts::message::Message;
+use flare_im_core_contracts::utils::Context;
 use flare_storage_writer::domain::repository::{
     ArchiveOutcome, ArchiveStoreRepository, IdempotencyLedgerRetention, LedgerDuplicate,
 };

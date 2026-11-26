@@ -1,8 +1,8 @@
 //! Push Proxy gRPC 客户端池（与 [`super::route_grpc_pool::SignalingRouteGrpcPool`] 相同的服务发现模式）
 
 use flare_grpc_proto::push::push_service_client::PushServiceClient;
-use flare_im_contracts::service_names::{PUSH_PROXY, get_service_name};
-use flare_im_service_kit::discovery::connect_grpc_channel_resilient;
+use flare_im_core_contracts::service_names::{PUSH_PROXY, get_service_name};
+use flare_im_core_service_kit::discovery::connect_grpc_channel_resilient;
 use flare_server_core::error::{ErrorBuilder, ErrorCode, Result};
 use tokio::sync::Mutex;
 use tonic::transport::Channel;

@@ -5,7 +5,7 @@ use std::sync::Arc;
 use flare_grpc_proto::push::{
     PushCapabilityRequest, PushCustomRequest, PushMessageRequest, PushNotificationRequest,
 };
-use flare_im_contracts::Ctx;
+use flare_im_core_contracts::Ctx;
 use flare_proto::common::DeviceHandoff;
 use flare_server_core::error::Result;
 use tracing::instrument;

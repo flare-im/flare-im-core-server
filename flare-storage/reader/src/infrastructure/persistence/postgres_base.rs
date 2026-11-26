@@ -5,8 +5,8 @@
 use std::collections::{HashMap, HashSet};
 
 use chrono::{DateTime, Utc};
-use flare_im_contracts::message::Message;
-use flare_im_contracts::utils::datetime_to_timestamp;
+use flare_im_core_contracts::message::Message;
+use flare_im_core_contracts::utils::datetime_to_timestamp;
 use flare_proto::common::{
     ContentVisibility, MessageContent, MessageRetentionLifecycle, MessageRetentionState,
 };
@@ -104,7 +104,7 @@ impl PostgresBaseStorage {
             })?;
             Some(std::sync::Arc::new(RedisMessageCache::new(
                 std::sync::Arc::new(
-                    flare_im_service_kit::redis_connection::SharedRedisConnection::new(
+                    flare_im_core_service_kit::redis_connection::SharedRedisConnection::new(
                         client,
                         config.redis_limits,
                     ),
@@ -432,7 +432,7 @@ impl PostgresBaseStorage {
         let plugin_shared_state: Option<Value> = row.try_get("plugin_shared_state").ok().flatten();
         let is_pinned: bool = row.try_get("is_pinned").unwrap_or(false);
 
-        let reaction_states = flare_im_contracts::message::reaction_states_from_extra(
+        let reaction_states = flare_im_core_contracts::message::reaction_states_from_extra(
             extra.as_ref().unwrap_or(&Value::Null),
         );
         let mut extra_map = HashMap::new();

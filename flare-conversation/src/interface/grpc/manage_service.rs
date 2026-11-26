@@ -9,7 +9,8 @@ use flare_grpc_proto::conversation::{
     UpdateConversationRequest, UpdateConversationResponse, UpdateConversationUserSettingsRequest,
     UpdateConversationUserSettingsResponse, UpdateCursorRequest, UpdatePresenceRequest,
 };
-use flare_im_contracts::utils::normalize_tenant_id;
+use flare_im_core_contracts::utils::normalize_tenant_id;
+use flare_im_core_service_kit::trusted_integration::TrustedIntegrationPrincipals;
 use flare_proto::common::DeviceState as ProtoDeviceState;
 use flare_server_core::auth::{SignedActorType, SignedContextVerifier};
 use flare_server_core::context::Ctx;
@@ -40,20 +41,18 @@ use super::shared::{
     proto_summary,
 };
 
-/// `PurgeConversationHistory` 唯一允许的调用方：flare-im-bridge 的服务身份。
-pub(crate) const PURGE_HISTORY_SERVICE_ACTOR: &str = "flare-im-bridge";
-
-/// `PurgeConversationHistory` 的逐 RPC 验签（REL-03 会话管理验签第 ② 步，flare-im
-/// `docs/REL03-friendship-epoch.md`）。
+/// `PurgeConversationHistory` 的逐 RPC 验签（REL-03 会话管理验签第 ② 步）。
 ///
-/// 清除历史是破坏性操作，只有 Social 调用：验 `x-flare-ctx`（与 message ingest 同一把
-/// `FLARE_INTERNAL_CTX_PUBLIC_KEY`），只收服务身份 `flare-im-bridge`，租户只取签名里的，调用方
+/// 清除历史是破坏性操作，只有业务集成服务调用：验 `x-flare-ctx`（与 message ingest 同一把
+/// `FLARE_INTERNAL_CTX_PUBLIC_KEY`），只收部署信任的业务集成服务身份
+/// （`FLARE_TRUSTED_INTEGRATION_PRINCIPALS`），租户只取签名里的，调用方
 /// 元数据里的 `x-tenant-id`、`x-user-id` 不起作用。没配验证器时 fail closed（UNAVAILABLE）。
 /// 以前这个 RPC 与其余会话管理 RPC 一样只看调用方自报的元数据，只靠网络隔离保护。其余 RPC
 /// 仍按元数据（第 ③④ 步）。
 pub(crate) fn authorize_purge_history(
     metadata: &MetadataMap,
     verifier: Option<&SignedContextVerifier>,
+    trusted: &TrustedIntegrationPrincipals,
 ) -> Result<Ctx, Status> {
     let verifier = verifier.ok_or_else(|| {
         Status::unavailable("conversation purge identity verifier not configured")
@@ -63,9 +62,7 @@ pub(crate) fn authorize_purge_history(
         .get_data::<VerifiedContext>()
         .and_then(|verified| verified.claims())
         .ok_or_else(|| Status::unauthenticated("signed purge identity required"))?;
-    if claims.actor_type != SignedActorType::Service
-        || claims.actor_id != PURGE_HISTORY_SERVICE_ACTOR
-    {
+    if claims.actor_type != SignedActorType::Service || !trusted.contains(&claims.actor_id) {
         return Err(Status::permission_denied(
             "actor not permitted to purge conversation history",
         ));
@@ -180,7 +177,11 @@ impl ConversationManageService for ConversationGrpcHandler {
         &self,
         request: Request<PurgeConversationHistoryRequest>,
     ) -> Result<Response<PurgeConversationHistoryResponse>, Status> {
-        let ctx = authorize_purge_history(request.metadata(), self.purge_verifier.as_ref())?;
+        let ctx = authorize_purge_history(
+            request.metadata(),
+            self.purge_verifier.as_ref(),
+            &self.trusted_integrations,
+        )?;
         let req = request.into_inner();
         let purged = self
             .command_handler
@@ -207,7 +208,11 @@ impl ConversationManageService for ConversationGrpcHandler {
     ) -> Result<Response<flare_grpc_proto::conversation::ClearConversationHistoryResponse>, Status>
     {
         use flare_grpc_proto::conversation::ClearConversationHistoryResponse;
-        let ctx = authorize_purge_history(request.metadata(), self.purge_verifier.as_ref())?;
+        let ctx = authorize_purge_history(
+            request.metadata(),
+            self.purge_verifier.as_ref(),
+            &self.trusted_integrations,
+        )?;
         let cleared_through_seq = self
             .command_handler
             .handle_clear_history_for_everyone(&ctx, &request.into_inner().conversation_id)
@@ -466,6 +471,13 @@ mod purge_authorization_tests {
     use ed25519_dalek::pkcs8::{EncodePrivateKey, EncodePublicKey};
     use flare_server_core::{SignedContextIdentity, SignedContextSigner};
 
+    /// 测试部署信任的业务集成服务身份。
+    const INTEGRATION: &str = "business-integration";
+
+    fn trusted() -> TrustedIntegrationPrincipals {
+        TrustedIntegrationPrincipals::parse(INTEGRATION)
+    }
+
     fn keys(seed: u8) -> (SignedContextSigner, SignedContextVerifier) {
         let key = SigningKey::from_bytes(&[seed; 32]);
         let private = key.to_pkcs8_pem(Default::default()).unwrap();
@@ -509,13 +521,8 @@ mod purge_authorization_tests {
     #[test]
     fn the_bridge_service_identity_is_accepted_with_the_signed_tenant() {
         let (signer, verifier) = keys(51);
-        let bridge = token(
-            &signer,
-            SignedActorType::Service,
-            PURGE_HISTORY_SERVICE_ACTOR,
-            "tenant-a",
-        );
-        let ctx = authorize_purge_history(&metadata(Some(&bridge)), Some(&verifier))
+        let bridge = token(&signer, SignedActorType::Service, INTEGRATION, "tenant-a");
+        let ctx = authorize_purge_history(&metadata(Some(&bridge)), Some(&verifier), &trusted())
             .expect("bridge identity");
         assert_eq!(ctx.tenant_id(), Some("tenant-a"));
         assert_eq!(ctx.user_id(), None);
@@ -524,7 +531,8 @@ mod purge_authorization_tests {
     #[test]
     fn a_missing_token_is_unauthenticated() {
         let (_, verifier) = keys(51);
-        let status = authorize_purge_history(&metadata(None), Some(&verifier)).unwrap_err();
+        let status =
+            authorize_purge_history(&metadata(None), Some(&verifier), &trusted()).unwrap_err();
         assert_eq!(status.code(), tonic::Code::Unauthenticated);
     }
 
@@ -535,11 +543,11 @@ mod purge_authorization_tests {
         let forged = token(
             &other_signer,
             SignedActorType::Service,
-            PURGE_HISTORY_SERVICE_ACTOR,
+            INTEGRATION,
             "tenant-a",
         );
-        let status =
-            authorize_purge_history(&metadata(Some(&forged)), Some(&verifier)).unwrap_err();
+        let status = authorize_purge_history(&metadata(Some(&forged)), Some(&verifier), &trusted())
+            .unwrap_err();
         assert_eq!(status.code(), tonic::Code::Unauthenticated);
     }
 
@@ -548,14 +556,15 @@ mod purge_authorization_tests {
         let (signer, verifier) = keys(51);
         for (actor_type, actor) in [
             (SignedActorType::User, "alice"),
-            (SignedActorType::User, PURGE_HISTORY_SERVICE_ACTOR),
+            (SignedActorType::User, INTEGRATION),
             (SignedActorType::Service, "flare-api-gateway"),
-            (SignedActorType::System, PURGE_HISTORY_SERVICE_ACTOR),
+            (SignedActorType::System, INTEGRATION),
             (SignedActorType::TenantAdmin, "admin-1"),
         ] {
             let other = token(&signer, actor_type, actor, "tenant-a");
             let status =
-                authorize_purge_history(&metadata(Some(&other)), Some(&verifier)).unwrap_err();
+                authorize_purge_history(&metadata(Some(&other)), Some(&verifier), &trusted())
+                    .unwrap_err();
             assert_eq!(
                 status.code(),
                 tonic::Code::PermissionDenied,
@@ -567,14 +576,23 @@ mod purge_authorization_tests {
     #[test]
     fn a_non_canonical_tenant_is_denied() {
         let (signer, verifier) = keys(51);
-        let bridge = token(
-            &signer,
-            SignedActorType::Service,
-            PURGE_HISTORY_SERVICE_ACTOR,
-            "default",
-        );
-        let status =
-            authorize_purge_history(&metadata(Some(&bridge)), Some(&verifier)).unwrap_err();
+        let bridge = token(&signer, SignedActorType::Service, INTEGRATION, "default");
+        let status = authorize_purge_history(&metadata(Some(&bridge)), Some(&verifier), &trusted())
+            .unwrap_err();
+        assert_eq!(status.code(), tonic::Code::PermissionDenied);
+    }
+
+    /// 部署没列出任何业务集成服务时，没有服务能清除历史。
+    #[test]
+    fn no_service_is_trusted_unless_the_deployment_lists_it() {
+        let (signer, verifier) = keys(51);
+        let bridge = token(&signer, SignedActorType::Service, INTEGRATION, "tenant-a");
+        let status = authorize_purge_history(
+            &metadata(Some(&bridge)),
+            Some(&verifier),
+            &TrustedIntegrationPrincipals::default(),
+        )
+        .unwrap_err();
         assert_eq!(status.code(), tonic::Code::PermissionDenied);
     }
 
@@ -582,13 +600,9 @@ mod purge_authorization_tests {
     #[test]
     fn a_missing_verifier_fails_closed() {
         let (signer, _) = keys(51);
-        let bridge = token(
-            &signer,
-            SignedActorType::Service,
-            PURGE_HISTORY_SERVICE_ACTOR,
-            "tenant-a",
-        );
-        let status = authorize_purge_history(&metadata(Some(&bridge)), None).unwrap_err();
+        let bridge = token(&signer, SignedActorType::Service, INTEGRATION, "tenant-a");
+        let status =
+            authorize_purge_history(&metadata(Some(&bridge)), None, &trusted()).unwrap_err();
         assert_eq!(status.code(), tonic::Code::Unavailable);
     }
 }

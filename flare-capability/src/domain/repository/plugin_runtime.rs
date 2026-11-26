@@ -1,5 +1,5 @@
 //! The plugin processes, as the reconciler reaches them.
-use flare_im_capability_core::plugin::data::DataRequest;
+use flare_im_core_capability_core::plugin::data::DataRequest;
 use serde_json::Value;
 
 use crate::domain::plugin::{PluginDeploymentRecord, TenantDelivery};

@@ -14,7 +14,7 @@
 use std::time::Duration;
 
 use async_trait::async_trait;
-use flare_im_contracts::{Ctx, DevicePushToken};
+use flare_im_core_contracts::{Ctx, DevicePushToken};
 use flare_proto::PushTaskEnvelope;
 use flare_proto::common::PushDisposition;
 use flare_server_core::{ErrorCode, FlareError};
@@ -309,7 +309,7 @@ pub fn receipt_capable(vendor: Vendor, binding: &DevicePushToken, task: &PushTas
 /// (empty included) is `other`. Arrival receipts use the same rule (one helper in the service
 /// kit). The sent metric bounds the label further: see `vendor_metrics::record_sent`.
 pub fn app_version_label(raw: &str) -> &str {
-    flare_im_service_kit::metrics::sanitized_app_version(raw)
+    flare_im_core_service_kit::metrics::sanitized_app_version(raw)
 }
 
 /// A vendor code for traces: short, printable, no vendor body. Anything else is dropped.

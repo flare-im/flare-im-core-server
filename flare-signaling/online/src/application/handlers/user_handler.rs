@@ -48,6 +48,7 @@ impl<R: ConversationRepository + Send + Sync> OnlineUserHandler<R> {
         self.inner.list_user_devices(tenant_id, request).await
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn revoke_identity_sessions(
         &self,
         tenant: &str,
@@ -55,6 +56,7 @@ impl<R: ConversationRepository + Send + Sync> OnlineUserHandler<R> {
         sessions: &[String],
         cutoff_ms: i64,
         request_id: &str,
+        actor_id: &str,
         signing_key_id: &str,
     ) -> Result<u32> {
         self.inner
@@ -64,6 +66,7 @@ impl<R: ConversationRepository + Send + Sync> OnlineUserHandler<R> {
                 sessions,
                 cutoff_ms,
                 request_id,
+                actor_id,
                 signing_key_id,
             )
             .await

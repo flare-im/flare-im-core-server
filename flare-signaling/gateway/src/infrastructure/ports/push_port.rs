@@ -11,8 +11,8 @@ use flare_core::common::protocol::{
 };
 use flare_core::server::DeviceOwner;
 use flare_core::server::handle::ServerHandle;
-use flare_im_contracts::Ctx;
-use flare_im_contracts::utils::normalize_optional_tenant_id;
+use flare_im_core_contracts::Ctx;
+use flare_im_core_contracts::utils::normalize_optional_tenant_id;
 use flare_server_core::error::{ErrorBuilder, ErrorCode, Result};
 use tokio::sync::Mutex;
 use tracing::{debug, info, warn};

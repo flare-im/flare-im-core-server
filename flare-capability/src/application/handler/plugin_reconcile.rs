@@ -10,15 +10,15 @@
 //!   acknowledged facts record that effective configuration.
 //! - Replicas take turns: a pass runs under a lease, so a binding is delivered by one worker.
 //!
-//! Social reads the outcome with `plugin_app_status.get`; it holds no connection to plugins.
+//! The business system reads the outcome with `plugin_app_status.get`; it holds no connection to plugins.
 use std::sync::Arc;
 use std::time::Duration;
 
-use flare_im_capability_core::plugin::data::DataRequest;
-use flare_im_capability_core::plugin::invocation::{
+use flare_im_core_capability_core::plugin::data::DataRequest;
+use flare_im_core_capability_core::plugin::invocation::{
     PluginCallSigner, PluginDataClaims, PluginTenantStateClaims,
 };
-use flare_im_capability_core::plugin::runtime::configuration_digest;
+use flare_im_core_capability_core::plugin::runtime::configuration_digest;
 use serde_json::Value;
 use tokio::sync::Notify;
 use tokio::time::Instant;

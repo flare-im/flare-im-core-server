@@ -1,7 +1,7 @@
 //! PG owns operator commands; Redis indexes are conditional projections. Completion
 //! requires the addressed gateway's acknowledgement, never PUBLISH's subscriber count.
 use super::*;
-use flare_im_service_kit::audit_effects::AuditEffects;
+use flare_im_core_service_kit::audit_effects::AuditEffects;
 use flare_server_core::error::FlareError;
 use serde_json::Value;
 use sqlx::Row;

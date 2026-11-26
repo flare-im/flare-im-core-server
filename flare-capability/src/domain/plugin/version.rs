@@ -1,9 +1,9 @@
 //! `PluginVersion`: one signed package. The bytes never change; only `published`, `revoked` and
 //! `suspended` do.
-use flare_im_capability_core::plugin::PluginManifest;
-use flare_im_capability_core::plugin::manifest::PluginKind;
-use flare_im_capability_core::plugin::package::PluginPackage;
-use flare_im_capability_core::plugin::runtime::digest_bytes;
+use flare_im_core_capability_core::plugin::PluginManifest;
+use flare_im_core_capability_core::plugin::manifest::PluginKind;
+use flare_im_core_capability_core::plugin::package::PluginPackage;
+use flare_im_core_capability_core::plugin::runtime::digest_bytes;
 use serde::{Deserialize, Serialize};
 
 use super::{PluginRegistryError, RegistryResult};
@@ -237,7 +237,7 @@ pub struct PluginAssetContent {
 /// reviewed the bytes; Core keeps the outcome so it serves a bundle only while it stands, and
 /// stops serving it everywhere at once when it is withdrawn. Where each application fetches it and
 /// which bridge permissions the application approved come with the application's projection
-/// ([`flare_im_capability_core::plugin::runtime::ProjectedWebBundle`]).
+/// ([`flare_im_core_capability_core::plugin::runtime::ProjectedWebBundle`]).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WebBundleAttachment {
@@ -317,9 +317,9 @@ pub struct WebBundleFilter {
 /// digest; in catalog form. Anything else is left out (logged by the caller), never served.
 pub fn served_web_bundles(
     manifest: &PluginManifest,
-    projected: &[flare_im_capability_core::plugin::runtime::ProjectedWebBundle],
+    projected: &[flare_im_core_capability_core::plugin::runtime::ProjectedWebBundle],
     approved: Option<&std::collections::BTreeMap<String, String>>,
-) -> Vec<flare_im_capability_core::plugin::bundle::WebBundleDecl> {
+) -> Vec<flare_im_core_capability_core::plugin::bundle::WebBundleDecl> {
     let Some(approved) = approved else {
         return Vec::new();
     };

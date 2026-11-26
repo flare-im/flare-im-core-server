@@ -5,7 +5,7 @@ CARGO ?= cargo
 # 自动检测 protoc 路径
 PROTOC ?= $(shell which protoc || echo "/opt/homebrew/bin/protoc" || echo "/usr/local/bin/protoc" || echo "")
 
-.PHONY: help build fmt lint check check-dashboard-metrics check-dockerfile-build-args test clean start-core start-social stop
+.PHONY: help build fmt lint check check-dashboard-metrics check-dockerfile-build-args test clean start-core stop
 
 help:
 	@echo "Flare IM Core Make targets"
@@ -19,7 +19,6 @@ help:
 	@echo "  clean           cargo clean"
 	@echo "  start-core      Start full stack, single gateway, no business hooks"
 	@echo "  start-core-fast Start core stack without cargo build (FLARE_SKIP_BUILD=1)"
-	@echo "  start-social    Start full stack, single gateway, flare-im hook"
 	@echo "  stop            Stop all services"
 	@echo "  run-<service>   Start service (see list below)"
 	@echo ""
@@ -95,16 +94,13 @@ clean:
 SCRIPTS := ./scripts
 ARGS ?=
 
-.PHONY: start-core start-core-fast start-social stop
+.PHONY: start-core start-core-fast stop
 
 start-core:
 	bash $(SCRIPTS)/start_server_core.sh single $(ARGS)
 
 start-core-fast:
 	FLARE_SKIP_BUILD=1 bash $(SCRIPTS)/start_server_core.sh single $(ARGS)
-
-start-social:
-	bash $(SCRIPTS)/start_server_social.sh single $(ARGS)
 
 stop:
 	$(SCRIPTS)/stop_server.sh

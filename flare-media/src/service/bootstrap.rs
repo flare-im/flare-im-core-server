@@ -4,7 +4,7 @@ use flare_server_core::SignedContextVerifier;
 use flare_server_core::error::Result;
 use tracing::info;
 
-use flare_im_contracts::service_names::MEDIA;
+use flare_im_core_contracts::service_names::MEDIA;
 
 use super::wire;
 use crate::domain::service::{MediaService, UPLOAD_SESSION_RECLAIM_INTERVAL, UploadReclaimReport};
@@ -16,9 +16,9 @@ impl ApplicationBootstrap {
     /// 运行应用的主入口点
     pub async fn run() -> Result<()> {
         let verifier = media_identity_verifier()?;
-        let app_config = flare_im_service_kit::load_app_config_from_env();
+        let app_config = flare_im_core_service_kit::load_app_config_from_env();
         let service_config = app_config.media_service();
-        let runtime_plan = flare_im_service_kit::build_service_runtime_plan(
+        let runtime_plan = flare_im_core_service_kit::build_service_runtime_plan(
             app_config,
             &service_config.runtime,
             MEDIA,
@@ -39,7 +39,7 @@ impl ApplicationBootstrap {
     /// 运行服务（带应用上下文）
     async fn run_with_context(
         context: wire::ApplicationContext,
-        runtime_plan: flare_im_service_kit::ImServiceRuntimePlan,
+        runtime_plan: flare_im_core_service_kit::ImServiceRuntimePlan,
         verifier: SignedContextVerifier,
     ) -> Result<()> {
         use tonic::transport::Server;
@@ -47,7 +47,7 @@ impl ApplicationBootstrap {
         let address = runtime_plan.address;
         let service_name = runtime_plan.service_name.clone();
         let grpc_metrics =
-            flare_im_service_kit::metrics::GrpcMetricsLayer::new(service_name.clone());
+            flare_im_core_service_kit::metrics::GrpcMetricsLayer::new(service_name.clone());
         let handler = context.handler.clone();
 
         info!(
@@ -114,7 +114,7 @@ impl ApplicationBootstrap {
         runtime
             .run_with_registration(|addr| {
                 Box::pin(async move {
-                    flare_im_service_kit::discovery::register_runtime_service_only(
+                    flare_im_core_service_kit::discovery::register_runtime_service_only(
                         &service_name,
                         addr,
                         None,
@@ -147,14 +147,14 @@ async fn reclaim_round(media_service: &MediaService) {
 
 /// Media 缺少 Cell 公钥时拒绝启动，而不是退回无认证的 gRPC 入口。
 fn media_identity_verifier() -> Result<SignedContextVerifier> {
-    flare_im_service_kit::staff_context::admin_staff_verifier_from_env("Media")
+    flare_im_core_service_kit::staff_context::admin_staff_verifier_from_env("Media")
 }
 
 #[cfg(test)]
 mod identity_startup_tests {
     #[test]
     fn missing_or_invalid_public_key_prevents_media_start() {
-        use flare_im_service_kit::staff_context::admin_staff_verifier_from_sources;
+        use flare_im_core_service_kit::staff_context::admin_staff_verifier_from_sources;
         assert!(admin_staff_verifier_from_sources("Media", None, None).is_err());
         assert!(admin_staff_verifier_from_sources("Media", None, Some("")).is_err());
         assert!(

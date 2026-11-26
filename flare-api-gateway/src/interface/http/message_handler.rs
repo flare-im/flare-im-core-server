@@ -13,7 +13,7 @@ use crate::application::dto::{
 };
 use flare_core_base::error::{ErrorBuilder, ErrorCode, FlareError};
 use flare_grpc_proto::message::{ExecuteEventRequest, RecallMessageRequest, SendMessageRequest};
-use flare_im_service_kit::clients::GrpcClients;
+use flare_im_core_service_kit::clients::GrpcClients;
 use flare_proto::common::{
     CustomContent, CustomEvent, Event, EventType, Message, MessageContent, MessageSource,
     MessageStatus, event, message_content,
@@ -351,13 +351,13 @@ fn signed_message_operator(
     let tenant_id = principal
         .tenant_id
         .as_deref()
-        .map(flare_im_contracts::utils::normalize_tenant_id)
+        .map(flare_im_core_contracts::utils::normalize_tenant_id)
         .ok_or_else(|| {
             GatewayError::bad_request("TENANT_REQUIRED", "authenticated tenant required")
         })?;
     if user_id.is_empty()
         || principal.has_gateway_admin_scope()
-        || !flare_im_contracts::domain::tenant::is_valid_tenant_id(&tenant_id)
+        || !flare_im_core_contracts::domain::tenant::is_valid_tenant_id(&tenant_id)
     {
         return Err(GatewayError::bad_request(
             "USER_REQUIRED",

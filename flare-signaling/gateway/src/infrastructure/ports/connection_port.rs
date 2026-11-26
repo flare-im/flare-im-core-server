@@ -15,9 +15,9 @@ use flare_grpc_proto::signaling::online::{
     LoginRequest, LoginResponse, LogoutRequest, LogoutResponse, ReportDeviceStateRequest,
     ReportDeviceStateResponse,
 };
-use flare_im_contracts::service_names::{SIGNALING_ONLINE, get_service_name};
-use flare_im_contracts::utils::normalize_tenant_id;
-use flare_im_service_kit::ServiceClient;
+use flare_im_core_contracts::service_names::{SIGNALING_ONLINE, get_service_name};
+use flare_im_core_contracts::utils::normalize_tenant_id;
+use flare_im_core_service_kit::ServiceClient;
 use flare_server_core::error::{ErrorBuilder, ErrorCode, Result};
 use flare_server_core::{
     SignedActorType, SignedContextIdentity, SignedContextSigner, set_signed_context_token,
@@ -25,7 +25,7 @@ use flare_server_core::{
 use tokio::sync::Mutex;
 use tonic::transport::Channel;
 
-use flare_im_contracts::Ctx;
+use flare_im_core_contracts::Ctx;
 
 use crate::constants::{
     AUTH_FAILURE_MSG_TENANT_UNAVAILABLE, METADATA_KEY_DEVICE_STATE, METADATA_KEY_TENANT_ID,
@@ -54,7 +54,7 @@ fn static_online_fallback<'a>(service_name: &str, endpoint: Option<&'a str>) -> 
 
 impl ConnectionRepository {
     pub(crate) fn resolve_online_static_endpoint(
-        app: &flare_im_service_kit::config::FlareAppConfig,
+        app: &flare_im_core_service_kit::config::FlareAppConfig,
         static_registry_mode: bool,
     ) -> Result<Option<String>> {
         if !static_registry_mode {
@@ -63,7 +63,7 @@ impl ConnectionRepository {
         // Resolve the same typed service and environment precedence as Online's
         // listener; its generic development port is only the final default.
         let service = app.signaling_online_service();
-        let mut address = flare_im_service_kit::build_service_runtime_plan(
+        let mut address = flare_im_core_service_kit::build_service_runtime_plan(
             app,
             &service.runtime,
             SIGNALING_ONLINE,
@@ -201,7 +201,7 @@ impl ConnectionRepository {
         if let Some(uri) =
             static_online_fallback(&self.service_name, self.static_online_endpoint.as_deref())
         {
-            let channel = flare_im_service_kit::discovery::connect_static_channel(uri)
+            let channel = flare_im_core_service_kit::discovery::connect_static_channel(uri)
                 .await
                 .map_err(|e| {
                     ErrorBuilder::new(
@@ -217,19 +217,20 @@ impl ConnectionRepository {
         }
         let mut service_client_guard = self.service_client.lock().await;
         if service_client_guard.is_none() {
-            let discover = flare_im_service_kit::discovery::create_discover(&self.service_name)
-                .await
-                .map_err(|e| {
-                    ErrorBuilder::new(
-                        ErrorCode::ServiceUnavailable,
-                        "signaling online service unavailable",
-                    )
-                    .details(format!(
-                        "Failed to create service discover for {}: {}",
-                        self.service_name, e
-                    ))
-                    .build_error()
-                })?;
+            let discover =
+                flare_im_core_service_kit::discovery::create_discover(&self.service_name)
+                    .await
+                    .map_err(|e| {
+                        ErrorBuilder::new(
+                            ErrorCode::ServiceUnavailable,
+                            "signaling online service unavailable",
+                        )
+                        .details(format!(
+                            "Failed to create service discover for {}: {}",
+                            self.service_name, e
+                        ))
+                        .build_error()
+                    })?;
             let Some(discover) = discover else {
                 return Err(flare_server_core::error::FlareError::system(
                     "Service discovery not configured; explicit static Signaling Online route unavailable",
@@ -242,7 +243,7 @@ impl ConnectionRepository {
                 "Service client not initialized".to_string(),
             )
         })?;
-        let channel = flare_im_service_kit::discovery::get_discovered_channel_with_timeout(
+        let channel = flare_im_core_service_kit::discovery::get_discovered_channel_with_timeout(
             &self.service_name,
             service_client,
         )

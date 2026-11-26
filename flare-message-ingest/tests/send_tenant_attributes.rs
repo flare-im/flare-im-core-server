@@ -12,14 +12,14 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use flare_im_contracts::Ctx;
-use flare_im_hooks::hooks::{
+use flare_im_core_contracts::Ctx;
+use flare_im_core_hooks::hooks::{
     HookDispatcher, HookMetadata, HookRegistry, HookSelector, MessageDraft, PreSendDecision,
     PreSendHook,
 };
-use flare_im_message_pipeline::MqPushRepository;
-use flare_im_seq::SequenceAllocator;
-use flare_im_service_kit::metrics::MessageOrchestratorMetrics;
+use flare_im_core_message_pipeline::MqPushRepository;
+use flare_im_core_seq::SequenceAllocator;
+use flare_im_core_service_kit::metrics::MessageOrchestratorMetrics;
 use flare_message_ingest::application::MessageIngestHandler;
 use flare_message_ingest::application::commands::SendMessageCommand;
 use flare_message_ingest::application::extension::{ExtensionOrchestrator, ExtensionRouting};

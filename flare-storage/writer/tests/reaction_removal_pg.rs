@@ -10,8 +10,8 @@
 
 use std::sync::Arc;
 
-use flare_im_contracts::Ctx;
-use flare_im_contracts::utils::Context;
+use flare_im_core_contracts::Ctx;
+use flare_im_core_contracts::utils::Context;
 use flare_storage_writer::domain::repository::ArchiveStoreRepository;
 use flare_storage_writer::infrastructure::persistence::repository::postgres_store::PostgresMessageStore;
 use sqlx::{PgPool, Row};

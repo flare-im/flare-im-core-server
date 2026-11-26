@@ -1,7 +1,7 @@
 //! Conditional binding, revoke-before-PUT tombstones and read-back, in one Redis authority.
 use crate::config::PushProxyConfig;
-use flare_im_contracts::domain::push_binding::*;
-use flare_im_contracts::{
+use flare_im_core_contracts::domain::push_binding::*;
+use flare_im_core_contracts::{
     DevicePushToken, device_push_token_registry_field, device_push_token_registry_key,
 };
 use sha2::{Digest, Sha256};

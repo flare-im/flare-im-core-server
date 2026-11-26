@@ -4,7 +4,7 @@
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
-use flare_im_service_kit::metrics::REGISTRY;
+use flare_im_core_service_kit::metrics::REGISTRY;
 use once_cell::sync::Lazy;
 use prometheus::IntCounter;
 use tokio::sync::oneshot;

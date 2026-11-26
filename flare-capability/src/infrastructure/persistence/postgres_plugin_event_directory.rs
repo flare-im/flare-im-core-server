@@ -2,7 +2,7 @@
 //! installation, approval or feature deny removes them from delivery.
 use super::*;
 use crate::domain::{plugin::ApprovedGrant, repository::PluginEventDirectory};
-use flare_im_capability_core::plugin::{
+use flare_im_core_capability_core::plugin::{
     event::{MESSAGE_BODY_SCOPE, MESSAGE_CREATED, MESSAGE_EVENTS_SCOPE},
     runtime::ProjectedLifecycle,
 };

@@ -2,7 +2,7 @@
 //! array of `{"key_id","publisher_id","public_key_base64"}`. Unset is an empty store, which refuses
 //! every package.
 use base64::{Engine, engine::general_purpose::STANDARD};
-use flare_im_capability_core::plugin::signature::PublisherTrustStore;
+use flare_im_core_capability_core::plugin::signature::PublisherTrustStore;
 use flare_server_core::error::{FlareError, Result};
 use serde::Deserialize;
 

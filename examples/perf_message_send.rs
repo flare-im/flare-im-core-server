@@ -347,7 +347,7 @@ fn print_report(config: &Config, elapsed: Duration, samples: &mut [Sample], fail
 
 /// 全军覆没时给出**能直接照做的**下一步，而不是让人对着一行截断的错误猜。
 ///
-/// 最常见的一种：带业务 Hook 档（`start_server.sh` 的 social 档）跑压测——
+/// 最常见的一种：带业务 Hook 档（`MESSAGE_INGEST_HOOKS_CONFIG` 指向业务 Hook 注册文件）跑压测——
 /// 本工具用的是合成用户对，它们彼此不是好友、也不在同一个群，于是每条消息都被
 /// PreSend Hook 挡下。此时打印出来的只有 `success=0`，看不出是「压测姿势不对」
 /// 还是「服务端真的坏了」，而这两者的处理方式完全相反。

@@ -44,7 +44,7 @@ use flare_grpc_proto::capability::extension_plugin_server::{
     ExtensionPlugin, ExtensionPluginServer,
 };
 use flare_grpc_proto::capability::{GenericRequest, GenericResponse};
-use flare_im_capability_core::plugin::invocation::{PLUGIN_CALL_HEADER, PluginCallVerifier};
+use flare_im_core_capability_core::plugin::invocation::{PLUGIN_CALL_HEADER, PluginCallVerifier};
 use tonic::{Request, Response, Status, transport::Server};
 
 /// 能力 id。客户端就是用这个字符串来调用本插件。
@@ -400,7 +400,7 @@ mod link_preview_tests {
     #[test]
     fn manifest_is_valid_and_declares_this_plugin() {
         let manifest =
-            flare_im_capability_core::plugin::PluginManifest::from_json(MANIFEST.as_bytes())
+            flare_im_core_capability_core::plugin::PluginManifest::from_json(MANIFEST.as_bytes())
                 .expect("清单要能通过协议校验");
         assert_eq!(manifest.plugin_id, PLUGIN_ID);
         // 注册声明的版本取自本包版本，控制面按清单审批：两者要一致。
@@ -411,7 +411,9 @@ mod link_preview_tests {
 
     #[test]
     fn a_call_needs_a_ticket_core_signed_for_exactly_this_call() {
-        use flare_im_capability_core::plugin::invocation::{PluginCallClaims, PluginCallSigner};
+        use flare_im_core_capability_core::plugin::invocation::{
+            PluginCallClaims, PluginCallSigner,
+        };
         use tonic::Code;
         let now = chrono::Utc::now().timestamp_millis();
         let core = PluginCallSigner::new("core".into(), [7; 32]).unwrap();

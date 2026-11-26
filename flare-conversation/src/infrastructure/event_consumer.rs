@@ -13,7 +13,7 @@ use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
 
-use flare_im_contracts::utils::normalize_tenant_id;
+use flare_im_core_contracts::utils::normalize_tenant_id;
 use flare_proto::common::event::Payload;
 use flare_proto::common::{Event, EventType, MqEnvelope, MqPayloadKind, mq_envelope};
 use flare_server_core::context::Context;
@@ -30,8 +30,8 @@ use flare_server_core::mq::nats::{
 use prost::Message as _;
 use tracing::{debug, error, info, warn};
 
-use flare_im_contracts::constants::groups::CONVERSATION_READ_RECEIPT_GROUP_DEFAULT;
-use flare_im_contracts::constants::topics::{
+use flare_im_core_contracts::constants::groups::CONVERSATION_READ_RECEIPT_GROUP_DEFAULT;
+use flare_im_core_contracts::constants::topics::{
     TOPIC_CONVERSATION_ENSURE, TOPIC_MESSAGE_CREATED, TOPIC_MESSAGE_EVENTS,
 };
 
@@ -94,7 +94,9 @@ const CONVERSATION_ENSURE_DLQ_SUBJECT: &str = "flare.im.dlq.conversation-ensure"
 /// 重试，1 s 起翻倍、封顶 15 s，等待合计 135 s），首投加全部重试落在 JetStream 默认的
 /// `max_deliver`（16）之内。
 fn consumer_retry_config() -> ConsumerConfig {
-    flare_im_service_kit::consumer_retry::with_downstream_outage_retry(ConsumerConfig::default())
+    flare_im_core_service_kit::consumer_retry::with_downstream_outage_retry(
+        ConsumerConfig::default(),
+    )
 }
 
 /// 处理失败后的处置（见 [`settle_message`]）。
@@ -1743,7 +1745,7 @@ mod settle_tests {
             kafka_client_id: String::new(),
         };
         for max_deliver in [read_receipt.max_deliver(), ensure.max_deliver()] {
-            let window = flare_im_service_kit::consumer_retry::check_downstream_outage_retry(
+            let window = flare_im_core_service_kit::consumer_retry::check_downstream_outage_retry(
                 &consumer_retry_config(),
                 max_deliver,
             )

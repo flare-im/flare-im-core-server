@@ -11,7 +11,7 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
-use flare_im_contracts::Ctx;
+use flare_im_core_contracts::Ctx;
 use flare_server_core::error::{ErrorCode, FlareError};
 use redis::aio::ConnectionManager;
 

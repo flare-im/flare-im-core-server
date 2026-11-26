@@ -3,7 +3,7 @@ use super::*;
 use flare_grpc_proto::message::{
     SendSystemMessageRequest, message_send_service_client::MessageSendServiceClient,
 };
-use flare_im_service_kit::platform_send::SYSTEM_MESSAGE_SCOPE;
+use flare_im_core_service_kit::platform_send::SYSTEM_MESSAGE_SCOPE;
 use flare_proto::common::{
     ConversationType, Message, MessageContent, MessageSource, MessageStatus, MessageType,
     SystemContent, message_content::Content,
@@ -64,7 +64,7 @@ pub(super) async fn send(
         Err(_) => return unavailable(),
     };
     let client_id = input.client_msg_id.to_string();
-    let origin_header = flare_im_service_kit::platform_send::ORIGIN_CONTEXT_HEADER;
+    let origin_header = flare_im_core_service_kit::platform_send::ORIGIN_CONTEXT_HEADER;
     let request_id = if let Some(token) = headers.get(origin_header) {
         let claims = state
             .origin_verifier

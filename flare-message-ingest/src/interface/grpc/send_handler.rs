@@ -11,10 +11,11 @@ use flare_grpc_proto::message::{
     SendAckResponse, SendCustomDataRequest, SendCustomDataResponse, SendMessageRequest,
     SendMessageResponse, SendSystemMessageRequest, SendSystemMessageResponse,
 };
-use flare_im_contracts::utils::normalize_tenant_id;
-use flare_im_hooks::is_pre_send_rejection;
-use flare_im_service_kit::metrics::MessageOrchestratorMetrics;
-use flare_im_service_kit::plugin_platform;
+use flare_im_core_contracts::utils::normalize_tenant_id;
+use flare_im_core_hooks::is_pre_send_rejection;
+use flare_im_core_service_kit::metrics::MessageOrchestratorMetrics;
+use flare_im_core_service_kit::plugin_platform;
+use flare_im_core_service_kit::trusted_integration::TrustedIntegrationPrincipals;
 use flare_proto::common::{Message, MessageSource, MessageType};
 use flare_server_core::auth::{SignedActorType, SignedContextClaims, SignedContextVerifier};
 use flare_server_core::error::grpc::IntoGrpc;
@@ -30,6 +31,8 @@ pub struct MessageSendGrpcHandler {
     message_ingest_handler: Arc<MessageIngestHandler>,
     metrics: Arc<MessageOrchestratorMetrics>,
     message_verifier: Option<SignedContextVerifier>,
+    /// 部署信任的业务集成服务身份：可以发系统消息与通知。
+    trusted_integrations: TrustedIntegrationPrincipals,
 }
 
 impl MessageSendGrpcHandler {
@@ -42,7 +45,13 @@ impl MessageSendGrpcHandler {
             message_ingest_handler,
             metrics,
             message_verifier,
+            trusted_integrations: TrustedIntegrationPrincipals::default(),
         }
+    }
+
+    pub fn with_trusted_integrations(mut self, trusted: TrustedIntegrationPrincipals) -> Self {
+        self.trusted_integrations = trusted;
+        self
     }
 
     fn verified_send_ctx<T>(
@@ -63,30 +72,24 @@ fn authorize_message(
     ctx: &flare_server_core::context::Ctx,
     message: &Message,
     system_only: bool,
+    trusted: &TrustedIntegrationPrincipals,
 ) -> Result<(), Status> {
     use flare_server_core::grpc::middleware::signed_context::VerifiedContext;
     let claims = ctx
         .get_data::<VerifiedContext>()
         .and_then(|verified| verified.claims())
         .ok_or_else(|| Status::unauthenticated("signed message identity required"))?;
-    authorize_message_claims(claims, message, system_only)
+    authorize_message_claims(claims, message, system_only, trusted)
 }
 
 fn authorize_message_claims(
     claims: &SignedContextClaims,
     message: &Message,
     system_only: bool,
+    trusted: &TrustedIntegrationPrincipals,
 ) -> Result<(), Status> {
     if claims.tenant_id != normalize_tenant_id(&claims.tenant_id) {
         return Err(Status::permission_denied("non-canonical tenant identity"));
-    }
-    if message
-        .attributes
-        .contains_key("x-social-internal-send-token")
-    {
-        return Err(Status::permission_denied(
-            "legacy internal send credential forbidden",
-        ));
     }
     // `tenant_id` 与 `x-tenant-id` 同样是租户声明：Storage Writer 曾按 `tenant_id` 选择落库租户，
     // 只拦 `x-tenant-id` 时客户端换个键就能把消息写进别的租户（W11-T）。
@@ -151,7 +154,7 @@ fn authorize_message_claims(
             }
         }
         SignedActorType::Service
-            if flare_im_service_kit::platform_send::is_platform_system_sender(claims) =>
+            if flare_im_core_service_kit::platform_send::is_platform_system_sender(claims) =>
         {
             let content_ok = matches!(&message.content,Some(flare_proto::common::MessageContent{content:Some(flare_proto::common::message_content::Content::System(content))})
                 if content.event_kind.strip_prefix("platform.").is_some_and(|kind|!kind.is_empty()&&kind.len()<=64&&kind.bytes().all(|b|b.is_ascii_alphanumeric()||matches!(b,b'_'|b'-')))
@@ -166,7 +169,7 @@ fn authorize_message_claims(
                 return Err(Status::permission_denied("invalid platform system message"));
             }
         }
-        SignedActorType::Service if claims.actor_id == "flare-im-bridge" => {
+        SignedActorType::Service if trusted.contains(&claims.actor_id) => {
             let expected_type = if system_only {
                 MessageType::System
             } else {
@@ -185,7 +188,9 @@ fn authorize_message_claims(
                 || message.sender_id.trim().is_empty()
                 || message.attributes.contains_key("x-user-id")
             {
-                return Err(Status::permission_denied("invalid signed bridge message"));
+                return Err(Status::permission_denied(
+                    "invalid signed integration message",
+                ));
             }
         }
         _ => {
@@ -288,7 +293,7 @@ impl MessageSendService for MessageSendGrpcHandler {
                 .observe_send_stage("grpc_request_decode", "error", decode_start.elapsed());
             Status::invalid_argument("message required")
         })?;
-        authorize_message(&ctx, &message, false)?;
+        authorize_message(&ctx, &message, false, &self.trusted_integrations)?;
         request_conversation_matches(&ctx, &req.conversation_id, &message)?;
         self.metrics
             .observe_send_stage("grpc_request_decode", "success", decode_start.elapsed());
@@ -363,7 +368,7 @@ impl MessageSendService for MessageSendGrpcHandler {
             }
             match m.message {
                 Some(msg) => {
-                    authorize_message(&ctx, &msg, false)?;
+                    authorize_message(&ctx, &msg, false, &self.trusted_integrations)?;
                     request_conversation_matches(&ctx, &m.conversation_id, &msg)?;
                     messages.push(crate::application::commands::SendMessageCommand {
                         burn_enabled: false,
@@ -433,7 +438,7 @@ impl MessageSendService for MessageSendGrpcHandler {
         let ctx = self.verified_send_ctx(&request)?;
         let req = request.into_inner();
         let message = req.message.unwrap_or_default();
-        authorize_message(&ctx, &message, true)?;
+        authorize_message(&ctx, &message, true, &self.trusted_integrations)?;
 
         let cmd = crate::application::commands::SendSystemMessageCommand {
             conversation_id: req.conversation_id,
@@ -533,6 +538,35 @@ mod tests {
     use super::*;
     use flare_proto::common::SendAckDurability;
 
+    /// 测试部署信任的业务集成服务身份。
+    const INTEGRATION: &str = "business-integration";
+
+    fn authorize_message(
+        ctx: &flare_server_core::context::Ctx,
+        message: &Message,
+        system_only: bool,
+    ) -> Result<(), Status> {
+        super::authorize_message(
+            ctx,
+            message,
+            system_only,
+            &TrustedIntegrationPrincipals::parse(INTEGRATION),
+        )
+    }
+
+    fn authorize_message_claims(
+        claims: &SignedContextClaims,
+        message: &Message,
+        system_only: bool,
+    ) -> Result<(), Status> {
+        super::authorize_message_claims(
+            claims,
+            message,
+            system_only,
+            &TrustedIntegrationPrincipals::parse(INTEGRATION),
+        )
+    }
+
     /// PreSend 扩展的策略拒绝回 `FAILED_PRECONDITION`，`ErrorDetail`（网关据此给客户端的错误码、
     /// 原因与说明）不变；扩展不可用仍是 `UNAVAILABLE`，其余未标记的 `OPERATION_FAILED` 仍是
     /// `UNKNOWN`。
@@ -553,7 +587,7 @@ mod tests {
     fn pre_send_policy_rejection_is_failed_precondition_with_the_same_error_detail() {
         use flare_server_core::error::{ErrorBuilder, ErrorCode};
 
-        let rejection = flare_im_hooks::pre_send_rejection(
+        let rejection = flare_im_core_hooks::pre_send_rejection(
             ErrorBuilder::new(ErrorCode::OperationFailed, "pre-send hook rejected")
                 .details("allow=false"),
         );
@@ -608,8 +642,8 @@ mod tests {
     async fn required_pre_send_hook_timeouts_answer_unavailable() {
         use crate::application::extension::{ExtensionOrchestrator, ExtensionRouting};
         use crate::domain::service::HookExecutionService;
-        use flare_im_contracts::Ctx;
-        use flare_im_hooks::hooks::{
+        use flare_im_core_contracts::Ctx;
+        use flare_im_core_hooks::hooks::{
             HookDispatcher, HookMetadata, HookRegistry, HookSelector, MessageDraft,
             PreSendDecision, PreSendHook,
         };
@@ -763,8 +797,8 @@ mod tests {
     }
 
     #[test]
-    fn only_exact_bridge_identity_can_send_internal_message() {
-        let bridge = claims(SignedActorType::Service, "flare-im-bridge");
+    fn only_a_trusted_integration_identity_can_send_internal_message() {
+        let bridge = claims(SignedActorType::Service, INTEGRATION);
         assert!(
             authorize_message_claims(
                 &bridge,
@@ -817,9 +851,9 @@ mod tests {
 
     #[test]
     fn platform_system_send_requires_api_gateway_key_scope_credential_and_fixed_envelope() {
-        use flare_im_service_kit::platform_send::SYSTEM_MESSAGE_SCOPE;
+        use flare_im_core_service_kit::platform_send::SYSTEM_MESSAGE_SCOPE;
         let mut caller = claims(SignedActorType::Service, "sa-platform");
-        caller.kid = flare_im_service_kit::platform_send::PLATFORM_API_KID.into();
+        caller.kid = flare_im_core_service_kit::platform_send::PLATFORM_API_KID.into();
         caller.roles = vec![SYSTEM_MESSAGE_SCOPE.into()];
         caller.credential_id = Some("AAAAAAAAAAAA".into());
         let mut msg = message("sa-platform", MessageSource::System, MessageType::System);
@@ -895,7 +929,7 @@ mod tests {
         let detail = flare_server_core::error::grpc::decode_error_detail(&status).expect("detail");
         assert_eq!(detail.reason, plugin_platform::PLUGIN_CARD_PLATFORM_ONLY);
         // Neither may the bridge, as a notification.
-        let bridge = claims(SignedActorType::Service, "flare-im-bridge");
+        let bridge = claims(SignedActorType::Service, INTEGRATION);
         let mut notice = plugin_card_message("alice");
         notice.source = MessageSource::System as i32;
         notice.message_type = MessageType::Notification as i32;
@@ -1124,15 +1158,11 @@ mod tests {
     }
 
     #[test]
-    fn legacy_secret_and_cross_tenant_attributes_are_not_authority() {
+    fn cross_tenant_and_user_attributes_are_not_authority() {
         let user = claims(SignedActorType::User, "alice");
         let mut msg = message("alice", MessageSource::User, MessageType::Text);
         msg.attributes
             .insert("x-tenant-id".into(), "tenant-b".into());
-        assert!(authorize_message_claims(&user, &msg, false).is_err());
-        msg.attributes.clear();
-        msg.attributes
-            .insert("x-social-internal-send-token".into(), "secret".into());
         assert!(authorize_message_claims(&user, &msg, false).is_err());
         msg.attributes.clear();
         msg.attributes.insert("x-user-id".into(), "bob".into());
@@ -1158,7 +1188,7 @@ mod tests {
                 MessageType::System,
                 true,
                 SignedActorType::Service,
-                "flare-im-bridge",
+                INTEGRATION,
             ),
         ] {
             let caller = claims(actor_type, actor_id);

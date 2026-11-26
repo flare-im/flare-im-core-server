@@ -12,8 +12,8 @@
 
 use std::sync::Arc;
 
-use flare_im_contracts::utils::normalize_optional_tenant_id;
-use flare_im_contracts::{Ctx, context_from_mq_metadata};
+use flare_im_core_contracts::utils::normalize_optional_tenant_id;
+use flare_im_core_contracts::{Ctx, context_from_mq_metadata};
 use flare_proto::common::MqEnvelope;
 use flare_server_core::mq::consumer::{ConsumerError, Message, MessageHandler, MessageResult};
 use tracing::instrument;
@@ -141,7 +141,7 @@ impl MessageHandler for StorageConsumerHandler {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use flare_im_contracts::context_to_mq_metadata;
+    use flare_im_core_contracts::context_to_mq_metadata;
     use flare_server_core::Context;
     use flare_server_core::mq::consumer::{ContentType, MessageContext};
 

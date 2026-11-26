@@ -7,7 +7,7 @@ apart (each described only its own side of the boundary).
 
 ## Send-time hooks live in `flare-message-ingest`
 
-`flare-message-ingest` owns message send-time hooks. There is one runtime, `flare-im-hooks`,
+`flare-message-ingest` owns message send-time hooks. There is one runtime, `flare-im-core-hooks`,
 embedded in Ingest: the call chain, adapters, circuit breakers, time limits and execution evidence.
 
 The one hook point is `message.pre_send`: it validates or rewrites the message draft before the

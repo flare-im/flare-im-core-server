@@ -14,9 +14,9 @@
 
 use std::sync::Arc;
 
-use flare_im_contracts::Ctx;
-use flare_im_contracts::abstractions::decorator::{MessageDecorator, NoopMessageDecorator};
-use flare_im_seq::SequenceAllocator;
+use flare_im_core_contracts::Ctx;
+use flare_im_core_contracts::abstractions::decorator::{MessageDecorator, NoopMessageDecorator};
+use flare_im_core_seq::SequenceAllocator;
 use flare_proto::common::Message;
 use flare_server_core::{flare_err, flare_err_details};
 use tracing::instrument;
@@ -26,8 +26,8 @@ use crate::domain::repository::{
     PushRepository, RecipientRepository, WalRepository, WalRepositoryItem, needs_member_lookup,
 };
 use crate::domain::{MessageProfile, PersistenceMode};
-use flare_im_message_pipeline::MqPushRepository;
-use flare_im_message_pipeline::{
+use flare_im_core_message_pipeline::MqPushRepository;
+use flare_im_core_message_pipeline::{
     CompositeMessageValidationStrategy, MessageValidationStrategy, ValidationContext,
 };
 use flare_server_core::error::{ErrorCode, Result};
@@ -236,8 +236,9 @@ impl MessageIngestService {
             let proof = self
                 .push_repository
                 .prepare_write_proof(ctx, &submission.message)?;
-            if flare_im_service_kit::audit_effects::write_proof::requires_proof(&submission.message)
-                && proof.is_none()
+            if flare_im_core_service_kit::audit_effects::write_proof::requires_proof(
+                &submission.message,
+            ) && proof.is_none()
             {
                 return Err(flare_err!(
                     ErrorCode::ConfigurationError,

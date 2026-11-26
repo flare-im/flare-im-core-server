@@ -7,9 +7,9 @@
 use std::sync::Arc;
 
 use crate::domain::ports::IConnectionPort;
-use flare_im_contracts::Ctx;
-use flare_im_contracts::abstractions::state::{ConnectionState, ConnectionStateNotifier};
-use flare_im_usage::UsageRecorder;
+use flare_im_core_contracts::Ctx;
+use flare_im_core_contracts::abstractions::state::{ConnectionState, ConnectionStateNotifier};
+use flare_im_core_usage::UsageRecorder;
 use flare_proto::common::{DeviceAppState, DeviceStateReport};
 use flare_server_core::error::Result;
 use std::collections::HashMap;
@@ -73,7 +73,7 @@ fn connection_build(info: &ConnectionInfo) -> (&'static str, u64) {
 /// 连接管理处理器：仅编排会话领域服务与指标，连接查询由 QueryHandler / PushDomainService 使用 ConnectionQuery 独立完成。
 pub struct ConnectionHandler {
     session_domain_service: Arc<ConnectionDomainService>,
-    metrics: Arc<flare_im_service_kit::metrics::AccessGatewayMetrics>,
+    metrics: Arc<flare_im_core_service_kit::metrics::AccessGatewayMetrics>,
     /// State 模式：连接状态通知，默认 Noop，可注入实现与 Online 打通
     state_notifier: Arc<dyn ConnectionStateNotifier>,
     connection_port: Arc<dyn IConnectionPort>,
@@ -108,7 +108,7 @@ pub struct ConnectionHandler {
 impl ConnectionHandler {
     pub fn new(
         session_domain_service: Arc<ConnectionDomainService>,
-        metrics: Arc<flare_im_service_kit::metrics::AccessGatewayMetrics>,
+        metrics: Arc<flare_im_core_service_kit::metrics::AccessGatewayMetrics>,
         state_notifier: Arc<dyn ConnectionStateNotifier>,
         connection_port: Arc<dyn IConnectionPort>,
         conversation_subscriptions: Arc<crate::domain::service::ConversationSubscriptionRegistry>,
@@ -179,8 +179,8 @@ impl ConnectionHandler {
             }
         };
         let Some(tenant_id) = ctx.tenant_id().filter(|tenant| {
-            flare_im_contracts::domain::tenant::is_valid_tenant_id(tenant)
-                && flare_im_contracts::utils::normalize_tenant_id(tenant) == *tenant
+            flare_im_core_contracts::domain::tenant::is_valid_tenant_id(tenant)
+                && flare_im_core_contracts::utils::normalize_tenant_id(tenant) == *tenant
         }) else {
             warn!(%user_id, %connection_id, "eager subscribe: canonical tenant missing");
             return;
@@ -192,13 +192,13 @@ impl ConnectionHandler {
                 return;
             }
         };
-        // 用户自己的 sync 收件箱：业务侧把「还没有会话」的通知（好友申请等）发到
-        // `sync:<user_id>`，它**不是真实会话**、永远不会出现在 list_conversations 里。
-        // 不在这里显式订阅，这类通知就没有订阅者、被静默丢弃——表现为「对方发来好友申请，
-        // 我这边毫无动静」，只能靠客户端下次主动拉列表才发现。
+        // 用户自己的收件箱：业务侧把「还没有会话」的通知发到
+        // `inbox:<user_id>`，它**不是真实会话**、永远不会出现在 list_conversations 里。
+        // 不在这里显式订阅，这类通知就没有订阅者、被静默丢弃——表现为通知毫无动静，
+        // 只能靠客户端下次主动拉列表才发现。
         conversation_subscriptions.join(
             tenant_id,
-            &flare_im_contracts::constants::sync_inbox::sync_inbox_conversation_id(&user_id),
+            &flare_im_core_contracts::constants::user_inbox::user_inbox_conversation_id(&user_id),
             &connection_id,
         );
 
@@ -890,8 +890,8 @@ mod disconnect_tests {
                     gateway_id: "gateway-test".to_string(),
                 },
             )),
-            Arc::new(flare_im_service_kit::metrics::AccessGatewayMetrics::new()),
-            Arc::new(flare_im_contracts::abstractions::state::NoopConnectionStateNotifier),
+            Arc::new(flare_im_core_service_kit::metrics::AccessGatewayMetrics::new()),
+            Arc::new(flare_im_core_contracts::abstractions::state::NoopConnectionStateNotifier),
             port,
             Arc::new(ConversationSubscriptionRegistry::new()),
             Arc::new(crate::infrastructure::ports::ConversationReadGrpcPool::new()),

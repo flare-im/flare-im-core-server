@@ -6,7 +6,7 @@ use crate::domain::model::MessageSyncResult;
 use crate::domain::repository::MessageProvider;
 use flare_grpc_proto::storage::QueryMessagesRequest;
 use flare_grpc_proto::storage::storage_reader_service_client::StorageReaderServiceClient;
-use flare_im_service_kit::ServiceClient;
+use flare_im_core_service_kit::ServiceClient;
 use flare_server_core::context::Context;
 use flare_server_core::error::{ErrorBuilder, ErrorCode, Result, map_infra_error};
 use std::collections::HashMap;
@@ -77,8 +77,8 @@ impl StorageReaderClient {
 
     /// 直连固定地址（`http://` 或 `https://`）。通道懒连接，构造时不连下游。
     pub fn with_static_endpoint(url: &str) -> Result<Self> {
-        let channel =
-            flare_im_service_kit::discovery::connect_static_channel_lazy(url).map_err(|e| {
+        let channel = flare_im_core_service_kit::discovery::connect_static_channel_lazy(url)
+            .map_err(|e| {
                 map_infra_error(e, ErrorCode::ConfigurationError, "storage reader endpoint")
             })?;
         Ok(Self {
@@ -106,18 +106,19 @@ impl StorageReaderClient {
                 client,
             } => {
                 let mut client = client.lock().await;
-                let channel = flare_im_service_kit::discovery::get_discovered_channel_with_timeout(
-                    service_name,
-                    &mut client,
-                )
-                .await
-                .map_err(|e| {
-                    map_infra_error(
-                        e,
-                        ErrorCode::ServiceUnavailable,
-                        "get channel from service discovery",
+                let channel =
+                    flare_im_core_service_kit::discovery::get_discovered_channel_with_timeout(
+                        service_name,
+                        &mut client,
                     )
-                })?;
+                    .await
+                    .map_err(|e| {
+                        map_infra_error(
+                            e,
+                            ErrorCode::ServiceUnavailable,
+                            "get channel from service discovery",
+                        )
+                    })?;
                 tracing::trace!("Got channel for storage reader service from service discovery");
                 Ok(channel)
             }
@@ -156,7 +157,7 @@ impl StorageReaderClient {
     fn last_seq(messages: &[flare_proto::common::Message]) -> Option<i64> {
         messages
             .last()
-            .and_then(flare_im_contracts::utils::extract_seq_from_message)
+            .and_then(flare_im_core_contracts::utils::extract_seq_from_message)
     }
 
     fn map_response(resp: flare_grpc_proto::storage::QueryMessagesResponse) -> MessageSyncResult {
@@ -254,7 +255,7 @@ impl MessageProvider for StorageReaderClient {
                     None => first_channel,
                     Some((service_name, client)) => {
                         let mut client = client.lock().await;
-                        flare_im_service_kit::discovery::get_discovered_channel_with_timeout(
+                        flare_im_core_service_kit::discovery::get_discovered_channel_with_timeout(
                             &service_name,
                             &mut client,
                         )

@@ -1586,7 +1586,7 @@ dependencies = [
  "flare-core-base",
  "flare-core-runtime",
  "flare-grpc-proto",
- "flare-im-service-kit",
+ "flare-im-core-service-kit",
  "flare-plugin-protocol",
  "flare-proto",
  "flare-server-core",
@@ -1615,9 +1615,9 @@ dependencies = [
  "flare-core-base",
  "flare-core-runtime",
  "flare-grpc-proto",
- "flare-im-contracts",
- "flare-im-service-kit",
- "flare-im-usage",
+ "flare-im-core-contracts",
+ "flare-im-core-service-kit",
+ "flare-im-core-usage",
  "flare-media",
  "flare-proto",
  "flare-server-core",
@@ -1652,11 +1652,11 @@ dependencies = [
  "flare-core-base",
  "flare-core-runtime",
  "flare-grpc-proto",
- "flare-im-capability-core",
- "flare-im-contracts",
- "flare-im-hooks",
- "flare-im-message-pipeline",
- "flare-im-service-kit",
+ "flare-im-core-capability-core",
+ "flare-im-core-contracts",
+ "flare-im-core-hooks",
+ "flare-im-core-message-pipeline",
+ "flare-im-core-service-kit",
  "flare-orchestrator",
  "flare-proto",
  "flare-server-core",
@@ -1694,8 +1694,8 @@ dependencies = [
  "flare-core",
  "flare-core-runtime",
  "flare-grpc-proto",
- "flare-im-contracts",
- "flare-im-service-kit",
+ "flare-im-core-contracts",
+ "flare-im-core-service-kit",
  "flare-proto",
  "flare-server-core",
  "once_cell",
@@ -1931,11 +1931,15 @@ dependencies = [
 ]
 
 [[package]]
-name = "flare-im-ack"
+name = "flare-im-arch-tests"
+version = "1.0.3"
+
+[[package]]
+name = "flare-im-core-ack"
 version = "1.0.3"
 dependencies = [
  "dashmap",
- "flare-im-contracts",
+ "flare-im-core-contracts",
  "prometheus",
  "redis 0.32.7",
  "serde",
@@ -1946,11 +1950,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "flare-im-arch-tests"
-version = "1.0.3"
-
-[[package]]
-name = "flare-im-capability-core"
+name = "flare-im-core-capability-core"
 version = "1.0.3"
 dependencies = [
  "async-trait",
@@ -1964,7 +1964,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "flare-im-contracts"
+name = "flare-im-core-contracts"
 version = "1.0.3"
 dependencies = [
  "async-trait",
@@ -1994,8 +1994,8 @@ dependencies = [
  "flare-core",
  "flare-core-base",
  "flare-grpc-proto",
- "flare-im-ack",
- "flare-im-capability-core",
+ "flare-im-core-ack",
+ "flare-im-core-capability-core",
  "flare-proto",
  "flare-server-core",
  "hex",
@@ -2015,7 +2015,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "flare-im-hooks"
+name = "flare-im-core-hooks"
 version = "1.0.3"
 dependencies = [
  "arc-swap",
@@ -2023,8 +2023,8 @@ dependencies = [
  "base64",
  "flare-core-base",
  "flare-grpc-proto",
- "flare-im-contracts",
- "flare-im-service-kit",
+ "flare-im-core-contracts",
+ "flare-im-core-service-kit",
  "flare-proto",
  "flare-server-core",
  "hex",
@@ -2047,15 +2047,15 @@ dependencies = [
 ]
 
 [[package]]
-name = "flare-im-message-pipeline"
+name = "flare-im-core-message-pipeline"
 version = "1.0.3"
 dependencies = [
  "async-trait",
  "ed25519-dalek",
  "flare-grpc-proto",
- "flare-im-contracts",
- "flare-im-hooks",
- "flare-im-service-kit",
+ "flare-im-core-contracts",
+ "flare-im-core-hooks",
+ "flare-im-core-service-kit",
  "flare-proto",
  "flare-server-core",
  "prost",
@@ -2067,11 +2067,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "flare-im-notify-rules"
-version = "0.1.0"
-
-[[package]]
-name = "flare-im-seq"
+name = "flare-im-core-seq"
 version = "1.0.3"
 dependencies = [
  "flare-server-core",
@@ -2081,7 +2077,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "flare-im-service-kit"
+name = "flare-im-core-service-kit"
 version = "1.0.3"
 dependencies = [
  "anyhow",
@@ -2096,8 +2092,8 @@ dependencies = [
  "flare-core-base",
  "flare-core-runtime",
  "flare-grpc-proto",
- "flare-im-contracts",
- "flare-im-seq",
+ "flare-im-core-contracts",
+ "flare-im-core-seq",
  "flare-plugin-protocol",
  "flare-proto",
  "flare-server-core",
@@ -2129,14 +2125,14 @@ dependencies = [
 ]
 
 [[package]]
-name = "flare-im-usage"
+name = "flare-im-core-usage"
 version = "1.0.3"
 dependencies = [
  "async-nats",
  "async-trait",
  "chrono",
- "flare-im-contracts",
- "flare-im-service-kit",
+ "flare-im-core-contracts",
+ "flare-im-core-service-kit",
  "flare-server-core",
  "futures",
  "parking_lot",
@@ -2148,6 +2144,10 @@ dependencies = [
  "tracing",
  "ulid",
 ]
+
+[[package]]
+name = "flare-im-notify-rules"
+version = "0.1.0"
 
 [[package]]
 name = "flare-media"
@@ -2164,9 +2164,9 @@ dependencies = [
  "ed25519-dalek",
  "flare-core-runtime",
  "flare-grpc-proto",
- "flare-im-contracts",
- "flare-im-service-kit",
- "flare-im-usage",
+ "flare-im-core-contracts",
+ "flare-im-core-service-kit",
+ "flare-im-core-usage",
  "flare-proto",
  "flare-server-core",
  "futures-util",
@@ -2205,12 +2205,12 @@ dependencies = [
  "flare-core",
  "flare-core-runtime",
  "flare-grpc-proto",
- "flare-im-contracts",
- "flare-im-hooks",
- "flare-im-message-pipeline",
- "flare-im-seq",
- "flare-im-service-kit",
- "flare-im-usage",
+ "flare-im-core-contracts",
+ "flare-im-core-hooks",
+ "flare-im-core-message-pipeline",
+ "flare-im-core-seq",
+ "flare-im-core-service-kit",
+ "flare-im-core-usage",
  "flare-proto",
  "flare-server-core",
  "flare-storage-reader",
@@ -2244,10 +2244,10 @@ dependencies = [
  "flare-core",
  "flare-core-runtime",
  "flare-grpc-proto",
- "flare-im-contracts",
- "flare-im-message-pipeline",
- "flare-im-seq",
- "flare-im-service-kit",
+ "flare-im-core-contracts",
+ "flare-im-core-message-pipeline",
+ "flare-im-core-seq",
+ "flare-im-core-service-kit",
  "flare-proto",
  "flare-server-core",
  "futures",
@@ -2300,8 +2300,8 @@ dependencies = [
  "chrono",
  "flare-core-runtime",
  "flare-grpc-proto",
- "flare-im-contracts",
- "flare-im-service-kit",
+ "flare-im-core-contracts",
+ "flare-im-core-service-kit",
  "flare-proto",
  "flare-server-core",
  "prost",
@@ -2329,9 +2329,9 @@ dependencies = [
  "flare-core",
  "flare-core-runtime",
  "flare-grpc-proto",
- "flare-im-contracts",
+ "flare-im-core-contracts",
+ "flare-im-core-service-kit",
  "flare-im-notify-rules",
- "flare-im-service-kit",
  "flare-proto",
  "flare-push-proxy",
  "flare-server-core",
@@ -2366,10 +2366,10 @@ dependencies = [
  "ed25519-dalek",
  "flare-core-runtime",
  "flare-grpc-proto",
- "flare-im-contracts",
+ "flare-im-core-contracts",
+ "flare-im-core-service-kit",
+ "flare-im-core-usage",
  "flare-im-notify-rules",
- "flare-im-service-kit",
- "flare-im-usage",
  "flare-proto",
  "flare-server-core",
  "futures",
@@ -2417,9 +2417,9 @@ dependencies = [
  "flare-core",
  "flare-core-runtime",
  "flare-grpc-proto",
- "flare-im-contracts",
- "flare-im-service-kit",
- "flare-im-usage",
+ "flare-im-core-contracts",
+ "flare-im-core-service-kit",
+ "flare-im-core-usage",
  "flare-proto",
  "flare-server-core",
  "futures",
@@ -2449,8 +2449,8 @@ dependencies = [
  "ed25519-dalek",
  "flare-core-runtime",
  "flare-grpc-proto",
- "flare-im-contracts",
- "flare-im-service-kit",
+ "flare-im-core-contracts",
+ "flare-im-core-service-kit",
  "flare-proto",
  "flare-server-core",
  "futures-util",
@@ -2480,8 +2480,8 @@ dependencies = [
  "dashmap",
  "flare-core-runtime",
  "flare-grpc-proto",
- "flare-im-contracts",
- "flare-im-service-kit",
+ "flare-im-core-contracts",
+ "flare-im-core-service-kit",
  "flare-proto",
  "flare-server-core",
  "parking_lot",
@@ -2528,9 +2528,9 @@ dependencies = [
  "ed25519-dalek",
  "flare-core-runtime",
  "flare-grpc-proto",
- "flare-im-capability-core",
- "flare-im-contracts",
- "flare-im-service-kit",
+ "flare-im-core-capability-core",
+ "flare-im-core-contracts",
+ "flare-im-core-service-kit",
  "flare-proto",
  "flare-server-core",
  "log",
@@ -2564,10 +2564,10 @@ dependencies = [
  "flare-core-initialize",
  "flare-core-runtime",
  "flare-grpc-proto",
- "flare-im-capability-core",
- "flare-im-contracts",
- "flare-im-service-kit",
- "flare-im-usage",
+ "flare-im-core-capability-core",
+ "flare-im-core-contracts",
+ "flare-im-core-service-kit",
+ "flare-im-core-usage",
  "flare-proto",
  "flare-server-core",
  "flare-storage-reader",
@@ -2605,8 +2605,8 @@ dependencies = [
  "async-trait",
  "flare-core-runtime",
  "flare-grpc-proto",
- "flare-im-contracts",
- "flare-im-service-kit",
+ "flare-im-core-contracts",
+ "flare-im-core-service-kit",
  "flare-proto",
  "flare-server-core",
  "futures",

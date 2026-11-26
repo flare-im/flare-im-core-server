@@ -14,7 +14,7 @@ path = "src/lib.rs"
 
 [dependencies]
 flare-core-runtime = { workspace = true }
-flare-im-service-kit = { workspace = true }
+flare-im-core-service-kit = { workspace = true }
 tonic = { workspace = true }
 flare-core-base = { workspace = true }
 flare-grpc-proto = { workspace = true }

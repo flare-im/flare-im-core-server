@@ -1,7 +1,7 @@
 //! 租户配置通知的领域规则：谁能在哪个 topic 命名空间里发布。Core 不解释 topic，只按发布者
 //! 登记的前缀放行；`flare.` 留给 Core 自己（插件目录通知不经过这里）。
 
-use flare_im_service_kit::tenant_notice::{ALL_TENANTS, CORE_TOPIC_PREFIX, valid_topic};
+use flare_im_core_service_kit::tenant_notice::{ALL_TENANTS, CORE_TOPIC_PREFIX, valid_topic};
 
 /// 一次发布的结果：版本前进并已发布，或已有不低于它的版本。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -39,7 +39,7 @@ struct Publisher {
     tenant_wide: bool,
 }
 
-/// 登记的发布者：`FLARE_TENANT_NOTICE_PUBLISHERS="flare-im-bridge=social.,*;other=foo."`。
+/// 登记的发布者：`FLARE_TENANT_NOTICE_PUBLISHERS="integration=biz.,*;other=foo."`。
 /// 每项 `服务=前缀,前缀`；列表里的 `*` 表示还可以发给全部租户。没有登记的服务一律拒绝。
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct NoticePublishers {

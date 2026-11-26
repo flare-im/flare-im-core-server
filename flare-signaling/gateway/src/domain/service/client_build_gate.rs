@@ -3,7 +3,7 @@
 //! 策略来自应用的 `client_policy` 投影，按发布清单平台段（`web`、`android`、`ios`、`tauri`、
 //! `electron`）取；没报构建号的连接按 0 判（预发布期不留宽容窗口）。
 
-use flare_im_contracts::domain::tenant::TenantClientPolicy;
+use flare_im_core_contracts::domain::tenant::TenantClientPolicy;
 use flare_proto::client_platform::{normalize_device_platform, release_platform};
 
 /// 为什么要求升级。
@@ -70,7 +70,7 @@ pub fn upgrade_verdict(
 }
 
 /// 门禁与构建分布用的平台：CONNECT 设备平台按 `flare_proto::client_platform::release_platform` 映射成
-/// 发布清单平台段（别名先归一，与 Social 网关同一处）。没有清单的平台（鸿蒙等）和认不出外壳的桌面
+/// 发布清单平台段（别名先归一，与业务网关同一处）。没有清单的平台（鸿蒙等）和认不出外壳的桌面
 /// （`distribution` 不是 `tauri` / `electron`）不设门禁，返回 `None`。
 pub fn gate_platform(device_platform: &str, distribution: Option<&str>) -> Option<&'static str> {
     release_platform(device_platform, distribution)
@@ -139,7 +139,7 @@ pub fn reported_build(value: Option<&str>) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use flare_im_contracts::domain::tenant::{ClientBuildPolicy, ClientBuildRange};
+    use flare_im_core_contracts::domain::tenant::{ClientBuildPolicy, ClientBuildRange};
     use std::collections::BTreeMap;
 
     const NOW: i64 = 1_800_000_000_000;

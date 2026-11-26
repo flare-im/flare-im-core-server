@@ -21,8 +21,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use flare_im_contracts::Ctx;
-use flare_im_contracts::domain::push_policy::device_digest_collapse_key;
+use flare_im_core_contracts::Ctx;
+use flare_im_core_contracts::domain::push_policy::device_digest_collapse_key;
 use flare_proto::PushTaskEnvelope;
 use flare_proto::common::{AlertClass, PushDisposition};
 use futures::StreamExt;

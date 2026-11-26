@@ -6,8 +6,8 @@ token_issuer = "flare-im-core"
 token_ttl_seconds = 3600
 token_store = "token_store"
 
-# 联调默认 Social [auth] 已与上方主 issuer/secret 一致，无需额外 trusted issuer。
-# 若生产仍使用独立 Social JWT（issuer=flare-im），可取消注释：
+# 联调默认业务系统的 [auth] 已与上方主 issuer/secret 一致，无需额外 trusted issuer。
+# 若业务系统签发独立的 JWT（例如 issuer=flare-im），可取消注释：
 # [[services.access_gateway.trusted_token_issuers]]
 # issuer = "flare-im"
 # secret = "set-via-secret-manager"

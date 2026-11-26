@@ -14,8 +14,8 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use tracing::{info, instrument, warn};
 
-use flare_im_service_kit::gateway::GatewaySettings;
-use flare_im_service_kit::gateway_auth::{
+use flare_im_core_service_kit::gateway::GatewaySettings;
+use flare_im_core_service_kit::gateway_auth::{
     TenantRuntimeGuard, auth_error_response, extract_bearer_token,
 };
 use flare_server_core::TokenService;
@@ -343,8 +343,8 @@ pub(crate) fn authorize_admin(
             if let Some(credential) = matched {
                 let tenant_id = credential.tenant_id.trim();
                 if tenant_id.is_empty()
-                    || !flare_im_contracts::domain::tenant::is_valid_tenant_id(tenant_id)
-                    || flare_im_contracts::utils::normalize_tenant_id(tenant_id) != tenant_id
+                    || !flare_im_core_contracts::domain::tenant::is_valid_tenant_id(tenant_id)
+                    || flare_im_core_contracts::utils::normalize_tenant_id(tenant_id) != tenant_id
                 {
                     return Err(AuthError::Forbidden(
                         "app credential tenant is invalid".into(),
@@ -411,9 +411,11 @@ mod tests {
         assert_eq!(response.status(), StatusCode::NOT_IMPLEMENTED);
     }
     use axum::{Router, body::Body, http::Request, routing::post};
-    use flare_im_contracts::domain::tenant::{TenantQuota, TenantRuntimeSnapshot, TenantStatus};
-    use flare_im_service_kit::gateway::GatewayEnvScope;
-    use flare_im_service_kit::tenant_runtime::{
+    use flare_im_core_contracts::domain::tenant::{
+        TenantQuota, TenantRuntimeSnapshot, TenantStatus,
+    };
+    use flare_im_core_service_kit::gateway::GatewayEnvScope;
+    use flare_im_core_service_kit::tenant_runtime::{
         TenantAccessPolicy, TenantRuntimeCache, TenantRuntimeCacheOptions, TenantRuntimeSource,
     };
     use flare_server_core::auth::{CoreJwtTokenIssuer, TokenService};

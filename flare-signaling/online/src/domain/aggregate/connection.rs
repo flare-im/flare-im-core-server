@@ -27,7 +27,7 @@ pub struct Connection {
     device_id: DeviceId,
     /// 数据面租户 ID（默认 "0"）；`tenant:sessions:{tenant}` 索引按它维护
     tenant_id: String,
-    /// Authenticated Social session binding; absent only on pre-upgrade/Core-native records.
+    /// Authenticated business identity session binding; absent only on pre-upgrade/Core-native records.
     #[serde(default)]
     identity_session_id: Option<String>,
 

@@ -13,12 +13,12 @@ use std::sync::Arc;
 
 use base64::{Engine, engine::general_purpose::STANDARD};
 use flare_grpc_proto::capability::{GenericRequest, GenericResponse};
-use flare_im_capability_core::plugin::data::DataRequest;
-use flare_im_capability_core::plugin::signature::PublisherTrustStore;
-use flare_im_service_kit::control_auth::{
+use flare_im_core_capability_core::plugin::data::DataRequest;
+use flare_im_core_capability_core::plugin::signature::PublisherTrustStore;
+use flare_im_core_service_kit::control_auth::{
     PlatformActorKind, PlatformAssertionVerifier, require_platform_assertion,
 };
-use flare_im_service_kit::staff_context::{VerifiedStaff, require_staff_any};
+use flare_im_core_service_kit::staff_context::{VerifiedStaff, require_staff_any};
 use flare_server_core::auth::core_admin::PLATFORM_SCOPE_TENANT;
 use flare_server_core::auth::core_admin::permission::{
     PLUGINS_PLATFORM_WRITE, PLUGINS_READ, PLUGINS_WRITE,

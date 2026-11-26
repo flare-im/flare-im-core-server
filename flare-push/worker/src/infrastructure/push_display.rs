@@ -21,7 +21,9 @@
 use flare_grpc_proto::access_gateway::{
     PushEventRequest, PushMessageRequest, PushNotificationRequest,
 };
-use flare_im_contracts::domain::push_policy::{event_has_mobile_alert, message_has_mobile_alert};
+use flare_im_core_contracts::domain::push_policy::{
+    event_has_mobile_alert, message_has_mobile_alert,
+};
 // 文案模板与引擎共用一份，见 flare-im-notify-rules 的 text 模块。
 use flare_im_notify_rules::text::{
     Lang, Phrase, count_prefix, digest_text, mentions_already, phrase,
@@ -553,7 +555,7 @@ fn digest_copy(envelope: &PushTaskEnvelope) -> AlertCopy {
     }
 }
 
-/// Defense for queued tasks made before routing policy was corrected. No Social event names.
+/// Defense for queued tasks made before routing policy was corrected. No business event names.
 pub fn mobile_alert_eligible(envelope: &PushTaskEnvelope) -> bool {
     match PushTaskPayloadKind::try_from(envelope.payload_kind) {
         Ok(PushTaskPayloadKind::Message) => {

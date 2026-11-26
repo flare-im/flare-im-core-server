@@ -1,5 +1,5 @@
 use crate::domain::model::ConversationType;
-use flare_im_contracts::utils::{TimelineMetadata, current_millis, normalize_tenant_id};
+use flare_im_core_contracts::utils::{TimelineMetadata, current_millis, normalize_tenant_id};
 use flare_proto::common::Message;
 use flare_server_core::error::{ErrorCode, Result};
 use flare_server_core::flare_err;

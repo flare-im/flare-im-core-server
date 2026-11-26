@@ -14,7 +14,7 @@ use flare_core::common::protocol::{Reliability, builder, frame_with_system_comma
 use flare_core::server::DeviceOwner;
 use flare_core::server::connection::{ConnectionManagerTrait, TraitConnectionInfo};
 use flare_core::transport::connection::Connection;
-use flare_im_contracts::domain::tenant::is_valid_tenant_id;
+use flare_im_core_contracts::domain::tenant::is_valid_tenant_id;
 use flare_server_core::auth::KickSignal;
 use futures::StreamExt;
 use tokio::sync::{Mutex, Semaphore};

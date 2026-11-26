@@ -5,8 +5,8 @@ use axum::{
 };
 use ed25519_dalek::SigningKey;
 use ed25519_dalek::pkcs8::{EncodePrivateKey, EncodePublicKey};
-use flare_im_service_kit::clients::*;
-use flare_im_service_kit::{
+use flare_im_core_service_kit::clients::*;
+use flare_im_core_service_kit::{
     gateway_auth::TenantRuntimeGuard,
     tenant_runtime::{TenantAccessPolicy, TenantRuntimeCache},
 };
@@ -1405,7 +1405,7 @@ mod real_media {
 
 #[tokio::test]
 async fn local_file_download_uses_authoritative_safe_attachment_headers() {
-    use flare_im_contracts::media_response::attachment_content_disposition;
+    use flare_im_core_contracts::media_response::attachment_content_disposition;
     let router = scripted_router(MediaVerdict::LocalFile).await;
     let view = call(
         &router,

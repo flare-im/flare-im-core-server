@@ -1,4 +1,4 @@
-use flare_im_service_kit::tracing::init_tracing_from_config;
+use flare_im_core_service_kit::tracing::init_tracing_from_config;
 use flare_server_core::error::{FlareError, Result};
 
 /// Worker stack size. An unoptimized build keeps every awaited stage future of the send path on

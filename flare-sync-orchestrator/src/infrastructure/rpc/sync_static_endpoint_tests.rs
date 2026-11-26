@@ -18,7 +18,7 @@ fn incoming(
 }
 
 fn configured(address: &str, conversation_port: u16, storage_port: u16) -> FlareAppConfig {
-    let mut app = flare_im_service_kit::config::load_config(Some(concat!(
+    let mut app = flare_im_core_service_kit::config::load_config(Some(concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/../config/base.toml"
     )))
@@ -27,7 +27,7 @@ fn configured(address: &str, conversation_port: u16, storage_port: u16) -> Flare
     app.services.conversation = Some(Default::default());
     app.services.storage_reader = Some(Default::default());
     let runtime = |port| ServiceRuntimeConfig {
-        server: Some(flare_im_service_kit::config::ServiceEndpointConfig {
+        server: Some(flare_im_core_service_kit::config::ServiceEndpointConfig {
             address: Some(address.to_string()),
             port: Some(port),
         }),

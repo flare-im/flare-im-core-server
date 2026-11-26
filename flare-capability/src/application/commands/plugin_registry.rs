@@ -1,9 +1,9 @@
 //! Registry write path: open and verify packages, then the aggregates' rules through the port.
 use std::sync::Arc;
 
-use flare_im_capability_core::plugin::ProtocolError;
-use flare_im_capability_core::plugin::package::PluginPackage;
-use flare_im_capability_core::plugin::signature::PublisherTrustStore;
+use flare_im_core_capability_core::plugin::ProtocolError;
+use flare_im_core_capability_core::plugin::package::PluginPackage;
+use flare_im_core_capability_core::plugin::signature::PublisherTrustStore;
 
 use crate::domain::plugin::{
     AppPluginState, DeploymentRegistration, DesiredAppState, DevAppFlag, DevRegistered,

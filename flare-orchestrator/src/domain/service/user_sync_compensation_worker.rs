@@ -115,7 +115,7 @@ impl UserSyncCompensationWorker {
 mod tests {
     use super::*;
     use async_trait::async_trait;
-    use flare_im_contracts::Ctx;
+    use flare_im_core_contracts::Ctx;
     use flare_server_core::error::FlareError;
     use std::sync::Mutex;
 

@@ -14,7 +14,7 @@ use ed25519_dalek::{
     pkcs8::{EncodePrivateKey, EncodePublicKey},
 };
 use flare_grpc_proto::capability::{capability_service_server::CapabilityService, *};
-use flare_im_service_kit::audit_effects::durable::{EvidencePublisher, StaffAudit, drain_one};
+use flare_im_core_service_kit::audit_effects::durable::{EvidencePublisher, StaffAudit, drain_one};
 use flare_server_core::{
     SignedActorType, SignedContextIdentity, SignedContextSigner, SignedContextVerifier,
     auth::core_admin::{PLATFORM_SCOPE_TENANT, permission::HOOKS_PLATFORM_WRITE},
@@ -404,7 +404,7 @@ impl EvidencePublisher for Publisher {
 async fn source_scope_and_queue_survive_failure_cancellation_and_retry_without_identity_drift() {
     database(|pool, _url| async move {
         let carrier = request((), "app-a", "core:hooks:write");
-        let staff = flare_im_service_kit::staff_context::verify_staff_metadata(
+        let staff = flare_im_core_service_kit::staff_context::verify_staff_metadata(
             carrier.metadata(),
             &keys().1,
             "core:hooks:write",
@@ -418,7 +418,7 @@ async fn source_scope_and_queue_survive_failure_cancellation_and_retry_without_i
         );
         let enqueue = |pool: Arc<PgPool>, app: &'static str| async move {
             let mut tx = pool.begin().await.unwrap();
-            let result = flare_im_service_kit::audit_effects::durable::record(
+            let result = flare_im_core_service_kit::audit_effects::durable::record(
                 &mut tx,
                 app,
                 "hook_config",

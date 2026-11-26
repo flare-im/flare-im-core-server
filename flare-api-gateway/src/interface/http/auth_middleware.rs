@@ -5,10 +5,10 @@ use axum::{
     middleware::Next,
     response::Response,
 };
-use flare_im_service_kit::gateway_auth::{
+use flare_im_core_service_kit::gateway_auth::{
     TenantRuntimeGuard, auth_error_response, authenticate_http_request,
 };
-use flare_im_usage::UsageRecorder;
+use flare_im_core_usage::UsageRecorder;
 use flare_server_core::{AuthenticatedPrincipal, TokenValidator};
 
 const GATEWAY_NAME: &str = "api-gateway";
@@ -71,8 +71,10 @@ mod tests {
         http::{Request, StatusCode},
         routing::get,
     };
-    use flare_im_contracts::domain::tenant::{TenantQuota, TenantRuntimeSnapshot, TenantStatus};
-    use flare_im_service_kit::tenant_runtime::{
+    use flare_im_core_contracts::domain::tenant::{
+        TenantQuota, TenantRuntimeSnapshot, TenantStatus,
+    };
+    use flare_im_core_service_kit::tenant_runtime::{
         TenantAccessPolicy, TenantRuntimeCache, TenantRuntimeCacheOptions, TenantRuntimeSource,
     };
     use flare_server_core::{AuthError, AuthenticatedPrincipal, TokenValidationRequest};

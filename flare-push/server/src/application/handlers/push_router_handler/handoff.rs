@@ -6,8 +6,8 @@
 //!
 //! 只读每个会话的最新一条，不逐条回放：补的是「有新消息」这件事，内容靠同步补齐。
 
-use flare_im_contracts::domain::push_policy::message_alert_class;
-use flare_im_contracts::push_trace::{TraceStage, trace_key};
+use flare_im_core_contracts::domain::push_policy::message_alert_class;
+use flare_im_core_contracts::push_trace::{TraceStage, trace_key};
 use flare_proto::common::{DeviceHandoff, DeviceHandoffCause, DeviceHandoffItem, Message};
 
 use super::trace::{PATH_CATCHUP, PATH_HANDOFF, TaskTrace, alert_trace_key};

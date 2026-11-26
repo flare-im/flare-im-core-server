@@ -1,5 +1,5 @@
 //! 构建分布上报：每 30s 把本网关按（租户，平台，构建）的在线连接数整份写进 Redis，供 capability 的
-//! `ClientBuildStats.GetConnectionBuilds` 汇总（约定见 `flare_im_service_kit::gateway::connection_builds`）。
+//! `ClientBuildStats.GetConnectionBuilds` 汇总（约定见 `flare_im_core_service_kit::gateway::connection_builds`）。
 //!
 //! 这一轮没有连接的租户删掉上一轮写的哈希并退出网关集合；停机时删掉全部，不等 TTL。
 //!
@@ -9,11 +9,11 @@
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
-use flare_im_service_kit::gateway::connection_builds::{
+use flare_im_core_service_kit::gateway::connection_builds::{
     REPORT_INTERVAL, hash_fields, queue_gateway_builds,
 };
-use flare_im_service_kit::metrics::AccessGatewayMetrics;
-use flare_im_service_kit::redis_connection::{RedisConnectionLimits, SharedRedisConnection};
+use flare_im_core_service_kit::metrics::AccessGatewayMetrics;
+use flare_im_core_service_kit::redis_connection::{RedisConnectionLimits, SharedRedisConnection};
 use tokio::sync::{Mutex, oneshot};
 use tracing::{debug, warn};
 
@@ -111,7 +111,7 @@ impl ConnectionBuildReporter {
 fn round_pipeline(
     snapshot: &[(
         String,
-        Vec<flare_im_service_kit::metrics::PlatformBuildDistribution>,
+        Vec<flare_im_core_service_kit::metrics::PlatformBuildDistribution>,
     )],
     written: &BTreeSet<String>,
     gateway_id: &str,
@@ -143,7 +143,7 @@ fn now_ms() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use flare_im_service_kit::metrics::{BuildDistribution, PlatformBuildDistribution};
+    use flare_im_core_service_kit::metrics::{BuildDistribution, PlatformBuildDistribution};
 
     fn count(packed: &[u8], word: &str) -> usize {
         // RESP bulk string of the command name: `$<len>\r\n<word>\r\n`.
