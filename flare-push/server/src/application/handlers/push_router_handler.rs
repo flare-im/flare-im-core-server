@@ -4,9 +4,9 @@ use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use flare_grpc_proto::access_gateway;
+use flare_im_notify_rules::{ConversationKind, Mentioned};
 use flare_im_service_kit::metrics::PushServerMetrics;
 use flare_im_service_kit::push_trace::PushTraceRecorder;
-use flare_im_notify_rules::{ConversationKind, Mentioned};
 use flare_proto::common::EventEnvelopeDeliveryMode;
 use flare_proto::common::{
     Ack, AckPayload, AlertClass, CustomData, CustomPayload, EventType, NotificationKind,

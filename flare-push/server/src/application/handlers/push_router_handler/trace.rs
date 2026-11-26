@@ -10,8 +10,8 @@
 use std::collections::BTreeSet;
 
 use flare_im_contracts::push_trace::{PushTraceEntry, TraceStage, trace_key};
-use flare_im_service_kit::push_trace::PushTraceRecorder;
 use flare_im_notify_rules::{DecideInput, Decision, SlotAction};
+use flare_im_service_kit::push_trace::PushTraceRecorder;
 
 use super::*;
 use crate::application::notify_gate::Admission;

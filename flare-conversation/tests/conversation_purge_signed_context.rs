@@ -159,11 +159,7 @@ async fn a_wrong_key_or_identity_is_rejected() {
     let (other_signer, _) = keys(62);
     let handler = handler(Some(verifier));
 
-    let forged = sign(
-        &other_signer,
-        SignedActorType::Service,
-        "flare-im-bridge",
-    );
+    let forged = sign(&other_signer, SignedActorType::Service, "flare-im-bridge");
     assert_eq!(
         purge(&handler, Some(&forged)).await,
         tonic::Code::Unauthenticated

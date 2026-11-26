@@ -23,7 +23,9 @@ use flare_grpc_proto::access_gateway::{
 };
 use flare_im_contracts::domain::push_policy::{event_has_mobile_alert, message_has_mobile_alert};
 // 文案模板与引擎共用一份，见 flare-im-notify-rules 的 text 模块。
-use flare_im_notify_rules::text::{Lang, Phrase, count_prefix, digest_text, mentions_already, phrase};
+use flare_im_notify_rules::text::{
+    Lang, Phrase, count_prefix, digest_text, mentions_already, phrase,
+};
 use flare_proto::PushTaskEnvelope;
 use flare_proto::common::event::Payload as EventPayload;
 use flare_proto::common::message_content::Content;

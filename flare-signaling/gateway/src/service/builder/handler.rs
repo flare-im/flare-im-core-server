@@ -208,8 +208,8 @@ mod tests {
     /// 社交签发的那类连接令牌：EdDSA 签名，本地 HS256 校验报 `InvalidAlgorithm`。
     fn social_token() -> String {
         let header = URL_SAFE_NO_PAD.encode(br#"{"alg":"EdDSA","typ":"JWT"}"#);
-        let claims = URL_SAFE_NO_PAD
-            .encode(br#"{"sub":"social-user","iss":"flare-im","exp":4102444800}"#);
+        let claims =
+            URL_SAFE_NO_PAD.encode(br#"{"sub":"social-user","iss":"flare-im","exp":4102444800}"#);
         let signature = URL_SAFE_NO_PAD.encode([7u8; 64]);
         format!("{header}.{claims}.{signature}")
     }
